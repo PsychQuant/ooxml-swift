@@ -73,6 +73,25 @@ public struct DocxReader {
             document.comments = try parseComments(from: commentsXML)
         }
 
+        // 9. Link comment paragraphIndex from paragraph commentIds
+        for (index, child) in document.body.children.enumerated() {
+            if case .paragraph(let para) = child {
+                for commentId in para.commentIds {
+                    if let idx = document.comments.comments.firstIndex(where: { $0.id == commentId }) {
+                        document.comments.comments[idx].paragraphIndex = index
+                    }
+                }
+            }
+        }
+
+        // 10. 讀取 commentsExtended.xml（可選，Word 2012+ 回覆與已解決狀態）
+        let commentsExtURL = tempDir.appendingPathComponent("word/commentsExtended.xml")
+        if FileManager.default.fileExists(atPath: commentsExtURL.path) {
+            let extData = try Data(contentsOf: commentsExtURL)
+            let extXML = try XMLDocument(data: extData)
+            try parseCommentsExtended(from: extXML, into: &document.comments)
+        }
+
         return document
     }
 
@@ -244,6 +263,16 @@ public struct DocxReader {
         for run in element.elements(forName: "w:r") {
             let parsedRun = try parseRun(from: run, relationships: relationships)
             paragraph.runs.append(parsedRun)
+        }
+
+        // 解析 comment anchors（commentRangeStart）
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement else { continue }
+            if childElement.localName == "commentRangeStart",
+               let idStr = childElement.attribute(forName: "w:id")?.stringValue,
+               let id = Int(idStr) {
+                paragraph.commentIds.append(id)
+            }
         }
 
         // 🆕 語義標註
@@ -1124,6 +1153,44 @@ public struct DocxReader {
         }
 
         return false
+    }
+
+    // MARK: - Comments Extended Parsing
+
+    /// 解析 commentsExtended.xml（Word 2012+ 回覆與已解決狀態）
+    private static func parseCommentsExtended(from xml: XMLDocument, into comments: inout CommentsCollection) throws {
+        // commentsExtended.xml 的結構：
+        // <w15:commentsEx>
+        //   <w15:commentEx w15:paraId="..." w15:paraIdParent="..." w15:done="1"/>
+        // </w15:commentsEx>
+        let extNodes = try xml.nodes(forXPath: "//*[local-name()='commentEx']")
+
+        for node in extNodes {
+            guard let element = node as? XMLElement else { continue }
+
+            // 取得 paraId
+            let paraId = element.attribute(forName: "w15:paraId")?.stringValue
+                ?? element.attribute(forName: "paraId")?.stringValue
+            guard let paraId = paraId else { continue }
+
+            // 找到對應的 comment（透過 paraId）
+            guard let idx = comments.comments.firstIndex(where: { $0.paraId == paraId }) else { continue }
+
+            // 解析 parentId（回覆）
+            let parentParaId = element.attribute(forName: "w15:paraIdParent")?.stringValue
+                ?? element.attribute(forName: "paraIdParent")?.stringValue
+            if let parentParaId = parentParaId,
+               let parentComment = comments.comments.first(where: { $0.paraId == parentParaId }) {
+                comments.comments[idx].parentId = parentComment.id
+            }
+
+            // 解析 done（已解決）
+            let doneStr = element.attribute(forName: "w15:done")?.stringValue
+                ?? element.attribute(forName: "done")?.stringValue
+            if doneStr == "1" {
+                comments.comments[idx].done = true
+            }
+        }
     }
 
     // MARK: - Comments Parsing

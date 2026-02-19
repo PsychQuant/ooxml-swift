@@ -64,6 +64,11 @@ public struct DocxWriter {
             try writeComments(document.comments, to: tempDir)
         }
 
+        // 寫入 commentsExtended.xml（如果有回覆或已解決狀態）
+        if let extXML = document.comments.toExtendedXML() {
+            try writeCommentsExtended(extXML, to: tempDir)
+        }
+
         // 寫入腳註（如果有）
         if !document.footnotes.footnotes.isEmpty {
             try writeFootnotes(document.footnotes, to: tempDir)
@@ -144,6 +149,13 @@ public struct DocxWriter {
         if !document.comments.comments.isEmpty {
             xml += """
                 <Override PartName="/word/comments.xml" ContentType="\(CommentsCollection.contentType)"/>
+            """
+        }
+
+        // commentsExtended（回覆和已解決狀態）
+        if document.comments.hasExtendedComments {
+            xml += """
+                <Override PartName="/word/commentsExtended.xml" ContentType="\(CommentsCollection.extendedContentType)"/>
             """
         }
 
@@ -239,11 +251,23 @@ public struct DocxWriter {
             """
         }
 
+        // commentsExtended 關係
+        if document.comments.hasExtendedComments {
+            let baseId = document.numbering.abstractNums.isEmpty ? 4 : 5
+            var usedCount = document.headers.count + document.footers.count + document.images.count + document.hyperlinkReferences.count
+            if !document.comments.comments.isEmpty { usedCount += 1 }
+            let commentsExtRId = "rId\(baseId + usedCount)"
+            xml += """
+                <Relationship Id="\(commentsExtRId)" Type="\(CommentsCollection.extendedRelationshipType)" Target="commentsExtended.xml"/>
+            """
+        }
+
         // 腳註關係
         if !document.footnotes.footnotes.isEmpty {
             let baseId = document.numbering.abstractNums.isEmpty ? 4 : 5
             var usedCount = document.headers.count + document.footers.count + document.images.count + document.hyperlinkReferences.count
             if !document.comments.comments.isEmpty { usedCount += 1 }
+            if document.comments.hasExtendedComments { usedCount += 1 }
             let footnotesRId = "rId\(baseId + usedCount)"
             xml += """
                 <Relationship Id="\(footnotesRId)" Type="\(FootnotesCollection.relationshipType)" Target="footnotes.xml"/>
@@ -255,6 +279,7 @@ public struct DocxWriter {
             let baseId = document.numbering.abstractNums.isEmpty ? 4 : 5
             var usedCount = document.headers.count + document.footers.count + document.images.count + document.hyperlinkReferences.count
             if !document.comments.comments.isEmpty { usedCount += 1 }
+            if document.comments.hasExtendedComments { usedCount += 1 }
             if !document.footnotes.footnotes.isEmpty { usedCount += 1 }
             let endnotesRId = "rId\(baseId + usedCount)"
             xml += """
@@ -470,6 +495,13 @@ public struct DocxWriter {
     private static func writeComments(_ comments: CommentsCollection, to baseURL: URL) throws {
         let xml = comments.toXML()
         let url = baseURL.appendingPathComponent("word/comments.xml")
+        try xml.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    // MARK: - Comments Extended
+
+    private static func writeCommentsExtended(_ xml: String, to baseURL: URL) throws {
+        let url = baseURL.appendingPathComponent("word/commentsExtended.xml")
         try xml.write(to: url, atomically: true, encoding: .utf8)
     }
 
