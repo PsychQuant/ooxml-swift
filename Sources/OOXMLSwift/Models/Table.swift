@@ -27,27 +27,6 @@ public struct Table {
         }.joined(separator: "\n")
     }
 
-    /// 轉換為 Markdown 表格
-    public func toMarkdown() -> String {
-        guard !rows.isEmpty else { return "" }
-
-        var result: [String] = []
-
-        // 表頭（第一行）
-        if let firstRow = rows.first {
-            let headers = firstRow.cells.map { $0.getText() }
-            result.append("| " + headers.joined(separator: " | ") + " |")
-            result.append("|" + headers.map { _ in "---" }.joined(separator: "|") + "|")
-        }
-
-        // 資料行
-        for row in rows.dropFirst() {
-            let cells = row.cells.map { $0.getText() }
-            result.append("| " + cells.joined(separator: " | ") + " |")
-        }
-
-        return result.joined(separator: "\n")
-    }
 }
 
 // MARK: - Table Row

@@ -1530,36 +1530,6 @@ public struct WordDocument {
         }
     }
 
-    // MARK: - Export
-
-    public func toMarkdown() -> String {
-        var result = ""
-        for child in body.children {
-            switch child {
-            case .paragraph(let para):
-                let text = para.getText()
-                if let style = para.properties.style {
-                    switch style {
-                    case "Heading1", "heading 1":
-                        result += "# \(text)\n\n"
-                    case "Heading2", "heading 2":
-                        result += "## \(text)\n\n"
-                    case "Heading3", "heading 3":
-                        result += "### \(text)\n\n"
-                    case "Title":
-                        result += "# \(text)\n\n"
-                    default:
-                        result += "\(text)\n\n"
-                    }
-                } else {
-                    result += "\(text)\n\n"
-                }
-            case .table(let table):
-                result += table.toMarkdown() + "\n\n"
-            }
-        }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 }
 
 // MARK: - Body
