@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Section Properties
 
 /// 分節屬性（頁面設定）
-public struct SectionProperties {
+public struct SectionProperties: Equatable {
     public var pageSize: PageSize
     public var pageMargins: PageMargins
     public var orientation: PageOrientation
@@ -162,7 +162,7 @@ public enum PageOrientation: String {
 // MARK: - Document Grid
 
 /// 文件格線（用於 CJK 文件）
-public struct DocumentGrid {
+public struct DocumentGrid: Equatable {
     public var linePitch: Int  // 行距（twips）
     public var charSpace: Int? // 字元間距
 
@@ -185,7 +185,7 @@ public enum SectionBreakType: String {
 // MARK: - Page Break
 
 /// 分頁符
-public struct PageBreak {
+public struct PageBreak: Equatable {
     // 分頁符是簡單的 <w:br w:type="page"/> 元素
     // 放在 Run 內
 }

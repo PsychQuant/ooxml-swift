@@ -1,7 +1,7 @@
 import Foundation
 
 /// Word 文件結構
-public struct WordDocument {
+public struct WordDocument: Equatable {
     public var body: Body
     public var styles: [Style]
     public var properties: DocumentProperties
@@ -1534,19 +1534,19 @@ public struct WordDocument {
 
 // MARK: - Body
 
-public struct Body {
+public struct Body: Equatable {
     public var children: [BodyChild] = []
     public var tables: [Table] = []
 }
 
-public enum BodyChild {
+public enum BodyChild: Equatable {
     case paragraph(Paragraph)
     case table(Table)
 }
 
 // MARK: - Document Properties
 
-public struct DocumentProperties {
+public struct DocumentProperties: Equatable {
     public var title: String?
     public var subject: String?
     public var creator: String?

@@ -1,7 +1,7 @@
 import Foundation
 
 /// 樣式 (Style) - 定義段落和文字的預設格式
-public struct Style {
+public struct Style: Equatable {
     public var id: String              // 樣式 ID
     public var name: String            // 顯示名稱
     public var type: StyleType         // 樣式類型
@@ -47,7 +47,7 @@ public enum StyleType: String, Codable {
 // MARK: - Style Update
 
 /// 樣式更新資料結構
-public struct StyleUpdate {
+public struct StyleUpdate: Equatable {
     public var name: String?
     public var basedOn: String?
     public var nextStyle: String?

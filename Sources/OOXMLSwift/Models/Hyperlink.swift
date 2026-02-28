@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Hyperlink
 
 /// 超連結（外部 URL 或內部書籤連結）
-public struct Hyperlink {
+public struct Hyperlink: Equatable {
     public var id: String              // 唯一識別碼（用於管理）
     public var relationshipId: String? // 關係 ID（外部連結使用 rId）
     public var anchor: String?         // 書籤名稱（內部連結使用）
@@ -54,7 +54,7 @@ public struct Hyperlink {
 }
 
 /// 超連結類型
-public enum HyperlinkType {
+public enum HyperlinkType: Equatable {
     case external   // 外部 URL
     case `internal` // 內部書籤連結
 }
@@ -62,7 +62,7 @@ public enum HyperlinkType {
 // MARK: - Hyperlink Reference (用於 document.xml.rels)
 
 /// 超連結關係（儲存在 document.xml.rels）
-public struct HyperlinkReference {
+public struct HyperlinkReference: Equatable {
     public var relationshipId: String  // rId
     public var url: String            // 目標 URL
 

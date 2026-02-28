@@ -2,7 +2,7 @@ import Foundation
 
 /// 文字運行 (Run) - Word 文件中的最小文字單元
 /// 一個 Run 包含具有相同格式的連續文字
-public struct Run {
+public struct Run: Equatable {
     public var text: String
     public var properties: RunProperties
     public var drawing: Drawing?  // 圖片繪圖元素
@@ -21,7 +21,7 @@ public struct Run {
 // MARK: - Run Properties
 
 /// Run 格式屬性
-public struct RunProperties {
+public struct RunProperties: Equatable {
     public var bold: Bool = false
     public var italic: Bool = false
     public var underline: UnderlineType?

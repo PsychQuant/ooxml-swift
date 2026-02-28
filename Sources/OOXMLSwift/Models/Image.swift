@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Image Reference
 
 /// 圖片參照（儲存在 word/media/ 目錄中的圖片）
-public struct ImageReference {
+public struct ImageReference: Equatable {
     public var id: String           // 關係 ID (rId)
     public var fileName: String     // 檔案名稱 (image1.png)
     public var contentType: String  // MIME 類型 (image/png)
@@ -89,7 +89,7 @@ public enum ImageError: Error, LocalizedError {
 // MARK: - Drawing
 
 /// 繪圖元素（用於將圖片嵌入文件）
-public struct Drawing {
+public struct Drawing: Equatable {
     public var type: DrawingType       // inline（行內）或 anchor（浮動）
     public var width: Int              // 寬度（EMU）
     public var height: Int             // 高度（EMU）
@@ -178,7 +178,7 @@ public struct Drawing {
 }
 
 /// 繪圖類型
-public enum DrawingType {
+public enum DrawingType: Equatable {
     case inline    // 行內（隨文字流動）
     case anchor    // 浮動（絕對或相對定位）
 }
@@ -228,7 +228,7 @@ public enum VerticalAlignment: String {
 }
 
 /// 文繞圖方式
-public enum WrapType {
+public enum WrapType: Equatable {
     case none           // 無文繞圖（圖片在文字上方或下方）
     case square         // 方形文繞圖
     case tight          // 緊密文繞圖
@@ -255,7 +255,7 @@ public enum WrapType {
 }
 
 /// 浮動圖片定位設定
-public struct AnchorPosition {
+public struct AnchorPosition: Equatable {
     // 水平定位
     public var horizontalRelativeFrom: HorizontalRelativeFrom = .column
     public var horizontalOffset: Int? = nil  // EMU 偏移量

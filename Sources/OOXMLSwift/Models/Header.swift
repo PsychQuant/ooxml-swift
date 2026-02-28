@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Header
 
 /// 頁首
-public struct Header {
+public struct Header: Equatable {
     public var id: String           // 關係 ID (如 "rId10")
     public var paragraphs: [Paragraph]
     public var type: HeaderFooterType

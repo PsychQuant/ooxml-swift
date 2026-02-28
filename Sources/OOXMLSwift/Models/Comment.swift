@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Comment
 
 /// 註解（用於文件審閱和協作）
-public struct Comment {
+public struct Comment: Equatable {
     public var id: Int                 // 註解唯一 ID
     public var author: String          // 作者名稱
     public var date: Date              // 建立日期
@@ -102,7 +102,7 @@ extension Comment {
 // MARK: - Comments Collection
 
 /// 註解集合（用於管理文件中的所有註解）
-public struct CommentsCollection {
+public struct CommentsCollection: Equatable {
     public var comments: [Comment] = []
 
     /// 取得下一個可用的註解 ID

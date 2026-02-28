@@ -1,7 +1,7 @@
 import Foundation
 
 /// 段落 (Paragraph) - Word 文件的基本結構單元
-public struct Paragraph {
+public struct Paragraph: Equatable {
     public var runs: [Run]
     public var properties: ParagraphProperties
     public var hasPageBreak: Bool = false      // 是否為分頁符段落
@@ -37,7 +37,7 @@ public struct Paragraph {
 // MARK: - Paragraph Properties
 
 /// 段落格式屬性
-public struct ParagraphProperties {
+public struct ParagraphProperties: Equatable {
     public var alignment: Alignment?
     public var spacing: Spacing?
     public var indentation: Indentation?
@@ -83,7 +83,7 @@ public enum Alignment: String, Codable {
 public typealias ParagraphAlignment = Alignment
 
 /// 段落間距
-public struct Spacing {
+public struct Spacing: Equatable {
     public var before: Int?        // 段前間距 (1/20 點，twips)
     public var after: Int?         // 段後間距 (1/20 點)
     public var line: Int?          // 行高 (1/240 點 或 百分比)
@@ -121,7 +121,7 @@ public enum LineRule: String, Codable {
 }
 
 /// 縮排
-public struct Indentation {
+public struct Indentation: Equatable {
     public var left: Int?          // 左縮排 (twips)
     public var right: Int?         // 右縮排 (twips)
     public var firstLine: Int?     // 首行縮排 (twips)
@@ -151,7 +151,7 @@ public struct Indentation {
 }
 
 /// 編號資訊
-public struct NumberingInfo {
+public struct NumberingInfo: Equatable {
     public var numId: Int          // 編號定義 ID
     public var level: Int          // 編號層級 (0-8)
 

@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Footnote
 
 /// 腳註（出現在頁面底部）
-public struct Footnote {
+public struct Footnote: Equatable {
     public var id: Int                 // 腳註唯一 ID
     public var text: String            // 腳註文字
     public var paragraphIndex: Int     // 腳註附加的段落索引
@@ -65,7 +65,7 @@ extension Footnote {
 // MARK: - Footnotes Collection
 
 /// 腳註集合
-public struct FootnotesCollection {
+public struct FootnotesCollection: Equatable {
     public var footnotes: [Footnote] = []
 
     /// 取得下一個可用的腳註 ID
@@ -115,7 +115,7 @@ public struct FootnotesCollection {
 // MARK: - Endnote
 
 /// 尾註（出現在文件結尾）
-public struct Endnote {
+public struct Endnote: Equatable {
     public var id: Int                 // 尾註唯一 ID
     public var text: String            // 尾註文字
     public var paragraphIndex: Int     // 尾註附加的段落索引
@@ -177,7 +177,7 @@ extension Endnote {
 // MARK: - Endnotes Collection
 
 /// 尾註集合
-public struct EndnotesCollection {
+public struct EndnotesCollection: Equatable {
     public var endnotes: [Endnote] = []
 
     /// 取得下一個可用的尾註 ID

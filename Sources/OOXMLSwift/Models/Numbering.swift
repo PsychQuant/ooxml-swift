@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Numbering
 
 /// 編號定義集合
-public struct Numbering {
+public struct Numbering: Equatable {
     public var abstractNums: [AbstractNum] = []
     public var nums: [Num] = []
 
@@ -20,7 +20,7 @@ public struct Numbering {
     public init() {}
 
     /// 建立項目符號清單的編號定義
-    mutating func createBulletList() -> Int {
+    public mutating func createBulletList() -> Int {
         let abstractNumId = nextAbstractNumId
         let numId = nextNumId
 
@@ -49,7 +49,7 @@ public struct Numbering {
     }
 
     /// 建立編號清單的編號定義
-    mutating func createNumberedList() -> Int {
+    public mutating func createNumberedList() -> Int {
         let abstractNumId = nextAbstractNumId
         let numId = nextNumId
 
@@ -80,7 +80,7 @@ public struct Numbering {
 // MARK: - AbstractNum
 
 /// 抽象編號定義（編號格式模板）
-public struct AbstractNum {
+public struct AbstractNum: Equatable {
     public var abstractNumId: Int
     public var levels: [Level]
 
@@ -93,7 +93,7 @@ public struct AbstractNum {
 // MARK: - Num
 
 /// 編號實例（引用 AbstractNum）
-public struct Num {
+public struct Num: Equatable {
     public var numId: Int
     public var abstractNumId: Int
 
@@ -106,7 +106,7 @@ public struct Num {
 // MARK: - Level
 
 /// 編號層級定義
-public struct Level {
+public struct Level: Equatable {
     public var ilvl: Int           // 層級（0-8）
     public var start: Int          // 起始數字
     public var numFmt: NumberFormat // 編號格式

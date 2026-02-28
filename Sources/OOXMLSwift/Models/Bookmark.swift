@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Bookmark
 
 /// 書籤（用於文件內部導航和連結）
-public struct Bookmark {
+public struct Bookmark: Equatable {
     public var id: Int          // 書籤唯一 ID（整數）
     public var name: String     // 書籤名稱（用於連結引用）
 
@@ -47,7 +47,7 @@ public struct Bookmark {
 // MARK: - Bookmark in Paragraph
 
 /// 段落中的書籤資訊
-public struct ParagraphBookmark {
+public struct ParagraphBookmark: Equatable {
     public var bookmark: Bookmark
     public var startPosition: Int  // 在段落中的起始位置（字元索引）
     public var endPosition: Int    // 在段落中的結束位置

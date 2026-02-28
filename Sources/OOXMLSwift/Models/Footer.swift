@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Footer
 
 /// 頁尾
-public struct Footer {
+public struct Footer: Equatable {
     public var id: String           // 關係 ID (如 "rId11")
     public var paragraphs: [Paragraph]
     public var type: HeaderFooterType
@@ -35,7 +35,7 @@ public struct Footer {
 // MARK: - Page Number Format
 
 /// 頁碼格式
-public enum PageNumberFormat {
+public enum PageNumberFormat: Equatable {
     case simple              // "1"
     case pageOfTotal         // "Page 1 of 10"
     case withDash            // "- 1 -"

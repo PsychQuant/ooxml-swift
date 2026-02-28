@@ -365,7 +365,7 @@ extension MathEquation {
 // MARK: - Advanced Text Formatting
 
 /// 段落邊框
-public struct ParagraphBorder {
+public struct ParagraphBorder: Equatable {
     public var top: ParagraphBorderStyle?
     public var bottom: ParagraphBorderStyle?
     public var left: ParagraphBorderStyle?
@@ -393,7 +393,7 @@ public struct ParagraphBorder {
 }
 
 /// 邊框樣式
-public struct ParagraphBorderStyle {
+public struct ParagraphBorderStyle: Equatable {
     public var type: ParagraphBorderType
     public var color: String       // 十六進位顏色碼
     public var size: Int           // 邊框寬度 (1/8 點)
@@ -451,7 +451,7 @@ extension ParagraphBorder {
 public typealias ParagraphShading = CellShading
 
 /// 字元間距設定
-public struct CharacterSpacing {
+public struct CharacterSpacing: Equatable {
     public var spacing: Int?       // 字元間距 (1/20 點，正值增加，負值減少)
     public var position: Int?      // 位置調整（上升/下降）
     public var kern: Int?          // 字距調整起始點數

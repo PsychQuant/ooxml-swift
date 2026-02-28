@@ -26,7 +26,7 @@ public enum RevisionType: String, Codable {
 }
 
 /// 修訂記錄
-public struct Revision {
+public struct Revision: Equatable {
     public var id: Int                     // 修訂 ID
     public var type: RevisionType          // 修訂類型
     public var author: String              // 作者
@@ -65,7 +65,7 @@ public struct Revision {
 // MARK: - Tracked Content
 
 /// 追蹤修訂的 Run（可包含插入或刪除標記）
-public struct TrackedRun {
+public struct TrackedRun: Equatable {
     public var run: Run                    // 原始 Run
     public var revision: Revision?         // 關聯的修訂（如果有）
     public var isDeleted: Bool             // 是否為刪除內容
@@ -78,7 +78,7 @@ public struct TrackedRun {
 }
 
 /// 追蹤修訂的段落
-public struct TrackedParagraph {
+public struct TrackedParagraph: Equatable {
     public var paragraph: Paragraph        // 原始段落
     public var trackedRuns: [TrackedRun]   // 帶修訂標記的 Runs
     public var paragraphRevision: Revision? // 段落級別的修訂（如整段插入/刪除）
@@ -279,7 +279,7 @@ extension RunProperties {
 // MARK: - Paragraph Format Change
 
 /// 段落格式變更記錄
-public struct ParagraphFormatChange {
+public struct ParagraphFormatChange: Equatable {
     public var id: Int
     public var author: String
     public var date: Date
@@ -300,7 +300,7 @@ public struct ParagraphFormatChange {
 // MARK: - Move Tracking
 
 /// 移動追蹤（用於追蹤剪下貼上）
-public struct MoveTracking {
+public struct MoveTracking: Equatable {
     public var moveId: String              // 移動配對 ID
     public var fromRevision: Revision      // 來源修訂
     public var toRevision: Revision        // 目標修訂
@@ -335,7 +335,7 @@ public struct MoveTracking {
 // MARK: - Table Revision
 
 /// 表格修訂（插入/刪除列）
-public struct TableRowRevision {
+public struct TableRowRevision: Equatable {
     public var id: Int
     public var type: RevisionType
     public var author: String
@@ -357,7 +357,7 @@ public struct TableRowRevision {
 }
 
 /// 儲存格修訂
-public struct TableCellRevision {
+public struct TableCellRevision: Equatable {
     public var id: Int
     public var author: String
     public var date: Date
@@ -402,22 +402,21 @@ public enum RevisionError: Error, LocalizedError {
 // MARK: - Track Changes Settings
 
 /// 修訂追蹤設定
-public struct TrackChangesSettings {
+public struct TrackChangesSettings: Equatable {
     public var enabled: Bool = false           // 是否啟用修訂追蹤
     public var author: String = "Unknown"      // 修訂作者
-    public var dateTime: Date = Date()         // 修訂時間
+    public var dateTime: Date?                 // 修訂時間（啟用追蹤時才設定）
 
     public init(enabled: Bool = false, author: String = "Unknown") {
         self.enabled = enabled
         self.author = author
-        self.dateTime = Date()
     }
 }
 
 // MARK: - Revisions Collection
 
 /// 修訂集合
-public struct RevisionsCollection {
+public struct RevisionsCollection: Equatable {
     public var revisions: [Revision] = []
     public var settings: TrackChangesSettings = TrackChangesSettings()
 

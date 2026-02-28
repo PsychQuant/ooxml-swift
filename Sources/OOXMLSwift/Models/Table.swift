@@ -1,7 +1,7 @@
 import Foundation
 
 /// 表格 (Table) - Word 文件中的表格結構
-public struct Table {
+public struct Table: Equatable {
     public var rows: [TableRow]
     public var properties: TableProperties
 
@@ -32,7 +32,7 @@ public struct Table {
 // MARK: - Table Row
 
 /// 表格行
-public struct TableRow {
+public struct TableRow: Equatable {
     public var cells: [TableCell]
     public var properties: TableRowProperties
 
@@ -43,7 +43,7 @@ public struct TableRow {
 }
 
 /// 表格行屬性
-public struct TableRowProperties {
+public struct TableRowProperties: Equatable {
     public var height: Int?                // 行高 (twips)
     public var heightRule: HeightRule?     // 行高規則
     public var isHeader: Bool = false      // 是否為表頭行（每頁重複）
@@ -62,7 +62,7 @@ public enum HeightRule: String, Codable {
 // MARK: - Table Cell
 
 /// 表格儲存格
-public struct TableCell {
+public struct TableCell: Equatable {
     public var paragraphs: [Paragraph]
     public var properties: TableCellProperties
 
@@ -89,7 +89,7 @@ public struct TableCell {
 }
 
 /// 表格儲存格屬性
-public struct TableCellProperties {
+public struct TableCellProperties: Equatable {
     public var width: Int?                     // 寬度 (twips)
     public var widthType: WidthType?           // 寬度類型
     public var verticalAlignment: CellVerticalAlignment?
@@ -123,7 +123,7 @@ public enum VerticalMerge: String, Codable {
 }
 
 /// 儲存格邊框
-public struct CellBorders {
+public struct CellBorders: Equatable {
     public var top: Border?
     public var bottom: Border?
     public var left: Border?
@@ -143,7 +143,7 @@ public struct CellBorders {
 }
 
 /// 邊框
-public struct Border {
+public struct Border: Equatable {
     public var style: BorderStyle
     public var size: Int           // 1/8 點
     public var color: String       // RGB hex
@@ -166,7 +166,7 @@ public enum BorderStyle: String, Codable {
 }
 
 /// 儲存格底色
-public struct CellShading {
+public struct CellShading: Equatable {
     public var fill: String            // 背景色 RGB hex
     public var color: String?          // 前景色（用於圖案）
     public var pattern: ShadingPattern?
@@ -212,7 +212,7 @@ public enum ShadingPattern: String, Codable {
 // MARK: - Table Properties
 
 /// 表格屬性
-public struct TableProperties {
+public struct TableProperties: Equatable {
     public var width: Int?                     // 表格寬度
     public var widthType: WidthType?
     public var alignment: Alignment?           // 表格對齊
@@ -224,7 +224,7 @@ public struct TableProperties {
 }
 
 /// 表格邊框
-public struct TableBorders {
+public struct TableBorders: Equatable {
     public var top: Border?
     public var bottom: Border?
     public var left: Border?
@@ -248,7 +248,7 @@ public struct TableBorders {
 }
 
 /// 表格儲存格邊距
-public struct TableCellMargins {
+public struct TableCellMargins: Equatable {
     public var top: Int?
     public var bottom: Int?
     public var left: Int?
