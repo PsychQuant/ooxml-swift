@@ -395,12 +395,9 @@ public struct DocxReader {
         }
 
         // 🆕 檢查是否為 OMML 公式 (m:oMath 或 m:oMathPara)
-        let oMathNodes = try element.nodes(forXPath: ".//*[local-name()='oMath' or local-name()='oMathPara']")
-        if !oMathNodes.isEmpty {
-            // 保存原始 XML 用於後續轉換
-            if let oMathElement = oMathNodes.first {
-                run.rawXML = oMathElement.xmlString
-            }
+        // 使用 children 遍歷取代 XPath，避免 O(n²) 效能問題
+        if let oMathElement = findFirstDescendant(of: element, localNames: ["oMath", "oMathPara"]) {
+            run.rawXML = oMathElement.xmlString
             run.semantic = SemanticAnnotation.ommlFormula
         }
 
@@ -411,14 +408,10 @@ public struct DocxReader {
 
     /// 解析 <w:drawing> 元素
     private static func parseDrawing(from element: XMLElement, relationships: RelationshipsCollection) throws -> Drawing? {
-        // 尋找 inline 或 anchor 元素
-        // 使用 XPath 搜尋（因為可能有命名空間前綴）
-        let inlineNodes = try element.nodes(forXPath: ".//*[local-name()='inline']")
-        let anchorNodes = try element.nodes(forXPath: ".//*[local-name()='anchor']")
-
-        if let inlineElement = inlineNodes.first as? XMLElement {
+        // 尋找 inline 或 anchor 元素（使用 children 遍歷取代 XPath）
+        if let inlineElement = findFirstDescendant(of: element, localNames: ["inline"]) {
             return try parseInlineDrawing(from: inlineElement, relationships: relationships)
-        } else if let anchorElement = anchorNodes.first as? XMLElement {
+        } else if let anchorElement = findFirstDescendant(of: element, localNames: ["anchor"]) {
             return try parseAnchorDrawing(from: anchorElement, relationships: relationships)
         }
 
@@ -428,8 +421,7 @@ public struct DocxReader {
     /// 解析 inline drawing
     private static func parseInlineDrawing(from element: XMLElement, relationships: RelationshipsCollection) throws -> Drawing? {
         // 取得尺寸 (wp:extent)
-        let extentNodes = try element.nodes(forXPath: ".//*[local-name()='extent']")
-        guard let extentElement = extentNodes.first as? XMLElement,
+        guard let extentElement = findFirstDescendant(of: element, localNames: ["extent"]),
               let cxStr = extentElement.attribute(forName: "cx")?.stringValue,
               let cyStr = extentElement.attribute(forName: "cy")?.stringValue,
               let cx = Int(cxStr),
@@ -438,8 +430,7 @@ public struct DocxReader {
         }
 
         // 取得圖片參照 (a:blip r:embed)
-        let blipNodes = try element.nodes(forXPath: ".//*[local-name()='blip']")
-        guard let blipElement = blipNodes.first as? XMLElement else {
+        guard let blipElement = findFirstDescendant(of: element, localNames: ["blip"]) else {
             return nil
         }
 
@@ -452,11 +443,10 @@ public struct DocxReader {
         }
 
         // 取得圖片名稱和描述 (wp:docPr)
-        let docPrNodes = try element.nodes(forXPath: ".//*[local-name()='docPr']")
         var name = "Picture"
         var description = ""
 
-        if let docPrElement = docPrNodes.first as? XMLElement {
+        if let docPrElement = findFirstDescendant(of: element, localNames: ["docPr"]) {
             if let nameAttr = docPrElement.attribute(forName: "name")?.stringValue {
                 name = nameAttr
             }
@@ -480,8 +470,7 @@ public struct DocxReader {
     /// 解析 anchor drawing (浮動圖片)
     private static func parseAnchorDrawing(from element: XMLElement, relationships: RelationshipsCollection) throws -> Drawing? {
         // 取得尺寸
-        let extentNodes = try element.nodes(forXPath: ".//*[local-name()='extent']")
-        guard let extentElement = extentNodes.first as? XMLElement,
+        guard let extentElement = findFirstDescendant(of: element, localNames: ["extent"]),
               let cxStr = extentElement.attribute(forName: "cx")?.stringValue,
               let cyStr = extentElement.attribute(forName: "cy")?.stringValue,
               let cx = Int(cxStr),
@@ -490,8 +479,7 @@ public struct DocxReader {
         }
 
         // 取得圖片參照
-        let blipNodes = try element.nodes(forXPath: ".//*[local-name()='blip']")
-        guard let blipElement = blipNodes.first as? XMLElement else {
+        guard let blipElement = findFirstDescendant(of: element, localNames: ["blip"]) else {
             return nil
         }
 
@@ -503,11 +491,10 @@ public struct DocxReader {
         }
 
         // 取得名稱和描述
-        let docPrNodes = try element.nodes(forXPath: ".//*[local-name()='docPr']")
         var name = "Picture"
         var description = ""
 
-        if let docPrElement = docPrNodes.first as? XMLElement {
+        if let docPrElement = findFirstDescendant(of: element, localNames: ["docPr"]) {
             if let nameAttr = docPrElement.attribute(forName: "name")?.stringValue {
                 name = nameAttr
             }
@@ -529,36 +516,34 @@ public struct DocxReader {
         var anchorPos = AnchorPosition()
 
         // 水平定位
-        let posHNodes = try element.nodes(forXPath: ".//*[local-name()='positionH']")
-        if let posHElement = posHNodes.first as? XMLElement {
+        if let posHElement = findFirstDescendant(of: element, localNames: ["positionH"]) {
             if let relativeFrom = posHElement.attribute(forName: "relativeFrom")?.stringValue {
                 anchorPos.horizontalRelativeFrom = HorizontalRelativeFrom(rawValue: relativeFrom) ?? .column
             }
 
             // posOffset 或 align
-            let offsetNodes = try posHElement.nodes(forXPath: ".//*[local-name()='posOffset']")
-            let alignNodes = try posHElement.nodes(forXPath: ".//*[local-name()='align']")
+            let hOffsetElement = findFirstDescendant(of: posHElement, localNames: ["posOffset"])
+            let hAlignElement = findFirstDescendant(of: posHElement, localNames: ["align"])
 
-            if let offsetElement = offsetNodes.first, let offsetStr = offsetElement.stringValue, let offset = Int(offsetStr) {
+            if let offsetEl = hOffsetElement, let offsetStr = offsetEl.stringValue, let offset = Int(offsetStr) {
                 anchorPos.horizontalOffset = offset
-            } else if let alignElement = alignNodes.first, let alignStr = alignElement.stringValue {
+            } else if let alignEl = hAlignElement, let alignStr = alignEl.stringValue {
                 anchorPos.horizontalAlignment = HorizontalAlignment(rawValue: alignStr)
             }
         }
 
         // 垂直定位
-        let posVNodes = try element.nodes(forXPath: ".//*[local-name()='positionV']")
-        if let posVElement = posVNodes.first as? XMLElement {
+        if let posVElement = findFirstDescendant(of: element, localNames: ["positionV"]) {
             if let relativeFrom = posVElement.attribute(forName: "relativeFrom")?.stringValue {
                 anchorPos.verticalRelativeFrom = VerticalRelativeFrom(rawValue: relativeFrom) ?? .paragraph
             }
 
-            let offsetNodes = try posVElement.nodes(forXPath: ".//*[local-name()='posOffset']")
-            let alignNodes = try posVElement.nodes(forXPath: ".//*[local-name()='align']")
+            let offsetElement = findFirstDescendant(of: posVElement, localNames: ["posOffset"])
+            let alignElement = findFirstDescendant(of: posVElement, localNames: ["align"])
 
-            if let offsetElement = offsetNodes.first, let offsetStr = offsetElement.stringValue, let offset = Int(offsetStr) {
+            if let offsetEl = offsetElement, let offsetStr = offsetEl.stringValue, let offset = Int(offsetStr) {
                 anchorPos.verticalOffset = offset
-            } else if let alignElement = alignNodes.first, let alignStr = alignElement.stringValue {
+            } else if let alignEl = alignElement, let alignStr = alignEl.stringValue {
                 anchorPos.verticalAlignment = VerticalAlignment(rawValue: alignStr)
             }
         }
@@ -1253,5 +1238,22 @@ public struct DocxReader {
         }
 
         return collection
+    }
+
+    // MARK: - XPath-free Helpers
+
+    /// 在子孫中搜尋第一個符合 localName 的元素（取代 XPath，避免 O(n²)）
+    private static func findFirstDescendant(of node: XMLNode, localNames: [String]) -> XMLElement? {
+        guard let children = node.children else { return nil }
+        for child in children {
+            guard let el = child as? XMLElement else { continue }
+            if let name = el.localName, localNames.contains(name) {
+                return el
+            }
+            if let found = findFirstDescendant(of: el, localNames: localNames) {
+                return found
+            }
+        }
+        return nil
     }
 }
