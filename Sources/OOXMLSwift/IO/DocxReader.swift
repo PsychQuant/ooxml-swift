@@ -218,26 +218,108 @@ public struct DocxReader {
         // XPath: //w:body/*
         let bodyNodes = try xml.nodes(forXPath: "//*[local-name()='body']/*")
 
-        for node in bodyNodes {
-            guard let element = node as? XMLElement else { continue }
+        let count = bodyNodes.count
+        guard count > 0 else { return body }
 
-            if element.localName == "p" {
-                let paragraph = try parseParagraph(
-                    from: element,
-                    relationships: relationships,
-                    styles: styles,
-                    numbering: numbering
-                )
-                body.children.append(.paragraph(paragraph))
-            } else if element.localName == "tbl" {
-                let table = try parseTable(
-                    from: element,
-                    relationships: relationships,
-                    styles: styles,
-                    numbering: numbering
-                )
-                body.children.append(.table(table))
-                body.tables.append(table)
+        // 小文件走 serial path（GCD dispatch overhead 不划算）
+        let coreCount = ProcessInfo.processInfo.activeProcessorCount
+        if count <= 200 || coreCount <= 1 {
+            for node in bodyNodes {
+                guard let element = node as? XMLElement else { continue }
+
+                if element.localName == "p" {
+                    let paragraph = try parseParagraph(
+                        from: element,
+                        relationships: relationships,
+                        styles: styles,
+                        numbering: numbering
+                    )
+                    body.children.append(.paragraph(paragraph))
+                } else if element.localName == "tbl" {
+                    let table = try parseTable(
+                        from: element,
+                        relationships: relationships,
+                        styles: styles,
+                        numbering: numbering
+                    )
+                    body.children.append(.table(table))
+                    body.tables.append(table)
+                }
+            }
+            return body
+        }
+
+        // 大文件走 parallel path
+        // 每個 body child 的子樹互不相交，shared data (relationships/styles/numbering) 為唯讀
+        // 使用 concurrentPerform 分 chunk 平行解析，再按順序合併
+        let chunkSize = max(count / coreCount, 64)
+        let chunkCount = (count + chunkSize - 1) / chunkSize
+
+        // 每個 chunk 的結果陣列（各 chunk 獨立寫入，無 data race）
+        let chunkResults = UnsafeMutablePointer<[BodyChild]>.allocate(capacity: chunkCount)
+        chunkResults.initialize(repeating: [], count: chunkCount)
+        defer {
+            chunkResults.deinitialize(count: chunkCount)
+            chunkResults.deallocate()
+        }
+
+        // Thread-safe error capture
+        var firstError: Error?
+        let errorLock = NSLock()
+
+        DispatchQueue.concurrentPerform(iterations: chunkCount) { ci in
+            // Early exit if another chunk already failed
+            errorLock.lock()
+            let hasError = firstError != nil
+            errorLock.unlock()
+            if hasError { return }
+
+            let start = ci * chunkSize
+            let end = min(start + chunkSize, count)
+            var children: [BodyChild] = []
+            children.reserveCapacity(end - start)
+
+            for i in start..<end {
+                guard let element = bodyNodes[i] as? XMLElement else { continue }
+
+                do {
+                    if element.localName == "p" {
+                        let paragraph = try parseParagraph(
+                            from: element,
+                            relationships: relationships,
+                            styles: styles,
+                            numbering: numbering
+                        )
+                        children.append(.paragraph(paragraph))
+                    } else if element.localName == "tbl" {
+                        let table = try parseTable(
+                            from: element,
+                            relationships: relationships,
+                            styles: styles,
+                            numbering: numbering
+                        )
+                        children.append(.table(table))
+                    }
+                } catch {
+                    errorLock.lock()
+                    if firstError == nil { firstError = error }
+                    errorLock.unlock()
+                    return
+                }
+            }
+            chunkResults[ci] = children
+        }
+
+        if let error = firstError { throw error }
+
+        // 按 chunk 順序合併，保持文件元素的原始順序
+        body.children.reserveCapacity(count)
+        for ci in 0..<chunkCount {
+            for child in chunkResults[ci] {
+                body.children.append(child)
+                if case .table(let table) = child {
+                    body.tables.append(table)
+                }
             }
         }
 
