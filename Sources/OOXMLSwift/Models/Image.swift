@@ -59,6 +59,8 @@ public struct ImageReference: Equatable {
         case "bmp": return "image/bmp"
         case "tiff", "tif": return "image/tiff"
         case "webp": return "image/webp"
+        case "emf": return "image/x-emf"
+        case "wmf": return "image/x-wmf"
         default: return "image/png"
         }
     }
