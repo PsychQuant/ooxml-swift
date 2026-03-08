@@ -84,12 +84,24 @@ public struct DocxReader {
             }
         }
 
-        // 10. 收集段落內的修訂記錄到 document.revisions
+        // 10. 收集段落內的修訂記錄到 document.revisions（包含 table 內的段落）
         for (index, child) in document.body.children.enumerated() {
-            if case .paragraph(let para) = child {
+            switch child {
+            case .paragraph(let para):
                 for var revision in para.revisions {
                     revision.paragraphIndex = index
                     document.revisions.revisions.append(revision)
+                }
+            case .table(let table):
+                for row in table.rows {
+                    for cell in row.cells {
+                        for para in cell.paragraphs {
+                            for var revision in para.revisions {
+                                revision.paragraphIndex = index
+                                document.revisions.revisions.append(revision)
+                            }
+                        }
+                    }
                 }
             }
         }
