@@ -84,7 +84,17 @@ public struct DocxReader {
             }
         }
 
-        // 10. 讀取 commentsExtended.xml（可選，Word 2012+ 回覆與已解決狀態）
+        // 10. 收集段落內的修訂記錄到 document.revisions
+        for (index, child) in document.body.children.enumerated() {
+            if case .paragraph(let para) = child {
+                for var revision in para.revisions {
+                    revision.paragraphIndex = index
+                    document.revisions.revisions.append(revision)
+                }
+            }
+        }
+
+        // 11. 讀取 commentsExtended.xml（可選，Word 2012+ 回覆與已解決狀態）
         let commentsExtURL = tempDir.appendingPathComponent("word/commentsExtended.xml")
         if FileManager.default.fileExists(atPath: commentsExtURL.path) {
             let extData = try Data(contentsOf: commentsExtURL)
@@ -341,19 +351,68 @@ public struct DocxReader {
             paragraph.properties = parseParagraphProperties(from: pPr)
         }
 
-        // 解析 Runs
-        for run in element.elements(forName: "w:r") {
-            let parsedRun = try parseRun(from: run, relationships: relationships)
-            paragraph.runs.append(parsedRun)
-        }
-
-        // 解析 comment anchors（commentRangeStart）
+        // 解析 Runs（包含 w:ins/w:del 追蹤修訂）
+        let isoFormatter = ISO8601DateFormatter()
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement else { continue }
-            if childElement.localName == "commentRangeStart",
-               let idStr = childElement.attribute(forName: "w:id")?.stringValue,
-               let id = Int(idStr) {
-                paragraph.commentIds.append(id)
+
+            switch childElement.localName {
+            case "r":
+                let parsedRun = try parseRun(from: childElement, relationships: relationships)
+                paragraph.runs.append(parsedRun)
+
+            case "ins":
+                // 插入修訂：提取 w:r 並建立 Revision
+                let revId = Int(childElement.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+                let author = childElement.attribute(forName: "w:author")?.stringValue ?? "Unknown"
+                let date = childElement.attribute(forName: "w:date")?.stringValue
+                    .flatMap { isoFormatter.date(from: $0) } ?? Date()
+
+                var insertedText = ""
+                for insRun in childElement.elements(forName: "w:r") {
+                    let parsedRun = try parseRun(from: insRun, relationships: relationships)
+                    paragraph.runs.append(parsedRun)
+                    insertedText += parsedRun.text
+                }
+
+                if !insertedText.isEmpty {
+                    paragraph.revisions.append(Revision(
+                        id: revId, type: .insertion, author: author,
+                        paragraphIndex: 0, originalText: nil,
+                        newText: insertedText, date: date
+                    ))
+                }
+
+            case "del":
+                // 刪除修訂：提取 w:delText 並建立 Revision
+                let revId = Int(childElement.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+                let author = childElement.attribute(forName: "w:author")?.stringValue ?? "Unknown"
+                let date = childElement.attribute(forName: "w:date")?.stringValue
+                    .flatMap { isoFormatter.date(from: $0) } ?? Date()
+
+                var deletedText = ""
+                for delRun in childElement.elements(forName: "w:r") {
+                    for delText in delRun.elements(forName: "w:delText") {
+                        deletedText += delText.stringValue ?? ""
+                    }
+                }
+
+                if !deletedText.isEmpty {
+                    paragraph.revisions.append(Revision(
+                        id: revId, type: .deletion, author: author,
+                        paragraphIndex: 0, originalText: deletedText,
+                        newText: nil, date: date
+                    ))
+                }
+
+            case "commentRangeStart":
+                if let idStr = childElement.attribute(forName: "w:id")?.stringValue,
+                   let id = Int(idStr) {
+                    paragraph.commentIds.append(id)
+                }
+
+            default:
+                break
             }
         }
 

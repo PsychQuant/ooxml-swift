@@ -10,6 +10,7 @@ public struct Paragraph: Equatable {
     public var commentIds: [Int] = []          // 段落關聯的註解 ID
     public var footnoteIds: [Int] = []         // 段落內的腳註 ID
     public var endnoteIds: [Int] = []          // 段落內的尾註 ID
+    public var revisions: [Revision] = []      // 段落內的修訂記錄（w:ins/w:del）
     public var semantic: SemanticAnnotation?  // 語義標註
 
     public init(runs: [Run] = [], properties: ParagraphProperties = ParagraphProperties()) {
