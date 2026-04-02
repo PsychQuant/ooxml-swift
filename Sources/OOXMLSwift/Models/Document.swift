@@ -299,11 +299,19 @@ public struct WordDocument: Equatable {
                 throw WordError.invalidFormat("Invalid col index \(col) for row \(row): row has \(cellCount) cell(s) (grid columns: \(gridCols), spans: \(gridSpans))")
             }
 
-            // 只更新文字，保留 cell properties（gridSpan、vMerge、寬度、邊框等）
-            let existingProps = table.rows[row].cells[col].properties
-            var updatedCell = TableCell(text: text)
-            updatedCell.properties = existingProps
-            table.rows[row].cells[col] = updatedCell
+            // 只更新文字，保留 cell properties + run properties（粗體、字型等）
+            let cell = table.rows[row].cells[col]
+            if let firstRun = cell.paragraphs.first?.runs.first {
+                // 保留第一個 run 的格式，只替換文字
+                var updatedRun = firstRun
+                updatedRun.text = text
+                var updatedPara = cell.paragraphs[0]
+                updatedPara.runs = [updatedRun]
+                table.rows[row].cells[col].paragraphs = [updatedPara]
+            } else {
+                // 空 cell，直接設文字（保留 cell properties）
+                table.rows[row].cells[col].paragraphs = [Paragraph(text: text)]
+            }
 
             body.children[actualIndex] = .table(table)
 
