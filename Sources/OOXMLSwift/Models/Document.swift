@@ -292,11 +292,19 @@ public struct WordDocument: Equatable {
             guard row >= 0 && row < table.rows.count else {
                 throw WordError.invalidIndex(row)
             }
-            guard col >= 0 && col < table.rows[row].cells.count else {
-                throw WordError.invalidIndex(col)
+            let cellCount = table.rows[row].cells.count
+            guard col >= 0 && col < cellCount else {
+                let gridSpans = table.rows[row].cells.map { $0.properties.gridSpan ?? 1 }
+                let gridCols = gridSpans.reduce(0, +)
+                throw WordError.invalidFormat("Invalid col index \(col) for row \(row): row has \(cellCount) cell(s) (grid columns: \(gridCols), spans: \(gridSpans))")
             }
 
-            table.rows[row].cells[col] = TableCell(text: text)
+            // 只更新文字，保留 cell properties（gridSpan、vMerge、寬度、邊框等）
+            let existingProps = table.rows[row].cells[col].properties
+            var updatedCell = TableCell(text: text)
+            updatedCell.properties = existingProps
+            table.rows[row].cells[col] = updatedCell
+
             body.children[actualIndex] = .table(table)
 
             // 同步更新 body.tables
