@@ -87,6 +87,24 @@ public struct WordDocument: Equatable {
         }
     }
 
+    /// 遞迴收集所有段落，包含表格儲存格內的段落
+    public func getAllParagraphs() -> [Paragraph] {
+        var result: [Paragraph] = []
+        for child in body.children {
+            switch child {
+            case .paragraph(let para):
+                result.append(para)
+            case .table(let table):
+                for row in table.rows {
+                    for cell in row.cells {
+                        result.append(contentsOf: cell.paragraphs)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
     // MARK: - Paragraph Operations
 
     public mutating func appendParagraph(_ paragraph: Paragraph) {
@@ -132,23 +150,44 @@ public struct WordDocument: Equatable {
     public mutating func replaceText(find: String, with replacement: String, all: Bool) -> Int {
         var count = 0
         for i in 0..<body.children.count {
-            if case .paragraph(var para) = body.children[i] {
-                for j in 0..<para.runs.count {
-                    if para.runs[j].text.contains(find) {
-                        if all {
-                            let occurrences = para.runs[j].text.components(separatedBy: find).count - 1
-                            count += occurrences
-                            para.runs[j].text = para.runs[j].text.replacingOccurrences(of: find, with: replacement)
-                        } else if count == 0 {
-                            if let range = para.runs[j].text.range(of: find) {
-                                para.runs[j].text.replaceSubrange(range, with: replacement)
-                                count = 1
-                            }
+            switch body.children[i] {
+            case .paragraph(var para):
+                count += replaceInParagraph(&para, find: find, with: replacement, all: all, currentCount: count)
+                body.children[i] = .paragraph(para)
+            case .table(var table):
+                for rowIdx in 0..<table.rows.count {
+                    for cellIdx in 0..<table.rows[rowIdx].cells.count {
+                        for paraIdx in 0..<table.rows[rowIdx].cells[cellIdx].paragraphs.count {
+                            var para = table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx]
+                            count += replaceInParagraph(&para, find: find, with: replacement, all: all, currentCount: count)
+                            table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx] = para
+                            if !all && count > 0 { break }
                         }
+                        if !all && count > 0 { break }
+                    }
+                    if !all && count > 0 { break }
+                }
+                body.children[i] = .table(table)
+            }
+            if !all && count > 0 { break }
+        }
+        return count
+    }
+
+    private func replaceInParagraph(_ para: inout Paragraph, find: String, with replacement: String, all: Bool, currentCount: Int) -> Int {
+        var count = 0
+        for j in 0..<para.runs.count {
+            if para.runs[j].text.contains(find) {
+                if all {
+                    let occurrences = para.runs[j].text.components(separatedBy: find).count - 1
+                    count += occurrences
+                    para.runs[j].text = para.runs[j].text.replacingOccurrences(of: find, with: replacement)
+                } else if currentCount + count == 0 {
+                    if let range = para.runs[j].text.range(of: find) {
+                        para.runs[j].text.replaceSubrange(range, with: replacement)
+                        count = 1
                     }
                 }
-                body.children[i] = .paragraph(para)
-                if !all && count > 0 { break }
             }
         }
         return count
