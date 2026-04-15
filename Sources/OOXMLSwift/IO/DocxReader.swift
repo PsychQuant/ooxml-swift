@@ -3,6 +3,16 @@ import Foundation
 /// DOCX 檔案讀取器
 public struct DocxReader {
 
+    /// When `true`, the parser writes one line to stderr for each direct child
+    /// of `<w:p>` whose local name is not recognized by `parseParagraph`. Use
+    /// during development / tests to surface parser coverage gaps. Default
+    /// `false` — production parses have zero overhead (the flag is checked
+    /// before any string formatting).
+    ///
+    /// Not thread-safe for concurrent toggles during parallel parses. Toggle at
+    /// test setup / teardown, not during document parsing.
+    public static var debugLoggingEnabled: Bool = false
+
     /// 讀取 .docx 檔案並解析為 WordDocument
     public static func read(from url: URL) throws -> WordDocument {
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -350,7 +360,12 @@ public struct DocxReader {
 
     // MARK: - Paragraph Parsing
 
-    private static func parseParagraph(
+    /// Parse a `<w:p>` element into a `Paragraph`.
+    ///
+    /// Internal (not private) so unit tests in `OOXMLSwiftTests` can exercise the parser
+    /// directly via `@testable import OOXMLSwift` with hand-constructed `XMLElement`
+    /// instances, bypassing the full .docx ZIP read path.
+    internal static func parseParagraph(
         from element: XMLElement,
         relationships: RelationshipsCollection,
         styles: [Style],
@@ -417,6 +432,50 @@ public struct DocxReader {
                     ))
                 }
 
+            case "moveFrom":
+                // 移動來源修訂（mirrors w:del）：抽取 w:r 並建立 Revision
+                let revId = Int(childElement.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+                let author = childElement.attribute(forName: "w:author")?.stringValue ?? "Unknown"
+                let date = childElement.attribute(forName: "w:date")?.stringValue
+                    .flatMap { isoFormatter.date(from: $0) } ?? Date()
+
+                var movedText = ""
+                for moveRun in childElement.elements(forName: "w:r") {
+                    let parsedRun = try parseRun(from: moveRun, relationships: relationships)
+                    paragraph.runs.append(parsedRun)
+                    movedText += parsedRun.text
+                }
+
+                if !movedText.isEmpty {
+                    paragraph.revisions.append(Revision(
+                        id: revId, type: .moveFrom, author: author,
+                        paragraphIndex: 0, originalText: movedText,
+                        newText: nil, date: date
+                    ))
+                }
+
+            case "moveTo":
+                // 移動目標修訂（mirrors w:ins）：抽取 w:r 並建立 Revision
+                let revId = Int(childElement.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+                let author = childElement.attribute(forName: "w:author")?.stringValue ?? "Unknown"
+                let date = childElement.attribute(forName: "w:date")?.stringValue
+                    .flatMap { isoFormatter.date(from: $0) } ?? Date()
+
+                var movedText = ""
+                for moveRun in childElement.elements(forName: "w:r") {
+                    let parsedRun = try parseRun(from: moveRun, relationships: relationships)
+                    paragraph.runs.append(parsedRun)
+                    movedText += parsedRun.text
+                }
+
+                if !movedText.isEmpty {
+                    paragraph.revisions.append(Revision(
+                        id: revId, type: .moveTo, author: author,
+                        paragraphIndex: 0, originalText: nil,
+                        newText: movedText, date: date
+                    ))
+                }
+
             case "commentRangeStart":
                 if let idStr = childElement.attribute(forName: "w:id")?.stringValue,
                    let id = Int(idStr) {
@@ -424,7 +483,13 @@ public struct DocxReader {
                 }
 
             default:
-                break
+                if DocxReader.debugLoggingEnabled {
+                    let name = childElement.localName ?? "<nil>"
+                    let line = "DocxReader.parseParagraph: skipped unknown element \(name)\n"
+                    if let data = line.data(using: .utf8) {
+                        FileHandle.standardError.write(data)
+                    }
+                }
             }
         }
 
