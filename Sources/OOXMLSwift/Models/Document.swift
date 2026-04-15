@@ -1322,6 +1322,15 @@ public struct WordDocument: Equatable {
         }
     }
 
+    /// 列出所有註解（完整 Comment 結構，含 parentId / paraId / done）
+    ///
+    /// 與 `getComments()` 不同之處：回傳完整的 `Comment` struct 而非 tuple，
+    /// 讓呼叫端可以取得 `parentId`（建立 reply 的 threading）、`paraId`、`done` 等欄位。
+    /// 既有的 `getComments()` 保留不動，仍回傳原本的 tuple，不影響 downstream。
+    public func getCommentsFull() -> [Comment] {
+        return comments.comments
+    }
+
     // MARK: - Track Changes Operations
 
     /// 啟用修訂追蹤
