@@ -12,6 +12,18 @@ private func escapeXML(_ string: String) -> String {
         .replacingOccurrences(of: "'", with: "&apos;")
 }
 
+// MARK: - Revision Source
+
+/// Where in the document a revision originated.
+/// Used by `getRevisionsFull()` to disambiguate "body paragraph 5" from "footnote paragraph 5".
+public enum RevisionSource: Equatable {
+    case body
+    case header(id: String)
+    case footer(id: String)
+    case footnote(id: Int)
+    case endnote(id: Int)
+}
+
 // MARK: - Revision Types
 
 /// 修訂類型
@@ -32,7 +44,9 @@ public struct Revision: Equatable {
     public var author: String              // 作者
     public var date: Date                  // 日期
     public var content: String?            // 修訂內容（用於插入/刪除）
-    public var previousFormat: RunProperties?  // 變更前格式（用於格式變更）
+    public var previousFormat: RunProperties?  // 變更前格式（用於格式變更，結構化）
+    public var previousFormatDescription: String?  // 變更前格式的人類可讀摘要（用於 formatChange / paragraphChange）
+    public var source: RevisionSource = .body  // 修訂來源（body / header / footer / footnote / endnote）
 
     // 舊版相容屬性
     public var paragraphIndex: Int = 0     // 段落索引

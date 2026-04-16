@@ -67,6 +67,88 @@ public struct DocxReader {
         )
         document.images = images
 
+        // 7b. 讀取 headers (Part C of ooxml-swift#1)
+        for rel in relationships.relationships where rel.type == .header {
+            let headerURL = tempDir.appendingPathComponent("word/\(rel.target)")
+            guard FileManager.default.fileExists(atPath: headerURL.path) else { continue }
+            let headerData = try Data(contentsOf: headerURL)
+            let headerXML = try XMLDocument(data: headerData)
+            let paragraphs = try parseContainerParagraphs(
+                from: headerXML,
+                relationships: relationships, styles: document.styles, numbering: document.numbering
+            )
+            document.headers.append(Header(id: rel.id, paragraphs: paragraphs))
+        }
+
+        // 7c. 讀取 footers
+        for rel in relationships.relationships where rel.type == .footer {
+            let footerURL = tempDir.appendingPathComponent("word/\(rel.target)")
+            guard FileManager.default.fileExists(atPath: footerURL.path) else { continue }
+            let footerData = try Data(contentsOf: footerURL)
+            let footerXML = try XMLDocument(data: footerData)
+            let paragraphs = try parseContainerParagraphs(
+                from: footerXML,
+                relationships: relationships, styles: document.styles, numbering: document.numbering
+            )
+            document.footers.append(Footer(id: rel.id, paragraphs: paragraphs))
+        }
+
+        // 7d. 讀取 footnotes
+        let footnotesURL = tempDir.appendingPathComponent("word/footnotes.xml")
+        if FileManager.default.fileExists(atPath: footnotesURL.path) {
+            let footnotesData = try Data(contentsOf: footnotesURL)
+            let footnotesXML = try XMLDocument(data: footnotesData)
+            if let root = footnotesXML.rootElement() {
+                for child in root.children ?? [] {
+                    guard
+                        let element = child as? XMLElement,
+                        element.localName == "footnote",
+                        let idStr = element.attribute(forName: "w:id")?.stringValue,
+                        let id = Int(idStr)
+                    else { continue }
+                    // Skip structural footnotes (separator / continuationSeparator) by w:type attribute
+                    let fnType = element.attribute(forName: "w:type")?.stringValue
+                    if fnType == "separator" || fnType == "continuationSeparator" { continue }
+                    let paragraphs = try parseContainerChildParagraphs(
+                        in: element,
+                        relationships: relationships, styles: document.styles, numbering: document.numbering
+                    )
+                    let text = paragraphs.map { $0.getText() }.joined(separator: " ")
+                    var footnote = Footnote(id: id, text: text, paragraphIndex: 0)
+                    footnote.paragraphs = paragraphs
+                    document.footnotes.footnotes.append(footnote)
+                }
+            }
+        }
+
+        // 7e. 讀取 endnotes
+        let endnotesURL = tempDir.appendingPathComponent("word/endnotes.xml")
+        if FileManager.default.fileExists(atPath: endnotesURL.path) {
+            let endnotesData = try Data(contentsOf: endnotesURL)
+            let endnotesXML = try XMLDocument(data: endnotesData)
+            if let root = endnotesXML.rootElement() {
+                for child in root.children ?? [] {
+                    guard
+                        let element = child as? XMLElement,
+                        element.localName == "endnote",
+                        let idStr = element.attribute(forName: "w:id")?.stringValue,
+                        let id = Int(idStr)
+                    else { continue }
+                    // Skip structural endnotes (separator / continuationSeparator) by w:type attribute
+                    let enType = element.attribute(forName: "w:type")?.stringValue
+                    if enType == "separator" || enType == "continuationSeparator" { continue }
+                    let paragraphs = try parseContainerChildParagraphs(
+                        in: element,
+                        relationships: relationships, styles: document.styles, numbering: document.numbering
+                    )
+                    let text = paragraphs.map { $0.getText() }.joined(separator: " ")
+                    var endnote = Endnote(id: id, text: text, paragraphIndex: 0)
+                    endnote.paragraphs = paragraphs
+                    document.endnotes.endnotes.append(endnote)
+                }
+            }
+        }
+
         // 8. 讀取 core.xml（可選）
         let coreURL = tempDir.appendingPathComponent("docProps/core.xml")
         if FileManager.default.fileExists(atPath: coreURL.path) {
@@ -94,12 +176,14 @@ public struct DocxReader {
             }
         }
 
-        // 10. 收集段落內的修訂記錄到 document.revisions（包含 table 內的段落）
+        // 10. 收集段落內的修訂記錄到 document.revisions
+        // Body revisions (source = .body)
         for (index, child) in document.body.children.enumerated() {
             switch child {
             case .paragraph(let para):
                 for var revision in para.revisions {
                     revision.paragraphIndex = index
+                    revision.source = .body
                     document.revisions.revisions.append(revision)
                 }
             case .table(let table):
@@ -108,10 +192,55 @@ public struct DocxReader {
                         for para in cell.paragraphs {
                             for var revision in para.revisions {
                                 revision.paragraphIndex = index
+                                revision.source = .body
                                 document.revisions.revisions.append(revision)
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Header revisions (source = .header(id:))
+        for header in document.headers {
+            for (paraIdx, para) in header.paragraphs.enumerated() {
+                for var revision in para.revisions {
+                    revision.paragraphIndex = paraIdx
+                    revision.source = .header(id: header.id)
+                    document.revisions.revisions.append(revision)
+                }
+            }
+        }
+
+        // Footer revisions (source = .footer(id:))
+        for footer in document.footers {
+            for (paraIdx, para) in footer.paragraphs.enumerated() {
+                for var revision in para.revisions {
+                    revision.paragraphIndex = paraIdx
+                    revision.source = .footer(id: footer.id)
+                    document.revisions.revisions.append(revision)
+                }
+            }
+        }
+
+        // Footnote revisions (source = .footnote(id:))
+        for footnote in document.footnotes.footnotes {
+            for (paraIdx, para) in footnote.paragraphs.enumerated() {
+                for var revision in para.revisions {
+                    revision.paragraphIndex = paraIdx
+                    revision.source = .footnote(id: footnote.id)
+                    document.revisions.revisions.append(revision)
+                }
+            }
+        }
+
+        // Endnote revisions (source = .endnote(id:))
+        for endnote in document.endnotes.endnotes {
+            for (paraIdx, para) in endnote.paragraphs.enumerated() {
+                for var revision in para.revisions {
+                    revision.paragraphIndex = paraIdx
+                    revision.source = .endnote(id: endnote.id)
+                    document.revisions.revisions.append(revision)
                 }
             }
         }
@@ -372,14 +501,27 @@ public struct DocxReader {
         numbering: Numbering
     ) throws -> Paragraph {
         var paragraph = Paragraph()
+        let isoFormatter = ISO8601DateFormatter()
 
         // 解析段落屬性
         if let pPr = element.elements(forName: "w:pPr").first {
             paragraph.properties = parseParagraphProperties(from: pPr)
+
+            // Part B: detect <w:pPrChange> inside <w:pPr> for paragraph property change tracking
+            if let pPrChange = pPr.elements(forName: "w:pPrChange").first {
+                let revId = Int(pPrChange.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+                let author = pPrChange.attribute(forName: "w:author")?.stringValue ?? "Unknown"
+                let date = pPrChange.attribute(forName: "w:date")?.stringValue
+                    .flatMap { isoFormatter.date(from: $0) } ?? Date()
+                let description = Self.summarizeParagraphPropertiesXML(pPrChange.elements(forName: "w:pPr").first)
+                var rev = Revision(id: revId, type: .paragraphChange, author: author,
+                                   paragraphIndex: 0, date: date)
+                rev.previousFormatDescription = description
+                paragraph.revisions.append(rev)
+            }
         }
 
         // 解析 Runs（包含 w:ins/w:del 追蹤修訂）
-        let isoFormatter = ISO8601DateFormatter()
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement else { continue }
 
@@ -387,6 +529,10 @@ public struct DocxReader {
             case "r":
                 let parsedRun = try parseRun(from: childElement, relationships: relationships)
                 paragraph.runs.append(parsedRun)
+                // Part B: detect <w:rPrChange> inside <w:rPr> for run formatting change tracking
+                if let rPrChangeRev = Self.detectRPrChangeRevision(in: childElement, isoFormatter: isoFormatter) {
+                    paragraph.revisions.append(rPrChangeRev)
+                }
 
             case "ins":
                 // 插入修訂：提取 w:r 並建立 Revision
@@ -588,6 +734,116 @@ public struct DocxReader {
         }
 
         return props
+    }
+
+    // MARK: - Container Parsing Helpers (Part C of ooxml-swift#1)
+
+    /// Parse `<w:p>` children directly under an XML document's root element
+    /// (used for headers `<w:hdr>` and footers `<w:ftr>` which are paragraph containers).
+    private static func parseContainerParagraphs(
+        from xml: XMLDocument,
+        relationships: RelationshipsCollection,
+        styles: [Style],
+        numbering: Numbering
+    ) throws -> [Paragraph] {
+        guard let root = xml.rootElement() else { return [] }
+        return try parseContainerChildParagraphs(
+            in: root,
+            relationships: relationships, styles: styles, numbering: numbering
+        )
+    }
+
+    /// Parse `<w:p>` children inside a given XML element
+    /// (used for footnote/endnote individual entries that contain paragraphs).
+    private static func parseContainerChildParagraphs(
+        in element: XMLElement,
+        relationships: RelationshipsCollection,
+        styles: [Style],
+        numbering: Numbering
+    ) throws -> [Paragraph] {
+        var paragraphs: [Paragraph] = []
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement, childElement.localName == "p" else { continue }
+            let para = try parseParagraph(
+                from: childElement,
+                relationships: relationships,
+                styles: styles,
+                numbering: numbering
+            )
+            paragraphs.append(para)
+        }
+        return paragraphs
+    }
+
+    // MARK: - Nested Revision Helpers (Part B of ooxml-swift#1)
+
+    /// Detect `<w:rPrChange>` inside a `<w:r>` element's `<w:rPr>` and return a `Revision`
+    /// if found. Returns `nil` if no change-tracking element is present.
+    private static func detectRPrChangeRevision(in runElement: XMLElement, isoFormatter: ISO8601DateFormatter) -> Revision? {
+        guard
+            let rPr = runElement.elements(forName: "w:rPr").first,
+            let rPrChange = rPr.elements(forName: "w:rPrChange").first
+        else { return nil }
+
+        let revId = Int(rPrChange.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+        let author = rPrChange.attribute(forName: "w:author")?.stringValue ?? "Unknown"
+        let date = rPrChange.attribute(forName: "w:date")?.stringValue
+            .flatMap { isoFormatter.date(from: $0) } ?? Date()
+        let description = summarizeRunPropertiesXML(rPrChange.elements(forName: "w:rPr").first)
+        let priorProps = rPrChange.elements(forName: "w:rPr").first.map { parseRunProperties(from: $0) }
+
+        var rev = Revision(id: revId, type: .formatChange, author: author,
+                           paragraphIndex: 0, date: date)
+        rev.previousFormatDescription = description
+        rev.previousFormat = priorProps
+        return rev
+    }
+
+    /// Human-readable summary of run formatting from a `<w:rPr>` XML element.
+    private static func summarizeRunPropertiesXML(_ element: XMLElement?) -> String {
+        guard let el = element else { return "no prior formatting" }
+        var parts: [String] = []
+        if el.elements(forName: "w:b").first != nil { parts.append("bold") }
+        if el.elements(forName: "w:i").first != nil { parts.append("italic") }
+        if el.elements(forName: "w:u").first != nil { parts.append("underline") }
+        if el.elements(forName: "w:strike").first != nil { parts.append("strikethrough") }
+        if let sz = el.elements(forName: "w:sz").first?.attribute(forName: "w:val")?.stringValue,
+           let halfPt = Int(sz) {
+            parts.append("\(halfPt / 2)pt")
+        }
+        if let font = el.elements(forName: "w:rFonts").first?.attribute(forName: "w:ascii")?.stringValue {
+            parts.append(font)
+        }
+        if let color = el.elements(forName: "w:color").first?.attribute(forName: "w:val")?.stringValue {
+            parts.append("color:\(color)")
+        }
+        return parts.isEmpty ? "no prior formatting" : parts.joined(separator: ", ")
+    }
+
+    /// Human-readable summary of paragraph formatting from a `<w:pPr>` XML element.
+    private static func summarizeParagraphPropertiesXML(_ element: XMLElement?) -> String {
+        guard let el = element else { return "no prior formatting" }
+        var parts: [String] = []
+        if let jc = el.elements(forName: "w:jc").first?.attribute(forName: "w:val")?.stringValue {
+            parts.append("alignment: \(jc)")
+        }
+        if let spacing = el.elements(forName: "w:spacing").first {
+            if let before = spacing.attribute(forName: "w:before")?.stringValue {
+                parts.append("spacing-before: \(before)")
+            }
+            if let after = spacing.attribute(forName: "w:after")?.stringValue {
+                parts.append("spacing-after: \(after)")
+            }
+        }
+        if let ind = el.elements(forName: "w:ind").first {
+            if let left = ind.attribute(forName: "w:left")?.stringValue {
+                parts.append("indent-left: \(left)")
+            }
+        }
+        if let pStyle = el.elements(forName: "w:pStyle").first?.attribute(forName: "w:val")?.stringValue {
+            parts.append("style: \(pStyle)")
+        }
+        return parts.isEmpty ? "no prior formatting" : parts.joined(separator: ", ")
     }
 
     // MARK: - Run Parsing

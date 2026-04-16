@@ -1322,6 +1322,16 @@ public struct WordDocument: Equatable {
         }
     }
 
+    /// 列出所有修訂（完整 Revision 結構，含 source / previousFormatDescription）
+    ///
+    /// 與 `getRevisions()` 不同之處：回傳完整的 `Revision` struct 而非 tuple，
+    /// 讓呼叫端可以取得 `source`（body / header / footer / footnote / endnote）
+    /// 和 `previousFormatDescription`（格式變更的人類可讀摘要）。
+    /// 既有的 `getRevisions()` 保留不動，仍回傳原本的 tuple（僅含 body 修訂）。
+    public func getRevisionsFull() -> [Revision] {
+        return revisions.revisions
+    }
+
     /// 列出所有註解（完整 Comment 結構，含 parentId / paraId / done）
     ///
     /// 與 `getComments()` 不同之處：回傳完整的 `Comment` struct 而非 tuple，
@@ -1350,12 +1360,17 @@ public struct WordDocument: Equatable {
         return revisions.settings.enabled
     }
 
-    /// 取得所有修訂
+    /// 取得所有修訂（僅 body 來源，向後相容）
+    ///
+    /// 只回傳 `source == .body` 的修訂。Container 來源（header/footer/footnote/endnote）
+    /// 的修訂需要透過 `getRevisionsFull()` 取得。
     public func getRevisions() -> [(id: Int, type: String, author: String, paragraphIndex: Int, originalText: String?, newText: String?)] {
-        return revisions.revisions.map { rev in
-            (id: rev.id, type: rev.type.rawValue, author: rev.author,
-             paragraphIndex: rev.paragraphIndex, originalText: rev.originalText, newText: rev.newText)
-        }
+        return revisions.revisions
+            .filter { $0.source == .body }
+            .map { rev in
+                (id: rev.id, type: rev.type.rawValue, author: rev.author,
+                 paragraphIndex: rev.paragraphIndex, originalText: rev.originalText, newText: rev.newText)
+            }
     }
 
     /// 接受修訂

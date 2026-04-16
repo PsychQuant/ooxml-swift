@@ -7,6 +7,7 @@ public struct Footnote: Equatable {
     public var id: Int                 // 腳註唯一 ID
     public var text: String            // 腳註文字
     public var paragraphIndex: Int     // 腳註附加的段落索引
+    public var paragraphs: [Paragraph] = []  // 從 DocxReader 解析的完整段落結構（含 revisions / comments）
 
     public init(id: Int, text: String, paragraphIndex: Int) {
         self.id = id
@@ -119,6 +120,7 @@ public struct Endnote: Equatable {
     public var id: Int                 // 尾註唯一 ID
     public var text: String            // 尾註文字
     public var paragraphIndex: Int     // 尾註附加的段落索引
+    public var paragraphs: [Paragraph] = []  // 從 DocxReader 解析的完整段落結構（含 revisions / comments）
 
     public init(id: Int, text: String, paragraphIndex: Int) {
         self.id = id
