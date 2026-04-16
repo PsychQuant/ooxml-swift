@@ -187,12 +187,15 @@ public struct DocxReader {
                     document.revisions.revisions.append(revision)
                 }
             case .table(let table):
-                for row in table.rows {
-                    for cell in row.cells {
-                        for para in cell.paragraphs {
+                for (rowIdx, row) in table.rows.enumerated() {
+                    for (colIdx, cell) in row.cells.enumerated() {
+                        for (cellParaIdx, para) in cell.paragraphs.enumerated() {
                             for var revision in para.revisions {
                                 revision.paragraphIndex = index
                                 revision.source = .body
+                                revision.tableRow = rowIdx
+                                revision.tableColumn = colIdx
+                                revision.cellParagraphIndex = cellParaIdx
                                 document.revisions.revisions.append(revision)
                             }
                         }

@@ -2,6 +2,12 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.6.1] - 2026-04-16
+
+### Fixed
+
+- **Table-cell revisions now carry distinct location info** — `Revision` gains 3 optional `Int?` fields: `tableRow`, `tableColumn`, `cellParagraphIndex`. Previously all revisions in a table shared the same `paragraphIndex` (the table's body position), making it impossible to distinguish which cell they belonged to. Closes [PsychQuant/ooxml-swift#2](https://github.com/PsychQuant/ooxml-swift/issues/2).
+
 ## [0.6.0] - 2026-04-16
 
 ### Added

@@ -47,6 +47,9 @@ public struct Revision: Equatable {
     public var previousFormat: RunProperties?  // 變更前格式（用於格式變更，結構化）
     public var previousFormatDescription: String?  // 變更前格式的人類可讀摘要（用於 formatChange / paragraphChange）
     public var source: RevisionSource = .body  // 修訂來源（body / header / footer / footnote / endnote）
+    public var tableRow: Int? = nil            // 表格內修訂的 row index（0-based，nil = 非表格）
+    public var tableColumn: Int? = nil         // 表格內修訂的 column index（0-based）
+    public var cellParagraphIndex: Int? = nil   // 表格儲存格內的段落 index（0-based）
 
     // 舊版相容屬性
     public var paragraphIndex: Int = 0     // 段落索引
