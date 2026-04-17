@@ -5,26 +5,35 @@ public struct DocxWriter {
 
     /// 將 WordDocument 寫入 .docx 檔案
     public static func write(_ document: WordDocument, to url: URL) throws {
-        // 1. 建立臨時目錄
+        let data = try writeData(document)
+
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        try data.write(to: url)
+    }
+
+    /// 將 WordDocument 壓縮成 in-memory .docx bytes（不落地）
+    public static func writeData(_ document: WordDocument) throws -> Data {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("che-word-mcp")
             .appendingPathComponent(UUID().uuidString)
 
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { ZipHelper.cleanup(tempDir) }
 
-        defer {
-            ZipHelper.cleanup(tempDir)
-        }
+        try writeAllParts(document, to: tempDir)
+        return try ZipHelper.zipToData(tempDir)
+    }
 
-        // 2. 建立目錄結構
+    /// 將 WordDocument 的所有 OOXML parts 寫到指定目錄（共享 pipeline）
+    private static func writeAllParts(_ document: WordDocument, to tempDir: URL) throws {
         try createDirectoryStructure(at: tempDir)
 
-        // 3. 計算各種標記
         let hasNumbering = !document.numbering.abstractNums.isEmpty
         let hasHeaders = !document.headers.isEmpty
         let hasFooters = !document.footers.isEmpty
 
-        // 4. 寫入各個 XML 檔案
         try writeContentTypes(to: tempDir, document: document)
         try writeRelationships(to: tempDir)
         try writeDocumentRelationships(to: tempDir, document: document)
@@ -35,52 +44,34 @@ public struct DocxWriter {
         try writeCoreProperties(document.properties, to: tempDir)
         try writeAppProperties(to: tempDir)
 
-        // 寫入編號定義（如果有）
         if hasNumbering {
             try writeNumbering(document.numbering, to: tempDir)
         }
-
-        // 寫入頁首（如果有）
         if hasHeaders {
             for header in document.headers {
                 try writeHeader(header, to: tempDir)
             }
         }
-
-        // 寫入頁尾（如果有）
         if hasFooters {
             for footer in document.footers {
                 try writeFooter(footer, to: tempDir)
             }
         }
-
-        // 寫入圖片（如果有）
         if !document.images.isEmpty {
             try writeImages(document.images, to: tempDir)
         }
-
-        // 寫入註解（如果有）
         if !document.comments.comments.isEmpty {
             try writeComments(document.comments, to: tempDir)
         }
-
-        // 寫入 commentsExtended.xml（如果有回覆或已解決狀態）
         if let extXML = document.comments.toExtendedXML() {
             try writeCommentsExtended(extXML, to: tempDir)
         }
-
-        // 寫入腳註（如果有）
         if !document.footnotes.footnotes.isEmpty {
             try writeFootnotes(document.footnotes, to: tempDir)
         }
-
-        // 寫入尾註（如果有）
         if !document.endnotes.endnotes.isEmpty {
             try writeEndnotes(document.endnotes, to: tempDir)
         }
-
-        // 5. 壓縮成 ZIP
-        try ZipHelper.zip(tempDir, to: url)
     }
 
     // MARK: - Directory Structure

@@ -17,17 +17,23 @@ public struct ZipHelper {
 
     /// 壓縮目錄內容為 ZIP 檔案（不包含目錄本身的路徑）
     public static func zip(_ directory: URL, to destination: URL) throws {
-        // 如果目標檔案已存在，先刪除
+        let data = try zipToData(directory)
+
         if FileManager.default.fileExists(atPath: destination.path) {
             try FileManager.default.removeItem(at: destination)
         }
+        try data.write(to: destination)
+    }
 
-        // 建立新的 ZIP 檔案
-        guard let archive = Archive(url: destination, accessMode: .create) else {
-            throw WordError.zipError("無法建立 ZIP 檔案")
+    /// 壓縮目錄內容為 in-memory ZIP bytes（不寫入磁碟）
+    public static func zipToData(_ directory: URL) throws -> Data {
+        let archive: Archive
+        do {
+            archive = try Archive(accessMode: .create)
+        } catch {
+            throw WordError.zipError("無法建立 in-memory ZIP archive: \(error)")
         }
 
-        // 取得目錄內所有檔案的相對路徑
         let files = try getAllFiles(in: directory)
 
         for (relativePath, fileURL) in files {
@@ -44,6 +50,11 @@ public struct ZipHelper {
                 }
             )
         }
+
+        guard let data = archive.data else {
+            throw WordError.zipError("in-memory ZIP archive 無 data 可讀")
+        }
+        return data
     }
 
     /// 取得目錄內所有檔案（回傳相對路徑和完整 URL 的配對）
