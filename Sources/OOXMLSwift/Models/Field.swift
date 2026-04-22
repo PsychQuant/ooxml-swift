@@ -906,6 +906,40 @@ public struct ReferenceField: FieldCode {
     }
 }
 
+// MARK: - StyleRef Field (樣式參照欄位)
+
+/// 樣式參照欄位：顯示目前游標位置所在的指定 heading 段落內容
+/// 常用於 caption 的章節編號（例：`STYLEREF 1 \s` 取第 1 層章節的編號前綴）
+public struct StyleRefField: FieldCode {
+    public var headingLevel: Int              // 標題層級（1-9）
+    public var suppressNonDelimiter: Bool     // \s — 只顯示分隔符之前的部分
+    public var insertPositionBeforeRef: Bool  // \l — 搜尋方向改為向後
+    public var cachedResult: String?
+
+    public init(
+        headingLevel: Int,
+        suppressNonDelimiter: Bool = false,
+        insertPositionBeforeRef: Bool = false,
+        cachedResult: String? = nil
+    ) {
+        self.headingLevel = headingLevel
+        self.suppressNonDelimiter = suppressNonDelimiter
+        self.insertPositionBeforeRef = insertPositionBeforeRef
+        self.cachedResult = cachedResult
+    }
+
+    public var fieldInstruction: String {
+        var instruction = "STYLEREF \(headingLevel)"
+        if suppressNonDelimiter {
+            instruction += " \\s"
+        }
+        if insertPositionBeforeRef {
+            instruction += " \\l"
+        }
+        return instruction
+    }
+}
+
 // MARK: - Sequence Field (序列欄位)
 
 /// 序列欄位（自動編號）
