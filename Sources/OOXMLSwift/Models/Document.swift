@@ -147,49 +147,92 @@ public struct WordDocument: Equatable {
         body.children.remove(at: actualIndex)
     }
 
-    public mutating func replaceText(find: String, with replacement: String, all: Bool) -> Int {
+    /// Replace occurrences of `find` with `replacement` across the document.
+    ///
+    /// Delegates per-paragraph splicing to `TextReplacementEngine` (flatten-then-map
+    /// algorithm — cross-run matches succeed, replacement inherits the start run's
+    /// formatting).
+    ///
+    /// Scope:
+    /// - `.bodyAndTables` (default) — body paragraphs and table-cell paragraphs.
+    /// - `.all` — additionally scans headers, footers, footnotes, endnotes.
+    ///
+    /// - Parameter options: `ReplaceOptions` — scope, regex, matchCase.
+    /// - Returns: Number of replacements performed.
+    /// - Throws: `ReplaceError.invalidRegex` when `options.regex == true` and the
+    ///   pattern is invalid.
+    @discardableResult
+    public mutating func replaceText(
+        find: String,
+        with replacement: String,
+        options: ReplaceOptions = ReplaceOptions()
+    ) throws -> Int {
         var count = 0
+
+        // Body + tables (always scanned)
         for i in 0..<body.children.count {
             switch body.children[i] {
             case .paragraph(var para):
-                count += replaceInParagraph(&para, find: find, with: replacement, all: all, currentCount: count)
+                count += try TextReplacementEngine.replace(
+                    runs: &para.runs, find: find, with: replacement, options: options
+                )
                 body.children[i] = .paragraph(para)
             case .table(var table):
                 for rowIdx in 0..<table.rows.count {
                     for cellIdx in 0..<table.rows[rowIdx].cells.count {
                         for paraIdx in 0..<table.rows[rowIdx].cells[cellIdx].paragraphs.count {
                             var para = table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx]
-                            count += replaceInParagraph(&para, find: find, with: replacement, all: all, currentCount: count)
+                            count += try TextReplacementEngine.replace(
+                                runs: &para.runs, find: find, with: replacement, options: options
+                            )
                             table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx] = para
-                            if !all && count > 0 { break }
                         }
-                        if !all && count > 0 { break }
                     }
-                    if !all && count > 0 { break }
                 }
                 body.children[i] = .table(table)
             }
-            if !all && count > 0 { break }
         }
-        return count
-    }
 
-    private func replaceInParagraph(_ para: inout Paragraph, find: String, with replacement: String, all: Bool, currentCount: Int) -> Int {
-        var count = 0
-        for j in 0..<para.runs.count {
-            if para.runs[j].text.contains(find) {
-                if all {
-                    let occurrences = para.runs[j].text.components(separatedBy: find).count - 1
-                    count += occurrences
-                    para.runs[j].text = para.runs[j].text.replacingOccurrences(of: find, with: replacement)
-                } else if currentCount + count == 0 {
-                    if let range = para.runs[j].text.range(of: find) {
-                        para.runs[j].text.replaceSubrange(range, with: replacement)
-                        count = 1
-                    }
-                }
+        // Headers / footers / footnotes / endnotes — only under .all scope
+        guard options.scope == .all else { return count }
+
+        for i in 0..<headers.count {
+            for j in 0..<headers[i].paragraphs.count {
+                var para = headers[i].paragraphs[j]
+                count += try TextReplacementEngine.replace(
+                    runs: &para.runs, find: find, with: replacement, options: options
+                )
+                headers[i].paragraphs[j] = para
             }
         }
+        for i in 0..<footers.count {
+            for j in 0..<footers[i].paragraphs.count {
+                var para = footers[i].paragraphs[j]
+                count += try TextReplacementEngine.replace(
+                    runs: &para.runs, find: find, with: replacement, options: options
+                )
+                footers[i].paragraphs[j] = para
+            }
+        }
+        for i in 0..<footnotes.footnotes.count {
+            for j in 0..<footnotes.footnotes[i].paragraphs.count {
+                var para = footnotes.footnotes[i].paragraphs[j]
+                count += try TextReplacementEngine.replace(
+                    runs: &para.runs, find: find, with: replacement, options: options
+                )
+                footnotes.footnotes[i].paragraphs[j] = para
+            }
+        }
+        for i in 0..<endnotes.endnotes.count {
+            for j in 0..<endnotes.endnotes[i].paragraphs.count {
+                var para = endnotes.endnotes[i].paragraphs[j]
+                count += try TextReplacementEngine.replace(
+                    runs: &para.runs, find: find, with: replacement, options: options
+                )
+                endnotes.endnotes[i].paragraphs[j] = para
+            }
+        }
+
         return count
     }
 
