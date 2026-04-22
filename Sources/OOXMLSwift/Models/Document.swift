@@ -846,7 +846,8 @@ public struct WordDocument: Equatable {
     // MARK: - Image Operations
 
     /// 取得下一個可用的圖片關係 ID
-    private var nextImageRelationshipId: String {
+    /// internal (not private) so InsertLocation extension can reuse it.
+    var nextImageRelationshipId: String {
         // 基本 ID 從 rId4 開始（rId1-3 用於基本關係）
         // 加上 numbering 的話從 rId5 開始
         let baseId = numbering.abstractNums.isEmpty ? 4 : 5
