@@ -291,6 +291,14 @@ extension FormDropdown {
 // MARK: - Mathematical Equations (OMML)
 
 /// Office 數學公式
+///
+/// - Warning: This flat `latex` + `processLatex` approach produces a single
+///   `<m:r><m:t>processed_string</m:t></m:r>` (plain math run) instead of
+///   structured OMML. Word renders it as text, not as a live equation.
+///   Use the `MathComponent` AST (`MathRun`, `MathFraction`, `MathRadical`,
+///   `MathSubSuperScript`, `MathNary`, etc.) for structurally correct
+///   equations. See `MathComponent.swift`.
+@available(*, deprecated, message: "Use MathComponent AST (MathRun, MathFraction, etc.) for structurally correct OMML; MathEquation produces flat string output and will be removed in ooxml-swift 1.0.")
 public struct MathEquation {
     public var latex: String           // LaTeX 格式的公式
     public var displayMode: Bool       // 是否為獨立區塊（true）或行內（false）
