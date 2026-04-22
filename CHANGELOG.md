@@ -2,6 +2,32 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.10.0] - 2026-04-22
+
+### Added — read-side parsers for fields and OMML
+
+Closes the "write-side only" gap from v2.0.0 `FieldCode` and `MathComponent`. Three downstream `che-word-mcp` issues (#17 caption CRUD, #19 update_all_fields, #21 equation CRUD) all depend on these primitives.
+
+- **`FieldParser`** (`Sources/OOXMLSwift/Parsing/FieldParser.swift`) — walks a `Paragraph`'s runs looking for `<w:fldChar>` field spans, parses `<w:instrText>` into typed `ParsedFieldValue` (cases: `.sequence`, `.styleRef`, `.reference`, `.unknown(instrText:)`). Each `ParsedField` carries `startRunIdx` / `endRunIdx` / `cachedResultRunIdx` so CRUD tools can locate specific runs to modify.
+
+- **`OMMLParser`** (`Sources/OOXMLSwift/Parsing/OMMLParser.swift`) — parses `<m:oMath>` / `<m:oMathPara>` XML into a `[MathComponent]` tree. Recognizes 5 of the 9 core types (`MathRun`, `MathFraction`, `MathSubSuperScript`, `MathRadical`, `MathNary`); unrecognized subtrees preserved as `UnknownMath(rawXML:)` for round-trip safety. (Parsers for `MathDelimiter` / `MathFunction` / `MathLimit` / `MathMatrix` deferred; they still emit via `toOMML()` and round-trip through `UnknownMath`.)
+
+- **`UnknownMath`** — new opaque `MathComponent` struct that preserves raw XML for round-tripping. Note: callers iterating `[MathComponent]` arrays may encounter this type — handle via `as?` cast.
+
+- **`FieldCode.parse(instrText:)`** static method added via extension on `SequenceField`, `StyleRefField`, `ReferenceField`. Returns `Self?` (nil on non-match). `FieldParser` dispatches by trying each in turn. Unknown field types (e.g., `TIME`, `MERGEFIELD`) captured as `.unknown(instrText:)`.
+
+- **`WordDocument.updateAllFields() -> [String: Int]`** — F9-equivalent SEQ counter recomputation across body + headers + footers + footnotes + endnotes. Non-SEQ fields preserved verbatim. Chapter-reset semantics: when a paragraph has `pStyle == "Heading N"`, SEQ fields with `resetLevel == N` restart their counters. Returns map of identifier → final count.
+
+### Tests
+
+40 new XCTest cases across `FieldCodeParseTests`, `FieldParserTests`, `OMMLParserTests`, `UpdateAllFieldsTests`. Full suite 306/306 green.
+
+### Out of scope (follow-up)
+
+- LaTeX parser for `insert_equation(latex:)` (Phase 3 deferred from word-mcp-insertion-primitives).
+- IF / CalculationField / DateTimeField / DocumentInfoField / MergeField `parse(instrText:)` — `.unknown` fallback covers them for round-trip; add per-type parsers when CRUD tools target them.
+- `MathDelimiter` / `MathFunction` / `MathLimit` / `MathMatrix` parsing — `UnknownMath` preserves round-trip; full parse added when CRUD tools target those shapes.
+
 ## [0.9.0] - 2026-04-22
 
 ### Added

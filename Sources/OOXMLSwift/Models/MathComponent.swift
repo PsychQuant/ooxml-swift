@@ -273,6 +273,25 @@ public struct MathLimit: MathComponent {
     }
 }
 
+// MARK: - UnknownMath (v0.10.0 opaque fallback)
+
+/// Preserves an `<m:...>` subtree that `OMMLParser` doesn't recognize so
+/// round-trip `write → read → write` never loses data.
+///
+/// Added in ooxml-swift 0.10.0. Callers iterating `[MathComponent]` arrays
+/// may encounter this struct — handle it by pattern-matching or `as?` cast.
+public struct UnknownMath: MathComponent {
+    public let rawXML: String
+
+    public init(rawXML: String) {
+        self.rawXML = rawXML
+    }
+
+    public func toOMML() -> String {
+        return rawXML
+    }
+}
+
 // MARK: - MathMatrix
 
 /// A matrix. `rows[r][c]` is the content of the cell at row r, column c.
