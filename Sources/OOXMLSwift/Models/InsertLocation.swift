@@ -28,6 +28,37 @@ public enum InsertLocationError: Error, Equatable {
 
 extension WordDocument {
 
+    /// Insert an image from a local file path at the given `InsertLocation`.
+    ///
+    /// Wraps the existing `insertImage(path:widthPx:heightPx:...)` but accepts
+    /// the full `InsertLocation` enum, unlocking table-cell insertion and
+    /// after-image/after-table anchors.
+    ///
+    /// - Returns: The relationship id assigned to the image (e.g. `"rId5"`).
+    /// - Throws: `ImageReference.from` errors; `InsertLocationError` on anchor
+    ///   resolution failure.
+    @discardableResult
+    public mutating func insertImage(
+        path: String,
+        widthPx: Int,
+        heightPx: Int,
+        at location: InsertLocation,
+        name: String = "Picture",
+        description: String = ""
+    ) throws -> String {
+        let imageId = nextImageRelationshipId
+        let imageRef = try ImageReference.from(path: path, id: imageId)
+        images.append(imageRef)
+
+        var drawing = Drawing.from(widthPx: widthPx, heightPx: heightPx, imageId: imageId, name: name)
+        drawing.description = description
+        let run = Run.withDrawing(drawing)
+        let para = Paragraph(runs: [run])
+
+        try insertParagraph(para, at: location)
+        return imageId
+    }
+
     /// Insert a paragraph at the given `InsertLocation`. See `InsertLocation`.
     public mutating func insertParagraph(_ paragraph: Paragraph, at location: InsertLocation) throws {
         switch location {

@@ -520,8 +520,8 @@ public protocol FieldCode {
 }
 
 extension FieldCode {
-    /// 產生欄位 XML
-    func toFieldXML() -> String {
+    /// 產生欄位 XML（5-run `<w:fldChar>` begin/separate/end structure）
+    public func toFieldXML() -> String {
         var xml = ""
         xml += "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>"
         xml += "<w:r><w:instrText xml:space=\"preserve\"> \(fieldInstruction) </w:instrText></w:r>"
