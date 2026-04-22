@@ -2,6 +2,41 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.11.0] - 2026-04-23
+
+### Added — `MathAccent` for accent decorators
+
+Adds the OMML accent element `<m:acc>` (ECMA-376 Part 1 §22.1.2.1) so callers
+emitting LaTeX-derived equations (`\hat{x}`, `\bar{x}`, `\tilde{x}`, `\dot{x}`,
+`\overline{x}`) produce structurally correct OMML editable in MS Word's
+native equation editor. Previously these accent macros had no first-class
+`MathComponent` representation.
+
+- **`MathAccent`** (`Sources/OOXMLSwift/Models/MathComponent.swift`) — new
+  public struct conforming to `MathComponent`. Stored properties: `base:
+  [MathComponent]` (math content under the accent) and `accentChar: String`
+  (Unicode combining diacritic — typically `"\u{0302}"` circumflex,
+  `"\u{0304}"` macron, `"\u{0303}"` tilde, `"\u{0307}"` dot above).
+  `toOMML()` emits `<m:acc><m:accPr><m:chr m:val="<c>"/></m:accPr><m:e><base
+  OMML></m:e></m:acc>` with XML escaping applied to `accentChar`.
+
+- **`OMMLParser` accent dispatch** — adds `case "acc"` to the recognized-tag
+  switch with a `parseMathAccent(_:)` helper. Previously `<m:acc>` subtrees
+  were preserved as `UnknownMath`; now they round-trip as typed
+  `MathAccent` values.
+
+### Tests
+
+4 new XCTest cases in `MathComponentTests` cover hat over single run, bar
+over Greek letter, accent over composite SubSuperScript base, and accent
+character requiring XML escape.
+
+### Compatibility
+
+Additive and non-breaking. Existing `<m:acc>` round-trips that returned
+`UnknownMath` will now return `MathAccent` — callers pattern-matching with
+`as? UnknownMath` should add a `MathAccent` arm.
+
 ## [0.10.0] - 2026-04-22
 
 ### Added — read-side parsers for fields and OMML

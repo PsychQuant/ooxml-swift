@@ -225,4 +225,45 @@ final class MathComponentTests: XCTestCase {
         XCTAssertTrue(xml.contains("<m:nary>"))
         XCTAssertTrue(xml.contains("<m:sSub>"))
     }
+
+    // MARK: - MathAccent (added v0.11.0)
+
+    func testMathAccentHatOverSingleRun() {
+        let acc = MathAccent(base: [MathRun(text: "x")], accentChar: "\u{0302}")
+        XCTAssertEqual(
+            acc.toOMML(),
+            "<m:acc><m:accPr><m:chr m:val=\"\u{0302}\"/></m:accPr><m:e><m:r><m:t>x</m:t></m:r></m:e></m:acc>"
+        )
+    }
+
+    func testMathAccentBarOverGreekLetter() {
+        let acc = MathAccent(base: [MathRun(text: "ρ")], accentChar: "\u{0304}")
+        let xml = acc.toOMML()
+        XCTAssertTrue(xml.contains("<m:chr m:val=\"\u{0304}\"/>"))
+        XCTAssertTrue(xml.contains("<m:e><m:r><m:t>ρ</m:t></m:r></m:e>"))
+        XCTAssertLessThan(
+            xml.range(of: "<m:chr")!.lowerBound,
+            xml.range(of: "<m:e>")!.lowerBound,
+            "<m:chr> must precede <m:e>"
+        )
+    }
+
+    func testMathAccentOverCompositeBase() {
+        let inner = MathSubSuperScript(
+            base: [MathRun(text: "ε")],
+            sub: [MathRun(text: "t")],
+            sup: nil
+        )
+        let acc = MathAccent(base: [inner], accentChar: "\u{0302}")
+        XCTAssertTrue(
+            acc.toOMML().contains(
+                "<m:e><m:sSub><m:e><m:r><m:t>ε</m:t></m:r></m:e><m:sub><m:r><m:t>t</m:t></m:r></m:sub></m:sSub></m:e>"
+            )
+        )
+    }
+
+    func testMathAccentXMLEscapesAccentChar() {
+        let acc = MathAccent(base: [MathRun(text: "y")], accentChar: "&")
+        XCTAssertTrue(acc.toOMML().contains("<m:chr m:val=\"&amp;\"/>"))
+    }
 }
