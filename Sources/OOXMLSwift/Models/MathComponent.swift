@@ -122,6 +122,30 @@ public struct MathSubSuperScript: MathComponent {
     }
 }
 
+// MARK: - MathAccent
+
+/// Accent decorator over a math base: `\hat{x}`, `\bar{x}`, `\tilde{x}`, etc.
+/// Emits `<m:acc>` per ECMA-376 §22.1.2.1.
+///
+/// `accentChar` MUST be a Unicode combining diacritic (e.g. `"\u{0302}"` for
+/// hat / circumflex, `"\u{0304}"` for macron / bar, `"\u{0303}"` for tilde,
+/// `"\u{0307}"` for dot above). Spacing variants like `"^"` will render but
+/// won't compose visually with the base — pick the combining form.
+public struct MathAccent: MathComponent {
+    public var base: [MathComponent]
+    public var accentChar: String
+
+    public init(base: [MathComponent], accentChar: String) {
+        self.base = base
+        self.accentChar = accentChar
+    }
+
+    public func toOMML() -> String {
+        let chrEscaped = escapeMathXML(accentChar)
+        return "<m:acc><m:accPr><m:chr m:val=\"\(chrEscaped)\"/></m:accPr><m:e>\(combine(base))</m:e></m:acc>"
+    }
+}
+
 // MARK: - MathRadical
 
 /// Square root or n-th root. `degree == nil` produces `<m:degHide>` for

@@ -132,6 +132,8 @@ public enum OMMLParser {
             return parseMathRadical(block)
         case "nary":
             return parseMathNary(block)
+        case "acc":
+            return parseMathAccent(block)
         default:
             return UnknownMath(rawXML: block)
         }
@@ -185,6 +187,21 @@ public enum OMMLParser {
         return MathRadical(
             radicand: parseChildren(radicandXML),
             degree: hasDegree ? parseChildren(degreeXML) : nil
+        )
+    }
+
+    private static func parseMathAccent(_ block: String) -> MathAccent {
+        var accentChar = ""
+        if let chrRange = block.range(of: #"<m:chr m:val=""#) {
+            let afterVal = block[chrRange.upperBound...]
+            if let quoteEnd = afterVal.firstIndex(of: "\"") {
+                accentChar = decodeXMLEntities(String(afterVal[..<quoteEnd]))
+            }
+        }
+        let baseXML = extractInner(block, childTag: "m:e") ?? ""
+        return MathAccent(
+            base: parseChildren(baseXML),
+            accentChar: accentChar
         )
     }
 
