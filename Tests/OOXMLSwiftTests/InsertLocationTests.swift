@@ -122,4 +122,98 @@ final class InsertLocationTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - afterText / beforeText (0.9.0)
+
+    func testAfterTextInsertsAfterMatchingParagraph() throws {
+        var doc = WordDocument()
+        doc.body.children = [
+            .paragraph(Paragraph(text: "intro")),
+            .paragraph(Paragraph(text: "圖 4-1：前後期報酬率分布")),
+            .paragraph(Paragraph(text: "body text")),
+        ]
+        try doc.insertParagraph(
+            Paragraph(text: "caption here"),
+            at: .afterText("圖 4-1", instance: 1)
+        )
+        XCTAssertEqual(doc.body.children.count, 4)
+        if case .paragraph(let p) = doc.body.children[2] {
+            XCTAssertEqual(p.runs.first?.text, "caption here")
+        } else {
+            XCTFail("Expected caption at index 2")
+        }
+    }
+
+    func testBeforeTextInsertsBeforeMatchingParagraph() throws {
+        var doc = WordDocument()
+        doc.body.children = [
+            .paragraph(Paragraph(text: "intro")),
+            .paragraph(Paragraph(text: "section start")),
+            .paragraph(Paragraph(text: "body text")),
+        ]
+        try doc.insertParagraph(
+            Paragraph(text: "heading"),
+            at: .beforeText("section start", instance: 1)
+        )
+        XCTAssertEqual(doc.body.children.count, 4)
+        if case .paragraph(let p) = doc.body.children[1] {
+            XCTAssertEqual(p.runs.first?.text, "heading")
+        } else {
+            XCTFail("Expected heading at index 1")
+        }
+    }
+
+    func testTextNotFoundThrows() {
+        var doc = WordDocument()
+        doc.body.children = [.paragraph(Paragraph(text: "only this"))]
+        XCTAssertThrowsError(try doc.insertParagraph(
+            Paragraph(text: "x"),
+            at: .afterText("missing", instance: 1)
+        )) { error in
+            guard case InsertLocationError.textNotFound(let s, let i) = error else {
+                XCTFail("Expected textNotFound, got \(error)"); return
+            }
+            XCTAssertEqual(s, "missing")
+            XCTAssertEqual(i, 1)
+        }
+    }
+
+    func testAfterTextInstance2FindsSecondOccurrence() throws {
+        var doc = WordDocument()
+        doc.body.children = [
+            .paragraph(Paragraph(text: "圖 4-1 first")),
+            .paragraph(Paragraph(text: "middle")),
+            .paragraph(Paragraph(text: "圖 4-1 second")),
+            .paragraph(Paragraph(text: "tail")),
+        ]
+        try doc.insertParagraph(
+            Paragraph(text: "after 2nd"),
+            at: .afterText("圖 4-1", instance: 2)
+        )
+        // Expected order: [圖 4-1 first, middle, 圖 4-1 second, after 2nd, tail]
+        XCTAssertEqual(doc.body.children.count, 5)
+        if case .paragraph(let p) = doc.body.children[3] {
+            XCTAssertEqual(p.runs.first?.text, "after 2nd")
+        } else {
+            XCTFail("Expected 'after 2nd' at index 3")
+        }
+    }
+
+    func testAfterTextCrossRunMatch() throws {
+        // Simulates the thesis scenario where text is split across runs
+        var doc = WordDocument()
+        var para = Paragraph()
+        para.runs = [
+            Run(text: "圖 4-1："),
+            Run(text: ""),  // phantom empty run
+            Run(text: "前後期報酬率分布")
+        ]
+        doc.body.children = [.paragraph(para)]
+
+        try doc.insertParagraph(
+            Paragraph(text: "caption"),
+            at: .afterText("圖 4-1：前後期", instance: 1)
+        )
+        XCTAssertEqual(doc.body.children.count, 2)
+    }
 }

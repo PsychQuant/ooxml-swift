@@ -2,6 +2,18 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.9.0] - 2026-04-22
+
+### Added
+
+- **`InsertLocation.afterText(String, instance: Int)` + `.beforeText(...)` cases** — insert paragraph/image relative to a body paragraph containing the given substring. Match is on flattened run text (cross-run safe). `instance` is 1-based to disambiguate when same phrase appears multiple times. Closes use case in [che-word-mcp#14](https://github.com/PsychQuant/che-word-mcp/issues/14) where every insert previously needed `search_text` + `insert_*` as 2 MCP calls.
+- **`InsertLocationError.textNotFound(searchText:instance:)`** — new error case for text-anchor resolution failure.
+- **`WordDocument.findBodyChildContainingText(_:nthInstance:)`** (private) — helper iterating body paragraphs and matching flattened text.
+
+### Behavior note
+
+Enum case addition technically changes the public surface. Callers that `switch` on `InsertLocation` exhaustively may emit a warning about missing cases. In practice all in-monorepo consumers use partial switches / pass-through, so no breaking impact observed during batch rebuild.
+
 ## [0.8.0] - 2026-04-22
 
 ### Breaking

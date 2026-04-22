@@ -2,18 +2,26 @@ import Foundation
 
 /// Where to insert a new paragraph or image inside a `WordDocument`.
 ///
-/// Covers the four anchor kinds used by che-word-mcp tools:
+/// Covers the six anchor kinds used by che-word-mcp tools:
 /// - `paragraphIndex` — explicit body-level paragraph index.
 /// - `afterImageId` — paragraph following the one that contains the image with
 ///   the given relationship id (returned by `insertImage`).
 /// - `afterTableIndex` — paragraph inserted right after the Nth table in the
 ///   document body.
 /// - `intoTableCell` — paragraph inserted inside the specified table cell.
+/// - `afterText(searchText, instance)` — paragraph inserted after the body
+///   paragraph whose flattened text contains `searchText`. `instance` is 1-based
+///   (1 = first match, 2 = second match, ...) — lets callers disambiguate when
+///   the same phrase appears multiple times.
+/// - `beforeText(searchText, instance)` — same resolution as `afterText` but
+///   the new paragraph is inserted *before* the matching paragraph.
 public enum InsertLocation: Equatable {
     case paragraphIndex(Int)
     case afterImageId(String)
     case afterTableIndex(Int)
     case intoTableCell(tableIndex: Int, row: Int, col: Int)
+    case afterText(String, instance: Int)
+    case beforeText(String, instance: Int)
 }
 
 /// Error thrown when an `InsertLocation` cannot be resolved in the target document.
@@ -22,6 +30,7 @@ public enum InsertLocationError: Error, Equatable {
     case imageIdNotFound(String)
     case tableIndexOutOfRange(Int)
     case tableCellOutOfRange(tableIndex: Int, row: Int, col: Int)
+    case textNotFound(searchText: String, instance: Int)
 }
 
 // MARK: - Document resolution
@@ -90,6 +99,18 @@ extension WordDocument {
             }
             table.rows[row].cells[col].paragraphs.append(paragraph)
             body.children[bodyIdx] = .table(table)
+
+        case .afterText(let searchText, let instance):
+            guard let bodyIdx = findBodyChildContainingText(searchText, nthInstance: instance) else {
+                throw InsertLocationError.textNotFound(searchText: searchText, instance: instance)
+            }
+            body.children.insert(.paragraph(paragraph), at: bodyIdx + 1)
+
+        case .beforeText(let searchText, let instance):
+            guard let bodyIdx = findBodyChildContainingText(searchText, nthInstance: instance) else {
+                throw InsertLocationError.textNotFound(searchText: searchText, instance: instance)
+            }
+            body.children.insert(.paragraph(paragraph), at: bodyIdx)
         }
     }
 
@@ -117,6 +138,25 @@ extension WordDocument {
             if case .table = child {
                 if seen == tableIndex { return i }
                 seen += 1
+            }
+        }
+        return nil
+    }
+
+    /// Return the index in `body.children` of the `nthInstance`-th paragraph
+    /// whose flattened text (concatenation of run texts) contains `needle`.
+    /// `nthInstance` is 1-based (1 = first match). Returns `nil` if fewer than
+    /// `nthInstance` paragraphs contain the text.
+    private func findBodyChildContainingText(_ needle: String, nthInstance: Int) -> Int? {
+        guard nthInstance >= 1 else { return nil }
+        var seen = 0
+        for (i, child) in body.children.enumerated() {
+            if case .paragraph(let para) = child {
+                let flat = para.runs.map { $0.text }.joined()
+                if flat.contains(needle) {
+                    seen += 1
+                    if seen == nthInstance { return i }
+                }
             }
         }
         return nil
