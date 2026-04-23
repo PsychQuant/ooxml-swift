@@ -2,6 +2,45 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.13.3] - 2026-04-24
+
+### Changed — Serial-only OOXML IO + allocator-based image rId assignment (Refs PsychQuant/che-word-mcp#41)
+
+Two coordinated hardening changes for the `che-word-mcp-insert-crash-autosave-fix` SDD:
+
+#### 1. `DocxReader.read` is now fully serial
+
+Pre-v0.13.3 `DocxReader.swift:438-499` used `DispatchQueue.concurrentPerform` for parallel chunk parsing on bodies with `count >= 256`. Worker threads called `parseParagraph`/`parseTable` against shared libxml2-backed `XMLElement` nodes — libxml2 documents are NOT thread-safe at the document level. The comment "shared data 為唯讀" misjudged lazy-property-access risk on `XMLElement` child collections / attribute dicts.
+
+More importantly, `recover_from_autosave` (che-word-mcp v3.6.0) requires re-parsing the same source bytes to produce identical in-memory state. Parallel chunk parsing introduces non-determinism, undermining the entire save-durability stack.
+
+v0.13.3 removes the parallel block. Parsing is now a single serial loop. New regression test `SerialOnlyOOXMLTests.testNoParallelPrimitivesInOOXMLIO` greps `Sources/OOXMLSwift/IO/` for forbidden symbols (`concurrentPerform`, `withTaskGroup`, `DispatchQueue.global`, `DispatchQueue.async`, `Task.detached`) and asserts zero matches — prevents future regressions.
+
+**Trade-off**: `open_document` on large theses (1000+ paragraphs) sees a 200-800ms regression vs v0.13.2. Acceptable for determinism guarantee. New `DocxReaderDeterminismTests` confirms `body.children.count` and paragraph text are identical across 5 repeated reads.
+
+#### 2. `nextImageRelationshipId` delegates to allocator
+
+`Document.swift:1023` `nextImageRelationshipId` was a naïve counter `4 + headers.count + footers.count + images.count`. Defensive hardening: now delegates to `nextRelationshipId` which already consults original rels via `RelationshipIdAllocator` in overlay mode (introduced v0.12.0).
+
+The naïve counter happened to track the typed model in lockstep for most cases (because all 3 collections grow with assignments), but is fragile against any mismatched assignment — e.g., reader-loaded doc with hyperlinks/comments rels not counted by the formula. New tests in `RelationshipIdAllocatorMutationTests` cover reader-loaded doc + sequential insert + initializer-built doc baseline.
+
+### Tests
+
+- 397 baseline + 6 new = **403/403 tests pass**:
+  - `RelationshipIdAllocatorMutationTests` (4 scenarios): reader-loaded non-collision, header+image collision regression, sequential inserts, initializer-built rId4 baseline
+  - `SerialOnlyOOXMLTests` (1 scenario): grep-based regression test for parallel primitives
+  - `DocxReaderDeterminismTests` (1 scenario): 300-paragraph fixture × 5 reads = identical output
+
+### Compatibility
+
+- **No public API change** — both changes are internal refactors. `DocxReader.read` signature unchanged; `nextImageRelationshipId` is internal.
+- **Behavior change**: `open_document` perf regression on large bodies (200-800ms one-time cost per session). `nextImageRelationshipId` may now return higher rIds in edge cases (still collision-free, just not the lowest available).
+
+### Refs
+
+- PsychQuant/che-word-mcp#41 — sequential 3rd insert crash investigation
+- Phase B of `che-word-mcp-insert-crash-autosave-fix` Spectra change
+
 ## [0.13.2] - 2026-04-23
 
 ### Fixed — Atomic-rename save (closes che-word-mcp#36)

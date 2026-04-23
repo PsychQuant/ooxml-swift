@@ -1021,11 +1021,13 @@ public struct WordDocument: Equatable {
     /// 取得下一個可用的圖片關係 ID
     /// internal (not private) so InsertLocation extension can reuse it.
     var nextImageRelationshipId: String {
-        // 基本 ID 從 rId4 開始（rId1-3 用於基本關係）
-        // 加上 numbering 的話從 rId5 開始
-        let baseId = numbering.abstractNums.isEmpty ? 4 : 5
-        let usedCount = headers.count + footers.count + images.count
-        return "rId\(baseId + usedCount)"
+        // v0.13.3+ (che-word-mcp#41 defensive hardening): delegate to the
+        // allocator-based `nextRelationshipId` which consults original rels in
+        // overlay mode. The naïve formula `baseId + headers + footers + images`
+        // happened to track the typed model in lockstep for most cases but is
+        // fragile against any mismatched assignment (e.g., reader-loaded doc
+        // with hyperlinks/comments rels not counted by the formula).
+        return nextRelationshipId
     }
 
     /// 從 Base64 插入圖片
