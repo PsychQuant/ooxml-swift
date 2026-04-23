@@ -2,6 +2,28 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.12.2] - 2026-04-23
+
+### Fixed — `WordDocument.nextRelationshipId` is now overlay-aware
+
+`WordDocument.addHeader()`, `addFooter()`, and other typed-model add operations
+allocate the new relationship's `rId` via `nextRelationshipId`. Previously this
+used a naive counter (`headers.count + footers.count`) that would collide with
+preserved original `_rels/document.xml.rels` entries in overlay mode (e.g.,
+calling `addHeader` on a document with preserved `rId99` would naively return
+`rId4`, but the writer's `RelationshipIdAllocator` would then upgrade it to
+`rId100` — creating a typed/written rId mismatch).
+
+`nextRelationshipId` now reads `archiveTempDir`'s original rels XML (when set)
+and uses `RelationshipIdAllocator` to compute a collision-free rId. In scratch
+mode (no archiveTempDir), behavior is unchanged.
+
+### Compatibility
+
+Behavior change only affects callers using overlay mode (Reader-loaded documents)
+with Add CRUD tools. Scratch mode (`create_document` MCP path) returns the
+same `rId4`, `rId5`, ... sequence as before.
+
 ## [0.12.1] - 2026-04-23
 
 ### Changed — Promote `WordDocument.archiveTempDir` to public read-only

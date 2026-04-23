@@ -816,13 +816,27 @@ public struct WordDocument: Equatable {
 
     // MARK: - Header/Footer Operations
 
-    /// 取得下一個可用的關係 ID
+    /// 取得下一個可用的關係 ID。v0.12.0+: 在 overlay mode（preservedArchive 非
+    /// nil）會掃描原始 `_rels/document.xml.rels` 避免與 preserved unknown rels 衝突。
     private var nextRelationshipId: String {
-        // 基本 ID 從 rId4 開始（rId1-3 用於基本關係）
-        // 加上 numbering 的話從 rId5 開始
-        let baseId = numbering.abstractNums.isEmpty ? 4 : 5
-        let usedCount = headers.count + footers.count
-        return "rId\(baseId + usedCount)"
+        // Read original rels XML when in overlay mode, otherwise allocate from
+        // typed model only (preserves prior behavior for create_document paths).
+        var originalRelsXML = ""
+        if let tempDir = preservedArchive?.tempDir {
+            let url = tempDir.appendingPathComponent("word/_rels/document.xml.rels")
+            originalRelsXML = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        }
+        var reservedIds: [String] = ["rId1", "rId2", "rId3"]
+        if !numbering.abstractNums.isEmpty { reservedIds.append("rId4") }
+        for header in headers { reservedIds.append(header.id) }
+        for footer in footers { reservedIds.append(footer.id) }
+        for image in images { reservedIds.append(image.id) }
+        for hyperlinkRef in hyperlinkReferences { reservedIds.append(hyperlinkRef.relationshipId) }
+        let allocator = RelationshipIdAllocator(
+            originalRelsXML: originalRelsXML,
+            additionalReservedIds: reservedIds
+        )
+        return allocator.allocate()
     }
 
     /// 新增頁首
