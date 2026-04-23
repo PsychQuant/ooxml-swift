@@ -113,4 +113,71 @@ final class WordDocumentUpdateAllFieldsHeaderPreservationTests: XCTestCase {
             "updateAllFields SHALL NOT add any new entries to modifiedParts in a true no-op (no SEQ anywhere); added: \(added)"
         )
     }
+
+    // MARK: - Scenario 5 (verify-driven): end-to-end byte-equality round-trip
+    //
+    // Per #42 Acceptance: open → update_all_fields → save → re-read; assert
+    // header XML byte-equal to source. The dirty-bit unit tests above prove
+    // modifiedPartsView correctness (the proxy); this test proves the proxy
+    // actually implies byte-equality through the DocxWriter overlay path.
+
+    func testHeaderByteEqualityAfterUpdateAllFieldsRoundTrip() throws {
+        // Build a fixture doc with a header carrying ONLY plain paragraphs (no SEQ).
+        // The body has SEQ to ensure updateAllFields runs non-trivially.
+        var src = WordDocument()
+        src.appendParagraph(captionParagraph(identifier: "Figure"))
+        src.appendParagraph(captionParagraph(identifier: "Figure"))
+        let hdr = Header(id: "rId10", paragraphs: [plainParagraph("UNIQUE_HEADER_TEXT_marker_42")])
+        src.headers.append(hdr)
+        let ftr = Footer(id: "rId20", paragraphs: [plainParagraph("UNIQUE_FOOTER_TEXT_marker_42")])
+        src.footers.append(ftr)
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UpdateAllFieldsRoundTrip-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let srcURL = tempDir.appendingPathComponent("source.docx")
+        try DocxWriter.write(src, to: srcURL)
+
+        // Capture original header/footer bytes (via reader-loaded archiveTempDir).
+        var preDoc = try DocxReader.read(from: srcURL)
+        guard let preTempDir = preDoc.archiveTempDir else {
+            return XCTFail("Reader-loaded doc SHALL carry archiveTempDir")
+        }
+        let preHeaderBytes = try Data(contentsOf: preTempDir.appendingPathComponent("word/header1.xml"))
+        let preFooterBytes = try Data(contentsOf: preTempDir.appendingPathComponent("word/footer1.xml"))
+        XCTAssertGreaterThan(preHeaderBytes.count, 0, "Pre-condition: header1.xml must exist with non-zero bytes")
+
+        // Run the workflow that previously stripped headers: updateAllFields → save → re-read.
+        _ = preDoc.updateAllFields()
+        let outURL = tempDir.appendingPathComponent("output.docx")
+        try DocxWriter.write(preDoc, to: outURL)
+        preDoc.close()
+
+        var postDoc = try DocxReader.read(from: outURL)
+        defer { postDoc.close() }
+        guard let postTempDir = postDoc.archiveTempDir else {
+            return XCTFail("Post-save doc SHALL carry archiveTempDir")
+        }
+        let postHeaderBytes = try Data(contentsOf: postTempDir.appendingPathComponent("word/header1.xml"))
+        let postFooterBytes = try Data(contentsOf: postTempDir.appendingPathComponent("word/footer1.xml"))
+
+        // Critical acceptance assertion (issue #42):
+        //   inputHeader.bytes == outputHeader.bytes after open → updateAllFields → save
+        XCTAssertEqual(
+            postHeaderBytes, preHeaderBytes,
+            "header1.xml SHALL be byte-equal after updateAllFields round-trip when header has no SEQ (closes #42 acceptance)"
+        )
+        XCTAssertEqual(
+            postFooterBytes, preFooterBytes,
+            "footer1.xml SHALL be byte-equal after updateAllFields round-trip when footer has no SEQ"
+        )
+        // Sanity: the unique marker text survives (not stripped).
+        let postHeaderString = String(decoding: postHeaderBytes, as: UTF8.self)
+        XCTAssertTrue(
+            postHeaderString.contains("UNIQUE_HEADER_TEXT_marker_42"),
+            "Header content SHALL be preserved (not stripped to <w:p/> stub)"
+        )
+    }
 }
