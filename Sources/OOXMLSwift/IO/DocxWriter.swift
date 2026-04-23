@@ -428,13 +428,27 @@ public struct DocxWriter {
         try xml.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    private static func writeDocumentRelationships(to baseURL: URL, document: WordDocument) throws {
-        let hasNumbering = !document.numbering.abstractNums.isEmpty
+    /// Type URLs the typed model owns. An original rel of one of these types
+    /// will be re-emitted from the typed model's authoritative state; an
+    /// original rel of any OTHER type is preserved verbatim by overlay merge
+    /// (theme / webSettings / customXml / commentsExtensible / commentsIds /
+    /// people / etc.). Added in v0.13.1 (closes che-word-mcp#35).
+    private static let typedManagedRelationshipTypes: Set<String> = [
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        Header.relationshipType,
+        Footer.relationshipType,
+        Hyperlink.relationshipType,
+        CommentsCollection.relationshipType,
+        CommentsCollection.extendedRelationshipType,
+        FootnotesCollection.relationshipType,
+        EndnotesCollection.relationshipType,
+    ]
 
-        // Build allocator. In overlay mode, seed from preserved original rels
-        // so newly-allocated rIds don't collide with parts the typed model
-        // doesn't manage. In scratch mode, allocator starts from rId4 (or rId5
-        // with numbering) since rId1-3 (or rId1-4) are hardcoded below.
+    private static func writeDocumentRelationships(to baseURL: URL, document: WordDocument) throws {
         let originalRelsXML: String
         if let archiveTempDir = document.archiveTempDir {
             let url = archiveTempDir.appendingPathComponent("word/_rels/document.xml.rels")
@@ -442,9 +456,11 @@ public struct DocxWriter {
         } else {
             originalRelsXML = ""
         }
-        // Reserve typed-model rIds so allocator doesn't reuse them.
+
+        // Build allocator for newly-needed rIds (comments/footnotes/endnotes
+        // when typed model has them but original rels doesn't).
         var typedReservedIds: [String] = ["rId1", "rId2", "rId3"]
-        if hasNumbering { typedReservedIds.append("rId4") }
+        if !document.numbering.abstractNums.isEmpty { typedReservedIds.append("rId4") }
         for header in document.headers { typedReservedIds.append(header.id) }
         for footer in document.footers { typedReservedIds.append(footer.id) }
         for image in document.images { typedReservedIds.append(image.id) }
@@ -454,84 +470,124 @@ public struct DocxWriter {
             additionalReservedIds: typedReservedIds
         )
 
-        var xml = """
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-            <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>
-            <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>
-        """
+        let typedRels = buildTypedRelationships(document: document, allocator: allocator)
 
-        if hasNumbering {
-            xml += """
-                <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
-            """
+        let xml: String
+        if document.archiveTempDir != nil && !originalRelsXML.isEmpty {
+            // Overlay mode: merge typed rels into original to preserve unknown
+            // types (theme / webSettings / people / customXml / etc.).
+            let overlay = RelationshipsOverlay(originalRelsXML: originalRelsXML)
+            xml = overlay.merge(
+                typedRels: typedRels,
+                typedManagedTypes: Self.typedManagedRelationshipTypes
+            )
+        } else {
+            // Scratch mode (no source archive): emit fresh rels from typed model only.
+            xml = serializeScratchRels(typedRels)
         }
-
-        // 頁首關係
-        for header in document.headers {
-            xml += """
-                <Relationship Id="\(header.id)" Type="\(Header.relationshipType)" Target="\(header.fileName)"/>
-            """
-        }
-
-        // 頁尾關係
-        for footer in document.footers {
-            xml += """
-                <Relationship Id="\(footer.id)" Type="\(Footer.relationshipType)" Target="\(footer.fileName)"/>
-            """
-        }
-
-        // 圖片關係
-        for image in document.images {
-            xml += """
-                <Relationship Id="\(image.id)" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/\(image.fileName)"/>
-            """
-        }
-
-        // 超連結關係（外部連結）
-        for hyperlinkRef in document.hyperlinkReferences {
-            xml += """
-                <Relationship Id="\(hyperlinkRef.relationshipId)" Type="\(Hyperlink.relationshipType)" Target="\(escapeXML(hyperlinkRef.url))" TargetMode="External"/>
-            """
-        }
-
-        // 註解關係 — allocator picks a collision-free rId
-        if !document.comments.comments.isEmpty {
-            let commentsRId = allocator.allocate()
-            xml += """
-                <Relationship Id="\(commentsRId)" Type="\(CommentsCollection.relationshipType)" Target="comments.xml"/>
-            """
-        }
-
-        // commentsExtended 關係
-        if document.comments.hasExtendedComments {
-            let commentsExtRId = allocator.allocate()
-            xml += """
-                <Relationship Id="\(commentsExtRId)" Type="\(CommentsCollection.extendedRelationshipType)" Target="commentsExtended.xml"/>
-            """
-        }
-
-        // 腳註關係
-        if !document.footnotes.footnotes.isEmpty {
-            let footnotesRId = allocator.allocate()
-            xml += """
-                <Relationship Id="\(footnotesRId)" Type="\(FootnotesCollection.relationshipType)" Target="footnotes.xml"/>
-            """
-        }
-
-        // 尾註關係
-        if !document.endnotes.endnotes.isEmpty {
-            let endnotesRId = allocator.allocate()
-            xml += """
-                <Relationship Id="\(endnotesRId)" Type="\(EndnotesCollection.relationshipType)" Target="endnotes.xml"/>
-            """
-        }
-
-        xml += "</Relationships>"
 
         let url = baseURL.appendingPathComponent("word/_rels/document.xml.rels")
         try xml.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Collect all rels the typed model wants to emit. Used by both overlay
+    /// merge (where these go through `RelationshipsOverlay`) and scratch mode.
+    private static func buildTypedRelationships(
+        document: WordDocument,
+        allocator: RelationshipIdAllocator
+    ) -> [RelationshipDescriptor] {
+        var rels: [RelationshipDescriptor] = [
+            RelationshipDescriptor(
+                id: "rId1",
+                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",
+                target: "styles.xml", targetMode: nil
+            ),
+            RelationshipDescriptor(
+                id: "rId2",
+                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings",
+                target: "settings.xml", targetMode: nil
+            ),
+            RelationshipDescriptor(
+                id: "rId3",
+                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable",
+                target: "fontTable.xml", targetMode: nil
+            ),
+        ]
+        if !document.numbering.abstractNums.isEmpty {
+            rels.append(RelationshipDescriptor(
+                id: "rId4",
+                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
+                target: "numbering.xml", targetMode: nil
+            ))
+        }
+        for header in document.headers {
+            rels.append(RelationshipDescriptor(
+                id: header.id, type: Header.relationshipType,
+                target: header.fileName, targetMode: nil
+            ))
+        }
+        for footer in document.footers {
+            rels.append(RelationshipDescriptor(
+                id: footer.id, type: Footer.relationshipType,
+                target: footer.fileName, targetMode: nil
+            ))
+        }
+        for image in document.images {
+            rels.append(RelationshipDescriptor(
+                id: image.id,
+                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+                target: "media/\(image.fileName)", targetMode: nil
+            ))
+        }
+        for hyperlinkRef in document.hyperlinkReferences {
+            rels.append(RelationshipDescriptor(
+                id: hyperlinkRef.relationshipId, type: Hyperlink.relationshipType,
+                target: hyperlinkRef.url, targetMode: "External"
+            ))
+        }
+        if !document.comments.comments.isEmpty {
+            rels.append(RelationshipDescriptor(
+                id: allocator.allocate(), type: CommentsCollection.relationshipType,
+                target: "comments.xml", targetMode: nil
+            ))
+        }
+        if document.comments.hasExtendedComments {
+            rels.append(RelationshipDescriptor(
+                id: allocator.allocate(), type: CommentsCollection.extendedRelationshipType,
+                target: "commentsExtended.xml", targetMode: nil
+            ))
+        }
+        if !document.footnotes.footnotes.isEmpty {
+            rels.append(RelationshipDescriptor(
+                id: allocator.allocate(), type: FootnotesCollection.relationshipType,
+                target: "footnotes.xml", targetMode: nil
+            ))
+        }
+        if !document.endnotes.endnotes.isEmpty {
+            rels.append(RelationshipDescriptor(
+                id: allocator.allocate(), type: EndnotesCollection.relationshipType,
+                target: "endnotes.xml", targetMode: nil
+            ))
+        }
+        return rels
+    }
+
+    /// Scratch-mode rels serializer (no source archive). Preserves the exact
+    /// pre-v0.13.1 output for `create_document` callers.
+    private static func serializeScratchRels(_ rels: [RelationshipDescriptor]) -> String {
+        var xml = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        """
+        for rel in rels {
+            xml += "\n    <Relationship Id=\"\(rel.id)\" Type=\"\(rel.type)\" Target=\"\(escapeXML(rel.target))\""
+            if let mode = rel.targetMode {
+                xml += " TargetMode=\"\(mode)\""
+            }
+            xml += "/>"
+        }
+        xml += "\n</Relationships>"
+        return xml
     }
 
     // MARK: - Document

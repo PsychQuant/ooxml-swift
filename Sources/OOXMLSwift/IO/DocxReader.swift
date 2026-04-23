@@ -326,54 +326,50 @@ public struct DocxReader {
     // MARK: - Image Extraction
 
     /// 從 word/media/ 提取圖片
+    /// v0.13.1 (closes che-word-mcp#35 root cause A): rewritten to be
+    /// **relationship-driven** instead of directory-driven. Pre-v0.13.1 the
+    /// loop iterated `word/media/` and fell back to `"rId_\(fileName)"` when
+    /// `targetToId` lookup missed — producing forged ids like `rId_image1.png`
+    /// that violate the OOXML `rId[0-9]+` convention AND made
+    /// `hasNewTypedRelationships` return true on no-op round-trip.
+    ///
+    /// Now: iterate `relationships.imageRelationships` (the authoritative
+    /// source). For each rel, try multiple path normalizations to locate the
+    /// file. If the file isn't found, skip the rel rather than forge an id.
+    /// Orphan files in `word/media/` not referenced by any rel are dropped
+    /// (they're unreferenced anyway).
     private static func extractImages(from tempDir: URL, relationships: RelationshipsCollection) throws -> [ImageReference] {
         var images: [ImageReference] = []
 
-        let mediaDir = tempDir.appendingPathComponent("word/media")
-        guard FileManager.default.fileExists(atPath: mediaDir.path) else {
-            // 沒有 media 目錄也是合法的
+        let wordDir = tempDir.appendingPathComponent("word")
+        guard FileManager.default.fileExists(atPath: wordDir.path) else {
             return images
         }
 
-        // 建立 target → rId 的映射
-        var targetToId: [String: String] = [:]
         for rel in relationships.imageRelationships {
-            // target 可能是 "media/image1.png" 或 "../media/image1.png"
-            let normalizedTarget = rel.target.replacingOccurrences(of: "../", with: "")
-            targetToId[normalizedTarget] = rel.id
-        }
-
-        // 讀取 media 目錄中的所有檔案
-        let contents = try FileManager.default.contentsOfDirectory(atPath: mediaDir.path)
-
-        for fileName in contents {
-            let fileURL = mediaDir.appendingPathComponent(fileName)
-
-            // 檢查是否為檔案（不是目錄）
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
-                  !isDirectory.boolValue else {
+            // Try multiple normalizations: media/X, ../media/X (rels file is
+            // at word/_rels/, so ../media/X → word/media/X), word/media/X.
+            // Also try the rel.target verbatim relative to word/.
+            let candidates: [URL] = [
+                wordDir.appendingPathComponent(rel.target),
+                wordDir.appendingPathComponent(rel.target.replacingOccurrences(of: "../", with: "")),
+                tempDir.appendingPathComponent(rel.target),
+                tempDir.appendingPathComponent(rel.target.replacingOccurrences(of: "../", with: "")),
+            ]
+            guard let fileURL = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+                // Skip orphan rel — can't materialize without the actual file.
                 continue
             }
-
-            // 讀取檔案資料
             let data = try Data(contentsOf: fileURL)
-
-            // 找對應的 relationship ID
-            let targetPath = "media/\(fileName)"
-            let relationshipId = targetToId[targetPath] ?? "rId_\(fileName)"
-
-            // 取得 MIME 類型
+            let fileName = fileURL.lastPathComponent
             let ext = (fileName as NSString).pathExtension.lowercased()
-            let contentType = mimeType(for: ext)
 
-            let imageRef = ImageReference(
-                id: relationshipId,
+            images.append(ImageReference(
+                id: rel.id,
                 fileName: fileName,
-                contentType: contentType,
+                contentType: mimeType(for: ext),
                 data: data
-            )
-            images.append(imageRef)
+            ))
         }
 
         return images
