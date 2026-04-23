@@ -75,6 +75,8 @@ public struct DocxReader {
         document.images = images
 
         // 7b. 讀取 headers (Part C of ooxml-swift#1)
+        // v0.13.0+: preserve `originalFileName` from rel.target so multi-instance
+        // same-type headers (header1.xml..header6.xml) don't collapse to a single fileName.
         for rel in relationships.relationships where rel.type == .header {
             let headerURL = tempDir.appendingPathComponent("word/\(rel.target)")
             guard FileManager.default.fileExists(atPath: headerURL.path) else { continue }
@@ -84,10 +86,13 @@ public struct DocxReader {
                 from: headerXML,
                 relationships: relationships, styles: document.styles, numbering: document.numbering
             )
-            document.headers.append(Header(id: rel.id, paragraphs: paragraphs))
+            document.headers.append(
+                Header(id: rel.id, paragraphs: paragraphs, originalFileName: rel.target)
+            )
         }
 
         // 7c. 讀取 footers
+        // v0.13.0+: see headers comment above re: originalFileName preservation.
         for rel in relationships.relationships where rel.type == .footer {
             let footerURL = tempDir.appendingPathComponent("word/\(rel.target)")
             guard FileManager.default.fileExists(atPath: footerURL.path) else { continue }
@@ -97,7 +102,9 @@ public struct DocxReader {
                 from: footerXML,
                 relationships: relationships, styles: document.styles, numbering: document.numbering
             )
-            document.footers.append(Footer(id: rel.id, paragraphs: paragraphs))
+            document.footers.append(
+                Footer(id: rel.id, paragraphs: paragraphs, originalFileName: rel.target)
+            )
         }
 
         // 7d. 讀取 footnotes
@@ -268,6 +275,13 @@ public struct DocxReader {
         // until process exit; macOS reclaims `/tmp` on reboot).
         document.preservedArchive = PreservedArchive(tempDir: tempDir)
         transferOwnership = true
+
+        // v0.13.0+: clear modifiedParts to empty as the final step before returning.
+        // Guarantees freshly loaded documents start with `modifiedParts.isEmpty == true`,
+        // so DocxWriter overlay mode skips every typed-part writer until the caller
+        // mutates the typed model.
+        document.modifiedParts.removeAll()
+
         return document
     }
 

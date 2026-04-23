@@ -65,6 +65,10 @@ extension WordDocument {
         let para = Paragraph(runs: [run])
 
         try insertParagraph(para, at: location)
+        // insertParagraph(at: location) marks document.xml. New image bumps media + rels + content_types.
+        modifiedParts.insert("word/media/\(imageRef.fileName)")
+        modifiedParts.insert("word/_rels/document.xml.rels")
+        modifiedParts.insert("[Content_Types].xml")
         return imageId
     }
 
@@ -112,6 +116,7 @@ extension WordDocument {
             }
             body.children.insert(.paragraph(paragraph), at: bodyIdx)
         }
+        modifiedParts.insert("word/document.xml")
     }
 
     // MARK: Resolution helpers
