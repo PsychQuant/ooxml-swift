@@ -435,77 +435,35 @@ public struct DocxReader {
             return body
         }
 
-        // 大文件走 parallel path
-        // 每個 body child 的子樹互不相交，shared data (relationships/styles/numbering) 為唯讀
-        // 使用 concurrentPerform 分 chunk 平行解析，再按順序合併
-        let chunkSize = max(count / coreCount, 64)
-        let chunkCount = (count + chunkSize - 1) / chunkSize
-
-        // 每個 chunk 的結果陣列（各 chunk 獨立寫入，無 data race）
-        let chunkResults = UnsafeMutablePointer<[BodyChild]>.allocate(capacity: chunkCount)
-        chunkResults.initialize(repeating: [], count: chunkCount)
-        defer {
-            chunkResults.deinitialize(count: chunkCount)
-            chunkResults.deallocate()
-        }
-
-        // Thread-safe error capture
-        var firstError: Error?
-        let errorLock = NSLock()
-
-        DispatchQueue.concurrentPerform(iterations: chunkCount) { ci in
-            // Early exit if another chunk already failed
-            errorLock.lock()
-            let hasError = firstError != nil
-            errorLock.unlock()
-            if hasError { return }
-
-            let start = ci * chunkSize
-            let end = min(start + chunkSize, count)
-            var children: [BodyChild] = []
-            children.reserveCapacity(end - start)
-
-            for i in start..<end {
-                guard let element = bodyNodes[i] as? XMLElement else { continue }
-
-                do {
-                    if element.localName == "p" {
-                        let paragraph = try parseParagraph(
-                            from: element,
-                            relationships: relationships,
-                            styles: styles,
-                            numbering: numbering
-                        )
-                        children.append(.paragraph(paragraph))
-                    } else if element.localName == "tbl" {
-                        let table = try parseTable(
-                            from: element,
-                            relationships: relationships,
-                            styles: styles,
-                            numbering: numbering
-                        )
-                        children.append(.table(table))
-                    }
-                } catch {
-                    errorLock.lock()
-                    if firstError == nil { firstError = error }
-                    errorLock.unlock()
-                    return
-                }
-            }
-            chunkResults[ci] = children
-        }
-
-        if let error = firstError { throw error }
-
-        // 按 chunk 順序合併，保持文件元素的原始順序
+        // v0.13.3+ (che-word-mcp#41 + save-durability prerequisite):
+        // Serial parsing always. The prior parallel path used
+        // `DispatchQueue.concurrentPerform` against shared libxml2-backed
+        // `XMLElement` nodes, which is NOT thread-safe at the document level.
+        // Parsing determinism is also a load-bearing prerequisite for
+        // `recover_from_autosave`: re-parsing the same source bytes must
+        // produce identical in-memory state. See SDD
+        // `che-word-mcp-insert-crash-autosave-fix` and the regression test
+        // `SerialOnlyOOXMLTests.testNoParallelPrimitivesInOOXMLIO`.
         body.children.reserveCapacity(count)
-        for ci in 0..<chunkCount {
-            for child in chunkResults[ci] {
-                body.children.append(child)
-                if case .table(let table) = child {
-                    body.tables.append(table)
-                }
+        for i in 0..<count {
+            guard let element = bodyNodes[i] as? XMLElement else { continue }
+            if element.localName == "p" {
+                let paragraph = try parseParagraph(
+                    from: element,
+                    relationships: relationships,
+                    styles: styles,
+                    numbering: numbering
+                )
+                body.children.append(.paragraph(paragraph))
+            } else if element.localName == "tbl" {
+                let table = try parseTable(
+                    from: element,
+                    relationships: relationships,
+                    styles: styles,
+                    numbering: numbering
+                )
+                body.children.append(.table(table))
+                body.tables.append(table)
             }
         }
 
