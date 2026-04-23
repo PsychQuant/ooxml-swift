@@ -2,6 +2,76 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.12.0] - 2026-04-23
+
+### Changed — Preserve-by-default round-trip architecture (Phase 1 of `che-word-mcp-ooxml-roundtrip-fidelity`)
+
+`DocxReader.read()` no longer deletes the source archive's unzip tempDir. The
+tempDir is now retained on the returned `WordDocument` and released only when
+the caller invokes the new `WordDocument.close()` method. `DocxWriter.write()`
+detects the preserved tempDir and switches to **overlay mode**: typed-model
+parts are overwritten directly into the preserved tempDir, then `ZipHelper.zip`
+produces the destination `.docx`. All OOXML parts the typed model does NOT
+manage (`word/theme/`, `word/webSettings.xml`, `word/people.xml`,
+`word/commentsExtended.xml`, `word/commentsExtensible.xml`,
+`word/commentsIds.xml`, `word/glossary/`, `word/customXml/`, etc.) survive
+round-trip byte-for-byte.
+
+Closes the lossy round-trip diagnosed in
+[`PsychQuant/che-word-mcp#23`](https://github.com/PsychQuant/che-word-mcp/issues/23).
+Unblocks the `OOXML parts CRUD completeness` milestone (#24-#31, 8 enhancement
+issues) which all require round-trip fidelity to ship.
+
+### Added — Public API
+
+- **`WordDocument.close()`** (`Sources/OOXMLSwift/Models/Document.swift`) —
+  new `public mutating func close()`. Releases the preserved archive tempDir;
+  idempotent. Callers SHOULD invoke after the final `DocxWriter.write()` to
+  free the tempDir; forgetting leaks the directory until process exit (macOS
+  reclaims `/tmp` on reboot).
+
+### Added — Internal helper types
+
+- **`PreservedArchive`** (`Sources/OOXMLSwift/IO/PreservedArchive.swift`) —
+  thin wrapper over the unzip tempDir URL with a `cleanup()` method. Used as
+  internal storage for `WordDocument`'s preserved-archive lifecycle.
+- **`RelationshipIdAllocator`** (`Sources/OOXMLSwift/IO/RelationshipIdAllocator.swift`) —
+  scans the source's `_rels/document.xml.rels` plus typed-model rIds, returns
+  collision-free `rId<N>` strings via `allocate()`. Replaces the prior naive
+  counter (`headers.count + footers.count + ...`) at `DocxWriter.swift:238`
+  that would collide with preserved original rIds in overlay mode.
+- **`ContentTypesOverlay`** + **`PartDescriptor`** (`Sources/OOXMLSwift/IO/ContentTypesOverlay.swift`) —
+  parses the source `[Content_Types].xml`, merges typed-part `<Override>`
+  entries with preserved entries via the
+  preserve-unknown-overrides + dedupe-typed-overrides + add-new-overrides
+  algorithm. Supports explicit "deletion" semantics via `typedManagedPatterns`
+  (PartName matches a managed pattern but is absent from typedParts → drop).
+
+### Compatibility
+
+**BREAKING-semantic, additive-API-only**:
+
+- API additions are non-breaking — existing code compiles unchanged.
+- **Lifecycle is new**: callers that read documents and discard them previously
+  worked because `DocxReader` cleaned its tempDir before returning. Now the
+  tempDir lives until `close()`; non-`close`-ing callers leak tempDirs that
+  macOS eventually reclaims on reboot.
+- **MCP server callers** (`che-word-mcp`) must wire `WordDocument.close()` into
+  session lifecycle. See `che-word-mcp` v3.3.0 (Phase 2A of the same Spectra
+  change) for the integration.
+
+### Tests
+
+15 new XCTest cases in `Tests/OOXMLSwiftTests/RoundTripFidelityTests.swift`:
+- `WordDocument.close()` / `archiveTempDir` lifecycle (5)
+- `RelationshipIdAllocator` collision avoidance + non-numeric handling (5)
+- `ContentTypesOverlay` preserve / replace / add / drop scenarios (3)
+- `DocxWriter` overlay round-trip preservation of unknown parts (theme1.xml +
+  customXml) + ZIP entry-list equality + Content_Types Override-set equality
+  (2)
+
+Full suite **325/325 green** (was 310/310).
+
 ## [0.11.0] - 2026-04-23
 
 ### Added — `MathAccent` for accent decorators

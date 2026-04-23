@@ -4,16 +4,39 @@ import Foundation
 public struct DocxWriter {
 
     /// 將 WordDocument 寫入 .docx 檔案
+    ///
+    /// **Overlay mode** (v0.12.0+): when `document.archiveTempDir != nil`,
+    /// the writer overwrites typed-model parts directly into the preserved
+    /// tempDir (rather than rebuilding from a scratch tempDir), then zips
+    /// the merged result. This preserves all OOXML parts the typed model
+    /// does not manage (theme/, webSettings.xml, people.xml, glossary/,
+    /// etc.) byte-for-byte.
+    ///
+    /// **Scratch mode**: when `archiveTempDir == nil` (initializer-built
+    /// documents), behavior is unchanged from prior releases — writer builds
+    /// a fresh scratch tempDir from typed model only.
     public static func write(_ document: WordDocument, to url: URL) throws {
-        let data = try writeData(document)
-
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
-        try data.write(to: url)
+
+        if let archiveTempDir = document.archiveTempDir {
+            // Overlay mode: write typed parts into preserved tempDir, then zip.
+            try writeAllParts(document, to: archiveTempDir, overlayMode: true)
+            let data = try ZipHelper.zipToData(archiveTempDir)
+            try data.write(to: url)
+        } else {
+            // Scratch mode: existing behavior unchanged.
+            let data = try writeData(document)
+            try data.write(to: url)
+        }
     }
 
     /// 將 WordDocument 壓縮成 in-memory .docx bytes（不落地）
+    ///
+    /// In-memory variant always uses scratch mode (no source archive to
+    /// preserve from). Callers wanting overlay-mode preservation MUST use
+    /// `write(_:to:)` instead.
     public static func writeData(_ document: WordDocument) throws -> Data {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("che-word-mcp")
@@ -22,19 +45,25 @@ public struct DocxWriter {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { ZipHelper.cleanup(tempDir) }
 
-        try writeAllParts(document, to: tempDir)
+        try writeAllParts(document, to: tempDir, overlayMode: false)
         return try ZipHelper.zipToData(tempDir)
     }
 
     /// 將 WordDocument 的所有 OOXML parts 寫到指定目錄（共享 pipeline）
-    private static func writeAllParts(_ document: WordDocument, to tempDir: URL) throws {
+    ///
+    /// - Parameters:
+    ///   - overlayMode: when `true`, `[Content_Types].xml` is computed via
+    ///     `ContentTypesOverlay` to preserve original Override entries for
+    ///     unknown parts (theme, webSettings, etc.). When `false`, all
+    ///     part XMLs are emitted from typed model only (scratch mode).
+    private static func writeAllParts(_ document: WordDocument, to tempDir: URL, overlayMode: Bool) throws {
         try createDirectoryStructure(at: tempDir)
 
         let hasNumbering = !document.numbering.abstractNums.isEmpty
         let hasHeaders = !document.headers.isEmpty
         let hasFooters = !document.footers.isEmpty
 
-        try writeContentTypes(to: tempDir, document: document)
+        try writeContentTypes(to: tempDir, document: document, overlayMode: overlayMode)
         try writeRelationships(to: tempDir)
         try writeDocumentRelationships(to: tempDir, document: document)
         try writeDocument(document, to: tempDir)
@@ -93,7 +122,12 @@ public struct DocxWriter {
 
     // MARK: - Content Types
 
-    private static func writeContentTypes(to baseURL: URL, document: WordDocument) throws {
+    private static func writeContentTypes(to baseURL: URL, document: WordDocument, overlayMode: Bool = false) throws {
+        if overlayMode, document.archiveTempDir != nil {
+            try writeContentTypesOverlay(to: baseURL, document: document)
+            return
+        }
+
         let hasNumbering = !document.numbering.abstractNums.isEmpty
 
         var xml = """
@@ -170,6 +204,97 @@ public struct DocxWriter {
         try xml.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// Overlay-mode `[Content_Types].xml`: read original from preserved
+    /// archive tempDir, compute typed-parts list, merge via
+    /// `ContentTypesOverlay`, write merged result. Preserves Overrides for
+    /// theme / webSettings / people / glossary / etc. that the typed model
+    /// does not manage.
+    private static func writeContentTypesOverlay(to baseURL: URL, document: WordDocument) throws {
+        guard let archiveTempDir = document.archiveTempDir else {
+            // Caller verified non-nil; defensive fallback to scratch mode.
+            try writeContentTypes(to: baseURL, document: document, overlayMode: false)
+            return
+        }
+        let originalCT = (try? String(
+            contentsOf: archiveTempDir.appendingPathComponent("[Content_Types].xml"),
+            encoding: .utf8
+        )) ?? ""
+        let overlay = ContentTypesOverlay(originalContentTypesXML: originalCT)
+        let merged = overlay.merge(
+            typedParts: typedPartDescriptors(for: document),
+            typedManagedPatterns: typedManagedPatternsForOverlay(document)
+        )
+        let url = baseURL.appendingPathComponent("[Content_Types].xml")
+        try merged.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Compute the PartDescriptors the writer is about to emit (typed model
+    /// state). Used by overlay-mode Content_Types merge.
+    private static func typedPartDescriptors(for document: WordDocument) -> [PartDescriptor] {
+        var parts: [PartDescriptor] = [
+            PartDescriptor(partName: "/word/document.xml",
+                           contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"),
+            PartDescriptor(partName: "/word/styles.xml",
+                           contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"),
+            PartDescriptor(partName: "/word/settings.xml",
+                           contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"),
+            PartDescriptor(partName: "/word/fontTable.xml",
+                           contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"),
+            PartDescriptor(partName: "/docProps/core.xml",
+                           contentType: "application/vnd.openxmlformats-package.core-properties+xml"),
+            PartDescriptor(partName: "/docProps/app.xml",
+                           contentType: "application/vnd.openxmlformats-officedocument.extended-properties+xml")
+        ]
+        if !document.numbering.abstractNums.isEmpty {
+            parts.append(PartDescriptor(
+                partName: "/word/numbering.xml",
+                contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
+            ))
+        }
+        for header in document.headers {
+            parts.append(PartDescriptor(partName: "/word/\(header.fileName)", contentType: Header.contentType))
+        }
+        for footer in document.footers {
+            parts.append(PartDescriptor(partName: "/word/\(footer.fileName)", contentType: Footer.contentType))
+        }
+        if !document.comments.comments.isEmpty {
+            parts.append(PartDescriptor(partName: "/word/comments.xml", contentType: CommentsCollection.contentType))
+        }
+        if document.comments.hasExtendedComments {
+            parts.append(PartDescriptor(partName: "/word/commentsExtended.xml",
+                                        contentType: CommentsCollection.extendedContentType))
+        }
+        if !document.footnotes.footnotes.isEmpty {
+            parts.append(PartDescriptor(partName: "/word/footnotes.xml",
+                                        contentType: FootnotesCollection.contentType))
+        }
+        if !document.endnotes.endnotes.isEmpty {
+            parts.append(PartDescriptor(partName: "/word/endnotes.xml",
+                                        contentType: EndnotesCollection.contentType))
+        }
+        return parts
+    }
+
+    /// PartName patterns the typed model owns. Overlay drops original Overrides
+    /// matching these patterns when the typed parts list omits them (= deletion).
+    private static func typedManagedPatternsForOverlay(_ document: WordDocument) -> [String] {
+        return [
+            "/word/document.xml",
+            "/word/styles.xml",
+            "/word/settings.xml",
+            "/word/fontTable.xml",
+            "/word/numbering.xml",
+            "/word/header",   // prefix: header1.xml, header2.xml, ...
+            "/word/footer",   // prefix: footer1.xml, footer2.xml, ...
+            "/word/comments.xml",
+            "/word/commentsExtended.xml",
+            "/word/footnotes.xml",
+            "/word/endnotes.xml",
+            "/docProps/core.xml",
+            "/docProps/app.xml"
+        ]
+    }
+
     // MARK: - Relationships
 
     private static func writeRelationships(to baseURL: URL) throws {
@@ -188,6 +313,29 @@ public struct DocxWriter {
 
     private static func writeDocumentRelationships(to baseURL: URL, document: WordDocument) throws {
         let hasNumbering = !document.numbering.abstractNums.isEmpty
+
+        // Build allocator. In overlay mode, seed from preserved original rels
+        // so newly-allocated rIds don't collide with parts the typed model
+        // doesn't manage. In scratch mode, allocator starts from rId4 (or rId5
+        // with numbering) since rId1-3 (or rId1-4) are hardcoded below.
+        let originalRelsXML: String
+        if let archiveTempDir = document.archiveTempDir {
+            let url = archiveTempDir.appendingPathComponent("word/_rels/document.xml.rels")
+            originalRelsXML = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        } else {
+            originalRelsXML = ""
+        }
+        // Reserve typed-model rIds so allocator doesn't reuse them.
+        var typedReservedIds: [String] = ["rId1", "rId2", "rId3"]
+        if hasNumbering { typedReservedIds.append("rId4") }
+        for header in document.headers { typedReservedIds.append(header.id) }
+        for footer in document.footers { typedReservedIds.append(footer.id) }
+        for image in document.images { typedReservedIds.append(image.id) }
+        for hyperlinkRef in document.hyperlinkReferences { typedReservedIds.append(hyperlinkRef.relationshipId) }
+        let allocator = RelationshipIdAllocator(
+            originalRelsXML: originalRelsXML,
+            additionalReservedIds: typedReservedIds
+        )
 
         var xml = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -231,12 +379,9 @@ public struct DocxWriter {
             """
         }
 
-        // 註解關係
+        // 註解關係 — allocator picks a collision-free rId
         if !document.comments.comments.isEmpty {
-            // 計算下一個可用的 rId
-            let baseId = document.numbering.abstractNums.isEmpty ? 4 : 5
-            let usedCount = document.headers.count + document.footers.count + document.images.count + document.hyperlinkReferences.count
-            let commentsRId = "rId\(baseId + usedCount)"
+            let commentsRId = allocator.allocate()
             xml += """
                 <Relationship Id="\(commentsRId)" Type="\(CommentsCollection.relationshipType)" Target="comments.xml"/>
             """
@@ -244,10 +389,7 @@ public struct DocxWriter {
 
         // commentsExtended 關係
         if document.comments.hasExtendedComments {
-            let baseId = document.numbering.abstractNums.isEmpty ? 4 : 5
-            var usedCount = document.headers.count + document.footers.count + document.images.count + document.hyperlinkReferences.count
-            if !document.comments.comments.isEmpty { usedCount += 1 }
-            let commentsExtRId = "rId\(baseId + usedCount)"
+            let commentsExtRId = allocator.allocate()
             xml += """
                 <Relationship Id="\(commentsExtRId)" Type="\(CommentsCollection.extendedRelationshipType)" Target="commentsExtended.xml"/>
             """
@@ -255,11 +397,7 @@ public struct DocxWriter {
 
         // 腳註關係
         if !document.footnotes.footnotes.isEmpty {
-            let baseId = document.numbering.abstractNums.isEmpty ? 4 : 5
-            var usedCount = document.headers.count + document.footers.count + document.images.count + document.hyperlinkReferences.count
-            if !document.comments.comments.isEmpty { usedCount += 1 }
-            if document.comments.hasExtendedComments { usedCount += 1 }
-            let footnotesRId = "rId\(baseId + usedCount)"
+            let footnotesRId = allocator.allocate()
             xml += """
                 <Relationship Id="\(footnotesRId)" Type="\(FootnotesCollection.relationshipType)" Target="footnotes.xml"/>
             """
@@ -267,12 +405,7 @@ public struct DocxWriter {
 
         // 尾註關係
         if !document.endnotes.endnotes.isEmpty {
-            let baseId = document.numbering.abstractNums.isEmpty ? 4 : 5
-            var usedCount = document.headers.count + document.footers.count + document.images.count + document.hyperlinkReferences.count
-            if !document.comments.comments.isEmpty { usedCount += 1 }
-            if document.comments.hasExtendedComments { usedCount += 1 }
-            if !document.footnotes.footnotes.isEmpty { usedCount += 1 }
-            let endnotesRId = "rId\(baseId + usedCount)"
+            let endnotesRId = allocator.allocate()
             xml += """
                 <Relationship Id="\(endnotesRId)" Type="\(EndnotesCollection.relationshipType)" Target="endnotes.xml"/>
             """

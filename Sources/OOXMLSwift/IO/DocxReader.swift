@@ -22,8 +22,15 @@ public struct DocxReader {
         // 1. 解壓縮 ZIP
         let tempDir = try ZipHelper.unzip(url)
 
+        // tempDir is retained on the returned WordDocument for preserve-by-default
+        // round-trip fidelity (v0.12.0+). Only clean up on error paths — success
+        // hands ownership to the document via `preservedArchive`. Caller releases
+        // via `WordDocument.close()`.
+        var transferOwnership = false
         defer {
-            ZipHelper.cleanup(tempDir)
+            if !transferOwnership {
+                ZipHelper.cleanup(tempDir)
+            }
         }
 
         // 2. 讀取關係檔案 word/_rels/document.xml.rels
@@ -256,6 +263,11 @@ public struct DocxReader {
             try parseCommentsExtended(from: extXML, into: &document.comments)
         }
 
+        // Hand tempDir ownership to the returned WordDocument. Caller MUST call
+        // `doc.close()` when finished to release it (otherwise the tempDir leaks
+        // until process exit; macOS reclaims `/tmp` on reboot).
+        document.preservedArchive = PreservedArchive(tempDir: tempDir)
+        transferOwnership = true
         return document
     }
 
