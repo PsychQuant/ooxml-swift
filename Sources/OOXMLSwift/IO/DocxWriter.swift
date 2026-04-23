@@ -15,21 +15,46 @@ public struct DocxWriter {
     /// **Scratch mode**: when `archiveTempDir == nil` (initializer-built
     /// documents), behavior is unchanged from prior releases — writer builds
     /// a fresh scratch tempDir from typed model only.
+    ///
+    /// **Atomic-rename save** (v0.13.2+, closes che-word-mcp#36): bytes are
+    /// written to `<url>.tmp.<UUID>` first, fsync'd, then `replaceItemAt`
+    /// performs an atomic POSIX rename. The target at `url` is observable
+    /// only as the full original or the full new bytes — never partial,
+    /// zero-byte, or absent. Any throw (during ZIP, temp write, or rename)
+    /// leaves the original at `url` byte-preserved; the temp file is cleaned
+    /// up via `defer`.
     public static func write(_ document: WordDocument, to url: URL) throws {
-        if FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.removeItem(at: url)
+        // Phase 1: compute new bytes BEFORE touching `url`. If serialization
+        // throws here, the original at `url` is untouched.
+        let data: Data
+        if let archiveTempDir = document.archiveTempDir {
+            try writeAllParts(document, to: archiveTempDir, overlayMode: true)
+            data = try ZipHelper.zipToData(archiveTempDir)
+        } else {
+            data = try writeData(document)
         }
 
-        if let archiveTempDir = document.archiveTempDir {
-            // Overlay mode: write typed parts into preserved tempDir, then zip.
-            try writeAllParts(document, to: archiveTempDir, overlayMode: true)
-            let data = try ZipHelper.zipToData(archiveTempDir)
-            try data.write(to: url)
-        } else {
-            // Scratch mode: existing behavior unchanged.
-            let data = try writeData(document)
-            try data.write(to: url)
-        }
+        // Phase 2: atomic-rename save.
+        let tempURL = url.appendingPathExtension("tmp.\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        try data.write(to: tempURL)
+
+        // fsync to flush kernel buffers — guarantees bytes are on disk before
+        // the rename makes them the canonical target.
+        let handle = try FileHandle(forWritingTo: tempURL)
+        try handle.synchronize()
+        try handle.close()
+
+        // POSIX `rename(2)` (same volume) or copy+delete fallback (cross-volume).
+        // Atomic at the kernel level: external observers see either the original
+        // bytes or the new bytes at `url`, never an intermediate state.
+        _ = try FileManager.default.replaceItemAt(
+            url,
+            withItemAt: tempURL,
+            backupItemName: nil,
+            options: []
+        )
     }
 
     /// 將 WordDocument 壓縮成 in-memory .docx bytes（不落地）
