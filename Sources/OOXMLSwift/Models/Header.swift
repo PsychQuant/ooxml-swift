@@ -8,10 +8,17 @@ public struct Header: Equatable {
     public var paragraphs: [Paragraph]
     public var type: HeaderFooterType
 
-    public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default) {
+    /// Archive file path the header was read from (v0.13.0+).
+    /// `DocxReader.read()` populates this from the relationship `Target`
+    /// attribute (e.g., `"header4.xml"`). `nil` for newly-built headers
+    /// — `fileName` then falls back to type-based default.
+    public var originalFileName: String?
+
+    public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, originalFileName: String? = nil) {
         self.id = id
         self.paragraphs = paragraphs
         self.type = type
+        self.originalFileName = originalFileName
     }
 
     /// 建立含單一文字的頁首
@@ -91,7 +98,13 @@ extension Header {
     }
 
     /// 取得檔案名稱
+    /// v0.13.0+: returns `originalFileName` when present (preserves multi-instance
+    /// same-type files like `header1.xml`/`header2.xml`/.../`header6.xml`).
+    /// Falls back to type-based default for newly-built headers.
     public var fileName: String {
+        if let original = originalFileName {
+            return original
+        }
         switch type {
         case .default: return "header1.xml"
         case .first: return "headerFirst.xml"

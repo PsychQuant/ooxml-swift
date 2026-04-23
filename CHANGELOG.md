@@ -2,6 +2,73 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.13.0] - 2026-04-23
+
+### Added — True byte-preservation via dirty tracking (closes che-word-mcp#23 round-2, #32, #33 contributing fixes)
+
+This release completes the round-trip fidelity work started in v0.12.0. The
+PreservedArchive infrastructure preserved unknown parts (theme, customXml,
+glossary, etc.) but the writer still **unconditionally re-emitted** every
+typed-managed part on every save — so a Reader-loaded NTPU thesis lost its
+13 custom font declarations, 6 distinct headers (collapsed to "header1.xml"),
+and 4 footers after a single no-op `save_document` round-trip even though no
+typed mutation had occurred.
+
+v0.13.0 introduces three architectural changes that make typed-managed parts
+behave like unknown parts: skip-when-not-dirty.
+
+1. **`WordDocument.modifiedParts: Set<String>`** — every mutating method
+   inserts the corresponding OOXML part path (`"word/document.xml"`,
+   `"word/header4.xml"`, `"word/styles.xml"`, etc.). `DocxReader.read()`
+   clears the set as the final step, so freshly loaded documents start with
+   `modifiedParts.isEmpty == true`. Public `markPartDirty(_:)` lets external
+   consumers (e.g., `che-word-mcp` writing to `archiveTempDir/word/theme/theme1.xml`)
+   join the dirty-tracking contract.
+
+2. **`Header.originalFileName` / `Footer.originalFileName`** — the pre-v0.13.0
+   `fileName` computed property collapsed all `.default` headers to
+   `"header1.xml"` regardless of source archive paths, so 6-section NTPU theses
+   with `header1.xml`–`header6.xml` had every typed-model lookup hit the same
+   file. Reader now populates `originalFileName` from each relationship's
+   `Target` attribute; `fileName` returns `originalFileName ?? type-based-default`.
+
+3. **`DocxWriter` overlay-mode skip-when-not-dirty** — every typed-part writer
+   in overlay mode is gated by `modifiedParts.contains(<part path>)`. Scratch
+   mode (no `archiveTempDir`) writes everything unconditionally — backward
+   compatible with `create_document` callers. New helpers `hasNewTypedParts`
+   and `hasNewTypedRelationships` ensure `[Content_Types].xml` and
+   `word/_rels/document.xml.rels` are still re-emitted when the typed model
+   added parts not declared in the source archive.
+
+### Tests
+
+- 4 `MarkDirtyCoverageTests` for the `Set<String>` foundation
+- 38 `MarkDirtyCoverageTests` enumerating every WordDocument mutating method
+- 8 `HeaderFooterOriginalFileNameTests` for the fileName preservation
+- 3 `ReaderDirtyTrackingTests` for Reader instrumentation
+- 2 `OverlaySkipWhenNotDirtyTests` proving no-op round-trip preserves typed
+  parts byte-equal AND single-edit triggers selective re-emission only
+- 6 `MultiHeaderFooterFixtureTests` building a 22-part .docx with 6 headers,
+  4 footers, 13 fontTable entries, and 1 `<w15:person>` with full presenceInfo
+  — proving end-to-end that editing one header preserves the other 5 byte-equal
+  AND markPartDirty + direct write preserves all 13 fontTable entries
+
+Total: 388 tests pass (was 327; +61 v0.13.0 contract coverage).
+
+### Compatibility
+
+- **Additive for typed callers**: `modifiedParts`, `markPartDirty(_:)`,
+  `originalFileName` are new APIs. Existing callers compile unchanged.
+- **Behaviour change in overlay mode**: writers SKIP for parts not in
+  `modifiedParts`. Callers that previously relied on the writer regenerating
+  `fontTable.xml` from a hardcoded 3-entry default on every save (which was
+  the round-trip bug) will now see the original 13-entry fontTable preserved.
+- **Scratch mode unchanged**: `create_document` paths (no source archive)
+  emit every part as before.
+- **`Header(id:paragraphs:type:)` and `Footer(id:paragraphs:type:...)` gain
+  optional `originalFileName: String? = nil` parameter** — callers using
+  positional arguments are unaffected.
+
 ## [0.12.2] - 2026-04-23
 
 ### Fixed — `WordDocument.nextRelationshipId` is now overlay-aware

@@ -10,12 +10,19 @@ public struct Footer: Equatable {
     public var pageNumberFormat: PageNumberFormat?  // 頁碼格式（如果是頁碼頁尾）
     public var pageNumberAlignment: ParagraphAlignment  // 頁碼對齊方式
 
-    public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, pageNumberFormat: PageNumberFormat? = nil, pageNumberAlignment: ParagraphAlignment = .center) {
+    /// Archive file path the footer was read from (v0.13.0+).
+    /// `DocxReader.read()` populates this from the relationship `Target`
+    /// attribute (e.g., `"footer3.xml"`). `nil` for newly-built footers
+    /// — `fileName` then falls back to type-based default.
+    public var originalFileName: String?
+
+    public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, pageNumberFormat: PageNumberFormat? = nil, pageNumberAlignment: ParagraphAlignment = .center, originalFileName: String? = nil) {
         self.id = id
         self.paragraphs = paragraphs
         self.type = type
         self.pageNumberFormat = pageNumberFormat
         self.pageNumberAlignment = pageNumberAlignment
+        self.originalFileName = originalFileName
     }
 
     /// 建立含單一文字的頁尾
@@ -140,7 +147,13 @@ extension Footer {
     }
 
     /// 取得檔案名稱
+    /// v0.13.0+: returns `originalFileName` when present (preserves multi-instance
+    /// same-type files like `footer1.xml`/`footer2.xml`/.../`footer4.xml`).
+    /// Falls back to type-based default for newly-built footers.
     public var fileName: String {
+        if let original = originalFileName {
+            return original
+        }
         switch type {
         case .default: return "footer1.xml"
         case .first: return "footerFirst.xml"

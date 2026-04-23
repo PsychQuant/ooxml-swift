@@ -72,6 +72,13 @@ extension WordDocument {
             }
         }
 
+        // updateAllFields rewrites in-place across body + headers/footers/notes;
+        // mark every container family dirty so overlay mode re-emits affected parts.
+        modifiedParts.insert("word/document.xml")
+        for header in headers { modifiedParts.insert("word/\(header.fileName)") }
+        for footer in footers { modifiedParts.insert("word/\(footer.fileName)") }
+        if !footnotes.footnotes.isEmpty { modifiedParts.insert("word/footnotes.xml") }
+        if !endnotes.endnotes.isEmpty { modifiedParts.insert("word/endnotes.xml") }
         return counters
     }
 

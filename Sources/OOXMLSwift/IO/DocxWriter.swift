@@ -62,44 +62,161 @@ public struct DocxWriter {
         let hasNumbering = !document.numbering.abstractNums.isEmpty
         let hasHeaders = !document.headers.isEmpty
         let hasFooters = !document.footers.isEmpty
+        let dirty = document.modifiedParts
 
-        try writeContentTypes(to: tempDir, document: document, overlayMode: overlayMode)
-        try writeRelationships(to: tempDir)
-        try writeDocumentRelationships(to: tempDir, document: document)
-        try writeDocument(document, to: tempDir)
-        try writeStyles(document.styles, to: tempDir)
-        try writeSettings(to: tempDir)
-        try writeFontTable(to: tempDir)
-        try writeCoreProperties(document.properties, to: tempDir)
-        try writeAppProperties(to: tempDir)
+        // v0.13.0+: in overlay mode every typed-part writer is gated by the
+        // corresponding part path appearing in `dirty`. Scratch mode (no
+        // archiveTempDir) writes everything unconditionally to preserve prior
+        // behavior. The helper computes new typed parts not declared in the
+        // original Content_Types so writeContentTypes still runs when the typed
+        // model added (e.g.) a fresh header/footer/image even if the dirty set
+        // doesn't explicitly contain `[Content_Types].xml`.
+        let needsContentTypes = !overlayMode
+            || dirty.contains("[Content_Types].xml")
+            || hasNewTypedParts(document)
+        let needsDocumentRels = !overlayMode
+            || dirty.contains("word/_rels/document.xml.rels")
+            || hasNewTypedRelationships(document)
 
-        if hasNumbering {
+        if needsContentTypes {
+            try writeContentTypes(to: tempDir, document: document, overlayMode: overlayMode)
+        }
+        if !overlayMode {
+            // Top-level _rels/.rels is read-only in overlay mode (preserved
+            // verbatim from the source archive). Scratch mode emits a fresh one.
+            try writeRelationships(to: tempDir)
+        }
+        if needsDocumentRels {
+            try writeDocumentRelationships(to: tempDir, document: document)
+        }
+        if !overlayMode || dirty.contains("word/document.xml") {
+            try writeDocument(document, to: tempDir)
+        }
+        if !overlayMode || dirty.contains("word/styles.xml") {
+            try writeStyles(document.styles, to: tempDir)
+        }
+        if !overlayMode || dirty.contains("word/settings.xml") {
+            try writeSettings(to: tempDir)
+        }
+        if !overlayMode || dirty.contains("word/fontTable.xml") {
+            try writeFontTable(to: tempDir)
+        }
+        if !overlayMode || dirty.contains("docProps/core.xml") {
+            try writeCoreProperties(document.properties, to: tempDir)
+        }
+        if !overlayMode || dirty.contains("docProps/app.xml") {
+            try writeAppProperties(to: tempDir)
+        }
+
+        if hasNumbering, !overlayMode || dirty.contains("word/numbering.xml") {
             try writeNumbering(document.numbering, to: tempDir)
         }
         if hasHeaders {
             for header in document.headers {
-                try writeHeader(header, to: tempDir)
+                if !overlayMode || dirty.contains("word/\(header.fileName)") {
+                    try writeHeader(header, to: tempDir)
+                }
             }
         }
         if hasFooters {
             for footer in document.footers {
-                try writeFooter(footer, to: tempDir)
+                if !overlayMode || dirty.contains("word/\(footer.fileName)") {
+                    try writeFooter(footer, to: tempDir)
+                }
             }
         }
         if !document.images.isEmpty {
-            try writeImages(document.images, to: tempDir)
+            // Image binary writing is per-image — only re-emit images whose
+            // media path is dirty (covers new image insertion). Existing source
+            // images are already in the preserved archive.
+            if overlayMode {
+                try writeNewImages(document.images, to: tempDir, dirty: dirty)
+            } else {
+                try writeImages(document.images, to: tempDir)
+            }
         }
-        if !document.comments.comments.isEmpty {
+        if !document.comments.comments.isEmpty,
+           !overlayMode || dirty.contains("word/comments.xml") {
             try writeComments(document.comments, to: tempDir)
         }
-        if let extXML = document.comments.toExtendedXML() {
+        if let extXML = document.comments.toExtendedXML(),
+           !overlayMode || dirty.contains("word/commentsExtended.xml") {
             try writeCommentsExtended(extXML, to: tempDir)
         }
-        if !document.footnotes.footnotes.isEmpty {
+        if !document.footnotes.footnotes.isEmpty,
+           !overlayMode || dirty.contains("word/footnotes.xml") {
             try writeFootnotes(document.footnotes, to: tempDir)
         }
-        if !document.endnotes.endnotes.isEmpty {
+        if !document.endnotes.endnotes.isEmpty,
+           !overlayMode || dirty.contains("word/endnotes.xml") {
             try writeEndnotes(document.endnotes, to: tempDir)
+        }
+    }
+
+    /// True when the typed model contains parts not declared in the source
+    /// archive's `[Content_Types].xml` — for example, a freshly added header
+    /// (`addHeader` produces a new `word/headerN.xml`) or a new media file
+    /// from `insertImage`. Used to gate `writeContentTypes` in overlay mode.
+    private static func hasNewTypedParts(_ document: WordDocument) -> Bool {
+        guard let tempDir = document.archiveTempDir else { return false }
+        let originalCT: String
+        do {
+            originalCT = try String(contentsOf: tempDir.appendingPathComponent("[Content_Types].xml"), encoding: .utf8)
+        } catch {
+            return true  // Original missing — must rewrite Content_Types
+        }
+        for header in document.headers
+        where !originalCT.contains("/word/\(header.fileName)") {
+            return true
+        }
+        for footer in document.footers
+        where !originalCT.contains("/word/\(footer.fileName)") {
+            return true
+        }
+        for image in document.images
+        where !originalCT.contains("/word/media/\(image.fileName)") {
+            // Media additions trigger via Default extension, but if the
+            // extension is new (e.g., first .webp), Content_Types must update.
+            let ext = (image.fileName as NSString).pathExtension.lowercased()
+            if !originalCT.contains("Extension=\"\(ext)\"") { return true }
+        }
+        return false
+    }
+
+    /// True when the typed model has relationships not declared in the source
+    /// archive's `word/_rels/document.xml.rels` — used to gate
+    /// `writeDocumentRelationships` in overlay mode.
+    private static func hasNewTypedRelationships(_ document: WordDocument) -> Bool {
+        guard let tempDir = document.archiveTempDir else { return false }
+        let originalRels: String
+        do {
+            originalRels = try String(contentsOf: tempDir.appendingPathComponent("word/_rels/document.xml.rels"), encoding: .utf8)
+        } catch {
+            return true  // No source rels — emit fresh
+        }
+        for header in document.headers where !originalRels.contains("Id=\"\(header.id)\"") {
+            return true
+        }
+        for footer in document.footers where !originalRels.contains("Id=\"\(footer.id)\"") {
+            return true
+        }
+        for image in document.images where !originalRels.contains("Id=\"\(image.id)\"") {
+            return true
+        }
+        for hyperlinkRef in document.hyperlinkReferences
+        where !originalRels.contains("Id=\"\(hyperlinkRef.relationshipId)\"") {
+            return true
+        }
+        return false
+    }
+
+    /// Overlay-mode image writer — only emits media files that are in `dirty`
+    /// (i.e., images added since `DocxReader.read()`). Existing source images
+    /// remain in the preserved archive untouched.
+    private static func writeNewImages(_ images: [ImageReference], to baseURL: URL, dirty: Set<String>) throws {
+        for image in images where dirty.contains("word/media/\(image.fileName)") {
+            let url = baseURL.appendingPathComponent("word/media/\(image.fileName)")
+            try image.data.write(to: url)
         }
     }
 
