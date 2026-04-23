@@ -2,6 +2,70 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.13.2] - 2026-04-23
+
+### Fixed — Atomic-rename save (closes che-word-mcp#36)
+
+Pre-v0.13.2 `DocxWriter.write(_:to:)` deleted the target file BEFORE computing the new bytes:
+
+```swift
+// Pre-v0.13.2 (BROKEN):
+if FileManager.default.fileExists(atPath: url.path) {
+    try FileManager.default.removeItem(at: url)        // ← STEP A: delete original
+}
+let data = try writeData(document)                      // ← STEP B: any throw here = data loss
+try data.write(to: url)                                 // ← STEP C: non-atomic write
+```
+
+Three failure modes:
+1. **Throw at STEP B** → original deleted, no recovery (the bug behind che-word-mcp#36 incident).
+2. **Throw at STEP C** → file is partial / zero-byte.
+3. **SIGKILL between A and C** → file gone, no `.bak`, no rollback.
+
+### Architecture
+
+`write(_:to:)` now follows the atomic-rename pattern used by every durable file system writer:
+
+```swift
+// v0.13.2+ (CORRECT):
+let data = try (compute new bytes — overlay or scratch mode)
+let tempURL = url.appendingPathExtension("tmp.\(UUID().uuidString)")
+defer { try? FileManager.default.removeItem(at: tempURL) }     // cleanup on throw
+try data.write(to: tempURL)
+let handle = try FileHandle(forWritingTo: tempURL)
+try handle.synchronize()                                       // fsync
+try handle.close()
+_ = try FileManager.default.replaceItemAt(url, withItemAt: tempURL,
+                                          backupItemName: nil, options: [])
+```
+
+Properties:
+- **Atomicity** — `replaceItemAt` uses POSIX `rename(2)` on same volume (kernel-atomic), copy+delete on cross-volume (Foundation fallback). External observers see either full original or full new bytes.
+- **Throw-safe** — any throw at any step leaves `url` byte-preserved. Temp file cleaned up via `defer`.
+- **fsync** — bytes flushed to disk before rename, so power loss after rename guarantees the new bytes are durable.
+
+### Tests
+
+- `AtomicSaveTests.swift` (NEW) — 6 tests:
+  - `testSuccessfulSaveReplacesTargetAtomically` — happy path, SHA256 transitions cleanly.
+  - `testThrowMidWritePreservesOriginalAndNoOrphanTempRemains` — read-only parent dir → write throws → original intact + no orphan tmp.
+  - `testProcessKilledMidWritePreservesOriginal` — planted orphan tmp survives next write; original SHA256 invariant preserved across simulated SIGKILL.
+  - `testFreshWriteToNonExistentPath` — fresh write produces only the target (no orphans).
+  - `testTargetIsAlwaysObservableDuringSuccessfulWrite` — concurrent observer polling `fileExists(atPath:)` NEVER sees target absent during write (RED on pre-v0.13.2; GREEN with atomic-rename).
+  - `testNoTempOrphanRemainsAfterSuccessfulOverwrite` — orphan cleanup invariant via `defer`.
+
+**397/397 tests pass** (was 391 → +6 AtomicSaveTests).
+
+### Compatibility
+
+- **Public API unchanged** — `DocxWriter.write(_:to:)` signature identical; semantic guarantee strictly stronger.
+- **Behavior change**: target file is no longer deleted as a separate step before write. Callers that observed the deletion gap (none known) would now see continuous file presence.
+- **Cross-volume save**: `replaceItemAt` automatically falls back to copy+delete when temp and target are on different mount points. No-data-loss invariant preserved at copy granularity.
+
+### Refs
+
+- PsychQuant/che-word-mcp#36 — incident report and root-cause audit.
+
 ## [0.13.1] - 2026-04-23
 
 ### Fixed — rels overlay merge + relationship-driven image extraction (closes che-word-mcp#35)
