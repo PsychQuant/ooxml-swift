@@ -18,6 +18,25 @@ public struct WordDocument: Equatable {
     private var nextBookmarkId: Int = 1       // 書籤 ID 計數器
     private var nextHyperlinkId: Int = 1      // 超連結 ID 計數器
 
+    /// Source archive wrapper, set by `DocxReader.read(from:)` for
+    /// preserve-by-default round-trip fidelity (v0.12.0+). `nil` for documents
+    /// created via initializer without a source ZIP.
+    ///
+    /// **Lifecycle**: callers SHALL invoke `close()` when finished to release
+    /// the underlying tempDir. Forgetting to call `close()` leaks the tempDir
+    /// until process exit (macOS reclaims `/tmp` on reboot).
+    ///
+    /// **Excluded from Equatable** because two reads of the same source `.docx`
+    /// produce different UUID-named tempDirs but should still be considered
+    /// equal in document content.
+    internal var preservedArchive: PreservedArchive?
+
+    /// Convenience accessor exposing the unzip tempDir URL.
+    /// `nil` for initializer-built documents without a source ZIP.
+    internal var archiveTempDir: URL? {
+        return preservedArchive?.tempDir
+    }
+
     public init() {
         self.body = Body()
         self.styles = Style.defaultStyles
@@ -32,6 +51,40 @@ public struct WordDocument: Equatable {
         self.revisions = RevisionsCollection()
         self.footnotes = FootnotesCollection()
         self.endnotes = EndnotesCollection()
+        self.preservedArchive = nil
+    }
+
+    /// Release the source archive's unzip tempDir (added v0.12.0).
+    ///
+    /// Idempotent: calling on a document whose `preservedArchive == nil` is a
+    /// no-op. After `close()`, subsequent `DocxWriter.write(self, to:)` falls
+    /// back to scratch mode (no preserve-by-default).
+    ///
+    /// Callers SHOULD invoke `close()` after the final `DocxWriter.write()` to
+    /// avoid leaking the tempDir until process exit.
+    public mutating func close() {
+        preservedArchive?.cleanup()
+        preservedArchive = nil
+    }
+
+    /// Manual Equatable conformance excluding `preservedArchive`.
+    /// See doc comment on `preservedArchive` for rationale.
+    public static func == (lhs: WordDocument, rhs: WordDocument) -> Bool {
+        return lhs.body == rhs.body
+            && lhs.styles == rhs.styles
+            && lhs.properties == rhs.properties
+            && lhs.numbering == rhs.numbering
+            && lhs.sectionProperties == rhs.sectionProperties
+            && lhs.headers == rhs.headers
+            && lhs.footers == rhs.footers
+            && lhs.images == rhs.images
+            && lhs.hyperlinkReferences == rhs.hyperlinkReferences
+            && lhs.comments == rhs.comments
+            && lhs.revisions == rhs.revisions
+            && lhs.footnotes == rhs.footnotes
+            && lhs.endnotes == rhs.endnotes
+            && lhs.nextBookmarkId == rhs.nextBookmarkId
+            && lhs.nextHyperlinkId == rhs.nextHyperlinkId
     }
 
     // MARK: - Document Info
