@@ -2,6 +2,45 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.13.1] - 2026-04-23
+
+### Fixed — rels overlay merge + relationship-driven image extraction (closes che-word-mcp#35)
+
+v0.13.0 shipped `WordDocument.modifiedParts: Set<String>` + `DocxWriter` overlay-mode skip-when-not-dirty for typed parts (`document.xml`, `styles.xml`, `fontTable.xml`, `header*.xml`, `footer*.xml`, etc.) — but the **rels layer** still had two regressions on no-op round-trip of NTPU-style fixtures:
+
+**Root cause A** — `DocxReader.extractImages` was directory-driven: it walked `word/media/` and used `targetToId[targetPath] ?? "rId_\(fileName)"` as fallback when the lookup missed. The fallback produced ids like `rId_image1.png` which:
+1. Violate the OOXML `rId[0-9]+` convention.
+2. Made `hasNewTypedRelationships` return true on no-op load (the typed model's image.id wasn't in originalRels), forcing rels regeneration.
+
+**Root cause B** — `writeDocumentRelationships` built rels **from the typed-model parts list only**. Original rels for parts the typed model doesn't manage (theme / webSettings / customXml / commentsExtensible / commentsIds / people) were silently dropped — which broke theme-font inheritance, comment author identity, watermark VML rendering toggle, and Word 2013+ comment thread metadata after any legitimate rels-changing edit (e.g., `addHeader`).
+
+### Architecture
+
+1. **`Sources/OOXMLSwift/IO/RelationshipsOverlay.swift`** (NEW) — Parallel to `ContentTypesOverlay` from v0.12.0. Parses original `word/_rels/document.xml.rels`; merges typed-model rels with preservation of unknown rel types:
+   - Original rel of managed type AND id in typed → emit (typed authoritative on target).
+   - Original rel of managed type AND id NOT in typed → drop (deletion).
+   - Original rel of any other type → preserve verbatim.
+   - Typed rel whose id NOT in original → append as new.
+
+2. **`DocxWriter.writeDocumentRelationships`** — Refactored. Overlay mode dispatches through `RelationshipsOverlay.merge`; scratch mode (no source archive) preserves the pre-v0.13.1 output via new `serializeScratchRels` helper. Adds `typedManagedRelationshipTypes` constant listing the 12 type URLs the model owns.
+
+3. **`DocxReader.extractImages`** — Rewritten **relationship-driven** (was directory-driven). Iterates `relationships.imageRelationships` (source of truth); tries multiple path normalizations (`media/X` / `../media/X` / `word/media/X`); skips orphan rels rather than forge ids. Removed the `"rId_\(fileName)"` fallback entirely.
+
+### Tests
+
+- `RelationshipsOverlayTests.testNoOpRoundTripPreservesDocumentRelsByteEqual` — proves rels file is byte-equal after no-op load+save on multi-header fixture (theme + people rels survive).
+- `testAddHeaderPreservesUnknownRelsTypes` — proves addHeader-triggered legitimate rewrite still preserves theme + people rels via overlay merge.
+- `testRelsNeverProducesNonNumericIds` — regex-based regression guard against `rId_xxx`-style forged ids in either path.
+
+**391/391 tests pass** (was 388 → +3 RelationshipsOverlay coverage).
+
+### Compatibility
+
+- **Additive for typed callers**: `RelationshipsOverlay` is `internal`; no public API change.
+- **Behaviour change**: in overlay mode `writeDocumentRelationships` no longer drops rels for unknown types. Callers that previously relied on the lossy regenerate behavior (e.g., wanted theme rel stripped) — there are no known such callers.
+- **Scratch mode unchanged**: `create_document` paths emit the same rels as before.
+- `extractImages` orphan media files (in `word/media/` but not referenced by any rel) are now skipped instead of being assigned forged ids.
+
 ## [0.13.0] - 2026-04-23
 
 ### Added — True byte-preservation via dirty tracking (closes che-word-mcp#23 round-2, #32, #33 contributing fixes)
