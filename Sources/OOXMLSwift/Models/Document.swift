@@ -33,7 +33,12 @@ public struct WordDocument: Equatable {
 
     /// Convenience accessor exposing the unzip tempDir URL.
     /// `nil` for initializer-built documents without a source ZIP.
-    internal var archiveTempDir: URL? {
+    ///
+    /// **Public read-only**: callers (e.g., MCP servers implementing
+    /// theme/header/footer CRUD) need to read original OOXML parts directly
+    /// from the preserved archive. Mutation of the underlying archive is
+    /// internal to `ooxml-swift`.
+    public var archiveTempDir: URL? {
         return preservedArchive?.tempDir
     }
 

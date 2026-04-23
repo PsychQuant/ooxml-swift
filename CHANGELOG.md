@@ -2,6 +2,22 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.12.1] - 2026-04-23
+
+### Changed — Promote `WordDocument.archiveTempDir` to public read-only
+
+Promotes the `archiveTempDir: URL?` accessor on `WordDocument` from
+`internal` to `public` (read-only). Required by `che-word-mcp` v3.3.0
+Phase 2A theme/header/footer CRUD tools, which need to read original OOXML
+parts (`word/theme/theme1.xml`, `word/header*.xml`, `word/footer*.xml`)
+directly from the preserved archive tempDir.
+
+### Compatibility
+
+Additive and non-breaking. The setter remains internal to `ooxml-swift`
+(only `DocxReader` writes it via `preservedArchive`). External callers can
+read the URL but cannot mutate the lifecycle outside of `WordDocument.close()`.
+
 ## [0.12.0] - 2026-04-23
 
 ### Changed — Preserve-by-default round-trip architecture (Phase 1 of `che-word-mcp-ooxml-roundtrip-fidelity`)
