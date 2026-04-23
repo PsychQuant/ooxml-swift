@@ -2,6 +2,69 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.13.4] - 2026-04-24
+
+### Fixed — `updateAllFields` honest dirty-bit propagation (closes che-word-mcp#42)
+
+Pre-v0.13.4 `WordDocument.updateAllFields` (introduced v0.10.0 for SEQ counter recomputation) **unconditionally** marked every header/footer/footnote/endnote path into `modifiedParts` regardless of whether any SEQ field was actually found there:
+
+```swift
+// Pre-v0.13.4 (BROKEN):
+modifiedParts.insert("word/document.xml")
+for header in headers { modifiedParts.insert("word/\(header.fileName)") }
+for footer in footers { modifiedParts.insert("word/\(footer.fileName)") }
+// ...always, even when no SEQ in any header
+```
+
+Once a header path is in `modifiedParts`, overlay-mode `DocxWriter` re-emits it via `Header.toXML()` — which only knows about typed `paragraphs[]` and silently drops VML watermarks, drawings, and any non-paragraph raw XML. Result on NTPU thesis: 3923-byte VML watermark header → 318-byte `<w:p/>` stub. **P0 silent data loss** on every academic template workflow that called `update_all_fields`.
+
+### Architecture
+
+`processParagraph` now returns `Bool` indicating whether any SEQ field's cached result was actually rewritten. Each container (body / headers / footers / footnotes / endnotes) tracks its own dirty bit during the scan. Only containers with a confirmed SEQ rewrite get inserted into `modifiedParts`:
+
+```swift
+// v0.13.4+ (CORRECT):
+var bodyDirty = false
+for i in 0..<body.children.count {
+    if processParagraph(&para, ...) { bodyDirty = true }
+}
+var dirtyHeaderFiles: Set<String> = []
+for i in 0..<headers.count {
+    var headerDirty = false
+    for j in 0..<headers[i].paragraphs.count {
+        if processParagraph(&para, ...) { headerDirty = true }
+    }
+    if headerDirty { dirtyHeaderFiles.insert(headers[i].fileName) }
+}
+// ... same for footers/footnotes/endnotes ...
+if bodyDirty { modifiedParts.insert("word/document.xml") }
+for fileName in dirtyHeaderFiles { modifiedParts.insert("word/\(fileName)") }
+```
+
+Additionally, `rewriteCachedResult` is now compared with the original — if the rewritten string equals the input (e.g., counter value didn't actually change), no rewrite is recorded.
+
+### Tests
+
+- `WordDocumentUpdateAllFieldsHeaderPreservationTests.swift` (NEW) — 4 scenarios:
+  - `testHeaderWithoutSEQNotMarkedDirty` — body has SEQ, header has only paragraphs → header NOT in modifiedPartsView
+  - `testHeaderWithSEQIsMarkedDirty` — header contains SEQ → header IS in modifiedPartsView
+  - `testFooterWithoutSEQNotMarkedDirty` — same logic mirrors footers
+  - `testUpdateAllFieldsNoSEQAnywhereDoesNotAddToModifiedParts` — true no-op snapshot test
+- **407/407 tests pass** (was 403 → +4).
+
+### Known limitation (out of scope for this fix)
+
+When a header DOES legitimately contain a SEQ field (rare — e.g., chapter caption in running header), it still re-emits via `Header.toXML()` which strips co-located VML watermarks/drawings. This requires `Header.toXML()` itself to gain raw-XML preservation, which is a separate architectural change. Current behavior degrades gracefully: the dirty-bit fix eliminates the strip in the common case (no SEQ in header), and the rare edge case is logged for follow-up.
+
+### Compatibility
+
+- **Public API unchanged** — `updateAllFields()` signature identical; semantic guarantee strictly stronger.
+- **Behavior change**: `modifiedPartsView` after `updateAllFields` is now a strict subset of the pre-v0.13.4 behavior. No existing test relied on the over-eager dirty marking; no consumer should break.
+
+### Refs
+
+- PsychQuant/che-word-mcp#42 — incident report and root-cause audit
+
 ## [0.13.3] - 2026-04-24
 
 ### Changed — Serial-only OOXML IO + allocator-based image rId assignment (Refs PsychQuant/che-word-mcp#41)

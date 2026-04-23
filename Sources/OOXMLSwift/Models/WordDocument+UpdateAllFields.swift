@@ -15,6 +15,14 @@ extension WordDocument {
 
     /// Recompute SEQ field cached results across the entire document.
     /// Non-SEQ fields (IF, DATE, PAGE, REF, etc.) are preserved verbatim.
+    ///
+    /// **#42 fix (v0.13.4+)**: only marks `modifiedParts` for containers
+    /// where a SEQ field was actually rewritten. Previously we unconditionally
+    /// inserted every header/footer/footnote/endnote path, which triggered
+    /// overlay-mode re-emission via the typed `Header.toXML()` / `Footer.toXML()`
+    /// — those serializers only know about typed `paragraphs[]` and silently
+    /// strip VML watermarks, drawings, and any non-paragraph raw XML.
+    /// Honest dirty-bit propagation prevents that data loss.
     @discardableResult
     public mutating func updateAllFields() -> [String: Int] {
         var counters: [String: Int] = [:]
@@ -26,74 +34,97 @@ extension WordDocument {
         var currentHeadingCount: [Int: Int] = [:]  // heading level -> times seen
 
         // Body
+        var bodyDirty = false
         for i in 0..<body.children.count {
             if case .paragraph(var para) = body.children[i] {
                 if let level = headingLevel(of: para) {
                     currentHeadingCount[level, default: 0] += 1
                 }
-                processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount)
+                if processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount) {
+                    bodyDirty = true
+                }
                 body.children[i] = .paragraph(para)
             }
         }
 
-        // Headers
+        // Headers — per-header dirty bit
+        var dirtyHeaderFiles: Set<String> = []
         for i in 0..<headers.count {
+            var headerDirty = false
             for j in 0..<headers[i].paragraphs.count {
                 var para = headers[i].paragraphs[j]
-                processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount)
+                if processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount) {
+                    headerDirty = true
+                }
                 headers[i].paragraphs[j] = para
             }
+            if headerDirty { dirtyHeaderFiles.insert(headers[i].fileName) }
         }
 
-        // Footers
+        // Footers — per-footer dirty bit
+        var dirtyFooterFiles: Set<String> = []
         for i in 0..<footers.count {
+            var footerDirty = false
             for j in 0..<footers[i].paragraphs.count {
                 var para = footers[i].paragraphs[j]
-                processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount)
+                if processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount) {
+                    footerDirty = true
+                }
                 footers[i].paragraphs[j] = para
             }
+            if footerDirty { dirtyFooterFiles.insert(footers[i].fileName) }
         }
 
         // Footnotes
+        var footnotesDirty = false
         for i in 0..<footnotes.footnotes.count {
             for j in 0..<footnotes.footnotes[i].paragraphs.count {
                 var para = footnotes.footnotes[i].paragraphs[j]
-                processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount)
+                if processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount) {
+                    footnotesDirty = true
+                }
                 footnotes.footnotes[i].paragraphs[j] = para
             }
         }
 
         // Endnotes
+        var endnotesDirty = false
         for i in 0..<endnotes.endnotes.count {
             for j in 0..<endnotes.endnotes[i].paragraphs.count {
                 var para = endnotes.endnotes[i].paragraphs[j]
-                processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount)
+                if processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount) {
+                    endnotesDirty = true
+                }
                 endnotes.endnotes[i].paragraphs[j] = para
             }
         }
 
-        // updateAllFields rewrites in-place across body + headers/footers/notes;
-        // mark every container family dirty so overlay mode re-emits affected parts.
-        modifiedParts.insert("word/document.xml")
-        for header in headers { modifiedParts.insert("word/\(header.fileName)") }
-        for footer in footers { modifiedParts.insert("word/\(footer.fileName)") }
-        if !footnotes.footnotes.isEmpty { modifiedParts.insert("word/footnotes.xml") }
-        if !endnotes.endnotes.isEmpty { modifiedParts.insert("word/endnotes.xml") }
+        // Honest dirty-bit propagation — only mark parts that ACTUALLY mutated.
+        if bodyDirty { modifiedParts.insert("word/document.xml") }
+        for fileName in dirtyHeaderFiles { modifiedParts.insert("word/\(fileName)") }
+        for fileName in dirtyFooterFiles { modifiedParts.insert("word/\(fileName)") }
+        if footnotesDirty { modifiedParts.insert("word/footnotes.xml") }
+        if endnotesDirty { modifiedParts.insert("word/endnotes.xml") }
         return counters
     }
 
     /// Process one paragraph: find SEQ fields, increment counters (with reset
     /// when the SEQ's resetLevel matches a fresh heading), rewrite cached
     /// result in rawXML.
+    ///
+    /// - Returns: `true` when at least one SEQ field's cached result was
+    ///   rewritten in the paragraph's rawXML; `false` otherwise. Callers use
+    ///   this to mark only containers whose content actually changed (#42 fix).
     private func processParagraph(
         _ para: inout Paragraph,
         counters: inout [String: Int],
         lastResetHeadingCount: inout [String: Int],
         currentHeadingCount: [Int: Int]
-    ) {
+    ) -> Bool {
         let fields = FieldParser.parse(paragraph: para)
-        guard !fields.isEmpty else { return }
+        guard !fields.isEmpty else { return false }
 
+        var rewroteSomething = false
         for field in fields {
             guard case .sequence(let seq) = field.field else { continue }
             let id = seq.identifier
@@ -117,9 +148,13 @@ extension WordDocument {
             if let idx = field.cachedResultRunIdx, idx < para.runs.count {
                 let oldXML = para.runs[idx].rawXML ?? ""
                 let newXML = rewriteCachedResult(oldXML, newValue: "\(newValue)", matchingInstrText: field.instrText)
-                para.runs[idx].rawXML = newXML
+                if newXML != oldXML {
+                    para.runs[idx].rawXML = newXML
+                    rewroteSomething = true
+                }
             }
         }
+        return rewroteSomething
     }
 
     /// Returns heading level (1-9) if paragraph has `pStyle == "Heading N"`, else nil.
