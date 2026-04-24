@@ -2293,17 +2293,20 @@ extension WordDocument {
     // MARK: - Content Control (SDT) Operations
 
     /// 插入內容控制項到指定段落
+    ///
+    /// **v0.15.0+ (#44 task 3.0)**: SDT is set as a `Paragraph.contentControls`
+    /// entry (proper sibling of runs), not as a `Run.rawXML` blob (which
+    /// produced malformed `<w:p><w:r><w:sdt>...</w:sdt></w:r></w:p>`). The
+    /// new structure emits as proper Word XML: `<w:p><w:sdt>...</w:sdt></w:p>`.
+    /// SDTParser (#44 task 3.1) reads this back into ContentControl.
     public mutating func insertContentControl(_ control: ContentControl, at paragraphIndex: Int) throws {
         guard paragraphIndex >= 0 && paragraphIndex <= getParagraphs().count else {
             throw WordError.invalidIndex(paragraphIndex)
         }
 
-        // 產生 SDT XML 並包裝成段落層級元素
-        let sdtXML = control.toXML()
+        // SDT-only paragraph: no runs, single ContentControl child.
         var sdtPara = Paragraph()
-        var sdtRun = Run(text: "")
-        sdtRun.rawXML = sdtXML
-        sdtPara.runs = [sdtRun]
+        sdtPara.contentControls = [control]
 
         // 插入到指定位置
         var childIndex = 0
@@ -2357,17 +2360,33 @@ extension WordDocument {
         var maxId = 0
         for child in body.children {
             if case .paragraph(let paragraph) = child {
+                // Legacy path (pre-task-3.0): SDTs stuffed into Run.rawXML.
+                // Kept for round-trip compat with docs saved before v0.15.0
+                // and for any rawXML field-XML still carrying SDT markup.
                 for run in paragraph.runs {
                     guard let raw = run.rawXML, raw.contains("<w:sdt>") else { continue }
                     maxId = max(maxId, Self.extractMaxSdtId(from: raw))
                 }
+                // v0.15.0+ (task 3.0): SDTs as first-class Paragraph children.
+                // Walk the tree (children may be nested via Group / RepeatingSection).
+                for control in paragraph.contentControls {
+                    maxId = max(maxId, Self.extractMaxSdtIdFromControl(control))
+                }
             }
-            // Table cells contain paragraphs with runs; if tables host SDTs via
-            // rawXML blobs we should also scan them. Skipped for now — SDT insert
-            // paths all target body-level paragraphs. Task 3.1 will surface SDTs
-            // as first-class and this scan broadens automatically.
+            // Block-level SDTs (task 3.4) and table-cell SDTs scan added when
+            // those code paths land. Body-paragraph scan covers v0.15.0 inserts.
         }
         return maxId + 1
+    }
+
+    /// Recursively scan a ContentControl tree for the maximum SDT id.
+    /// Task 3.0 helper; replaces rawXML-only scan.
+    private static func extractMaxSdtIdFromControl(_ control: ContentControl) -> Int {
+        var maxId = control.sdt.id ?? 0
+        for child in control.children {
+            maxId = max(maxId, extractMaxSdtIdFromControl(child))
+        }
+        return maxId
     }
 
     /// 從一段包含 SDT 的 rawXML 中抽出所有 `<w:id w:val="N"/>` 的最大值。

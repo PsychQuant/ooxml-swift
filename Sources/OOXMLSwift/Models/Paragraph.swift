@@ -13,6 +13,14 @@ public struct Paragraph: Equatable {
     public var revisions: [Revision] = []      // 段落內的修訂記錄（w:ins/w:del）
     public var semantic: SemanticAnnotation?  // 語義標註
 
+    /// v0.15.0+ (che-word-mcp#44, task 3.0): structured Content Controls
+    /// (SDTs) appearing as siblings of runs inside this paragraph. Emitted
+    /// after `runs` in `toXML()`. The previous architecture stuffed entire
+    /// `<w:sdt>...</w:sdt>` strings into `Run.rawXML`, producing malformed
+    /// `<w:p><w:r><w:sdt>...</w:sdt></w:r></w:p>` (SDT inside Run). Now SDTs
+    /// emit as proper siblings of runs: `<w:p><w:r>...</w:r><w:sdt>...</w:sdt></w:p>`.
+    public var contentControls: [ContentControl] = []
+
     public init(runs: [Run] = [], properties: ParagraphProperties = ParagraphProperties()) {
         self.runs = runs
         self.properties = properties
@@ -200,6 +208,11 @@ extension Paragraph {
         // Runs
         for run in runs {
             xml += run.toXML()
+        }
+
+        // v0.15.0+ (#44 task 3.0): Content Controls as proper siblings of runs.
+        for control in contentControls {
+            xml += control.toXML()
         }
 
         // 超連結

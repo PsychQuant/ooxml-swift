@@ -1202,7 +1202,7 @@ public enum SDTLockType: String {
 }
 
 /// 結構化文件標籤（SDT）基礎
-public struct StructuredDocumentTag {
+public struct StructuredDocumentTag: Equatable {
     public var id: Int?                            // SDT 唯一 ID
     public var tag: String?                        // 標籤（用於識別）
     public var alias: String?                      // 顯示名稱
@@ -1476,7 +1476,7 @@ public struct RepeatingSectionItem {
 // MARK: - Content Control (內容控制項)
 
 /// 內容控制項（通用 SDT 包裝）
-public struct ContentControl {
+public struct ContentControl: Equatable {
     public var sdt: StructuredDocumentTag
     public var content: String                     // 內容 XML 或純文字
     public var children: [ContentControl]          // 巢狀子 SDT（Group / RepeatingSection 常用）
