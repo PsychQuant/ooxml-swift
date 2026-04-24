@@ -25,6 +25,12 @@ public enum WordError: Error, LocalizedError {
     case missingParameter(String)
     case invalidParameter(String, String)  // (參數名, 原因)
 
+    // SDT / Content Control 錯誤 (Change A: che-word-mcp-content-controls-read-write)
+    case contentControlNotFound(Int)
+    case unsupportedSDTType(SDTType)
+    case disallowedElement(String)
+    case repeatingSectionItemOutOfBounds(index: Int, count: Int)
+
     // 其他
     case unknownError(String)
 
@@ -56,6 +62,14 @@ public enum WordError: Error, LocalizedError {
             return "Missing required parameter: \(param)"
         case .invalidParameter(let param, let reason):
             return "Invalid parameter '\(param)': \(reason)"
+        case .contentControlNotFound(let id):
+            return "Content control not found: \(id)"
+        case .unsupportedSDTType(let type):
+            return "SDT type does not support this operation: \(type.rawValue)"
+        case .disallowedElement(let name):
+            return "Disallowed element in content XML: \(name)"
+        case .repeatingSectionItemOutOfBounds(let index, let count):
+            return "Repeating section item index \(index) out of bounds (count=\(count))"
         case .unknownError(let message):
             return "Unknown error: \(message)"
         }

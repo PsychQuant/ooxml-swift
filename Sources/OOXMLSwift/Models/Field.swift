@@ -1345,8 +1345,21 @@ public struct RepeatingSection {
         items.append(item)
     }
 
+    /// 更新指定索引位置的項目內容（純文字）
+    ///
+    /// - Parameters:
+    ///   - atIndex: 項目的零基索引
+    ///   - newText: 新的項目文字
+    /// - Throws: `WordError.repeatingSectionItemOutOfBounds` 若索引超出範圍
+    public mutating func updateItem(atIndex index: Int, newText: String) throws {
+        guard index >= 0 && index < items.count else {
+            throw WordError.repeatingSectionItemOutOfBounds(index: index, count: items.count)
+        }
+        items[index].content = newText
+    }
+
     /// 產生完整的重複區段 XML
-    func toXML() -> String {
+    public func toXML() -> String {
         var xml = "<w:sdt>"
 
         // SDT 屬性
@@ -1358,13 +1371,11 @@ public struct RepeatingSection {
             xml += "<w:alias w:val=\"\(escapeXML(alias))\"/>"
         }
 
-        // 重複區段設定
-        xml += "<w15:repeatingSection xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\">"
+        // 重複區段設定（attribute form 如 spec: w15:allowInsertDeleteSections="0|1"）
+        let allowValue = allowInsertDeleteSections ? "1" : "0"
+        xml += "<w15:repeatingSection xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\" w15:allowInsertDeleteSections=\"\(allowValue)\">"
         if let title = sectionTitle {
             xml += "<w15:sectionTitle w15:val=\"\(escapeXML(title))\"/>"
-        }
-        if allowInsertDeleteSections {
-            xml += "<w15:allowInsertDeleteSection w15:val=\"true\"/>"
         }
         xml += "</w15:repeatingSection>"
         xml += "</w:sdtPr>"
@@ -1468,10 +1479,19 @@ public struct RepeatingSectionItem {
 public struct ContentControl {
     public var sdt: StructuredDocumentTag
     public var content: String                     // 內容 XML 或純文字
+    public var children: [ContentControl]          // 巢狀子 SDT（Group / RepeatingSection 常用）
+    public var parentSdtId: Int?                   // 所屬父 SDT 的 id；頂層 SDT 為 nil
 
-    public init(sdt: StructuredDocumentTag, content: String) {
+    public init(
+        sdt: StructuredDocumentTag,
+        content: String,
+        children: [ContentControl] = [],
+        parentSdtId: Int? = nil
+    ) {
         self.sdt = sdt
         self.content = content
+        self.children = children
+        self.parentSdtId = parentSdtId
     }
 
     /// 建立富文本控制項
@@ -1526,7 +1546,7 @@ public struct ContentControl {
     }
 
     /// 產生內容控制項 XML
-    func toXML() -> String {
+    public func toXML() -> String {
         var xml = "<w:sdt>"
         xml += sdt.toSdtPrXML()
         xml += "<w:sdtContent>"
@@ -1536,9 +1556,13 @@ public struct ContentControl {
         } else if !content.isEmpty {
             // 純文字，包裝成段落
             xml += "<w:p><w:r><w:t>\(escapeXML(content))</w:t></w:r></w:p>"
-        } else {
-            // 空內容，插入空段落
+        } else if children.isEmpty {
+            // 空內容且無子項，插入空段落
             xml += "<w:p><w:r><w:t></w:t></w:r></w:p>"
+        }
+        // 巢狀 SDT 依插入順序附加在 content 之後
+        for child in children {
+            xml += child.toXML()
         }
         xml += "</w:sdtContent>"
         xml += "</w:sdt>"
