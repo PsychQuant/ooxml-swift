@@ -29,28 +29,89 @@ final class SDTParserTests: XCTestCase {
         return try DocxReader.read(from: tempURL)
     }
 
-    // MARK: - Task 3.1 placeholder
+    // MARK: - Task 3.1: DocxReader surfaces ContentControls
 
     /// See: `DocxReader parses w:sdt into structured ContentControl values`.
-    /// Enabled by task 3.1.
     func testReaderSurfacesContentControlsAfterTask31() throws {
-        throw XCTSkip("pending task 3.1: DocxReader SDT parser")
+        let doc = try loadFixtureDocument()
+        let allControls = doc.getParagraphs().flatMap { $0.contentControls }
+        XCTAssertGreaterThanOrEqual(allControls.count, 10,
+            "expected 10+ paragraph-level SDTs from fixture, got \(allControls.count)")
+
+        // Spec scenario: plain-text SDT round-trips with tag/alias/type/content.
+        guard let clientName = allControls.first(where: { $0.sdt.tag == "client_name" }) else {
+            XCTFail("client_name SDT not surfaced as structured ContentControl")
+            return
+        }
+        XCTAssertEqual(clientName.sdt.tag, "client_name")
+        XCTAssertEqual(clientName.sdt.alias, "Client Name")
+        XCTAssertEqual(clientName.sdt.type, .plainText)
+        XCTAssertTrue(clientName.content.contains("ACME Corp"),
+            "plain-text SDT content lost: '\(clientName.content)'")
+
+        // Spec scenario: paragraph runs do not contain SDT XML as rawXML.
+        for paragraph in doc.getParagraphs() where !paragraph.contentControls.isEmpty {
+            for run in paragraph.runs {
+                let raw = run.rawXML ?? ""
+                XCTAssertFalse(raw.contains("<w:sdt"),
+                    "SDT leaked into Run.rawXML — should be on Paragraph.contentControls")
+            }
+        }
     }
 
-    // MARK: - Task 3.2 placeholder
+    // MARK: - Task 3.2: 12-type discrimination
 
     /// See: `SDTParser distinguishes all 12 SDT types`.
-    /// Enabled by task 3.2.
     func testAllElevenFixtureSDTsHaveCorrectTypesAfterTask32() throws {
-        throw XCTSkip("pending task 3.2: SDT type discrimination")
+        let doc = try loadFixtureDocument()
+        let byTag: [String: ContentControl] = Dictionary(
+            uniqueKeysWithValues: doc.getParagraphs()
+                .flatMap { $0.contentControls }
+                .compactMap { control in control.sdt.tag.map { ($0, control) } }
+        )
+
+        let expectations: [(tag: String, type: SDTType)] = [
+            ("intro", .richText),
+            ("client_name", .plainText),
+            ("logo", .picture),
+            ("issue_date", .date),
+            ("priority", .dropDownList),
+            ("category", .comboBox),
+            ("acceptance", .checkbox),
+            ("references", .bibliography),
+            ("cite_a", .citation),
+            ("address_block", .group),
+            ("line_items", .repeatingSection),
+        ]
+        for (tag, expectedType) in expectations {
+            guard let control = byTag[tag] else {
+                XCTFail("SDT tag='\(tag)' not surfaced from fixture")
+                continue
+            }
+            XCTAssertEqual(control.sdt.type, expectedType,
+                "type mismatch for tag='\(tag)'")
+        }
     }
 
-    // MARK: - Task 3.3 placeholder
+    // MARK: - Task 3.3: nested SDT tree
 
     /// See: `SDTParser handles nested SDTs by preserving tree structure`.
-    /// Enabled by task 3.3.
     func testGroupSDTHasNestedPlainTextChildAfterTask33() throws {
-        throw XCTSkip("pending task 3.3: nested SDT tree")
+        let doc = try loadFixtureDocument()
+        let groups = doc.getParagraphs()
+            .flatMap { $0.contentControls }
+            .filter { $0.sdt.type == .group }
+        guard let group = groups.first(where: { $0.sdt.tag == "address_block" }) else {
+            XCTFail("address_block group SDT not found")
+            return
+        }
+        XCTAssertEqual(group.children.count, 1,
+            "expected 1 nested plainText child inside address_block group")
+        guard let city = group.children.first else { return }
+        XCTAssertEqual(city.sdt.tag, "city")
+        XCTAssertEqual(city.sdt.type, .plainText)
+        XCTAssertEqual(city.parentSdtId, group.sdt.id,
+            "nested child must reference outer SDT id as parentSdtId")
     }
 
     // MARK: - Task 3.4 placeholder

@@ -627,6 +627,13 @@ public struct DocxReader {
                     paragraph.commentIds.append(id)
                 }
 
+            case "sdt":
+                // v0.15.0+ (#44 task 3.1): paragraph-level SDT becomes a
+                // first-class ContentControl on Paragraph.contentControls
+                // (sibling of runs), not a Run.rawXML blob. See SDD
+                // `che-word-mcp-content-controls-read-write`.
+                paragraph.contentControls.append(SDTParser.parseSDT(from: childElement))
+
             default:
                 if DocxReader.debugLoggingEnabled {
                     let name = childElement.localName ?? "<nil>"
