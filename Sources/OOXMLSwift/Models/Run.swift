@@ -30,6 +30,22 @@ public struct Run: Equatable {
     /// preserves Equatable equality for programmatic Run construction.
     public var rawElements: [RawElement]?
 
+    /// v0.18.0+ (che-word-mcp#45): id of the `Revision` in the enclosing
+    /// `Paragraph.revisions` collection that this run belongs to (insertion,
+    /// deletion, moveFrom, moveTo). When set, `Paragraph.toXML()` groups
+    /// consecutive runs with the same `revisionId` and wraps them with the
+    /// matching `<w:ins>` / `<w:del>` / `<w:moveFrom>` / `<w:moveTo>` element.
+    public var revisionId: Int?
+
+    /// v0.18.0+ (che-word-mcp#45): id of the `Revision` (type `.formatChange`)
+    /// in the enclosing `Paragraph.revisions` whose `previousFormat` describes
+    /// this run's pre-mutation properties. Orthogonal to `revisionId` — a run
+    /// can be a tracked insertion AND carry an independent format-change
+    /// revision. When set, `Paragraph.toXML()` emits `<w:rPrChange>` inside
+    /// the run's `<w:rPr>` block so Word UI shows the format change as a
+    /// tracked revision.
+    public var formatChangeRevisionId: Int?
+
     public init(text: String, properties: RunProperties = RunProperties()) {
         self.text = text
         self.properties = properties
