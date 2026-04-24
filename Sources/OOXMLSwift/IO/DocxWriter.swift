@@ -118,7 +118,7 @@ public struct DocxWriter {
             try writeDocument(document, to: tempDir)
         }
         if !overlayMode || dirty.contains("word/styles.xml") {
-            try writeStyles(document.styles, to: tempDir)
+            try writeStyles(document.styles, latentStyles: document.latentStyles, to: tempDir)
         }
         if !overlayMode || dirty.contains("word/settings.xml") {
             try writeSettings(to: tempDir)
@@ -660,10 +660,41 @@ public struct DocxWriter {
 
     // MARK: - Styles
 
-    private static func writeStyles(_ styles: [Style], to baseURL: URL) throws {
-        let xml = styles.toStylesXML()
+    /// v0.16.0+ (#44 §8): emits styles.xml with optional `<w:latentStyles>`
+    /// block injected after `<w:docDefaults>` and before `<w:style>` entries
+    /// per ECMA-376 schema order.
+    private static func writeStyles(_ styles: [Style], latentStyles: [LatentStyle], to baseURL: URL) throws {
+        var xml = styles.toStylesXML()
+        if !latentStyles.isEmpty {
+            // Insert latentStyles block after </w:docDefaults> and before first <w:style>.
+            let block = renderLatentStylesBlock(latentStyles)
+            if let range = xml.range(of: "</w:docDefaults>") {
+                xml.replaceSubrange(range, with: "</w:docDefaults>\(block)")
+            } else if let firstStyle = xml.range(of: "<w:style ") {
+                xml.replaceSubrange(firstStyle, with: "\(block)<w:style ")
+            } else {
+                // No docDefaults nor styles — append before closing tag.
+                if let endTag = xml.range(of: "</w:styles>") {
+                    xml.replaceSubrange(endTag, with: "\(block)</w:styles>")
+                }
+            }
+        }
         let url = baseURL.appendingPathComponent("word/styles.xml")
         try xml.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private static func renderLatentStylesBlock(_ entries: [LatentStyle]) -> String {
+        var xml = "<w:latentStyles>"
+        for e in entries {
+            var attrs = "w:name=\"\(e.name)\""
+            if let p = e.uiPriority { attrs += " w:uiPriority=\"\(p)\"" }
+            if e.semiHidden { attrs += " w:semiHidden=\"1\"" }
+            if e.unhideWhenUsed { attrs += " w:unhideWhenUsed=\"1\"" }
+            if e.qFormat { attrs += " w:qFormat=\"1\"" }
+            xml += "<w:lsdException \(attrs)/>"
+        }
+        xml += "</w:latentStyles>"
+        return xml
     }
 
     // MARK: - Numbering
