@@ -12,13 +12,38 @@ public struct Header: Equatable {
     /// `DocxReader.read()` populates this from the relationship `Target`
     /// attribute (e.g., `"header4.xml"`). `nil` for newly-built headers
     /// — `fileName` then falls back to type-based default.
-    public var originalFileName: String?
+    ///
+    /// **Security (v0.13.5+, che-word-mcp#55)**: setter validates against
+    /// path traversal (`..`, absolute paths, URL-encoded escapes, control
+    /// chars). Invalid values are silently coerced to `nil`, falling back to
+    /// the type-based default fileName. Same validation applies to the
+    /// initializer parameter.
+    public var originalFileName: String? {
+        didSet {
+            // didSet is not called during init; init runs sanitize itself.
+            originalFileName = Self.sanitizeOriginalFileName(originalFileName)
+        }
+    }
 
     public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, originalFileName: String? = nil) {
         self.id = id
         self.paragraphs = paragraphs
         self.type = type
-        self.originalFileName = originalFileName
+        self.originalFileName = Self.sanitizeOriginalFileName(originalFileName)
+    }
+
+    /// Sanitize a candidate `originalFileName` per #55 security baseline.
+    /// Returns the original value when safe; nil when traversal/absolute/
+    /// control-char detected. Logs rejections to stderr for observability.
+    private static func sanitizeOriginalFileName(_ candidate: String?) -> String? {
+        guard let candidate = candidate else { return nil }
+        if isSafeRelativeOOXMLPath(candidate) {
+            return candidate
+        }
+        FileHandle.standardError.write(
+            Data("Warning: Header.originalFileName rejected unsafe path '\(candidate)' (#55 security baseline); falling back to type-based default\n".utf8)
+        )
+        return nil
     }
 
     /// 建立含單一文字的頁首
