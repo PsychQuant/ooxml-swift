@@ -12,6 +12,16 @@ public struct SectionProperties: Equatable {
     public var columns: Int                 // 欄數
     public var docGrid: DocumentGrid?       // 文件格線
 
+    /// v0.16.0+ (#44 §4): per-type header/footer references
+    public var headerReferences: HeaderFooterReferences = HeaderFooterReferences()
+    public var footerReferences: HeaderFooterReferences = HeaderFooterReferences()
+    public var lineNumbers: LineNumbers?
+    public var verticalAlignment: SectionVerticalAlignment?
+    public var pageNumberFormat: SectionPageNumberFormat?
+    public var pageNumberStartValue: Int?
+    public var titlePageDistinct: Bool = false
+    public var sectionBreakType: SectionBreakType?
+
     public init(pageSize: PageSize = .letter,
          pageMargins: PageMargins = .normal,
          orientation: PageOrientation = .portrait,
@@ -27,6 +37,58 @@ public struct SectionProperties: Equatable {
         self.columns = columns
         self.docGrid = docGrid
     }
+}
+
+/// v0.16.0+ (#44 §4): per-type rId map for headers or footers (default / first / even).
+public struct HeaderFooterReferences: Equatable {
+    public var defaultRef: String?
+    public var firstRef: String?
+    public var evenRef: String?
+
+    public init(defaultRef: String? = nil, firstRef: String? = nil, evenRef: String? = nil) {
+        self.defaultRef = defaultRef
+        self.firstRef = firstRef
+        self.evenRef = evenRef
+    }
+}
+
+/// v0.16.0+ (#44 §4): line numbering settings (`<w:lnNumType>`).
+public struct LineNumbers: Equatable {
+    public var countBy: Int
+    public var start: Int?
+    public var restart: LineNumberRestart
+
+    public init(countBy: Int, start: Int? = nil, restart: LineNumberRestart = .continuous) {
+        self.countBy = countBy
+        self.start = start
+        self.restart = restart
+    }
+}
+
+/// v0.16.0+ (#44 §4): when line numbering restarts.
+public enum LineNumberRestart: String {
+    case continuous = "continuous"
+    case newSection = "newSection"
+    case newPage = "newPage"
+}
+
+/// v0.16.0+ (#44 §4): section content vertical alignment (`<w:vAlign>`).
+/// Distinct from `Image.VerticalAlignment` (image positioning enum).
+public enum SectionVerticalAlignment: String {
+    case top = "top"
+    case center = "center"
+    case bottom = "bottom"
+    case both = "both"
+}
+
+/// v0.16.0+ (#44 §4): page number format (`<w:pgNumType w:fmt>`).
+/// Distinct from `Footer.PageNumberFormat` (footer-level format enum).
+public enum SectionPageNumberFormat: String {
+    case decimal = "decimal"
+    case lowerRoman = "lowerRoman"
+    case upperRoman = "upperRoman"
+    case lowerLetter = "lowerLetter"
+    case upperLetter = "upperLetter"
 }
 
 // MARK: - Page Size
@@ -197,14 +259,33 @@ extension SectionProperties {
     func toXML() -> String {
         var xml = "<w:sectPr>"
 
-        // 頁首參照
-        if let headerRef = headerReference {
-            xml += "<w:headerReference w:type=\"default\" r:id=\"\(headerRef)\"/>"
+        // v0.16.0+ (#44 §4): per-type header refs first, then default if no per-type set
+        if let h = headerReferences.defaultRef {
+            xml += "<w:headerReference w:type=\"default\" r:id=\"\(h)\"/>"
+        } else if let h = headerReference {
+            xml += "<w:headerReference w:type=\"default\" r:id=\"\(h)\"/>"
+        }
+        if let h = headerReferences.firstRef {
+            xml += "<w:headerReference w:type=\"first\" r:id=\"\(h)\"/>"
+        }
+        if let h = headerReferences.evenRef {
+            xml += "<w:headerReference w:type=\"even\" r:id=\"\(h)\"/>"
+        }
+        if let f = footerReferences.defaultRef {
+            xml += "<w:footerReference w:type=\"default\" r:id=\"\(f)\"/>"
+        } else if let f = footerReference {
+            xml += "<w:footerReference w:type=\"default\" r:id=\"\(f)\"/>"
+        }
+        if let f = footerReferences.firstRef {
+            xml += "<w:footerReference w:type=\"first\" r:id=\"\(f)\"/>"
+        }
+        if let f = footerReferences.evenRef {
+            xml += "<w:footerReference w:type=\"even\" r:id=\"\(f)\"/>"
         }
 
-        // 頁尾參照
-        if let footerRef = footerReference {
-            xml += "<w:footerReference w:type=\"default\" r:id=\"\(footerRef)\"/>"
+        // v0.16.0+ (#44 §4): section break type, page number format, line numbers, vAlign, titlePg
+        if let breakType = sectionBreakType {
+            xml += "<w:type w:val=\"\(breakType.rawValue)\"/>"
         }
 
         // 頁面大小
@@ -217,8 +298,36 @@ extension SectionProperties {
         // 頁邊距
         xml += "<w:pgMar w:top=\"\(pageMargins.top)\" w:right=\"\(pageMargins.right)\" w:bottom=\"\(pageMargins.bottom)\" w:left=\"\(pageMargins.left)\" w:header=\"\(pageMargins.header)\" w:footer=\"\(pageMargins.footer)\" w:gutter=\"\(pageMargins.gutter)\"/>"
 
+        // v0.16.0+ (#44 §4): pgNumType — both start and fmt go on one element
+        if let fmt = pageNumberFormat {
+            var pgNumAttrs = ""
+            if let start = pageNumberStartValue {
+                pgNumAttrs += "w:start=\"\(start)\" "
+            }
+            pgNumAttrs += "w:fmt=\"\(fmt.rawValue)\""
+            xml += "<w:pgNumType \(pgNumAttrs)/>"
+        }
+
         // 欄設定
         xml += "<w:cols w:space=\"720\" w:num=\"\(columns)\"/>"
+
+        // v0.16.0+ (#44 §4): line numbering
+        if let ln = lineNumbers {
+            var attrs = "w:countBy=\"\(ln.countBy)\""
+            if let s = ln.start { attrs += " w:start=\"\(s)\"" }
+            attrs += " w:restart=\"\(ln.restart.rawValue)\""
+            xml += "<w:lnNumType \(attrs)/>"
+        }
+
+        // v0.16.0+ (#44 §4): vertical alignment
+        if let vAlign = verticalAlignment {
+            xml += "<w:vAlign w:val=\"\(vAlign.rawValue)\"/>"
+        }
+
+        // v0.16.0+ (#44 §4): titlePg
+        if titlePageDistinct {
+            xml += "<w:titlePg/>"
+        }
 
         // 文件格線
         if let grid = docGrid {

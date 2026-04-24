@@ -31,6 +31,12 @@ public enum WordError: Error, LocalizedError {
     case disallowedElement(String)
     case repeatingSectionItemOutOfBounds(index: Int, count: Int)
 
+    // Style / Numbering / Section 錯誤 (#44: che-word-mcp-styles-sections-numbering-foundations)
+    case styleNotFound(String)
+    case typeMismatch(expected: String, actual: String)
+    case numIdNotFound(Int)
+    case abstractNumIdNotFound(Int)
+
     // 其他
     case unknownError(String)
 
@@ -70,6 +76,14 @@ public enum WordError: Error, LocalizedError {
             return "Disallowed element in content XML: \(name)"
         case .repeatingSectionItemOutOfBounds(let index, let count):
             return "Repeating section item index \(index) out of bounds (count=\(count))"
+        case .styleNotFound(let id):
+            return "Style not found: \(id)"
+        case .typeMismatch(let expected, let actual):
+            return "Type mismatch: expected \(expected), got \(actual)"
+        case .numIdNotFound(let id):
+            return "Numbering numId not found: \(id)"
+        case .abstractNumIdNotFound(let id):
+            return "Numbering abstractNumId not found: \(id)"
         case .unknownError(let message):
             return "Unknown error: \(message)"
         }

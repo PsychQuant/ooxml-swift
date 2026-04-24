@@ -55,6 +55,7 @@ public struct DocxReader {
             let stylesData = try Data(contentsOf: stylesURL)
             let stylesXML = try XMLDocument(data: stylesData)
             document.styles = try parseStyles(from: stylesXML)
+            document.latentStyles = parseLatentStyles(from: stylesXML)
         }
 
         // 6. 讀取 numbering.xml（可選，用於清單語義標註）
@@ -1364,6 +1365,27 @@ public struct DocxReader {
             // 快速樣式
             style.isQuickStyle = element.elements(forName: "w:qFormat").first != nil
 
+            // v0.16.0+ (#44 §8): linked paragraph↔character style
+            if let link = element.elements(forName: "w:link").first,
+               let val = link.attribute(forName: "w:val")?.stringValue {
+                style.linkedStyleId = val
+            }
+
+            // v0.16.0+ (#44 §8): visibility flags
+            style.hidden = element.elements(forName: "w:hidden").first != nil
+            style.semiHidden = element.elements(forName: "w:semiHidden").first != nil
+
+            // v0.16.0+ (#44 §8): localized name aliases — additional <w:name>
+            // elements with xml:lang. The first <w:name> (already consumed
+            // above) is the primary; subsequent ones with xml:lang are aliases.
+            let nameElements = element.elements(forName: "w:name")
+            for nameEl in nameElements.dropFirst() {
+                guard let lang = nameEl.attribute(forName: "xml:lang")?.stringValue,
+                      let val = nameEl.attribute(forName: "w:val")?.stringValue
+                else { continue }
+                style.aliases.append(StyleAlias(lang: lang, name: val))
+            }
+
             // 段落屬性
             if let pPr = element.elements(forName: "w:pPr").first {
                 style.paragraphProperties = parseParagraphProperties(from: pPr)
@@ -1383,6 +1405,32 @@ public struct DocxReader {
         }
 
         return styles
+    }
+
+    /// v0.16.0+ (#44 §8): parse `<w:latentStyles>` block into LatentStyle entries.
+    /// Returns empty array when no block is present.
+    private static func parseLatentStyles(from xml: XMLDocument) -> [LatentStyle] {
+        guard let nodes = try? xml.nodes(forXPath: "//*[local-name()='lsdException']") else {
+            return []
+        }
+        var entries: [LatentStyle] = []
+        for node in nodes {
+            guard let el = node as? XMLElement,
+                  let name = el.attribute(forName: "w:name")?.stringValue
+            else { continue }
+            let priority = el.attribute(forName: "w:uiPriority")?.stringValue.flatMap(Int.init)
+            let semiHidden = el.attribute(forName: "w:semiHidden")?.stringValue == "1"
+            let unhideWhenUsed = el.attribute(forName: "w:unhideWhenUsed")?.stringValue == "1"
+            let qFormat = el.attribute(forName: "w:qFormat")?.stringValue == "1"
+            entries.append(LatentStyle(
+                name: name,
+                uiPriority: priority,
+                semiHidden: semiHidden,
+                unhideWhenUsed: unhideWhenUsed,
+                qFormat: qFormat
+            ))
+        }
+        return entries
     }
 
     // MARK: - Core Properties Parsing
@@ -1536,7 +1584,19 @@ public struct DocxReader {
                   let abstractNumIdStr = abstractNumIdRef.attribute(forName: "w:val")?.stringValue,
                   let abstractNumId = Int(abstractNumIdStr) else { continue }
 
-            let num = Num(numId: numId, abstractNumId: abstractNumId)
+            // v0.16.0+ (#44 §3): parse w:lvlOverride children
+            var overrides: [LvlOverride] = []
+            for ovEl in element.elements(forName: "w:lvlOverride") {
+                guard let ilvlStr = ovEl.attribute(forName: "w:ilvl")?.stringValue,
+                      let ilvl = Int(ilvlStr),
+                      let startEl = ovEl.elements(forName: "w:startOverride").first,
+                      let startStr = startEl.attribute(forName: "w:val")?.stringValue,
+                      let start = Int(startStr)
+                else { continue }
+                overrides.append(LvlOverride(ilvl: ilvl, startOverride: start))
+            }
+
+            let num = Num(numId: numId, abstractNumId: abstractNumId, lvlOverrides: overrides)
             numbering.nums.append(num)
         }
 

@@ -96,10 +96,25 @@ public struct AbstractNum: Equatable {
 public struct Num: Equatable {
     public var numId: Int
     public var abstractNumId: Int
+    /// v0.16.0+ (#44 §3): per-level start overrides
+    /// (`<w:lvlOverride w:ilvl="N"><w:startOverride w:val="M"/></w:lvlOverride>`)
+    public var lvlOverrides: [LvlOverride]
 
-    public init(numId: Int, abstractNumId: Int) {
+    public init(numId: Int, abstractNumId: Int, lvlOverrides: [LvlOverride] = []) {
         self.numId = numId
         self.abstractNumId = abstractNumId
+        self.lvlOverrides = lvlOverrides
+    }
+}
+
+/// v0.16.0+ (#44 §3): per-level start override for a `<w:num>` instance.
+public struct LvlOverride: Equatable {
+    public var ilvl: Int
+    public var startOverride: Int
+
+    public init(ilvl: Int, startOverride: Int) {
+        self.ilvl = ilvl
+        self.startOverride = startOverride
     }
 }
 
@@ -140,6 +155,10 @@ public enum NumberFormat: String {
     case lowerRoman = "lowerRoman"      // i, ii, iii
     case upperRoman = "upperRoman"      // I, II, III
     case none = "none"                  // 無編號
+    // v0.16.0+ (#44 §3): additional formats from Office.js spec parity
+    case ordinal = "ordinal"            // 1st, 2nd, 3rd
+    case cardinalText = "cardinalText"  // One, Two, Three
+    case decimalZero = "decimalZero"    // 01, 02, 03
 }
 
 // MARK: - XML Generation
@@ -183,7 +202,12 @@ extension AbstractNum {
 
 extension Num {
     func toXML() -> String {
-        return "<w:num w:numId=\"\(numId)\"><w:abstractNumId w:val=\"\(abstractNumId)\"/></w:num>"
+        var xml = "<w:num w:numId=\"\(numId)\"><w:abstractNumId w:val=\"\(abstractNumId)\"/>"
+        for o in lvlOverrides {
+            xml += "<w:lvlOverride w:ilvl=\"\(o.ilvl)\"><w:startOverride w:val=\"\(o.startOverride)\"/></w:lvlOverride>"
+        }
+        xml += "</w:num>"
+        return xml
     }
 }
 

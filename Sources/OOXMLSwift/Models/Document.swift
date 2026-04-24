@@ -72,6 +72,10 @@ public struct WordDocument: Equatable {
         modifiedParts.insert(partPath)
     }
 
+    /// v0.16.0+ (#44 §8): latentStyles for Quick Style Gallery defaults of
+    /// built-in styles not yet materialized as `<w:style>` blocks.
+    public var latentStyles: [LatentStyle] = []
+
     public init() {
         self.body = Body()
         self.styles = Style.defaultStyles
@@ -2487,6 +2491,340 @@ extension WordDocument {
             maxId = max(maxId, extractMaxSdtIdFromControl(child))
         }
         return maxId
+    }
+
+    // MARK: - Style Mutations (#44 styles-sections-numbering-foundations Phase 3)
+
+    /// Traverse the `basedOn` reference chain from `styleId` upward to root.
+    ///
+    /// Returns ordered chain starting with the queried style itself, ending
+    /// at a root style (one with no `basedOn`). When the chain contains a
+    /// cycle, traversal stops at the first revisited style and the prefix
+    /// is returned (callers MAY detect a cycle when the chain length seems
+    /// short relative to expectation).
+    ///
+    /// Returns empty array when `styleId` does not exist.
+    public func getStyleInheritanceChain(styleId: String) -> [Style] {
+        guard styles.contains(where: { $0.id == styleId }) else { return [] }
+        var chain: [Style] = []
+        var visited: Set<String> = []
+        var currentId: String? = styleId
+        while let id = currentId {
+            if visited.contains(id) { break }
+            visited.insert(id)
+            guard let style = styles.first(where: { $0.id == id }) else { break }
+            chain.append(style)
+            currentId = style.basedOn
+        }
+        return chain
+    }
+
+    /// Set bidirectional `<w:link>` between a paragraph and a character style.
+    ///
+    /// - Throws: `WordError.styleNotFound(id)` when either id is missing.
+    ///   `WordError.typeMismatch(expected:actual:)` when the paragraph style is
+    ///   not `.paragraph` type or character style is not `.character` type.
+    public mutating func linkStyles(paragraphStyleId: String, characterStyleId: String) throws {
+        guard let pIdx = styles.firstIndex(where: { $0.id == paragraphStyleId }) else {
+            throw WordError.styleNotFound(paragraphStyleId)
+        }
+        guard let cIdx = styles.firstIndex(where: { $0.id == characterStyleId }) else {
+            throw WordError.styleNotFound(characterStyleId)
+        }
+        guard styles[pIdx].type == .paragraph else {
+            throw WordError.typeMismatch(expected: "paragraph", actual: styles[pIdx].type.rawValue)
+        }
+        guard styles[cIdx].type == .character else {
+            throw WordError.typeMismatch(expected: "character", actual: styles[cIdx].type.rawValue)
+        }
+        styles[pIdx].linkedStyleId = characterStyleId
+        styles[cIdx].linkedStyleId = paragraphStyleId
+        modifiedParts.insert("word/styles.xml")
+    }
+
+    /// Add or replace a localized name alias on a style.
+    ///
+    /// If an alias with the same `lang` already exists, it is replaced rather
+    /// than duplicated.
+    ///
+    /// - Throws: `WordError.styleNotFound(styleId)` when the style is missing.
+    public mutating func addStyleNameAlias(styleId: String, lang: String, name: String) throws {
+        guard let idx = styles.firstIndex(where: { $0.id == styleId }) else {
+            throw WordError.styleNotFound(styleId)
+        }
+        if let existing = styles[idx].aliases.firstIndex(where: { $0.lang == lang }) {
+            styles[idx].aliases[existing].name = name
+        } else {
+            styles[idx].aliases.append(StyleAlias(lang: lang, name: name))
+        }
+        modifiedParts.insert("word/styles.xml")
+    }
+
+    /// Replace the document's `latentStyles` collection wholesale.
+    /// Pass an empty array to remove the `<w:latentStyles>` block entirely.
+    public mutating func setLatentStyles(_ entries: [LatentStyle]) {
+        latentStyles = entries
+        modifiedParts.insert("word/styles.xml")
+    }
+
+    // MARK: - Section Mutations (#44 styles-sections-numbering-foundations Phase 5)
+
+    /// SectionInfo: summary returned by `getAllSections`.
+    public struct SectionInfo: Equatable {
+        public let sectionIndex: Int
+        public let paragraphRange: ClosedRange<Int>
+        public let pageSize: PageSize
+        public let pageMargins: PageMargins
+        public let orientation: PageOrientation
+        public let columns: Int
+        public let lineNumbers: LineNumbers?
+        public let verticalAlignment: SectionVerticalAlignment?
+        public let pageNumberFormat: SectionPageNumberFormat?
+        public let sectionBreakType: SectionBreakType?
+        public let titlePageDistinct: Bool
+        public let headerReferences: HeaderFooterReferences
+        public let footerReferences: HeaderFooterReferences
+    }
+
+    /// Set line numbering on the document's section properties.
+    /// Currently the document holds a single `sectionProperties` — `sectionIndex`
+    /// must be 0 until multi-section support lands.
+    ///
+    /// Throws `WordError.invalidIndex(sectionIndex)` for any non-zero index.
+    public mutating func setSectionLineNumbers(
+        sectionIndex: Int,
+        countBy: Int,
+        start: Int? = nil,
+        restart: LineNumberRestart = .continuous
+    ) throws {
+        guard sectionIndex == 0 else { throw WordError.invalidIndex(sectionIndex) }
+        sectionProperties.lineNumbers = LineNumbers(countBy: countBy, start: start, restart: restart)
+        modifiedParts.insert("word/document.xml")
+    }
+
+    /// Set the vertical alignment of section content.
+    public mutating func setSectionVerticalAlignment(
+        sectionIndex: Int,
+        alignment: SectionVerticalAlignment
+    ) throws {
+        guard sectionIndex == 0 else { throw WordError.invalidIndex(sectionIndex) }
+        sectionProperties.verticalAlignment = alignment
+        modifiedParts.insert("word/document.xml")
+    }
+
+    /// Set page number format (decimal / Roman / letter) and optional start value.
+    public mutating func setSectionPageNumberFormat(
+        sectionIndex: Int,
+        start: Int? = nil,
+        format: SectionPageNumberFormat
+    ) throws {
+        guard sectionIndex == 0 else { throw WordError.invalidIndex(sectionIndex) }
+        sectionProperties.pageNumberFormat = format
+        sectionProperties.pageNumberStartValue = start
+        modifiedParts.insert("word/document.xml")
+    }
+
+    /// Set section break type (nextPage / continuous / evenPage / oddPage).
+    public mutating func setSectionBreakType(
+        sectionIndex: Int,
+        type: SectionBreakType
+    ) throws {
+        guard sectionIndex == 0 else { throw WordError.invalidIndex(sectionIndex) }
+        sectionProperties.sectionBreakType = type
+        modifiedParts.insert("word/document.xml")
+    }
+
+    /// Toggle `<w:titlePg/>` in the section's properties.
+    public mutating func setTitlePageDistinct(
+        sectionIndex: Int,
+        enabled: Bool
+    ) throws {
+        guard sectionIndex == 0 else { throw WordError.invalidIndex(sectionIndex) }
+        sectionProperties.titlePageDistinct = enabled
+        modifiedParts.insert("word/document.xml")
+    }
+
+    /// Assign per-type header / footer rId references on a section.
+    /// Provided keys overwrite; omitted keys are left unchanged.
+    public mutating func setSectionHeaderFooterReferences(
+        sectionIndex: Int,
+        headerDefault: String? = nil,
+        headerFirst: String? = nil,
+        headerEven: String? = nil,
+        footerDefault: String? = nil,
+        footerFirst: String? = nil,
+        footerEven: String? = nil
+    ) throws {
+        guard sectionIndex == 0 else { throw WordError.invalidIndex(sectionIndex) }
+        if let h = headerDefault { sectionProperties.headerReferences.defaultRef = h }
+        if let h = headerFirst { sectionProperties.headerReferences.firstRef = h }
+        if let h = headerEven { sectionProperties.headerReferences.evenRef = h }
+        if let f = footerDefault { sectionProperties.footerReferences.defaultRef = f }
+        if let f = footerFirst { sectionProperties.footerReferences.firstRef = f }
+        if let f = footerEven { sectionProperties.footerReferences.evenRef = f }
+        modifiedParts.insert("word/document.xml")
+    }
+
+    /// Return one SectionInfo per section. Currently always one entry
+    /// (single-section document model — multi-section split lands later).
+    public func getAllSections() -> [SectionInfo] {
+        let paraIndices = body.children.enumerated().compactMap { (i, c) -> Int? in
+            if case .paragraph = c { return i }
+            return nil
+        }
+        let lastIdx = max(paraIndices.count - 1, 0)
+        return [
+            SectionInfo(
+                sectionIndex: 0,
+                paragraphRange: 0...lastIdx,
+                pageSize: sectionProperties.pageSize,
+                pageMargins: sectionProperties.pageMargins,
+                orientation: sectionProperties.orientation,
+                columns: sectionProperties.columns,
+                lineNumbers: sectionProperties.lineNumbers,
+                verticalAlignment: sectionProperties.verticalAlignment,
+                pageNumberFormat: sectionProperties.pageNumberFormat,
+                sectionBreakType: sectionProperties.sectionBreakType,
+                titlePageDistinct: sectionProperties.titlePageDistinct,
+                headerReferences: sectionProperties.headerReferences,
+                footerReferences: sectionProperties.footerReferences
+            )
+        ]
+    }
+
+    // MARK: - Numbering Mutations (#44 styles-sections-numbering-foundations Phase 4)
+
+    /// Create a new abstractNum + paired num in numbering.xml.
+    ///
+    /// - Throws: `WordError.invalidIndex(0)` when `levels` is empty,
+    ///   `WordError.invalidIndex(levels.count)` when more than 9 levels.
+    /// - Returns: the new numId allocated for the paired `<w:num>`.
+    public mutating func createNumberingDefinition(levels: [Level]) throws -> Int {
+        guard !levels.isEmpty else { throw WordError.invalidIndex(0) }
+        guard levels.count <= 9 else { throw WordError.invalidIndex(levels.count) }
+
+        let abstractNumId = numbering.nextAbstractNumId
+        let numId = numbering.nextNumId
+        numbering.abstractNums.append(AbstractNum(abstractNumId: abstractNumId, levels: levels))
+        numbering.nums.append(Num(numId: numId, abstractNumId: abstractNumId))
+        modifiedParts.insert("word/numbering.xml")
+        return numId
+    }
+
+    /// Add a `<w:lvlOverride>` to the named num. Replaces any existing
+    /// override for the same level on that num.
+    ///
+    /// - Throws: `WordError.numIdNotFound(numId)` when the num does not exist.
+    public mutating func overrideNumberingLevel(numId: Int, level: Int, startValue: Int) throws {
+        guard let idx = numbering.nums.firstIndex(where: { $0.numId == numId }) else {
+            throw WordError.numIdNotFound(numId)
+        }
+        if let existing = numbering.nums[idx].lvlOverrides.firstIndex(where: { $0.ilvl == level }) {
+            numbering.nums[idx].lvlOverrides[existing].startOverride = startValue
+        } else {
+            numbering.nums[idx].lvlOverrides.append(LvlOverride(ilvl: level, startOverride: startValue))
+        }
+        modifiedParts.insert("word/numbering.xml")
+    }
+
+    /// Attach a numId+level to the paragraph at the given top-level body index.
+    ///
+    /// Marks BOTH `word/numbering.xml` (numId reference touched) AND
+    /// `word/document.xml` (paragraph mutated) dirty.
+    ///
+    /// - Throws: `WordError.numIdNotFound(numId)` when the num is missing,
+    ///   `WordError.invalidIndex(paragraphIndex)` when the paragraph index
+    ///   is out of bounds.
+    public mutating func assignNumberingToParagraph(paragraphIndex: Int, numId: Int, level: Int) throws {
+        guard numbering.nums.contains(where: { $0.numId == numId }) else {
+            throw WordError.numIdNotFound(numId)
+        }
+        let paragraphIndices = body.children.enumerated().compactMap { (i, child) -> Int? in
+            if case .paragraph = child { return i }
+            return nil
+        }
+        guard paragraphIndex >= 0 && paragraphIndex < paragraphIndices.count else {
+            throw WordError.invalidIndex(paragraphIndex)
+        }
+        let actualIndex = paragraphIndices[paragraphIndex]
+        if case .paragraph(var para) = body.children[actualIndex] {
+            para.properties.numbering = NumberingInfo(numId: numId, level: level)
+            body.children[actualIndex] = .paragraph(para)
+        }
+        modifiedParts.insert("word/document.xml")
+        modifiedParts.insert("word/numbering.xml")
+    }
+
+    /// Continue an existing list — assign the same numId as a previously
+    /// numbered paragraph to a new paragraph at level 0.
+    ///
+    /// - Throws: `WordError.numIdNotFound(numId)` or `WordError.invalidIndex`.
+    public mutating func continueList(paragraphIndex: Int, previousListNumId: Int) throws {
+        try assignNumberingToParagraph(paragraphIndex: paragraphIndex, numId: previousListNumId, level: 0)
+    }
+
+    /// Start a new list referencing an existing abstractNum, returning the
+    /// freshly-allocated numId.
+    ///
+    /// - Throws: `WordError.abstractNumIdNotFound` or `WordError.invalidIndex`.
+    @discardableResult
+    public mutating func startNewList(paragraphIndex: Int, abstractNumId: Int, level: Int = 0) throws -> Int {
+        guard numbering.abstractNums.contains(where: { $0.abstractNumId == abstractNumId }) else {
+            throw WordError.abstractNumIdNotFound(abstractNumId)
+        }
+        let numId = numbering.nextNumId
+        numbering.nums.append(Num(numId: numId, abstractNumId: abstractNumId))
+        // Now assign — assignNumberingToParagraph marks both parts dirty.
+        try assignNumberingToParagraph(paragraphIndex: paragraphIndex, numId: numId, level: level)
+        return numId
+    }
+
+    /// Sweep `<w:num>` entries whose numId is not referenced by any paragraph
+    /// (anywhere — top-level, inside tables, inside block-level SDTs).
+    ///
+    /// AbstractNums are templates and are NOT GCed even when unreferenced.
+    ///
+    /// - Returns: deleted numIds in numId order.
+    @discardableResult
+    public mutating func gcOrphanNumbering() -> [Int] {
+        var referenced: Set<Int> = []
+        func collectFromBodyChild(_ child: BodyChild) {
+            switch child {
+            case .paragraph(let p):
+                if let numInfo = p.properties.numbering { referenced.insert(numInfo.numId) }
+            case .table(let table):
+                for row in table.rows {
+                    for cell in row.cells {
+                        for cellPara in cell.paragraphs {
+                            if let numInfo = cellPara.properties.numbering {
+                                referenced.insert(numInfo.numId)
+                            }
+                        }
+                    }
+                }
+            case .contentControl(_, let children):
+                for c in children { collectFromBodyChild(c) }
+            }
+        }
+        for c in body.children { collectFromBodyChild(c) }
+        // Headers / footers also have paragraphs that may carry numbering refs.
+        for header in headers {
+            for p in header.paragraphs {
+                if let numInfo = p.properties.numbering { referenced.insert(numInfo.numId) }
+            }
+        }
+        for footer in footers {
+            for p in footer.paragraphs {
+                if let numInfo = p.properties.numbering { referenced.insert(numInfo.numId) }
+            }
+        }
+
+        let allNumIds = numbering.nums.map { $0.numId }.sorted()
+        let orphans = allNumIds.filter { !referenced.contains($0) }
+        guard !orphans.isEmpty else { return [] }
+        numbering.nums.removeAll { orphans.contains($0.numId) }
+        modifiedParts.insert("word/numbering.xml")
+        return orphans
     }
 
     // MARK: - Content Control Mutations (#44 Phase 4)

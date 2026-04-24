@@ -6,9 +6,18 @@ public struct Style: Equatable {
     public var name: String            // 顯示名稱
     public var type: StyleType         // 樣式類型
     public var basedOn: String?        // 基於的樣式
-    public var nextStyle: String?      // 下一段使用的樣式
+    public var nextStyle: String?      // 下一段使用的樣式（== nextStyleId in spec)
     public var isDefault: Bool         // 是否為預設樣式
-    public var isQuickStyle: Bool      // 是否顯示在快速樣式庫
+    public var isQuickStyle: Bool      // 是否顯示在快速樣式庫（== qFormat in spec)
+
+    /// v0.16.0+ (#44 §8): paragraph↔character link target style id (`<w:link w:val="...">`)
+    public var linkedStyleId: String?
+    /// v0.16.0+ (#44 §8): hide entirely from styles pane (`<w:hidden/>`)
+    public var hidden: Bool
+    /// v0.16.0+ (#44 §8): hide from default UI but show when used (`<w:semiHidden/>`)
+    public var semiHidden: Bool
+    /// v0.16.0+ (#44 §8): localized name aliases (additional `<w:name>` entries with `xml:lang`)
+    public var aliases: [StyleAlias]
 
     public var paragraphProperties: ParagraphProperties?
     public var runProperties: RunProperties?
@@ -20,6 +29,10 @@ public struct Style: Equatable {
          nextStyle: String? = nil,
          isDefault: Bool = false,
          isQuickStyle: Bool = true,
+         linkedStyleId: String? = nil,
+         hidden: Bool = false,
+         semiHidden: Bool = false,
+         aliases: [StyleAlias] = [],
          paragraphProperties: ParagraphProperties? = nil,
          runProperties: RunProperties? = nil) {
         self.id = id
@@ -29,8 +42,49 @@ public struct Style: Equatable {
         self.nextStyle = nextStyle
         self.isDefault = isDefault
         self.isQuickStyle = isQuickStyle
+        self.linkedStyleId = linkedStyleId
+        self.hidden = hidden
+        self.semiHidden = semiHidden
+        self.aliases = aliases
         self.paragraphProperties = paragraphProperties
         self.runProperties = runProperties
+    }
+}
+
+/// v0.16.0+ (#44 §8): localized style name alias (`<w:name w:val="..." xml:lang="..."/>`)
+public struct StyleAlias: Equatable {
+    public var lang: String   // BCP 47 (e.g., "de-DE", "ja-JP")
+    public var name: String
+
+    public init(lang: String, name: String) {
+        self.lang = lang
+        self.name = name
+    }
+}
+
+/// v0.16.0+ (#44 §8): latentStyles entry — would-be Quick Style Gallery
+/// behavior for built-in styles that are not yet materialized as
+/// `<w:style>` blocks. Lives parallel to Document.styles, not nested.
+/// Reference: ECMA-376 Part 1 §17.7.4.7 (`<w:lsdException>`).
+public struct LatentStyle: Equatable {
+    public var name: String
+    public var uiPriority: Int?
+    public var semiHidden: Bool
+    public var unhideWhenUsed: Bool
+    public var qFormat: Bool
+
+    public init(
+        name: String,
+        uiPriority: Int? = nil,
+        semiHidden: Bool = false,
+        unhideWhenUsed: Bool = false,
+        qFormat: Bool = false
+    ) {
+        self.name = name
+        self.uiPriority = uiPriority
+        self.semiHidden = semiHidden
+        self.unhideWhenUsed = unhideWhenUsed
+        self.qFormat = qFormat
     }
 }
 
@@ -235,8 +289,11 @@ extension Style {
         }
         parts.append("<w:style \(attrs)>")
 
-        // 名稱
+        // 名稱（含 v0.16.0+ 本地化別名）
         parts.append("<w:name w:val=\"\(name)\"/>")
+        for alias in aliases {
+            parts.append("<w:name w:val=\"\(alias.name)\" xml:lang=\"\(alias.lang)\"/>")
+        }
 
         // 基於
         if let basedOn = basedOn {
@@ -246,6 +303,19 @@ extension Style {
         // 下一段樣式
         if let nextStyle = nextStyle {
             parts.append("<w:next w:val=\"\(nextStyle)\"/>")
+        }
+
+        // v0.16.0+ (#44 §8): linked paragraph↔character style
+        if let linkedStyleId = linkedStyleId {
+            parts.append("<w:link w:val=\"\(linkedStyleId)\"/>")
+        }
+
+        // v0.16.0+ (#44 §8): visibility
+        if hidden {
+            parts.append("<w:hidden/>")
+        }
+        if semiHidden {
+            parts.append("<w:semiHidden/>")
         }
 
         // 快速樣式
