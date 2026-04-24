@@ -1364,6 +1364,11 @@ public struct RepeatingSection {
 
         // SDT 屬性
         xml += "<w:sdtPr>"
+        // v0.15.1+ (#44 Phase 6.4): emit <w:id> so MCP layer can locate
+        // the repeating section by id for list / update operations.
+        if let id = sdt.id {
+            xml += "<w:id w:val=\"\(id)\"/>"
+        }
         if let tag = sdt.tag {
             xml += "<w:tag w:val=\"\(escapeXML(tag))\"/>"
         }
