@@ -921,10 +921,46 @@ public struct WordDocument: Equatable {
         return allocator.allocate()
     }
 
+    /// v0.13.5+ (#53): allocate a unique header fileName for the given type
+    /// among existing typed-model headers. Returns `headerN.xml` (default),
+    /// `headerFirstN.xml`, or `headerEvenN.xml` where N is the smallest
+    /// positive integer such that no existing header has the same fileName.
+    private func allocateHeaderFileName(for type: HeaderFooterType) -> String {
+        let prefix: String
+        switch type {
+        case .default: prefix = "header"
+        case .first: prefix = "headerFirst"
+        case .even: prefix = "headerEven"
+        }
+        let existing = Set(headers.map { $0.fileName })
+        var n = 1
+        while existing.contains("\(prefix)\(n).xml") { n += 1 }
+        return "\(prefix)\(n).xml"
+    }
+
+    /// v0.13.5+ (#53): allocate a unique footer fileName. Same logic as
+    /// `allocateHeaderFileName(for:)` but scans `footers`.
+    private func allocateFooterFileName(for type: HeaderFooterType) -> String {
+        let prefix: String
+        switch type {
+        case .default: prefix = "footer"
+        case .first: prefix = "footerFirst"
+        case .even: prefix = "footerEven"
+        }
+        let existing = Set(footers.map { $0.fileName })
+        var n = 1
+        while existing.contains("\(prefix)\(n).xml") { n += 1 }
+        return "\(prefix)\(n).xml"
+    }
+
     /// 新增頁首
     public mutating func addHeader(text: String, type: HeaderFooterType = .default) -> Header {
         let id = nextRelationshipId
-        let header = Header.withText(text, id: id, type: type)
+        // v0.13.5+ (#53): auto-suffix fileName so multi-instance default-type
+        // adds don't collide on the type-based fallback "header1.xml".
+        let fileName = allocateHeaderFileName(for: type)
+        var header = Header.withText(text, id: id, type: type)
+        header.originalFileName = fileName
         headers.append(header)
 
         // 更新分節屬性中的頁首參照
@@ -943,7 +979,9 @@ public struct WordDocument: Equatable {
     /// 新增含頁碼的頁首
     public mutating func addHeaderWithPageNumber(type: HeaderFooterType = .default) -> Header {
         let id = nextRelationshipId
-        let header = Header.withPageNumber(id: id, type: type)
+        let fileName = allocateHeaderFileName(for: type)
+        var header = Header.withPageNumber(id: id, type: type)
+        header.originalFileName = fileName
         headers.append(header)
 
         if type == .default {
@@ -972,7 +1010,10 @@ public struct WordDocument: Equatable {
     /// 新增頁尾
     public mutating func addFooter(text: String, type: HeaderFooterType = .default) -> Footer {
         let id = nextRelationshipId
-        let footer = Footer.withText(text, id: id, type: type)
+        // v0.13.5+ (#53): auto-suffix fileName.
+        let fileName = allocateFooterFileName(for: type)
+        var footer = Footer.withText(text, id: id, type: type)
+        footer.originalFileName = fileName
         footers.append(footer)
 
         // 更新分節屬性中的頁尾參照
@@ -990,7 +1031,9 @@ public struct WordDocument: Equatable {
     /// 新增含頁碼的頁尾
     public mutating func addFooterWithPageNumber(format: PageNumberFormat = .simple, type: HeaderFooterType = .default) -> Footer {
         let id = nextRelationshipId
-        let footer = Footer.withPageNumber(id: id, format: format, type: type)
+        let fileName = allocateFooterFileName(for: type)
+        var footer = Footer.withPageNumber(id: id, format: format, type: type)
+        footer.originalFileName = fileName
         footers.append(footer)
 
         if type == .default {
@@ -2298,5 +2341,49 @@ extension WordDocument {
         // 插入到指定位置
         body.children.insert(.paragraph(sectionPara), at: min(index, body.children.count))
         modifiedParts.insert("word/document.xml")
+    }
+
+    // MARK: - SDT ID Allocation (che-word-mcp-content-controls-read-write task 2.3)
+
+    /// 配置下一個可用的 SDT id，採用「全文件最大 id + 1」策略。
+    ///
+    /// 掃描 body 所有 paragraph 內 run 的 rawXML（目前 SDT 仍以 rawXML blob 儲存，
+    /// task 3.1 落地後會擴充掃描已解析的 ContentControl 樹）。若文件沒有任何 SDT
+    /// 則回傳 1。
+    ///
+    /// - Note: 目前未實作 per-session 快取；每次呼叫都做全文件掃描。
+    ///   對小型文件（< 100 SDTs）效能可接受；大型文件可在 task 3.x 完成後加上快取。
+    public func allocateSdtId() -> Int {
+        var maxId = 0
+        for child in body.children {
+            if case .paragraph(let paragraph) = child {
+                for run in paragraph.runs {
+                    guard let raw = run.rawXML, raw.contains("<w:sdt>") else { continue }
+                    maxId = max(maxId, Self.extractMaxSdtId(from: raw))
+                }
+            }
+            // Table cells contain paragraphs with runs; if tables host SDTs via
+            // rawXML blobs we should also scan them. Skipped for now — SDT insert
+            // paths all target body-level paragraphs. Task 3.1 will surface SDTs
+            // as first-class and this scan broadens automatically.
+        }
+        return maxId + 1
+    }
+
+    /// 從一段包含 SDT 的 rawXML 中抽出所有 `<w:id w:val="N"/>` 的最大值。
+    /// 因為 rawXML 以 `<w:sdt>` 為界，所有 `<w:id w:val=>` 都屬於 SDT 家族
+    /// （Bookmark / Comment 使用不同屬性形式，不會誤判）。
+    private static func extractMaxSdtId(from xml: String) -> Int {
+        var maxId = 0
+        let pattern = #"<w:id w:val=\"(\d+)\"\s*/>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return 0 }
+        let range = NSRange(xml.startIndex..., in: xml)
+        regex.enumerateMatches(in: xml, range: range) { match, _, _ in
+            guard let match = match,
+                  let valueRange = Range(match.range(at: 1), in: xml),
+                  let value = Int(xml[valueRange]) else { return }
+            maxId = max(maxId, value)
+        }
+        return maxId
     }
 }
