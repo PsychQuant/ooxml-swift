@@ -847,7 +847,9 @@ public struct DocxReader {
 
     // MARK: - Run Parsing
 
-    private static func parseRun(from element: XMLElement, relationships: RelationshipsCollection) throws -> Run {
+    /// Parse a `<w:r>` element into a `Run`. Internal access (was private)
+    /// so `@testable import OOXMLSwift` consumers can drive parser directly.
+    internal static func parseRun(from element: XMLElement, relationships: RelationshipsCollection) throws -> Run {
         var run = Run(text: "")
 
         // 解析 Run 屬性
@@ -872,6 +874,27 @@ public struct DocxReader {
         if let oMathElement = findFirstDescendant(of: element, localNames: ["oMath", "oMathPara"]) {
             run.rawXML = oMathElement.xmlString
             run.semantic = SemanticAnnotation.ommlFormula
+        }
+
+        // v0.14.0+ (che-word-mcp#52): preserve unknown direct children of <w:r>
+        // (e.g., <w:pict> VML watermarks, <w:object> OLE embeds, <w:ruby>).
+        // Recognized typed kinds are skipped because they're already captured
+        // into typed fields above. Source-document order is preserved by
+        // walking children sequentially.
+        let recognizedRunChildren: Set<String> = ["rPr", "t", "drawing", "oMath", "oMathPara"]
+        var collectedRawElements: [RawElement] = []
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement,
+                  let localName = childElement.localName,
+                  !recognizedRunChildren.contains(localName) else {
+                continue
+            }
+            collectedRawElements.append(
+                RawElement(name: localName, xml: childElement.xmlString)
+            )
+        }
+        if !collectedRawElements.isEmpty {
+            run.rawElements = collectedRawElements
         }
 
         return run

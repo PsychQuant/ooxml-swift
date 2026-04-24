@@ -2,6 +2,49 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.14.0] - 2026-04-24
+
+### Added — Run rawElements carrier for unknown OOXML elements (Refs PsychQuant/che-word-mcp#52)
+
+`Run` typed model gains `public var rawElements: [RawElement]?` field carrying verbatim XML for unknown direct children of `<w:r>` (e.g., `<w:pict>` VML watermarks, `<w:object>` OLE embeds, `<w:ruby>` annotations). New `public struct RawElement: Equatable` with `name: String` + `xml: String` fields.
+
+`DocxReader.parseRun` now collects unknown children into `rawElements` (recognized typed kinds — `rPr`, `t`, `drawing`, `oMath`, `oMathPara` — are skipped because they're already captured into typed fields). When no unknown children, `rawElements` stays `nil` (NOT empty array) so programmatic Run construction without rawElements remains Equatable-equal to reader-loaded Runs.
+
+`Run.toXML()` emits typed children in fixed order, then appends rawElements verbatim before `</w:r>`. Empty-text Runs with rawElements (typical NTPU watermark structure: `<w:r>` → `<w:rPr>` → `<w:pict>` with no `<w:t>`) suppress the synthetic empty `<w:t>` to avoid spurious empty text nodes in Word output.
+
+### Added — Header/Footer namespace declarations for VML preservation
+
+`Header.toXML()` and `Footer.toXML()` now declare `xmlns:v` (VML), `xmlns:o` (Office), `xmlns:w10` (Word) at the `<w:hdr>` / `<w:ftr>` root so descendant `<v:shape>` / `<o:lock>` / `<w10:wrap>` resolve when the saved `header*.xml` is re-read. Required for round-trip of preserved VML watermarks.
+
+### Added — `updateAllFields(isolatePerContainer:)` opt-in flag (Refs #52, deferred from #54)
+
+`WordDocument.updateAllFields` gains `isolatePerContainer: Bool = false` parameter. Default `false` preserves prior global-counter-sharing behavior across all container families. When `true`, each container family (body / each header / each footer / footnotes collection / endnotes collection) maintains independent SEQ counter dicts — body's `Figure 3` does NOT increment a header's `Figure` counter.
+
+The returned `[String: Int]` reflects body's final counter state. Per-container final values are reflected in the SEQ runs' rawXML (callers needing per-container introspection can inspect the cached `<w:t>` values directly).
+
+### Tests
+
+- 408 baseline + 7 net new = **451/451 tests pass** across 3 phases:
+  - 3 `RunRawElementPreservationTests` (Phase A: VML round-trip, multiple unknowns, Equatable nil-equivalence)
+  - 2 `HeaderFooterByteEqualityWithVMLTests` (Phase B: updateAllFields preservation, updateHeader documented limitation)
+  - 2 `UpdateAllFieldsCounterIsolationTests` (Phase C: default sharing, isolation flag)
+- 6 XCTSkip (pre-existing fixture-gated tests + 1 documented updateHeader API design boundary)
+
+### Compatibility
+
+- **Public API additions** — all opt-in; no removed APIs:
+  - `RawElement` struct (new)
+  - `Run.rawElements` field (default nil)
+  - `updateAllFields(isolatePerContainer:)` parameter (default false)
+- **Behavior changes**:
+  - DocxReader: previously-dropped unknown Run children now preserved in `Run.rawElements`. Round-trip now byte-preserves VML watermarks / OLE objects in headers/footers. Programmatic callers comparing `Run` instances post-parse will see populated `rawElements` where previously the data was silently lost
+  - Header/Footer XML root tags now declare additional namespaces — observable in saved `word/header*.xml` / `word/footer*.xml` byte content
+- `DocxReader.parseRun` access changed from `private` to `internal` for `@testable` consumers
+
+### Refs
+
+- PsychQuant/che-word-mcp#52 — Header.toXML raw-XML preservation (closes the v3.7.1 known-limitation paragraph)
+
 ## [0.13.5] - 2026-04-24
 
 ### Added — Path traversal security baseline (closes che-word-mcp#55)
