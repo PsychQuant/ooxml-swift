@@ -77,7 +77,16 @@ public struct DocxReader {
         // 7b. 讀取 headers (Part C of ooxml-swift#1)
         // v0.13.0+: preserve `originalFileName` from rel.target so multi-instance
         // same-type headers (header1.xml..header6.xml) don't collapse to a single fileName.
+        // v0.13.5+ (#55): validate rel.target BEFORE forming the read URL to
+        // block path traversal at the read sink (the property setter on
+        // Header.originalFileName is defense-in-depth for post-load mutation).
         for rel in relationships.relationships where rel.type == .header {
+            guard isSafeRelativeOOXMLPath(rel.target) else {
+                FileHandle.standardError.write(
+                    Data("Warning: DocxReader skipped header rel '\(rel.id)' with unsafe target '\(rel.target)' (#55 security baseline)\n".utf8)
+                )
+                continue
+            }
             let headerURL = tempDir.appendingPathComponent("word/\(rel.target)")
             guard FileManager.default.fileExists(atPath: headerURL.path) else { continue }
             let headerData = try Data(contentsOf: headerURL)
@@ -93,7 +102,14 @@ public struct DocxReader {
 
         // 7c. 讀取 footers
         // v0.13.0+: see headers comment above re: originalFileName preservation.
+        // v0.13.5+ (#55): same path-traversal guard as headers.
         for rel in relationships.relationships where rel.type == .footer {
+            guard isSafeRelativeOOXMLPath(rel.target) else {
+                FileHandle.standardError.write(
+                    Data("Warning: DocxReader skipped footer rel '\(rel.id)' with unsafe target '\(rel.target)' (#55 security baseline)\n".utf8)
+                )
+                continue
+            }
             let footerURL = tempDir.appendingPathComponent("word/\(rel.target)")
             guard FileManager.default.fileExists(atPath: footerURL.path) else { continue }
             let footerData = try Data(contentsOf: footerURL)
