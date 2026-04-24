@@ -23,6 +23,16 @@ extension WordDocument {
     /// — those serializers only know about typed `paragraphs[]` and silently
     /// strip VML watermarks, drawings, and any non-paragraph raw XML.
     /// Honest dirty-bit propagation prevents that data loss.
+    ///
+    /// **Counter scope (v0.13.5+ documentation, #54 sub-finding #8)**: SEQ
+    /// counters are global across body / headers / footers / footnotes /
+    /// endnotes. Body containing 3 `SEQ Figure` followed by header with 1
+    /// `SEQ Figure` will give the header `Figure 4`, not `Figure 1`. This
+    /// differs from Word F9 which isolates counters per section. Acceptable
+    /// for current callers (NTPU thesis workflow uses distinct identifiers
+    /// per running header). If section-isolated counters are needed later,
+    /// add an `isolatePerContainer: Bool = false` parameter — out of scope
+    /// for this version.
     @discardableResult
     public mutating func updateAllFields() -> [String: Int] {
         var counters: [String: Int] = [:]
@@ -147,10 +157,18 @@ extension WordDocument {
             // Rewrite cachedResult run in rawXML
             if let idx = field.cachedResultRunIdx, idx < para.runs.count {
                 let oldXML = para.runs[idx].rawXML ?? ""
-                let newXML = rewriteCachedResult(oldXML, newValue: "\(newValue)", matchingInstrText: field.instrText)
+                let (newXML, didMatch) = rewriteCachedResult(oldXML, newValue: "\(newValue)", matchingInstrText: field.instrText)
                 if newXML != oldXML {
                     para.runs[idx].rawXML = newXML
                     rewroteSomething = true
+                } else if !didMatch {
+                    // v0.13.5+ (#54 sub-finding #5): regex schema drift detection.
+                    // FieldParser saw a SEQ with a cached-result run, but our
+                    // rewrite regex couldn't locate the cached <w:t>...</w:t>
+                    // block. The cached value may now be stale.
+                    FileHandle.standardError.write(
+                        Data("Warning: updateAllFields could not rewrite cached value for SEQ '\(id)' (instrText: '\(field.instrText)'). Cached value may be stale; potential XML schema drift. (#54)\n".utf8)
+                    )
                 }
             }
         }
@@ -169,12 +187,17 @@ extension WordDocument {
     /// `<w:fldChar end>` within a field block matching the given instrText.
     /// Only rewrites the specific field — other field blocks in the same rawXML
     /// (if any) are untouched.
-    private func rewriteCachedResult(_ rawXML: String, newValue: String, matchingInstrText: String) -> String {
+    ///
+    /// v0.13.5+ (#54 sub-finding #5): returns `(rewritten: String, didMatch: Bool)`.
+    /// `didMatch == false` means the regex couldn't locate a SEQ field with the
+    /// expected XML structure — caller can use this to detect schema drift
+    /// vs. legitimate "value didn't change" no-op.
+    private func rewriteCachedResult(_ rawXML: String, newValue: String, matchingInstrText: String) -> (String, didMatch: Bool) {
         // Locate the instrText block to anchor our replacement.
         let instrPattern = "<w:instrText[^>]*>\(escapeForRegex(matchingInstrText))</w:instrText>"
         guard let instrRegex = try? NSRegularExpression(pattern: instrPattern, options: [.dotMatchesLineSeparators]),
               let instrMatch = instrRegex.firstMatch(in: rawXML, options: [], range: NSRange(rawXML.startIndex..., in: rawXML)) else {
-            return rawXML
+            return (rawXML, false)
         }
         // From end of instrText, find the next <w:t>...</w:t>
         let afterInstr = instrMatch.range.location + instrMatch.range.length
@@ -184,14 +207,17 @@ extension WordDocument {
         // we have `</w:r><w:r>`. Match accordingly.
         let cachedPattern = #"(<w:fldChar[^/]*fldCharType="separate"[^/]*/>\s*</w:r>\s*<w:r[^>]*>\s*<w:t[^>]*>)[^<]*(</w:t>)"#
         guard let cachedRegex = try? NSRegularExpression(pattern: cachedPattern, options: [.dotMatchesLineSeparators]) else {
-            return rawXML
+            return (rawXML, false)
         }
-        return cachedRegex.stringByReplacingMatches(
+        // Count matches so we can report didMatch honestly.
+        let cachedMatchCount = cachedRegex.numberOfMatches(in: rawXML, options: [], range: searchRange)
+        let rewritten = cachedRegex.stringByReplacingMatches(
             in: rawXML,
             options: [],
             range: searchRange,
             withTemplate: "$1\(newValue)$2"
         )
+        return (rewritten, cachedMatchCount > 0)
     }
 
     private func escapeForRegex(_ s: String) -> String {
