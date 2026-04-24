@@ -14,7 +14,15 @@ public struct Footer: Equatable {
     /// `DocxReader.read()` populates this from the relationship `Target`
     /// attribute (e.g., `"footer3.xml"`). `nil` for newly-built footers
     /// — `fileName` then falls back to type-based default.
-    public var originalFileName: String?
+    ///
+    /// **Security (v0.13.5+, che-word-mcp#55)**: setter validates against
+    /// path traversal. Invalid values silently coerced to `nil`. See
+    /// `Header.originalFileName` for full rationale.
+    public var originalFileName: String? {
+        didSet {
+            originalFileName = Self.sanitizeOriginalFileName(originalFileName)
+        }
+    }
 
     public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, pageNumberFormat: PageNumberFormat? = nil, pageNumberAlignment: ParagraphAlignment = .center, originalFileName: String? = nil) {
         self.id = id
@@ -22,7 +30,19 @@ public struct Footer: Equatable {
         self.type = type
         self.pageNumberFormat = pageNumberFormat
         self.pageNumberAlignment = pageNumberAlignment
-        self.originalFileName = originalFileName
+        self.originalFileName = Self.sanitizeOriginalFileName(originalFileName)
+    }
+
+    /// Sanitize per #55 security baseline. See `Header.sanitizeOriginalFileName`.
+    private static func sanitizeOriginalFileName(_ candidate: String?) -> String? {
+        guard let candidate = candidate else { return nil }
+        if isSafeRelativeOOXMLPath(candidate) {
+            return candidate
+        }
+        FileHandle.standardError.write(
+            Data("Warning: Footer.originalFileName rejected unsafe path '\(candidate)' (#55 security baseline); falling back to type-based default\n".utf8)
+        )
+        return nil
     }
 
     /// 建立含單一文字的頁尾
