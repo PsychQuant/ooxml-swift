@@ -2,12 +2,33 @@ import Foundation
 
 /// 文字運行 (Run) - Word 文件中的最小文字單元
 /// 一個 Run 包含具有相同格式的連續文字
+/// v0.14.0+ (che-word-mcp#52): typed carrier for an unknown OOXML element
+/// preserved verbatim within a Run. `name` is the local element name
+/// (e.g., `"pict"`, `"object"`); `xml` is the verbatim serialized XML.
+public struct RawElement: Equatable {
+    public let name: String
+    public let xml: String
+    public init(name: String, xml: String) {
+        self.name = name
+        self.xml = xml
+    }
+}
+
 public struct Run: Equatable {
     public var text: String
     public var properties: RunProperties
     public var drawing: Drawing?  // 圖片繪圖元素
     public var rawXML: String?    // 原始 XML（用於欄位代碼、SDT 等進階功能）
     public var semantic: SemanticAnnotation?  // 語義標註
+
+    /// v0.14.0+ (che-word-mcp#52): preserves unknown OOXML child elements of
+    /// `<w:r>` (e.g., `<w:pict>` VML watermarks, `<w:object>` OLE embeds,
+    /// `<w:ruby>` annotations) by carrying their verbatim XML. Populated by
+    /// `DocxReader.parseRun` for any child element whose local name is NOT
+    /// among the typed kinds (`rPr`, `t`, `drawing`, `oMath`, `oMathPara`).
+    /// Emitted verbatim by `Run.toXML()` after typed children. Default `nil`
+    /// preserves Equatable equality for programmatic Run construction.
+    public var rawElements: [RawElement]?
 
     public init(text: String, properties: RunProperties = RunProperties()) {
         self.text = text
@@ -140,9 +161,21 @@ extension Run {
         // Drawing (圖片) - 如果有圖片，優先輸出圖片
         if let drawing = drawing {
             xml += drawing.toXML()
-        } else {
-            // Text (保留空格)
+        } else if !text.isEmpty || (rawElements?.isEmpty ?? true) {
+            // v0.14.0+ (che-word-mcp#52): when a Run carries only rawElements
+            // (e.g., VML watermark with no text child), suppress the synthetic
+            // empty <w:t> emission. Empty <w:t> + <w:pict> would inject a
+            // spurious empty text node into Word output. Only emit <w:t> when
+            // we have actual text OR when there are no rawElements to emit.
             xml += "<w:t xml:space=\"preserve\">\(escapeXML(text))</w:t>"
+        }
+
+        // v0.14.0+ (che-word-mcp#52): emit preserved unknown elements in
+        // source-document order, after typed children but before </w:r>.
+        if let rawElements = rawElements {
+            for raw in rawElements {
+                xml += raw.xml
+            }
         }
 
         xml += "</w:r>"

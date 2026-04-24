@@ -77,7 +77,10 @@ extension Footer {
         var xml = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+               xmlns:v="urn:schemas-microsoft-com:vml"
+               xmlns:o="urn:schemas-microsoft-com:office:office"
+               xmlns:w10="urn:schemas-microsoft-com:office:word">
         """
 
         for para in paragraphs {
@@ -98,7 +101,10 @@ extension Footer {
         var xml = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+               xmlns:v="urn:schemas-microsoft-com:vml"
+               xmlns:o="urn:schemas-microsoft-com:office:office"
+               xmlns:w10="urn:schemas-microsoft-com:office:word">
         <w:p>
         <w:pPr><w:jc w:val="\(alignment.rawValue)"/></w:pPr>
         """

@@ -33,8 +33,15 @@ extension WordDocument {
     /// per running header). If section-isolated counters are needed later,
     /// add an `isolatePerContainer: Bool = false` parameter — out of scope
     /// for this version.
+    /// v0.14.0+ (#52): `isolatePerContainer` opt-in flag. When `false`
+    /// (default), preserves prior global-counter-sharing behavior. When `true`,
+    /// each container family (body / each header / each footer / footnotes
+    /// collection / endnotes collection) maintains independent SEQ counter
+    /// dicts — body's `Figure 3` does NOT increment header's `Figure` counter.
+    /// Returned dict reflects body's final counter state (per spec scenario);
+    /// per-container final values are reflected in the SEQ runs' rawXML.
     @discardableResult
-    public mutating func updateAllFields() -> [String: Int] {
+    public mutating func updateAllFields(isolatePerContainer: Bool = false) -> [String: Int] {
         var counters: [String: Int] = [:]
         // heading-reset state: for each level N (1-9), how many times we've
         // seen a heading at that level. When a SEQ with resetLevel=N is
@@ -57,56 +64,90 @@ extension WordDocument {
             }
         }
 
-        // Headers — per-header dirty bit
+        // Capture body's final counter state for return (per spec contract).
+        // Per-container counter snapshots are NOT in the return value;
+        // callers inspecting per-container values inspect SEQ runs' rawXML.
+        let bodyCounters = counters
+
+        // Headers — per-header dirty bit. Under isolation, each header gets
+        // a fresh counter dict (independent of body and other headers).
         var dirtyHeaderFiles: Set<String> = []
         for i in 0..<headers.count {
+            var headerCounters: [String: Int] = isolatePerContainer ? [:] : counters
+            var headerLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
             var headerDirty = false
             for j in 0..<headers[i].paragraphs.count {
                 var para = headers[i].paragraphs[j]
-                if processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount) {
+                if processParagraph(&para, counters: &headerCounters, lastResetHeadingCount: &headerLastReset, currentHeadingCount: currentHeadingCount) {
                     headerDirty = true
                 }
                 headers[i].paragraphs[j] = para
             }
+            if !isolatePerContainer {
+                counters = headerCounters
+                lastResetHeadingCount = headerLastReset
+            }
             if headerDirty { dirtyHeaderFiles.insert(headers[i].fileName) }
         }
 
-        // Footers — per-footer dirty bit
+        // Footers — same isolation pattern as headers.
         var dirtyFooterFiles: Set<String> = []
         for i in 0..<footers.count {
+            var footerCounters: [String: Int] = isolatePerContainer ? [:] : counters
+            var footerLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
             var footerDirty = false
             for j in 0..<footers[i].paragraphs.count {
                 var para = footers[i].paragraphs[j]
-                if processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount) {
+                if processParagraph(&para, counters: &footerCounters, lastResetHeadingCount: &footerLastReset, currentHeadingCount: currentHeadingCount) {
                     footerDirty = true
                 }
                 footers[i].paragraphs[j] = para
             }
+            if !isolatePerContainer {
+                counters = footerCounters
+                lastResetHeadingCount = footerLastReset
+            }
             if footerDirty { dirtyFooterFiles.insert(footers[i].fileName) }
         }
 
-        // Footnotes
+        // Footnotes — single container family, isolated as a unit.
+        var footnotesCounters: [String: Int] = isolatePerContainer ? [:] : counters
+        var footnotesLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
         var footnotesDirty = false
         for i in 0..<footnotes.footnotes.count {
             for j in 0..<footnotes.footnotes[i].paragraphs.count {
                 var para = footnotes.footnotes[i].paragraphs[j]
-                if processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount) {
+                if processParagraph(&para, counters: &footnotesCounters, lastResetHeadingCount: &footnotesLastReset, currentHeadingCount: currentHeadingCount) {
                     footnotesDirty = true
                 }
                 footnotes.footnotes[i].paragraphs[j] = para
             }
         }
+        if !isolatePerContainer {
+            counters = footnotesCounters
+            lastResetHeadingCount = footnotesLastReset
+        }
 
-        // Endnotes
+        // Endnotes — single container family, isolated as a unit.
+        var endnotesCounters: [String: Int] = isolatePerContainer ? [:] : counters
+        var endnotesLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
         var endnotesDirty = false
         for i in 0..<endnotes.endnotes.count {
             for j in 0..<endnotes.endnotes[i].paragraphs.count {
                 var para = endnotes.endnotes[i].paragraphs[j]
-                if processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount) {
+                if processParagraph(&para, counters: &endnotesCounters, lastResetHeadingCount: &endnotesLastReset, currentHeadingCount: currentHeadingCount) {
                     endnotesDirty = true
                 }
                 endnotes.endnotes[i].paragraphs[j] = para
             }
+        }
+        if !isolatePerContainer {
+            counters = endnotesCounters
+            lastResetHeadingCount = endnotesLastReset
+        }
+        // In isolation mode, return body's counter snapshot (per spec).
+        if isolatePerContainer {
+            counters = bodyCounters
         }
 
         // Honest dirty-bit propagation — only mark parts that ACTUALLY mutated.

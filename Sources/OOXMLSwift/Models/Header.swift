@@ -75,11 +75,22 @@ public enum HeaderFooterType: String {
 
 extension Header {
     /// 轉換為完整的 header.xml 內容
+    ///
+    /// **VML watermark / OLE preservation chain (v0.14.0+, che-word-mcp#52)**:
+    /// `Header.toXML()` → `Paragraph.toXML()` → `Run.toXML()`. The Run-layer
+    /// `rawElements` carrier (per `ooxml-header-footer-raw-element-preservation`
+    /// capability) emits unknown OOXML elements verbatim after typed children.
+    /// `<w:hdr>` declares `xmlns:v` / `xmlns:o` / `xmlns:w10` so descendant
+    /// `<v:shape>` / `<o:lock>` / `<w10:wrap>` resolve when the saved
+    /// `header*.xml` is re-read.
     func toXML() -> String {
         var xml = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+               xmlns:v="urn:schemas-microsoft-com:vml"
+               xmlns:o="urn:schemas-microsoft-com:office:office"
+               xmlns:w10="urn:schemas-microsoft-com:office:word">
         """
 
         for para in paragraphs {
@@ -100,7 +111,10 @@ extension Header {
         var xml = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+               xmlns:v="urn:schemas-microsoft-com:vml"
+               xmlns:o="urn:schemas-microsoft-com:office:office"
+               xmlns:w10="urn:schemas-microsoft-com:office:word">
         <w:p>
         <w:pPr><w:jc w:val="center"/></w:pPr>
         """
