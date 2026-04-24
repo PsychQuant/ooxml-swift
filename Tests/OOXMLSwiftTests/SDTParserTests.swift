@@ -114,20 +114,91 @@ final class SDTParserTests: XCTestCase {
             "nested child must reference outer SDT id as parentSdtId")
     }
 
-    // MARK: - Task 3.4 placeholder
+    // MARK: - Task 3.4: block-level SDT
 
     /// See: `SDTParser handles block-level SDTs wrapping paragraphs and tables`.
-    /// Enabled by task 3.4.
+    /// Spec scenario: <w:body><w:sdt>...<w:sdtContent><w:p>A</w:p><w:p>B</w:p></w:sdtContent></w:sdt></w:body>
     func testBlockLevelSDTPreservesChildrenAfterTask34() throws {
-        throw XCTSkip("pending task 3.4: block-level SDT")
+        // Build a doc with a block-level SDT wrapping two paragraphs by
+        // direct body manipulation (writer round-trip exercises both reader
+        // and writer paths).
+        var doc = WordDocument()
+        let blockSdt = StructuredDocumentTag(
+            id: 20001,
+            tag: "block_wrapper",
+            alias: "Block Wrapper",
+            type: .richText
+        )
+        let paraA = Paragraph(text: "A")
+        let paraB = Paragraph(text: "B")
+        let control = ContentControl(sdt: blockSdt, content: "")
+        doc.body.children = [
+            .contentControl(control, children: [.paragraph(paraA), .paragraph(paraB)])
+        ]
+
+        let bytes = try DocxWriter.writeData(doc)
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("block-sdt-\(UUID().uuidString).docx")
+        try bytes.write(to: tempURL)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let parsed = try DocxReader.read(from: tempURL)
+        XCTAssertEqual(parsed.body.children.count, 1, "expected 1 block-level SDT in body")
+        guard case .contentControl(let parsedControl, let parsedChildren) = parsed.body.children[0] else {
+            XCTFail("expected BodyChild.contentControl, got \(parsed.body.children[0])")
+            return
+        }
+        XCTAssertEqual(parsedControl.sdt.tag, "block_wrapper")
+        XCTAssertEqual(parsedControl.sdt.alias, "Block Wrapper")
+        XCTAssertEqual(parsedChildren.count, 2)
+
+        var texts: [String] = []
+        for child in parsedChildren {
+            if case .paragraph(let p) = child { texts.append(p.getText()) }
+        }
+        XCTAssertEqual(texts, ["A", "B"], "block-level SDT children paragraphs lost")
     }
 
-    // MARK: - Task 3.5 placeholder
+    // MARK: - Task 3.5: round-trip fidelity
 
     /// See: `SDT round-trip preserves byte-level content fidelity`.
-    /// Enabled by task 3.5.
+    /// Reads the fixture, writes it back unchanged, then verifies the
+    /// re-read matches the original on id/tag/alias/type for every SDT.
     func testFixtureRoundTripPreservesSDTMetadataAfterTask35() throws {
-        throw XCTSkip("pending task 3.5: round-trip fidelity")
+        let original = try loadFixtureDocument()
+        let originalControls = original.getParagraphs().flatMap { $0.contentControls }
+        XCTAssertGreaterThanOrEqual(originalControls.count, 10,
+            "fixture must surface 10+ SDTs to be a meaningful round-trip test")
+
+        // Write the parsed document back to disk, then re-read.
+        let bytes = try DocxWriter.writeData(original)
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sdt-roundtrip-\(UUID().uuidString).docx")
+        try bytes.write(to: tempURL)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let reread = try DocxReader.read(from: tempURL)
+        let rereadControls = reread.getParagraphs().flatMap { $0.contentControls }
+        XCTAssertEqual(rereadControls.count, originalControls.count,
+            "SDT count drift across round-trip: \(originalControls.count) → \(rereadControls.count)")
+
+        // Compare metadata (id/tag/alias/type/lockType) by tag.
+        let originalByTag: [String: ContentControl] = Dictionary(
+            uniqueKeysWithValues: originalControls.compactMap { c in c.sdt.tag.map { ($0, c) } }
+        )
+        let rereadByTag: [String: ContentControl] = Dictionary(
+            uniqueKeysWithValues: rereadControls.compactMap { c in c.sdt.tag.map { ($0, c) } }
+        )
+        for tag in originalByTag.keys {
+            guard let o = originalByTag[tag], let r = rereadByTag[tag] else {
+                XCTFail("tag '\(tag)' lost across round-trip")
+                continue
+            }
+            XCTAssertEqual(o.sdt.id, r.sdt.id, "id drift for tag='\(tag)'")
+            XCTAssertEqual(o.sdt.alias, r.sdt.alias, "alias drift for tag='\(tag)'")
+            XCTAssertEqual(o.sdt.type, r.sdt.type, "type drift for tag='\(tag)'")
+            XCTAssertEqual(o.sdt.lockType, r.sdt.lockType, "lockType drift for tag='\(tag)'")
+        }
     }
 
     // MARK: - Pre-existing sanity: fixture builds without crashing
