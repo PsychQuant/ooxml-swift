@@ -2,6 +2,53 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.18.0] - 2026-04-25
+
+### Added — Track Changes write-side: 5 revision generators + writer extensions (Refs PsychQuant/che-word-mcp#45)
+
+Closes the WRITE-side gap for tracked revisions. Reader infrastructure already populated `paragraph.revisions` from `<w:ins>` / `<w:del>` / `<w:moveFrom>` / `<w:moveTo>` / `<w:rPrChange>` / `<w:pPrChange>` markup, but the writer ignored `paragraph.revisions` entirely — meaning programmatically-added revisions never reached the saved `.docx`. v0.18.0 fills the gap with 6 new `WordDocument` methods and a writer that emits proper revision wrappers.
+
+**New `WordDocument` methods:**
+
+- `allocateRevisionId() -> Int` — scans `revisions.revisions` for max id; returns max+1 (or 1 when empty). Mirrors v0.15.0 `allocateSdtId()` deterministic max+1 pattern.
+- `insertTextAsRevision(text:atParagraph:position:author:date:) throws -> Int` — splits the run at `position` (preserves prior + post text + formatting), inserts a new `<w:ins>`-wrapped run, returns allocated revision id.
+- `deleteTextAsRevision(atParagraph:start:end:author:date:) throws -> Int` — splits straddling runs at boundaries; tags middle runs with the revision id; writer wraps them with `<w:del>` and substitutes `<w:t>` → `<w:delText>`.
+- `moveTextAsRevision(fromParagraph:fromStart:fromEnd:toParagraph:toPosition:author:date:) throws -> (fromId: Int, toId: Int)` — allocates two adjacent ids (`N` and `N+1`); emits paired `<w:moveFrom>` (source) and `<w:moveTo>` (destination). Single-paragraph moves rejected as out of scope.
+- `applyRunPropertiesAsRevision(atParagraph:atRunIndex:newProperties:author:date:) throws -> Int` — replaces run formatting; captures previous `RunProperties` for the revision; writer emits `<w:rPrChange>` inside `<w:rPr>`.
+- `applyParagraphPropertiesAsRevision(atParagraph:newProperties:author:date:) throws -> Int` — replaces paragraph formatting; captures previous `ParagraphProperties`; writer emits `<w:pPrChange>` inside `<w:pPr>`.
+
+All 5 generators guard `isTrackChangesEnabled()` and throw new `WordError.trackChangesNotEnabled` when off — no auto-enable side effect (per design decision: explicit `enable_track_changes` required to avoid hidden state mutation).
+
+All 5 generators resolve author via 3-tier fallback: explicit non-empty arg → `revisions.settings.author` → `"Unknown"`. They mark `word/document.xml` dirty.
+
+**New typed Run/Paragraph fields linking runs to revisions:**
+
+- `Run.revisionId: Int?` — id of the wrapping `<w:ins>` / `<w:del>` / `<w:moveFrom>` / `<w:moveTo>` revision.
+- `Run.formatChangeRevisionId: Int?` — id of the format-change revision whose `previousFormat` describes this run's pre-mutation state. Orthogonal to `revisionId`.
+- `Paragraph.paragraphFormatChangeRevisionId: Int?` + `Paragraph.previousProperties: ParagraphProperties?` — pair carrying paragraph-level format change metadata.
+
+**Writer extensions in `Paragraph.toXML()`:**
+
+- Groups consecutive runs sharing the same `revisionId` and emits a single `<w:ins>` / `<w:del>` / `<w:moveFrom>` / `<w:moveTo>` wrapper around the group (instead of one wrapper per run). Multi-run wrapping produces `<w:ins ...><w:r>A</w:r><w:r>B</w:r><w:r>C</w:r></w:ins>`.
+- Substitutes `<w:t>` with `<w:delText xml:space="preserve">` when wrapping deletion-typed revisions.
+- Emits `<w:rPrChange>` inside a run's `<w:rPr>` when the run carries `formatChangeRevisionId` matching a `.formatChange` revision in `paragraph.revisions`.
+- Emits `<w:pPrChange>` inside a paragraph's `<w:pPr>` when the paragraph carries `paragraphFormatChangeRevisionId` matching a `.paragraphChange` revision.
+
+**WordError additions (additive):**
+
+- `case trackChangesNotEnabled` — guard violation when `as_revision: true` is passed but track changes is off.
+
+### Tests
+
+- 525 baseline + 13 net new = **538/538 tests pass**, 1 skipped:
+  - 24 `RevisionGenerationTests` covering all 5 generators (insertion run-splitting, deletion boundary splits, move adjacent-id allocation, format change rPrChange/pPrChange emission, error guards, author fallback chain)
+  - Multi-run wrapping verified produces single `<w:ins>` containing 3 `<w:r>` siblings
+  - `<w:t>` → `<w:delText>` substitution verified
+
+### Migration
+
+Additive release — no API changes to existing methods. `Paragraph.toXML()` behavior for runs without `revisionId` set is unchanged. New `Run` fields default to `nil` so programmatic `Run(text:)` constructions remain Equatable-equal to previous releases.
+
 ## [0.14.0] - 2026-04-24
 
 ### Added — Run rawElements carrier for unknown OOXML elements (Refs PsychQuant/che-word-mcp#52)

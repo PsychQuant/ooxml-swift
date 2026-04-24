@@ -1741,6 +1741,458 @@ public struct WordDocument: Equatable {
         return revisions.settings.enabled
     }
 
+    /// Allocate a fresh revision id (max existing + 1, or 1 when empty).
+    ///
+    /// Mirrors `allocateSdtId()` (v0.15.0): scans the document for the highest
+    /// existing revision id and returns one greater. Because `revisions.revisions`
+    /// is the single collection populated by `DocxReader` for body, headers,
+    /// footers, footnotes, and endnotes, scanning that collection alone is
+    /// sufficient.
+    ///
+    /// The method is idempotent — consecutive calls without appending the
+    /// allocated id return the same value (no stale-cache risk).
+    public func allocateRevisionId() -> Int {
+        let maxId = revisions.revisions.map { $0.id }.max() ?? 0
+        return maxId + 1
+    }
+
+    /// 3-tier author resolution: explicit arg (when non-nil and non-empty)
+    /// wins; otherwise fall back to the track-changes settings author; finally
+    /// "Unknown". Used by all v0.18.0 revision-generating mutations.
+    fileprivate func resolveAuthor(_ explicit: String?) -> String {
+        if let explicit = explicit, !explicit.isEmpty {
+            return explicit
+        }
+        let stored = revisions.settings.author
+        if !stored.isEmpty { return stored }
+        return "Unknown"
+    }
+
+    // MARK: - Track Changes Generators (v0.18.0+, che-word-mcp#45)
+
+    /// Locate the body-children index for the Nth paragraph (skipping tables and
+    /// content controls). Returns nil when out of range.
+    private func bodyIndexForParagraph(_ paragraphIndex: Int) -> Int? {
+        var seen = 0
+        for (i, child) in body.children.enumerated() {
+            if case .paragraph = child {
+                if seen == paragraphIndex { return i }
+                seen += 1
+            }
+        }
+        return nil
+    }
+
+    /// Insert `text` at character `position` within paragraph `paragraphIndex`,
+    /// wrapping the new run with a `<w:ins>` revision. Splits an existing run
+    /// when the position falls inside one (preserves the surrounding text +
+    /// formatting). Returns the allocated revision id.
+    ///
+    /// Throws `WordError.trackChangesNotEnabled` when track changes is off
+    /// (no auto-enable side effect). Throws `WordError.invalidIndex` for
+    /// out-of-range paragraph index or character position.
+    public mutating func insertTextAsRevision(
+        text: String,
+        atParagraph paragraphIndex: Int,
+        position: Int,
+        author: String? = nil,
+        date: Date? = nil
+    ) throws -> Int {
+        guard isTrackChangesEnabled() else {
+            throw WordError.trackChangesNotEnabled
+        }
+        guard let bodyIdx = bodyIndexForParagraph(paragraphIndex) else {
+            throw WordError.invalidIndex(paragraphIndex)
+        }
+        guard case .paragraph(var paragraph) = body.children[bodyIdx] else {
+            throw WordError.invalidIndex(paragraphIndex)
+        }
+
+        let totalLength = paragraph.runs.reduce(0) { $0 + $1.text.count }
+        guard position >= 0, position <= totalLength else {
+            throw WordError.invalidIndex(position)
+        }
+
+        let revisionId = allocateRevisionId()
+        let resolvedAuthor = resolveAuthor(author)
+        let resolvedDate = date ?? Date()
+
+        var newRun = Run(text: text)
+        newRun.revisionId = revisionId
+
+        if position == 0 {
+            paragraph.runs.insert(newRun, at: 0)
+        } else if position == totalLength {
+            paragraph.runs.append(newRun)
+        } else {
+            // Split the run that contains `position`.
+            var charsSeen = 0
+            for runIdx in 0..<paragraph.runs.count {
+                let runLength = paragraph.runs[runIdx].text.count
+                let charsAfter = charsSeen + runLength
+                if position == charsSeen {
+                    paragraph.runs.insert(newRun, at: runIdx)
+                    break
+                } else if position < charsAfter {
+                    let offsetInRun = position - charsSeen
+                    let original = paragraph.runs[runIdx]
+                    let beforeText = String(original.text.prefix(offsetInRun))
+                    let afterText = String(original.text.suffix(runLength - offsetInRun))
+
+                    var beforeRun = original
+                    beforeRun.text = beforeText
+                    var afterRun = original
+                    afterRun.text = afterText
+
+                    paragraph.runs[runIdx] = beforeRun
+                    paragraph.runs.insert(newRun, at: runIdx + 1)
+                    paragraph.runs.insert(afterRun, at: runIdx + 2)
+                    break
+                }
+                charsSeen = charsAfter
+            }
+        }
+
+        let revision = Revision(
+            id: revisionId,
+            type: .insertion,
+            author: resolvedAuthor,
+            date: resolvedDate,
+            content: text
+        )
+        paragraph.revisions.append(revision)
+        revisions.revisions.append(revision)
+
+        body.children[bodyIdx] = .paragraph(paragraph)
+        modifiedParts.insert("word/document.xml")
+
+        return revisionId
+    }
+
+    /// Mark text in `[start, end)` of paragraph `paragraphIndex` as a tracked
+    /// deletion. Splits straddling runs at the boundaries so only the deleted
+    /// substring carries the revision id; the writer substitutes `<w:t>` with
+    /// `<w:delText>` for those runs.
+    ///
+    /// Cross-paragraph delete is OUT OF SCOPE — `start` and `end` are character
+    /// offsets within the named paragraph's text only.
+    public mutating func deleteTextAsRevision(
+        atParagraph paragraphIndex: Int,
+        start: Int,
+        end: Int,
+        author: String? = nil,
+        date: Date? = nil
+    ) throws -> Int {
+        guard isTrackChangesEnabled() else {
+            throw WordError.trackChangesNotEnabled
+        }
+        guard let bodyIdx = bodyIndexForParagraph(paragraphIndex) else {
+            throw WordError.invalidIndex(paragraphIndex)
+        }
+        guard case .paragraph(var paragraph) = body.children[bodyIdx] else {
+            throw WordError.invalidIndex(paragraphIndex)
+        }
+
+        let totalLength = paragraph.runs.reduce(0) { $0 + $1.text.count }
+        guard start >= 0, end >= start, end <= totalLength else {
+            throw WordError.invalidIndex(end)
+        }
+
+        let revisionId = allocateRevisionId()
+        let resolvedAuthor = resolveAuthor(author)
+        let resolvedDate = date ?? Date()
+
+        var newRuns: [Run] = []
+        var charsSeen = 0
+        var deletedText = ""
+
+        for run in paragraph.runs {
+            let runStart = charsSeen
+            let runEnd = charsSeen + run.text.count
+
+            if runEnd <= start || runStart >= end {
+                newRuns.append(run)
+            } else {
+                let preLen = max(0, start - runStart)
+                let postLen = max(0, runEnd - end)
+                let midLen = run.text.count - preLen - postLen
+
+                if preLen > 0 {
+                    var preRun = run
+                    preRun.text = String(run.text.prefix(preLen))
+                    newRuns.append(preRun)
+                }
+                if midLen > 0 {
+                    var midRun = run
+                    let midText = String(run.text.dropFirst(preLen).prefix(midLen))
+                    midRun.text = midText
+                    midRun.revisionId = revisionId
+                    newRuns.append(midRun)
+                    deletedText += midText
+                }
+                if postLen > 0 {
+                    var postRun = run
+                    postRun.text = String(run.text.suffix(postLen))
+                    newRuns.append(postRun)
+                }
+            }
+
+            charsSeen = runEnd
+        }
+
+        paragraph.runs = newRuns
+
+        var revision = Revision(
+            id: revisionId,
+            type: .deletion,
+            author: resolvedAuthor,
+            date: resolvedDate,
+            content: deletedText
+        )
+        revision.originalText = deletedText
+        paragraph.revisions.append(revision)
+        revisions.revisions.append(revision)
+
+        body.children[bodyIdx] = .paragraph(paragraph)
+        modifiedParts.insert("word/document.xml")
+
+        return revisionId
+    }
+
+    /// Move a contiguous span of text from `[fromStart, fromEnd)` in
+    /// `fromParagraph` to `toPosition` in `toParagraph`, recording the action
+    /// as a paired `<w:moveFrom>` / `<w:moveTo>` revision. The two halves get
+    /// adjacent ids (returned as `(fromId, toId)` where `toId == fromId + 1`).
+    ///
+    /// Single-paragraph moves are rejected (`invalidParameter`) — callers should
+    /// model them as a delete + insert pair instead.
+    public mutating func moveTextAsRevision(
+        fromParagraph: Int,
+        fromStart: Int,
+        fromEnd: Int,
+        toParagraph: Int,
+        toPosition: Int,
+        author: String? = nil,
+        date: Date? = nil
+    ) throws -> (fromId: Int, toId: Int) {
+        guard isTrackChangesEnabled() else {
+            throw WordError.trackChangesNotEnabled
+        }
+        guard fromParagraph != toParagraph else {
+            throw WordError.invalidParameter("toParagraph",
+                "single-paragraph move is out of scope; use delete + insert instead")
+        }
+        guard let fromBodyIdx = bodyIndexForParagraph(fromParagraph) else {
+            throw WordError.invalidIndex(fromParagraph)
+        }
+        guard let toBodyIdx = bodyIndexForParagraph(toParagraph) else {
+            throw WordError.invalidIndex(toParagraph)
+        }
+        guard case .paragraph(var fromPara) = body.children[fromBodyIdx] else {
+            throw WordError.invalidIndex(fromParagraph)
+        }
+        guard case .paragraph(var toPara) = body.children[toBodyIdx] else {
+            throw WordError.invalidIndex(toParagraph)
+        }
+
+        let fromTotal = fromPara.runs.reduce(0) { $0 + $1.text.count }
+        guard fromStart >= 0, fromEnd >= fromStart, fromEnd <= fromTotal else {
+            throw WordError.invalidIndex(fromEnd)
+        }
+        let toTotal = toPara.runs.reduce(0) { $0 + $1.text.count }
+        guard toPosition >= 0, toPosition <= toTotal else {
+            throw WordError.invalidIndex(toPosition)
+        }
+
+        let fromId = allocateRevisionId()
+        let toId = fromId + 1
+        let resolvedAuthor = resolveAuthor(author)
+        let resolvedDate = date ?? Date()
+
+        // moveFrom side: split runs at [fromStart, fromEnd), tag middle runs.
+        var newFromRuns: [Run] = []
+        var charsSeen = 0
+        var movedText = ""
+        for run in fromPara.runs {
+            let runStart = charsSeen
+            let runEnd = charsSeen + run.text.count
+            if runEnd <= fromStart || runStart >= fromEnd {
+                newFromRuns.append(run)
+            } else {
+                let preLen = max(0, fromStart - runStart)
+                let postLen = max(0, runEnd - fromEnd)
+                let midLen = run.text.count - preLen - postLen
+                if preLen > 0 {
+                    var preRun = run
+                    preRun.text = String(run.text.prefix(preLen))
+                    newFromRuns.append(preRun)
+                }
+                if midLen > 0 {
+                    var midRun = run
+                    let midText = String(run.text.dropFirst(preLen).prefix(midLen))
+                    midRun.text = midText
+                    midRun.revisionId = fromId
+                    newFromRuns.append(midRun)
+                    movedText += midText
+                }
+                if postLen > 0 {
+                    var postRun = run
+                    postRun.text = String(run.text.suffix(postLen))
+                    newFromRuns.append(postRun)
+                }
+            }
+            charsSeen = runEnd
+        }
+        fromPara.runs = newFromRuns
+
+        // moveTo side: insert a new run at toPosition.
+        var newRun = Run(text: movedText)
+        newRun.revisionId = toId
+        if toPosition == 0 {
+            toPara.runs.insert(newRun, at: 0)
+        } else if toPosition == toTotal {
+            toPara.runs.append(newRun)
+        } else {
+            var seen = 0
+            for runIdx in 0..<toPara.runs.count {
+                let length = toPara.runs[runIdx].text.count
+                let after = seen + length
+                if toPosition == seen {
+                    toPara.runs.insert(newRun, at: runIdx)
+                    break
+                } else if toPosition < after {
+                    let offsetInRun = toPosition - seen
+                    let original = toPara.runs[runIdx]
+                    var beforeRun = original
+                    beforeRun.text = String(original.text.prefix(offsetInRun))
+                    var afterRun = original
+                    afterRun.text = String(original.text.suffix(length - offsetInRun))
+                    toPara.runs[runIdx] = beforeRun
+                    toPara.runs.insert(newRun, at: runIdx + 1)
+                    toPara.runs.insert(afterRun, at: runIdx + 2)
+                    break
+                }
+                seen = after
+            }
+        }
+
+        var fromRevision = Revision(
+            id: fromId, type: .moveFrom, author: resolvedAuthor,
+            date: resolvedDate, content: movedText
+        )
+        fromRevision.originalText = movedText
+        fromPara.revisions.append(fromRevision)
+        revisions.revisions.append(fromRevision)
+
+        var toRevision = Revision(
+            id: toId, type: .moveTo, author: resolvedAuthor,
+            date: resolvedDate, content: movedText
+        )
+        toRevision.newText = movedText
+        toPara.revisions.append(toRevision)
+        revisions.revisions.append(toRevision)
+
+        body.children[fromBodyIdx] = .paragraph(fromPara)
+        body.children[toBodyIdx] = .paragraph(toPara)
+        modifiedParts.insert("word/document.xml")
+
+        return (fromId: fromId, toId: toId)
+    }
+
+    /// Replace `ParagraphProperties` on paragraph `paragraphIndex`, recording
+    /// the previous properties as a tracked `<w:pPrChange>` revision. Returns
+    /// the allocated revision id.
+    public mutating func applyParagraphPropertiesAsRevision(
+        atParagraph paragraphIndex: Int,
+        newProperties: ParagraphProperties,
+        author: String? = nil,
+        date: Date? = nil
+    ) throws -> Int {
+        guard isTrackChangesEnabled() else {
+            throw WordError.trackChangesNotEnabled
+        }
+        guard let bodyIdx = bodyIndexForParagraph(paragraphIndex) else {
+            throw WordError.invalidIndex(paragraphIndex)
+        }
+        guard case .paragraph(var paragraph) = body.children[bodyIdx] else {
+            throw WordError.invalidIndex(paragraphIndex)
+        }
+
+        let revisionId = allocateRevisionId()
+        let resolvedAuthor = resolveAuthor(author)
+        let resolvedDate = date ?? Date()
+
+        let previousProperties = paragraph.properties
+        paragraph.properties = newProperties
+        paragraph.previousProperties = previousProperties
+        paragraph.paragraphFormatChangeRevisionId = revisionId
+
+        var revision = Revision(
+            id: revisionId,
+            type: .paragraphChange,
+            author: resolvedAuthor,
+            date: resolvedDate
+        )
+        revision.previousFormatDescription = "ParagraphProperties change"
+        paragraph.revisions.append(revision)
+        revisions.revisions.append(revision)
+
+        body.children[bodyIdx] = .paragraph(paragraph)
+        modifiedParts.insert("word/document.xml")
+
+        return revisionId
+    }
+
+    /// Replace `RunProperties` of the run at `atRunIndex` in paragraph
+    /// `paragraphIndex`, recording the previous properties as a tracked
+    /// `<w:rPrChange>` revision. The replacement is in-place — the run keeps
+    /// its text and identity, only its formatting changes. Returns the
+    /// allocated revision id.
+    public mutating func applyRunPropertiesAsRevision(
+        atParagraph paragraphIndex: Int,
+        atRunIndex runIndex: Int,
+        newProperties: RunProperties,
+        author: String? = nil,
+        date: Date? = nil
+    ) throws -> Int {
+        guard isTrackChangesEnabled() else {
+            throw WordError.trackChangesNotEnabled
+        }
+        guard let bodyIdx = bodyIndexForParagraph(paragraphIndex) else {
+            throw WordError.invalidIndex(paragraphIndex)
+        }
+        guard case .paragraph(var paragraph) = body.children[bodyIdx] else {
+            throw WordError.invalidIndex(paragraphIndex)
+        }
+        guard runIndex >= 0, runIndex < paragraph.runs.count else {
+            throw WordError.invalidIndex(runIndex)
+        }
+
+        let revisionId = allocateRevisionId()
+        let resolvedAuthor = resolveAuthor(author)
+        let resolvedDate = date ?? Date()
+
+        let previousProperties = paragraph.runs[runIndex].properties
+        paragraph.runs[runIndex].properties = newProperties
+        paragraph.runs[runIndex].formatChangeRevisionId = revisionId
+
+        var revision = Revision(
+            id: revisionId,
+            type: .formatChange,
+            author: resolvedAuthor,
+            date: resolvedDate,
+            previousFormat: previousProperties
+        )
+        revision.previousFormat = previousProperties
+        paragraph.revisions.append(revision)
+        revisions.revisions.append(revision)
+
+        body.children[bodyIdx] = .paragraph(paragraph)
+        modifiedParts.insert("word/document.xml")
+
+        return revisionId
+    }
+
     /// 取得所有修訂（僅 body 來源，向後相容）
     ///
     /// 只回傳 `source == .body` 的修訂。Container 來源（header/footer/footnote/endnote）

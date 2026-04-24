@@ -13,6 +13,17 @@ public struct Paragraph: Equatable {
     public var revisions: [Revision] = []      // 段落內的修訂記錄（w:ins/w:del）
     public var semantic: SemanticAnnotation?  // 語義標註
 
+    /// v0.18.0+ (che-word-mcp#45): id of a `Revision` (type `.paragraphChange`)
+    /// in `revisions` whose `previousFormat` is captured by
+    /// `previousProperties` below. When set, `Paragraph.toXML()` emits
+    /// `<w:pPrChange>` inside this paragraph's `<w:pPr>` block.
+    public var paragraphFormatChangeRevisionId: Int?
+
+    /// v0.18.0+ (che-word-mcp#45): pre-mutation paragraph properties for a
+    /// tracked `<w:pPrChange>` revision. Paired with
+    /// `paragraphFormatChangeRevisionId`.
+    public var previousProperties: ParagraphProperties?
+
     /// v0.15.0+ (che-word-mcp#44, task 3.0): structured Content Controls
     /// (SDTs) appearing as siblings of runs inside this paragraph. Emitted
     /// after `runs` in `toXML()`. The previous architecture stuffed entire
@@ -179,12 +190,26 @@ extension Paragraph {
 
         // Paragraph Properties
         let propsXML = properties.toXML()
-        if !propsXML.isEmpty || properties.sectionBreak != nil {
+        let formatChangeRevision: Revision? = {
+            guard let id = paragraphFormatChangeRevisionId else { return nil }
+            return revisions.first { $0.id == id }
+        }()
+        let needsPPr = !propsXML.isEmpty
+            || properties.sectionBreak != nil
+            || formatChangeRevision != nil
+        if needsPPr {
             xml += "<w:pPr>\(propsXML)"
 
             // 分節符放在段落屬性中
             if let sectionBreak = properties.sectionBreak {
                 xml += "<w:sectPr><w:type w:val=\"\(sectionBreak.rawValue)\"/></w:sectPr>"
+            }
+
+            // v0.18.0+ (che-word-mcp#45): pPrChange tracks paragraph format change
+            if let revision = formatChangeRevision, let prev = previousProperties {
+                xml += revision.toOpeningXML()
+                xml += "<w:pPr>\(prev.toXML())</w:pPr>"
+                xml += revision.toClosingXML()
             }
 
             xml += "</w:pPr>"
@@ -205,9 +230,26 @@ extension Paragraph {
             xml += "<w:commentRangeStart w:id=\"\(commentId)\"/>"
         }
 
-        // Runs
-        for run in runs {
-            xml += run.toXML()
+        // Runs (v0.18.0: grouped by Run.revisionId so a single revision wrapping
+        // multiple consecutive runs emits one <w:ins>/<w:del>/etc pair, not one
+        // wrapper per run; deletion-type wrappers also substitute <w:t> with
+        // <w:delText> per OOXML spec; runs flagged with formatChangeRevisionId
+        // emit <w:rPrChange> inside their <w:rPr>)
+        for group in Self.groupRunsByRevisionId(runs) {
+            if let revisionId = group.revisionId,
+               let revision = revisions.first(where: { $0.id == revisionId }) {
+                xml += revision.toOpeningXML()
+                for run in group.runs {
+                    xml += Self.emitRun(run, asDelText: revision.type == .deletion,
+                                        paragraphRevisions: revisions)
+                }
+                xml += revision.toClosingXML()
+            } else {
+                for run in group.runs {
+                    xml += Self.emitRun(run, asDelText: false,
+                                        paragraphRevisions: revisions)
+                }
+            }
         }
 
         // v0.15.0+ (#44 task 3.0): Content Controls as proper siblings of runs.
@@ -243,6 +285,92 @@ extension Paragraph {
 
         xml += "</w:p>"
         return xml
+    }
+
+    // MARK: - Revision Grouping (v0.18.0+)
+
+    /// Internal grouping of consecutive runs sharing the same `revisionId`.
+    fileprivate struct RunGroup {
+        let revisionId: Int?
+        var runs: [Run]
+    }
+
+    /// Walk `runs` once, coalescing consecutive entries that share the same
+    /// `revisionId` (including the all-nil case). Used by `toXML()` to emit
+    /// a single `<w:ins>`/`<w:del>` wrapper around each contiguous run group
+    /// instead of one wrapper per run.
+    fileprivate static func groupRunsByRevisionId(_ runs: [Run]) -> [RunGroup] {
+        var groups: [RunGroup] = []
+        for run in runs {
+            if !groups.isEmpty, groups[groups.count - 1].revisionId == run.revisionId {
+                groups[groups.count - 1].runs.append(run)
+            } else {
+                groups.append(RunGroup(revisionId: run.revisionId, runs: [run]))
+            }
+        }
+        return groups
+    }
+
+    /// Emit a single run's XML with optional revision decorations:
+    ///   - `asDelText == true`: substitute `<w:t>` → `<w:delText>`
+    ///   - `run.formatChangeRevisionId` set + matching Revision in
+    ///     `paragraphRevisions`: emit `<w:rPrChange>` inside `<w:rPr>`
+    /// Falls through to `Run.toXML()` when neither decoration applies and the
+    /// run has no rawXML override.
+    fileprivate static func emitRun(_ run: Run, asDelText: Bool,
+                                    paragraphRevisions: [Revision]) -> String {
+        if let rawXML = run.rawXML { return rawXML }
+        if let rawXML = run.properties.rawXML { return rawXML }
+
+        let formatRevision: Revision? = {
+            guard let id = run.formatChangeRevisionId else { return nil }
+            return paragraphRevisions.first { $0.id == id }
+        }()
+
+        if !asDelText && formatRevision == nil {
+            return run.toXML()
+        }
+
+        var xml = "<w:r>"
+
+        let propsXML = run.properties.toXML()
+        if !propsXML.isEmpty || formatRevision != nil {
+            xml += "<w:rPr>\(propsXML)"
+            if let revision = formatRevision, let prev = revision.previousFormat {
+                xml += revision.toOpeningXML()
+                xml += prev.toChangeXML()
+                xml += revision.toClosingXML()
+            }
+            xml += "</w:rPr>"
+        }
+
+        if let drawing = run.drawing {
+            xml += drawing.toXML()
+        } else if !run.text.isEmpty || (run.rawElements?.isEmpty ?? true) {
+            if asDelText {
+                xml += "<w:delText xml:space=\"preserve\">\(escapeRunText(run.text))</w:delText>"
+            } else {
+                xml += "<w:t xml:space=\"preserve\">\(escapeRunText(run.text))</w:t>"
+            }
+        }
+
+        if let rawElements = run.rawElements {
+            for raw in rawElements {
+                xml += raw.xml
+            }
+        }
+
+        xml += "</w:r>"
+        return xml
+    }
+
+    fileprivate static func escapeRunText(_ string: String) -> String {
+        return string
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
     }
 }
 

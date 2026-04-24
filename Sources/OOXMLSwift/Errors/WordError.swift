@@ -41,6 +41,9 @@ public enum WordError: Error, LocalizedError {
     case nestedTooDeep(depth: Int, max: Int)
     case hyperlinkNotFound(String)
 
+    // Track Changes 錯誤 (#45: che-word-mcp-track-changes-programmatic-generation)
+    case trackChangesNotEnabled
+
     // 其他
     case unknownError(String)
 
@@ -92,6 +95,8 @@ public enum WordError: Error, LocalizedError {
             return "Nested table depth \(depth) exceeds maximum \(max)"
         case .hyperlinkNotFound(let id):
             return "Hyperlink not found: \(id)"
+        case .trackChangesNotEnabled:
+            return "track_changes_not_enabled — call enable_track_changes first"
         case .unknownError(let message):
             return "Unknown error: \(message)"
         }
