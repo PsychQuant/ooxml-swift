@@ -21,42 +21,13 @@ internal enum SDTParser {
     ///   and `content` set to the verbatim XML string of `<w:sdtContent>`'s
     ///   children. Nested SDTs inside `<w:sdtContent>` populate `children`.
     static func parseSDT(from element: XMLElement, parentSdtId: Int? = nil) -> ContentControl {
-        var sdt = StructuredDocumentTag()
-
-        // <w:sdtPr> — properties block. Absent => defaults (richText, no id/tag).
-        if let sdtPr = element.elements(forName: "w:sdtPr").first {
-            if let idEl = sdtPr.elements(forName: "w:id").first,
-               let idStr = idEl.attribute(forName: "w:val")?.stringValue,
-               let id = Int(idStr) {
-                sdt.id = id
-            }
-            if let tagEl = sdtPr.elements(forName: "w:tag").first,
-               let tagVal = tagEl.attribute(forName: "w:val")?.stringValue {
-                sdt.tag = tagVal
-            }
-            if let aliasEl = sdtPr.elements(forName: "w:alias").first,
-               let aliasVal = aliasEl.attribute(forName: "w:val")?.stringValue {
-                sdt.alias = aliasVal
-            }
-            if let lockEl = sdtPr.elements(forName: "w:lock").first,
-               let lockVal = lockEl.attribute(forName: "w:val")?.stringValue,
-               let lockType = SDTLockType(rawValue: lockVal) {
-                sdt.lockType = lockType
-            }
-            if let placeholderEl = sdtPr.elements(forName: "w:placeholder").first,
-               let docPart = placeholderEl.elements(forName: "w:docPart").first,
-               let placeholderVal = docPart.attribute(forName: "w:val")?.stringValue {
-                sdt.placeholder = placeholderVal
-            }
-            if sdtPr.elements(forName: "w:temporary").first != nil {
-                sdt.isTemporary = true
-            }
-            sdt.type = detectType(from: sdtPr)
-        }
+        let sdt = parseSdtPr(from: element)
 
         // <w:sdtContent> — the content region.
-        // For Task 3.1, capture verbatim XML of inner children. Task 3.3
-        // will recursively parse nested `<w:sdt>` siblings into `children`.
+        // For paragraph-level SDTs, capture verbatim XML of inner children;
+        // nested `<w:sdt>` siblings become ContentControl.children.
+        // Block-level callers (DocxReader.parseBodyChildren) skip this path
+        // and feed children via the BodyChild.contentControl carrier instead.
         var contentXML = ""
         var children: [ContentControl] = []
 
@@ -64,7 +35,6 @@ internal enum SDTParser {
             for child in sdtContent.children ?? [] {
                 guard let childEl = child as? XMLElement else { continue }
                 if childEl.localName == "sdt" {
-                    // Task 3.3: nested SDT becomes a child ContentControl
                     children.append(parseSDT(from: childEl, parentSdtId: sdt.id))
                 } else {
                     contentXML += childEl.xmlString
@@ -78,6 +48,43 @@ internal enum SDTParser {
             children: children,
             parentSdtId: parentSdtId
         )
+    }
+
+    /// Parse only the `<w:sdtPr>` metadata of a `<w:sdt>` element.
+    /// Used for block-level SDTs (Task 3.4) where the content region is
+    /// re-walked by DocxReader.parseBodyChildren as BodyChild values.
+    static func parseSdtPr(from element: XMLElement) -> StructuredDocumentTag {
+        var sdt = StructuredDocumentTag()
+        guard let sdtPr = element.elements(forName: "w:sdtPr").first else { return sdt }
+
+        if let idEl = sdtPr.elements(forName: "w:id").first,
+           let idStr = idEl.attribute(forName: "w:val")?.stringValue,
+           let id = Int(idStr) {
+            sdt.id = id
+        }
+        if let tagEl = sdtPr.elements(forName: "w:tag").first,
+           let tagVal = tagEl.attribute(forName: "w:val")?.stringValue {
+            sdt.tag = tagVal
+        }
+        if let aliasEl = sdtPr.elements(forName: "w:alias").first,
+           let aliasVal = aliasEl.attribute(forName: "w:val")?.stringValue {
+            sdt.alias = aliasVal
+        }
+        if let lockEl = sdtPr.elements(forName: "w:lock").first,
+           let lockVal = lockEl.attribute(forName: "w:val")?.stringValue,
+           let lockType = SDTLockType(rawValue: lockVal) {
+            sdt.lockType = lockType
+        }
+        if let placeholderEl = sdtPr.elements(forName: "w:placeholder").first,
+           let docPart = placeholderEl.elements(forName: "w:docPart").first,
+           let placeholderVal = docPart.attribute(forName: "w:val")?.stringValue {
+            sdt.placeholder = placeholderVal
+        }
+        if sdtPr.elements(forName: "w:temporary").first != nil {
+            sdt.isTemporary = true
+        }
+        sdt.type = detectType(from: sdtPr)
+        return sdt
     }
 
     /// Detect SDT type by inspecting `<w:sdtPr>` children in spec-defined

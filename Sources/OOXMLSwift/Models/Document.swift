@@ -156,22 +156,44 @@ public struct WordDocument: Equatable {
     public func getText() -> String {
         var result = ""
         for child in body.children {
-            switch child {
-            case .paragraph(let para):
-                result += para.getText() + "\n"
-            case .table(let table):
-                result += table.getText() + "\n"
-            }
+            result += textOfBodyChild(child)
         }
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Recursive helper: text content of any BodyChild including block-level
+    /// SDT wrappers (#44 task 3.4). Block-level controls are transparent —
+    /// their children's text is concatenated with the SDT wrapper invisible.
+    private func textOfBodyChild(_ child: BodyChild) -> String {
+        switch child {
+        case .paragraph(let para):
+            return para.getText() + "\n"
+        case .table(let table):
+            return table.getText() + "\n"
+        case .contentControl(_, let children):
+            return children.map { textOfBodyChild($0) }.joined()
+        }
+    }
+
     public func getParagraphs() -> [Paragraph] {
-        return body.children.compactMap { child in
-            if case .paragraph(let para) = child {
-                return para
-            }
-            return nil
+        var result: [Paragraph] = []
+        for child in body.children {
+            collectTopLevelParagraphs(child, into: &result)
+        }
+        return result
+    }
+
+    /// Recursively collect paragraphs that are siblings at the body level,
+    /// transparently descending into block-level SDTs (#44 task 3.4).
+    /// Does NOT descend into tables — that's `getAllParagraphs`'s job.
+    private func collectTopLevelParagraphs(_ child: BodyChild, into result: inout [Paragraph]) {
+        switch child {
+        case .paragraph(let para):
+            result.append(para)
+        case .table:
+            break
+        case .contentControl(_, let children):
+            for c in children { collectTopLevelParagraphs(c, into: &result) }
         }
     }
 
@@ -179,18 +201,26 @@ public struct WordDocument: Equatable {
     public func getAllParagraphs() -> [Paragraph] {
         var result: [Paragraph] = []
         for child in body.children {
-            switch child {
-            case .paragraph(let para):
-                result.append(para)
-            case .table(let table):
-                for row in table.rows {
-                    for cell in row.cells {
-                        result.append(contentsOf: cell.paragraphs)
-                    }
-                }
-            }
+            collectAllParagraphs(child, into: &result)
         }
         return result
+    }
+
+    /// Recursively collect every paragraph anywhere — body siblings,
+    /// table cells, block-level SDT children (#44 task 3.4).
+    private func collectAllParagraphs(_ child: BodyChild, into result: inout [Paragraph]) {
+        switch child {
+        case .paragraph(let para):
+            result.append(para)
+        case .table(let table):
+            for row in table.rows {
+                for cell in row.cells {
+                    result.append(contentsOf: cell.paragraphs)
+                }
+            }
+        case .contentControl(_, let children):
+            for c in children { collectAllParagraphs(c, into: &result) }
+        }
     }
 
     // MARK: - Paragraph Operations
@@ -253,6 +283,45 @@ public struct WordDocument: Equatable {
     /// - Returns: Number of replacements performed.
     /// - Throws: `ReplaceError.invalidRegex` when `options.regex == true` and the
     ///   pattern is invalid.
+    /// Recursive helper for `replaceText` to descend into block-level SDT
+    /// children (#44 task 3.4). Returns total replacements made.
+    private mutating func replaceTextInBodyChildren(
+        _ children: inout [BodyChild],
+        find: String,
+        with replacement: String,
+        options: ReplaceOptions
+    ) throws -> Int {
+        var count = 0
+        for i in 0..<children.count {
+            switch children[i] {
+            case .paragraph(var para):
+                count += try TextReplacementEngine.replace(
+                    runs: &para.runs, find: find, with: replacement, options: options
+                )
+                children[i] = .paragraph(para)
+            case .table(var table):
+                for rowIdx in 0..<table.rows.count {
+                    for cellIdx in 0..<table.rows[rowIdx].cells.count {
+                        for paraIdx in 0..<table.rows[rowIdx].cells[cellIdx].paragraphs.count {
+                            var para = table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx]
+                            count += try TextReplacementEngine.replace(
+                                runs: &para.runs, find: find, with: replacement, options: options
+                            )
+                            table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx] = para
+                        }
+                    }
+                }
+                children[i] = .table(table)
+            case .contentControl(let metadata, var inner):
+                count += try replaceTextInBodyChildren(
+                    &inner, find: find, with: replacement, options: options
+                )
+                children[i] = .contentControl(metadata, children: inner)
+            }
+        }
+        return count
+    }
+
     @discardableResult
     public mutating func replaceText(
         find: String,
@@ -282,6 +351,11 @@ public struct WordDocument: Equatable {
                     }
                 }
                 body.children[i] = .table(table)
+            case .contentControl(let metadata, var children):
+                count += try replaceTextInBodyChildren(
+                    &children, find: find, with: replacement, options: options
+                )
+                body.children[i] = .contentControl(metadata, children: children)
             }
         }
 
@@ -1930,6 +2004,12 @@ public struct Body: Equatable {
 public enum BodyChild: Equatable {
     case paragraph(Paragraph)
     case table(Table)
+    /// v0.15.0+ (#44 task 3.4): block-level Structured Document Tag wrapping
+    /// one or more body children (paragraphs / tables / nested SDTs). The
+    /// outer `<w:sdt>` appears directly inside `<w:body>` or `<w:tc>` rather
+    /// than inside a `<w:p>`. The control's metadata is on `ContentControl.sdt`;
+    /// `children` are the body elements that lived inside `<w:sdtContent>`.
+    case contentControl(ContentControl, children: [BodyChild])
 }
 
 // MARK: - Document Properties

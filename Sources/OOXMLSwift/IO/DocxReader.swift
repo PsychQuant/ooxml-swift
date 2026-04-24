@@ -231,6 +231,13 @@ public struct DocxReader {
                         }
                     }
                 }
+            case .contentControl:
+                // #44 task 3.4: revision tracking inside block-level SDTs
+                // is deferred — these wrappers don't carry their own
+                // revisions, and child paragraph revisions are already
+                // attached when each paragraph is parsed. A future task
+                // would index revisions through the SDT children too.
+                break
             }
         }
 
@@ -416,74 +423,86 @@ public struct DocxReader {
     ) throws -> Body {
         var body = Body()
 
-        // 取得所有段落和表格節點
-        // XPath: //w:body/*
-        let bodyNodes = try xml.nodes(forXPath: "//*[local-name()='body']/*")
-
-        let count = bodyNodes.count
-        guard count > 0 else { return body }
-
-        // 小文件走 serial path（GCD dispatch overhead 不划算）
-        let coreCount = ProcessInfo.processInfo.activeProcessorCount
-        if count <= 200 || coreCount <= 1 {
-            for node in bodyNodes {
-                guard let element = node as? XMLElement else { continue }
-
-                if element.localName == "p" {
-                    let paragraph = try parseParagraph(
-                        from: element,
-                        relationships: relationships,
-                        styles: styles,
-                        numbering: numbering
-                    )
-                    body.children.append(.paragraph(paragraph))
-                } else if element.localName == "tbl" {
-                    let table = try parseTable(
-                        from: element,
-                        relationships: relationships,
-                        styles: styles,
-                        numbering: numbering
-                    )
-                    body.children.append(.table(table))
-                    body.tables.append(table)
-                }
-            }
-            return body
-        }
-
         // v0.13.3+ (che-word-mcp#41 + save-durability prerequisite):
-        // Serial parsing always. The prior parallel path used
-        // `DispatchQueue.concurrentPerform` against shared libxml2-backed
-        // `XMLElement` nodes, which is NOT thread-safe at the document level.
-        // Parsing determinism is also a load-bearing prerequisite for
-        // `recover_from_autosave`: re-parsing the same source bytes must
-        // produce identical in-memory state. See SDD
-        // `che-word-mcp-insert-crash-autosave-fix` and the regression test
-        // `SerialOnlyOOXMLTests.testNoParallelPrimitivesInOOXMLIO`.
-        body.children.reserveCapacity(count)
-        for i in 0..<count {
-            guard let element = bodyNodes[i] as? XMLElement else { continue }
-            if element.localName == "p" {
+        // Serial parsing always (no parallel primitives in OOXML IO).
+        // Parsing determinism is load-bearing for recover_from_autosave.
+        guard let bodyEl = (try xml.nodes(forXPath: "//*[local-name()='body']").first) as? XMLElement
+        else { return body }
+
+        body.children = try parseBodyChildren(
+            in: bodyEl,
+            relationships: relationships,
+            styles: styles,
+            numbering: numbering,
+            collectingTablesInto: &body.tables
+        )
+        return body
+    }
+
+    /// Recursively parse the body-level children of an XML element. Used for
+    /// `<w:body>`, `<w:sdtContent>` (block-level SDT children), and `<w:tc>`
+    /// (table cell contents that may include nested block-level SDTs).
+    ///
+    /// Walks direct children: `<w:p>` → paragraph, `<w:tbl>` → table,
+    /// `<w:sdt>` → block-level ContentControl with recursively-parsed
+    /// `<w:sdtContent>` children. Other elements are skipped.
+    ///
+    /// The `collectingTablesInto` parameter preserves the existing
+    /// `body.tables` flat list for backwards compatibility with consumers
+    /// that iterate it directly.
+    internal static func parseBodyChildren(
+        in element: XMLElement,
+        relationships: RelationshipsCollection,
+        styles: [Style],
+        numbering: Numbering,
+        collectingTablesInto tables: inout [Table]
+    ) throws -> [BodyChild] {
+        var children: [BodyChild] = []
+        for node in element.children ?? [] {
+            guard let el = node as? XMLElement else { continue }
+            switch el.localName {
+            case "p":
                 let paragraph = try parseParagraph(
-                    from: element,
+                    from: el,
                     relationships: relationships,
                     styles: styles,
                     numbering: numbering
                 )
-                body.children.append(.paragraph(paragraph))
-            } else if element.localName == "tbl" {
+                children.append(.paragraph(paragraph))
+            case "tbl":
                 let table = try parseTable(
-                    from: element,
+                    from: el,
                     relationships: relationships,
                     styles: styles,
                     numbering: numbering
                 )
-                body.children.append(.table(table))
-                body.tables.append(table)
+                children.append(.table(table))
+                tables.append(table)
+            case "sdt":
+                // v0.15.0+ (#44 task 3.4): block-level SDT wrapping body
+                // children. Parse SDT metadata via SDTParser (without
+                // descending into <w:sdtContent>'s children), then recurse
+                // here to parse the body children inside.
+                let metadata = ContentControl(
+                    sdt: SDTParser.parseSdtPr(from: el),
+                    content: ""
+                )
+                var sdtChildren: [BodyChild] = []
+                if let sdtContent = el.elements(forName: "w:sdtContent").first {
+                    sdtChildren = try parseBodyChildren(
+                        in: sdtContent,
+                        relationships: relationships,
+                        styles: styles,
+                        numbering: numbering,
+                        collectingTablesInto: &tables
+                    )
+                }
+                children.append(.contentControl(metadata, children: sdtChildren))
+            default:
+                continue
             }
         }
-
-        return body
+        return children
     }
 
     // MARK: - Paragraph Parsing

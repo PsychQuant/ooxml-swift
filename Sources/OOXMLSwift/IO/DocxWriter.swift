@@ -617,6 +617,25 @@ public struct DocxWriter {
 
     // MARK: - Document
 
+    /// Recursive XML serialization for BodyChild including block-level SDTs
+    /// (#44 task 3.4). Block-level SDTs emit `<w:sdt><w:sdtPr/><w:sdtContent>...children...</w:sdtContent></w:sdt>`
+    /// with children re-serialized via this same helper.
+    private static func xmlForBodyChild(_ child: BodyChild) -> String {
+        switch child {
+        case .paragraph(let para):
+            return para.toXML()
+        case .table(let table):
+            return table.toXML()
+        case .contentControl(let metadata, let children):
+            var xml = "<w:sdt>"
+            xml += metadata.sdt.toSdtPrXML()
+            xml += "<w:sdtContent>"
+            for c in children { xml += xmlForBodyChild(c) }
+            xml += "</w:sdtContent></w:sdt>"
+            return xml
+        }
+    }
+
     private static func writeDocument(_ document: WordDocument, to baseURL: URL) throws {
         var xml = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -627,12 +646,7 @@ public struct DocxWriter {
 
         // 段落和表格
         for child in document.body.children {
-            switch child {
-            case .paragraph(let para):
-                xml += para.toXML()
-            case .table(let table):
-                xml += table.toXML()
-            }
+            xml += xmlForBodyChild(child)
         }
 
         // 分節屬性（頁面設定）- 使用文件的 sectionProperties
