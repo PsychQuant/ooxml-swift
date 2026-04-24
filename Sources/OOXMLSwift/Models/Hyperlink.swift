@@ -10,6 +10,9 @@ public struct Hyperlink: Equatable {
     public var url: String?            // 外部 URL
     public var text: String            // 顯示文字
     public var tooltip: String?        // 滑鼠懸停提示
+    /// v0.17.0+ (#50): controls `w:history` attribute. `true` (default) = link
+    /// is added to "visited" history; `false` = emit `w:history="0"`.
+    public var history: Bool = true
 
     // 連結類型
     public var type: HyperlinkType {
@@ -21,22 +24,24 @@ public struct Hyperlink: Equatable {
         return .external
     }
 
-    public init(id: String, text: String, url: String, relationshipId: String, tooltip: String? = nil) {
+    public init(id: String, text: String, url: String, relationshipId: String, tooltip: String? = nil, history: Bool = true) {
         self.id = id
         self.text = text
         self.url = url
         self.relationshipId = relationshipId
         self.anchor = nil
         self.tooltip = tooltip
+        self.history = history
     }
 
-    public init(id: String, text: String, anchor: String, tooltip: String? = nil) {
+    public init(id: String, text: String, anchor: String, tooltip: String? = nil, history: Bool = true) {
         self.id = id
         self.text = text
         self.anchor = anchor
         self.relationshipId = nil
         self.url = nil
         self.tooltip = tooltip
+        self.history = history
     }
 
     /// 建立外部連結
@@ -89,6 +94,11 @@ extension Hyperlink {
         // 提示文字
         if let tooltip = tooltip {
             xml += " w:tooltip=\"\(escapeXML(tooltip))\""
+        }
+
+        // v0.17.0+ (#50): w:history (only emit when false; true is default)
+        if !history {
+            xml += " w:history=\"0\""
         }
 
         xml += ">"

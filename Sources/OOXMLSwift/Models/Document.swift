@@ -76,6 +76,10 @@ public struct WordDocument: Equatable {
     /// built-in styles not yet materialized as `<w:style>` blocks.
     public var latentStyles: [LatentStyle] = []
 
+    /// v0.17.0+ (#51): document-level setting for `<w:evenAndOddHeaders/>` in
+    /// settings.xml — when true, headers/footers of type `even` apply to even pages.
+    public var evenAndOddHeaders: Bool = false
+
     public init() {
         self.body = Body()
         self.styles = Style.defaultStyles
@@ -2565,6 +2569,204 @@ extension WordDocument {
     public mutating func setLatentStyles(_ entries: [LatentStyle]) {
         latentStyles = entries
         modifiedParts.insert("word/styles.xml")
+    }
+
+    // MARK: - Table / Hyperlink / Header Mutations (#44 tables-hyperlinks-headers-builtin)
+
+    /// Find the body table at index `tableIndex` (0-based, only top-level tables).
+    /// Throws `WordError.invalidIndex` when out of bounds.
+    private func findTable(at tableIndex: Int) throws -> Table {
+        let tables = body.children.compactMap { c -> Table? in
+            if case .table(let t) = c { return t }
+            return nil
+        }
+        guard tableIndex >= 0 && tableIndex < tables.count else {
+            throw WordError.invalidIndex(tableIndex)
+        }
+        return tables[tableIndex]
+    }
+
+    /// Replace the table at `tableIndex` with a mutated version.
+    private mutating func replaceTable(at tableIndex: Int, with newTable: Table) throws {
+        var seen = 0
+        for i in 0..<body.children.count {
+            if case .table = body.children[i] {
+                if seen == tableIndex {
+                    body.children[i] = .table(newTable)
+                    modifiedParts.insert("word/document.xml")
+                    return
+                }
+                seen += 1
+            }
+        }
+        throw WordError.invalidIndex(tableIndex)
+    }
+
+    /// Apply or replace a `<w:tblStylePr>` block on the table.
+    public mutating func setTableConditionalStyle(
+        tableIndex: Int,
+        type: TableConditionalStyleType,
+        properties: TableConditionalStyleProperties
+    ) throws {
+        var table = try findTable(at: tableIndex)
+        if let existing = table.conditionalStyles.firstIndex(where: { $0.type == type }) {
+            table.conditionalStyles[existing] = TableConditionalStyle(type: type, properties: properties)
+        } else {
+            table.conditionalStyles.append(TableConditionalStyle(type: type, properties: properties))
+        }
+        try replaceTable(at: tableIndex, with: table)
+    }
+
+    /// Set explicit table layout (`<w:tblLayout w:type>`).
+    public mutating func setTableLayout(tableIndex: Int, type: TableLayout) throws {
+        var table = try findTable(at: tableIndex)
+        table.explicitLayout = type
+        try replaceTable(at: tableIndex, with: table)
+    }
+
+    /// Mark a row as header-row (`<w:tblHeader/>`) so it repeats on page break.
+    public mutating func setHeaderRow(tableIndex: Int, rowIndex: Int) throws {
+        var table = try findTable(at: tableIndex)
+        guard rowIndex >= 0 && rowIndex < table.rows.count else {
+            throw WordError.invalidIndex(rowIndex)
+        }
+        table.rows[rowIndex].properties.isHeader = true
+        try replaceTable(at: tableIndex, with: table)
+    }
+
+    /// Set table-level left indent (`<w:tblInd>`) in twips.
+    public mutating func setTableIndent(tableIndex: Int, value: Int) throws {
+        var table = try findTable(at: tableIndex)
+        table.tableIndent = value
+        try replaceTable(at: tableIndex, with: table)
+    }
+
+    /// Insert a new table inside the cell at (rowIndex, colIndex) of the
+    /// parent table. Throws `nestedTooDeep` when nesting would exceed depth 5.
+    public mutating func insertNestedTable(
+        parentTableIndex: Int,
+        rowIndex: Int,
+        colIndex: Int,
+        rows: Int,
+        cols: Int
+    ) throws {
+        var table = try findTable(at: parentTableIndex)
+        guard rowIndex >= 0 && rowIndex < table.rows.count else {
+            throw WordError.invalidIndex(rowIndex)
+        }
+        guard colIndex >= 0 && colIndex < table.rows[rowIndex].cells.count else {
+            throw WordError.invalidIndex(colIndex)
+        }
+        // Depth check: count existing nesting depth in target cell.
+        let parentDepth = Self.computeMaxNestDepth(in: table.rows[rowIndex].cells[colIndex])
+        guard parentDepth + 1 <= 5 else {
+            throw WordError.nestedTooDeep(depth: parentDepth + 1, max: 5)
+        }
+        let nested = Table(rowCount: rows, columnCount: cols)
+        table.rows[rowIndex].cells[colIndex].nestedTables.append(nested)
+        try replaceTable(at: parentTableIndex, with: table)
+    }
+
+    /// Recursively compute the max nesting depth inside a cell. Returns 0
+    /// when the cell has no nested tables.
+    private static func computeMaxNestDepth(in cell: TableCell) -> Int {
+        guard !cell.nestedTables.isEmpty else { return 0 }
+        var maxDepth = 0
+        for nested in cell.nestedTables {
+            for row in nested.rows {
+                for child in row.cells {
+                    let depth = 1 + computeMaxNestDepth(in: child)
+                    if depth > maxDepth { maxDepth = depth }
+                }
+            }
+            // At least one nested table itself counts as depth 1.
+            if maxDepth == 0 { maxDepth = 1 }
+        }
+        return maxDepth
+    }
+
+    /// Set the tooltip on an existing hyperlink identified by id. Pass `nil`
+    /// to clear. Throws `hyperlinkNotFound` when the id does not match.
+    public mutating func setHyperlinkTooltip(hyperlinkId: String, tooltip: String?) throws {
+        var found = false
+        for childIdx in 0..<body.children.count {
+            guard case .paragraph(var para) = body.children[childIdx] else { continue }
+            if let hlIdx = para.hyperlinks.firstIndex(where: { $0.id == hyperlinkId }) {
+                para.hyperlinks[hlIdx].tooltip = tooltip
+                body.children[childIdx] = .paragraph(para)
+                found = true
+                break
+            }
+        }
+        guard found else { throw WordError.hyperlinkNotFound(hyperlinkId) }
+        modifiedParts.insert("word/document.xml")
+    }
+
+    /// Add a header part of the given type, returning the assigned filename
+    /// (e.g., `header2.xml`). Marks both the new header file AND document.xml
+    /// dirty (sectPr changes).
+    @discardableResult
+    public mutating func addHeaderOfType(text: String, type: HeaderFooterType) throws -> String {
+        // Find next available header index.
+        let usedIndices = headers.compactMap { h -> Int? in
+            // file name format: "headerN.xml"
+            let fn = h.fileName
+            let stripped = fn.replacingOccurrences(of: "header", with: "").replacingOccurrences(of: ".xml", with: "")
+            return Int(stripped)
+        }
+        let nextIdx = (usedIndices.max() ?? 0) + 1
+        let rId = "rId\(1000 + nextIdx)"  // simple synthetic rId; conflict-checked elsewhere
+        let header = Header(
+            id: rId,
+            paragraphs: [Paragraph(text: text)],
+            type: type,
+            originalFileName: "header\(nextIdx).xml"
+        )
+        // Replace any existing header of same type
+        if let existingIdx = headers.firstIndex(where: { $0.type == type }) {
+            headers[existingIdx] = header
+        } else {
+            headers.append(header)
+        }
+        modifiedParts.insert("word/\(header.fileName)")
+        modifiedParts.insert("word/document.xml")
+        return header.fileName
+    }
+
+    /// Toggle `<w:evenAndOddHeaders/>` in settings.xml.
+    public mutating func setEvenAndOddHeaders(_ enabled: Bool) {
+        evenAndOddHeaders = enabled
+        modifiedParts.insert("word/settings.xml")
+    }
+
+    /// Clone the source header's content into a new header part of the given
+    /// type. Returns the new file name. Used by unlink-from-previous semantics.
+    @discardableResult
+    public mutating func cloneHeaderForSection(
+        sourceFileName: String,
+        targetSectionIndex: Int,
+        type: HeaderFooterType
+    ) throws -> String {
+        guard let source = headers.first(where: { $0.fileName == sourceFileName }) else {
+            throw WordError.parseError("source header \(sourceFileName) not found")
+        }
+        // Allocate next index.
+        let usedIndices = headers.compactMap { h -> Int? in
+            let stripped = h.fileName.replacingOccurrences(of: "header", with: "").replacingOccurrences(of: ".xml", with: "")
+            return Int(stripped)
+        }
+        let nextIdx = (usedIndices.max() ?? 0) + 1
+        let rId = "rId\(1000 + nextIdx)"
+        let cloned = Header(
+            id: rId,
+            paragraphs: source.paragraphs,  // deep copy via value semantics
+            type: type,
+            originalFileName: "header\(nextIdx).xml"
+        )
+        headers.append(cloned)
+        modifiedParts.insert("word/\(cloned.fileName)")
+        modifiedParts.insert("word/document.xml")
+        return cloned.fileName
     }
 
     // MARK: - Section Mutations (#44 styles-sections-numbering-foundations Phase 5)

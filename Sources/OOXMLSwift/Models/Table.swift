@@ -5,6 +5,17 @@ public struct Table: Equatable {
     public var rows: [TableRow]
     public var properties: TableProperties
 
+    /// v0.17.0+ (#49): conditional formatting blocks (firstRow / lastRow / banded etc.)
+    /// emitted as `<w:tblStylePr w:type="...">` inside `<w:tblPr>`.
+    public var conditionalStyles: [TableConditionalStyle] = []
+
+    /// v0.17.0+ (#49): explicit `<w:tblInd>` table-level left indent (twips).
+    public var tableIndent: Int?
+
+    /// v0.17.0+ (#49): explicit table layout mode (`<w:tblLayout w:type>`).
+    /// nil means inherit from parent / default.
+    public var explicitLayout: TableLayout?
+
     public init(rows: [TableRow] = [], properties: TableProperties = TableProperties()) {
         self.rows = rows
         self.properties = properties
@@ -65,6 +76,11 @@ public enum HeightRule: String, Codable {
 public struct TableCell: Equatable {
     public var paragraphs: [Paragraph]
     public var properties: TableCellProperties
+
+    /// v0.17.0+ (#49): nested tables inside this cell (depth-limited to 5
+    /// at parser layer per design.md decision 1). Distinct from `paragraphs`
+    /// so the writer can emit `<w:tbl>` siblings of `<w:p>` correctly.
+    public var nestedTables: [Table] = []
 
     public init() {
         self.paragraphs = [Paragraph()]
@@ -129,11 +145,20 @@ public struct CellBorders: Equatable {
     public var left: Border?
     public var right: Border?
 
-    public init(top: Border? = nil, bottom: Border? = nil, left: Border? = nil, right: Border? = nil) {
+    /// v0.17.0+ (#49): diagonal borders.
+    /// `tl2br` = top-left to bottom-right (`<w:tl2br>`)
+    /// `tr2bl` = top-right to bottom-left (`<w:tr2bl>`)
+    public var tl2br: Border?
+    public var tr2bl: Border?
+
+    public init(top: Border? = nil, bottom: Border? = nil, left: Border? = nil, right: Border? = nil,
+                tl2br: Border? = nil, tr2bl: Border? = nil) {
         self.top = top
         self.bottom = bottom
         self.left = left
         self.right = right
+        self.tl2br = tl2br
+        self.tr2bl = tr2bl
     }
 
     /// 便利方法：建立四邊相同邊框
@@ -273,6 +298,86 @@ public enum TableLayout: String, Codable {
     case autofit = "autofit"    // 自動調整
 }
 
+// MARK: - v0.17.0+ (#49) Conditional Formatting
+
+/// `<w:tblStylePr w:type>` discriminator — region of the table that the
+/// formatting applies to.
+public enum TableConditionalStyleType: String, Codable {
+    case firstRow = "firstRow"
+    case lastRow = "lastRow"
+    case firstCol = "firstCol"
+    case lastCol = "lastCol"
+    case bandedRows = "band1Horz"   // OOXML uses band1Horz for odd rows
+    case bandedCols = "band1Vert"   // OOXML uses band1Vert for odd cols
+    case neCell = "neCell"
+    case nwCell = "nwCell"
+    case seCell = "seCell"
+    case swCell = "swCell"
+}
+
+/// Properties applied to a conditional formatting region. Sparse — only
+/// non-nil fields are emitted.
+public struct TableConditionalStyleProperties: Equatable {
+    public var bold: Bool?
+    public var italic: Bool?
+    public var color: String?           // RGB hex
+    public var backgroundColor: String? // RGB hex (becomes `<w:shd>`)
+    public var fontSize: Int?           // 半點 (half-points) — caller passes pt*2
+
+    public init(
+        bold: Bool? = nil,
+        italic: Bool? = nil,
+        color: String? = nil,
+        backgroundColor: String? = nil,
+        fontSize: Int? = nil
+    ) {
+        self.bold = bold
+        self.italic = italic
+        self.color = color
+        self.backgroundColor = backgroundColor
+        self.fontSize = fontSize
+    }
+}
+
+/// One `<w:tblStylePr>` block: which region + the formatting to apply.
+public struct TableConditionalStyle: Equatable {
+    public var type: TableConditionalStyleType
+    public var properties: TableConditionalStyleProperties
+
+    public init(type: TableConditionalStyleType, properties: TableConditionalStyleProperties) {
+        self.type = type
+        self.properties = properties
+    }
+
+    /// Render to OOXML `<w:tblStylePr>` block.
+    func toXML() -> String {
+        var rPrParts: [String] = []
+        if properties.bold == true { rPrParts.append("<w:b/>") }
+        if properties.italic == true { rPrParts.append("<w:i/>") }
+        if let c = properties.color {
+            rPrParts.append("<w:color w:val=\"\(c)\"/>")
+        }
+        if let sz = properties.fontSize {
+            rPrParts.append("<w:sz w:val=\"\(sz)\"/>")
+        }
+
+        var tcPrParts: [String] = []
+        if let bg = properties.backgroundColor {
+            tcPrParts.append("<w:shd w:val=\"clear\" w:fill=\"\(bg)\"/>")
+        }
+
+        var xml = "<w:tblStylePr w:type=\"\(type.rawValue)\">"
+        if !rPrParts.isEmpty {
+            xml += "<w:rPr>" + rPrParts.joined() + "</w:rPr>"
+        }
+        if !tcPrParts.isEmpty {
+            xml += "<w:tcPr>" + tcPrParts.joined() + "</w:tcPr>"
+        }
+        xml += "</w:tblStylePr>"
+        return xml
+    }
+}
+
 // MARK: - XML 生成
 
 extension Table {
@@ -280,8 +385,9 @@ extension Table {
     public func toXML() -> String {
         var xml = "<w:tbl>"
 
-        // Table Properties
-        xml += properties.toXML()
+        // Table Properties (extended in v0.17.0+ to inject tblInd / explicit
+        // layout / conditional styles into the existing tblPr block)
+        xml += extendedTablePropertiesXML()
 
         // Table Grid (欄位定義)
         xml += "<w:tblGrid>"
@@ -300,6 +406,32 @@ extension Table {
 
         xml += "</w:tbl>"
         return xml
+    }
+}
+
+extension Table {
+    /// v0.17.0+ (#49): emit Table-level extensions (tblInd, conditional styles,
+    /// explicit layout) into the existing tblPr block. Wrapper around
+    /// `TableProperties.toXML` with table-level fields injected.
+    func extendedTablePropertiesXML() -> String {
+        let baseXML = properties.toXML()
+        var injected = ""
+        // Inject ind / explicit layout / conditional styles inside <w:tblPr>.
+        if let indent = tableIndent {
+            injected += "<w:tblInd w:w=\"\(indent)\" w:type=\"dxa\"/>"
+        }
+        if let layout = explicitLayout {
+            injected += "<w:tblLayout w:type=\"\(layout.rawValue)\"/>"
+        }
+        for cs in conditionalStyles {
+            injected += cs.toXML()
+        }
+        guard !injected.isEmpty else { return baseXML }
+        // Inject before closing </w:tblPr>.
+        if let range = baseXML.range(of: "</w:tblPr>") {
+            return baseXML.replacingCharacters(in: range, with: injected + "</w:tblPr>")
+        }
+        return baseXML
     }
 }
 
@@ -411,6 +543,18 @@ extension TableCell {
             }
         }
 
+        // v0.17.0+ (#49): nested tables emit as siblings of paragraphs
+        for nested in nestedTables {
+            xml += nested.toXML()
+        }
+
+        // OOXML requires the cell to end with a paragraph after a nested table
+        // (Word silently appends one if missing). Append a trailing empty
+        // paragraph so re-saving produces compliant output.
+        if !nestedTables.isEmpty {
+            xml += "<w:p/>"
+        }
+
         xml += "</w:tc>"
         return xml
     }
@@ -448,6 +592,9 @@ extension TableCellProperties {
             if let bottom = borders.bottom { parts.append(bottom.toXML(name: "bottom")) }
             if let left = borders.left { parts.append(left.toXML(name: "left")) }
             if let right = borders.right { parts.append(right.toXML(name: "right")) }
+            // v0.17.0+ (#49): diagonal borders
+            if let tl2br = borders.tl2br { parts.append(tl2br.toXML(name: "tl2br")) }
+            if let tr2bl = borders.tr2bl { parts.append(tr2bl.toXML(name: "tr2bl")) }
             parts.append("</w:tcBorders>")
         }
 

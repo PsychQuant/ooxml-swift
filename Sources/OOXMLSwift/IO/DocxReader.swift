@@ -1135,17 +1135,62 @@ public struct DocxReader {
 
     // MARK: - Table Parsing
 
+    /// v0.17.0+ (#49): max table nesting depth — beyond this we throw rather
+    /// than risk OOM on malformed input. Matches Word's own internal threshold.
+    static let MAX_TABLE_NEST_DEPTH = 5
+
     private static func parseTable(
         from element: XMLElement,
         relationships: RelationshipsCollection,
         styles: [Style],
-        numbering: Numbering
+        numbering: Numbering,
+        depth: Int = 0
     ) throws -> Table {
+        guard depth <= MAX_TABLE_NEST_DEPTH else {
+            throw WordError.invalidDocx("nested table depth exceeds \(MAX_TABLE_NEST_DEPTH)")
+        }
+
         var table = Table()
 
-        // 解析表格屬性
+        // 解析表格屬性 (extended in v0.17.0+ to also pick up tblInd / explicit
+        // layout / conditional styles)
         if let tblPr = element.elements(forName: "w:tblPr").first {
             table.properties = parseTableProperties(from: tblPr)
+            // tblInd
+            if let tblInd = tblPr.elements(forName: "w:tblInd").first,
+               let w = tblInd.attribute(forName: "w:w")?.stringValue,
+               let value = Int(w) {
+                table.tableIndent = value
+            }
+            // explicit layout (separate from properties.layout for round-trip clarity)
+            if let layout = tblPr.elements(forName: "w:tblLayout").first,
+               let val = layout.attribute(forName: "w:type")?.stringValue,
+               let lay = TableLayout(rawValue: val) {
+                table.explicitLayout = lay
+            }
+            // conditional styles
+            for stylePr in tblPr.elements(forName: "w:tblStylePr") {
+                guard let typeStr = stylePr.attribute(forName: "w:type")?.stringValue,
+                      let type = TableConditionalStyleType(rawValue: typeStr)
+                else { continue }
+                var props = TableConditionalStyleProperties()
+                if let rPr = stylePr.elements(forName: "w:rPr").first {
+                    if rPr.elements(forName: "w:b").first != nil { props.bold = true }
+                    if rPr.elements(forName: "w:i").first != nil { props.italic = true }
+                    if let c = rPr.elements(forName: "w:color").first?.attribute(forName: "w:val")?.stringValue {
+                        props.color = c
+                    }
+                    if let szStr = rPr.elements(forName: "w:sz").first?.attribute(forName: "w:val")?.stringValue,
+                       let sz = Int(szStr) {
+                        props.fontSize = sz
+                    }
+                }
+                if let tcPr = stylePr.elements(forName: "w:tcPr").first,
+                   let bg = tcPr.elements(forName: "w:shd").first?.attribute(forName: "w:fill")?.stringValue {
+                    props.backgroundColor = bg
+                }
+                table.conditionalStyles.append(TableConditionalStyle(type: type, properties: props))
+            }
         }
 
         // 解析表格行
@@ -1154,7 +1199,8 @@ public struct DocxReader {
                 from: tr,
                 relationships: relationships,
                 styles: styles,
-                numbering: numbering
+                numbering: numbering,
+                depth: depth
             )
             table.rows.append(row)
         }
@@ -1194,7 +1240,8 @@ public struct DocxReader {
         from element: XMLElement,
         relationships: RelationshipsCollection,
         styles: [Style],
-        numbering: Numbering
+        numbering: Numbering,
+        depth: Int = 0
     ) throws -> TableRow {
         var row = TableRow()
 
@@ -1209,7 +1256,8 @@ public struct DocxReader {
                 from: tc,
                 relationships: relationships,
                 styles: styles,
-                numbering: numbering
+                numbering: numbering,
+                depth: depth
             )
             row.cells.append(cell)
         }
@@ -1247,7 +1295,8 @@ public struct DocxReader {
         from element: XMLElement,
         relationships: RelationshipsCollection,
         styles: [Style],
-        numbering: Numbering
+        numbering: Numbering,
+        depth: Int = 0
     ) throws -> TableCell {
         var cell = TableCell()
         cell.paragraphs = []
@@ -1266,6 +1315,18 @@ public struct DocxReader {
                 numbering: numbering
             )
             cell.paragraphs.append(para)
+        }
+
+        // v0.17.0+ (#49): nested tables — recurse into <w:tbl> children of <w:tc>
+        for nestedEl in element.elements(forName: "w:tbl") {
+            let nested = try parseTable(
+                from: nestedEl,
+                relationships: relationships,
+                styles: styles,
+                numbering: numbering,
+                depth: depth + 1
+            )
+            cell.nestedTables.append(nested)
         }
 
         // 確保至少有一個段落
@@ -1320,7 +1381,27 @@ public struct DocxReader {
             props.shading = shading
         }
 
+        // v0.17.0+ (#49): diagonal borders
+        if let tcBorders = element.elements(forName: "w:tcBorders").first {
+            let tl2br = parseBorder(tcBorders.elements(forName: "w:tl2br").first)
+            let tr2bl = parseBorder(tcBorders.elements(forName: "w:tr2bl").first)
+            if tl2br != nil || tr2bl != nil {
+                if props.borders == nil { props.borders = CellBorders() }
+                props.borders?.tl2br = tl2br
+                props.borders?.tr2bl = tr2bl
+            }
+        }
+
         return props
+    }
+
+    /// v0.17.0+ helper: parse a single `<w:top|bottom|...>` border element.
+    private static func parseBorder(_ element: XMLElement?) -> Border? {
+        guard let el = element else { return nil }
+        let style = BorderStyle(rawValue: el.attribute(forName: "w:val")?.stringValue ?? "single") ?? .single
+        let size = Int(el.attribute(forName: "w:sz")?.stringValue ?? "4") ?? 4
+        let color = el.attribute(forName: "w:color")?.stringValue ?? "000000"
+        return Border(style: style, size: size, color: color)
     }
 
     // MARK: - Styles Parsing

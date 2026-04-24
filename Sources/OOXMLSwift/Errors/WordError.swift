@@ -37,6 +37,10 @@ public enum WordError: Error, LocalizedError {
     case numIdNotFound(Int)
     case abstractNumIdNotFound(Int)
 
+    // Tables / Hyperlinks / Headers 錯誤 (#44: che-word-mcp-tables-hyperlinks-headers-builtin)
+    case nestedTooDeep(depth: Int, max: Int)
+    case hyperlinkNotFound(String)
+
     // 其他
     case unknownError(String)
 
@@ -84,6 +88,10 @@ public enum WordError: Error, LocalizedError {
             return "Numbering numId not found: \(id)"
         case .abstractNumIdNotFound(let id):
             return "Numbering abstractNumId not found: \(id)"
+        case .nestedTooDeep(let depth, let max):
+            return "Nested table depth \(depth) exceeds maximum \(max)"
+        case .hyperlinkNotFound(let id):
+            return "Hyperlink not found: \(id)"
         case .unknownError(let message):
             return "Unknown error: \(message)"
         }
