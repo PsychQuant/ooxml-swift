@@ -2,6 +2,58 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.13.5] - 2026-04-24
+
+### Added — Path traversal security baseline (closes che-word-mcp#55)
+
+`isSafeRelativeOOXMLPath()` validator at `Sources/OOXMLSwift/IO/PathValidator.swift`. Defense-in-depth: applied at parse boundary (DocxReader header/footer rel loops) AND at property setters (`Header.originalFileName` / `Footer.originalFileName` `didSet` observers).
+
+Pre-fix, `_rels/document.xml.rels` `Target` attribute flowed unsanitized into `URL.appendingPathComponent` (does NOT normalize `..`) AND into `Header.originalFileName` used at write time. Malicious .docx could read OR write outside `word/` directory at user UID.
+
+Validator rejects: empty / >256 chars (DoS guard), absolute paths, parent traversal (including URL-encoded `%2e%2e` `%2f` `%5c`), control chars (NUL, newlines, < 0x20, 0x7F). Accepts non-ASCII Unicode in printable range.
+
+10 new `PathTraversalSecurityTests` scenarios.
+
+### Added — Multi-instance Header/Footer auto-suffix (closes che-word-mcp#53)
+
+`addHeader()` / `addHeaderWithPageNumber()` / `addFooter()` / `addFooterWithPageNumber()` now call new private `allocateHeaderFileName(for:)` / `allocateFooterFileName(for:)` helpers that auto-suffix the fileName. Multi-instance `.default`-type adds now produce `header1.xml`, `header2.xml`, `header3.xml` instead of all collapsing to `header1.xml`.
+
+Pre-fix: latent bug where `addHeader()` × 2 with default type both produced `Header.fileName == "header1.xml"`. On disk: h2 overwrote h1; in #42 dirty-bit Sets they collapsed to one entry.
+
+Reader-loaded path unchanged (`originalFileName` already populated from `rel.target`). 7 new `MultiInstanceHeaderFooterTests` scenarios.
+
+### Changed — `updateAllFields` coverage extensions (closes che-word-mcp#54)
+
+Bundles 4 sub-findings from #42 verification:
+
+1. **Regex schema-drift detection**: `rewriteCachedResult` now returns `(rewritten: String, didMatch: Bool)`. When `didMatch == false` and a SEQ field with `cachedResultRunIdx` was present, emit stderr warning that cached value may be stale.
+2. **Counter-scope documentation**: `updateAllFields()` doc-comment explains SEQ counters are global across body / headers / footers / notes (differs from Word F9 per-section isolation). `isolatePerContainer` flag deferred.
+3. **Header-SEQ no-op test**: snapshot-delta assertion confirms updateAllFields adds nothing to modifiedParts when cached value already matches.
+4. **Footnote/endnote round-trip tests**: byte-equality verification for note-parts mirrors v0.13.4's header round-trip.
+
+3 new `UpdateAllFieldsCoverageTests` scenarios.
+
+### Tests
+
+- 408 baseline + 36 net new = **444/444 tests pass** across 3 issues:
+  - 10 `PathTraversalSecurityTests` (#55)
+  - 7 `MultiInstanceHeaderFooterTests` (#53)
+  - 3 `UpdateAllFieldsCoverageTests` (#54)
+  - Plus dirty-bit verify + earlier sessions
+- 5 XCTSkip (pre-existing fixture-gated tests)
+
+### Compatibility
+
+- **No public API changes**. `isSafeRelativeOOXMLPath` is the only new public symbol; defaults preserve all prior behavior for existing callers.
+- **Behavior changes**:
+  - DocxReader silently drops headers/footers with unsafe rel.target (with stderr warning) — was previously vulnerable
+  - `addHeader()` × N with default type now produces sequential fileNames — was silently colliding
+  - `updateAllFields` emits stderr warnings on regex schema drift — was silent
+
+### Refs
+
+- PsychQuant/che-word-mcp#53, #54, #55 (all opened during #42 verification on 2026-04-24)
+
 ## [0.13.4] - 2026-04-24
 
 ### Fixed — `updateAllFields` honest dirty-bit propagation (closes che-word-mcp#42)
