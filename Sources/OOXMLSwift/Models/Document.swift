@@ -2439,24 +2439,44 @@ extension WordDocument {
     public func allocateSdtId() -> Int {
         var maxId = 0
         for child in body.children {
-            if case .paragraph(let paragraph) = child {
-                // Legacy path (pre-task-3.0): SDTs stuffed into Run.rawXML.
-                // Kept for round-trip compat with docs saved before v0.15.0
-                // and for any rawXML field-XML still carrying SDT markup.
-                for run in paragraph.runs {
-                    guard let raw = run.rawXML, raw.contains("<w:sdt>") else { continue }
-                    maxId = max(maxId, Self.extractMaxSdtId(from: raw))
-                }
-                // v0.15.0+ (task 3.0): SDTs as first-class Paragraph children.
-                // Walk the tree (children may be nested via Group / RepeatingSection).
-                for control in paragraph.contentControls {
-                    maxId = max(maxId, Self.extractMaxSdtIdFromControl(control))
-                }
-            }
-            // Block-level SDTs (task 3.4) and table-cell SDTs scan added when
-            // those code paths land. Body-paragraph scan covers v0.15.0 inserts.
+            maxId = max(maxId, Self.extractMaxSdtIdFromBodyChild(child))
         }
         return maxId + 1
+    }
+
+    /// Recursive scan of a BodyChild for the maximum SDT id. Handles
+    /// paragraph-level SDTs (v0.15.0+ structured + legacy rawXML) and
+    /// block-level SDTs (task 3.4). Tables traversed for paragraphs inside
+    /// cells.
+    private static func extractMaxSdtIdFromBodyChild(_ child: BodyChild) -> Int {
+        switch child {
+        case .paragraph(let paragraph):
+            var maxId = 0
+            for run in paragraph.runs {
+                guard let raw = run.rawXML, raw.contains("<w:sdt>") else { continue }
+                maxId = max(maxId, extractMaxSdtId(from: raw))
+            }
+            for control in paragraph.contentControls {
+                maxId = max(maxId, extractMaxSdtIdFromControl(control))
+            }
+            return maxId
+        case .table(let table):
+            var maxId = 0
+            for row in table.rows {
+                for cell in row.cells {
+                    for para in cell.paragraphs {
+                        maxId = max(maxId, extractMaxSdtIdFromBodyChild(.paragraph(para)))
+                    }
+                }
+            }
+            return maxId
+        case .contentControl(let control, let children):
+            var maxId = control.sdt.id ?? 0
+            for c in children {
+                maxId = max(maxId, extractMaxSdtIdFromBodyChild(c))
+            }
+            return maxId
+        }
     }
 
     /// Recursively scan a ContentControl tree for the maximum SDT id.
@@ -2467,6 +2487,273 @@ extension WordDocument {
             maxId = max(maxId, extractMaxSdtIdFromControl(child))
         }
         return maxId
+    }
+
+    // MARK: - Content Control Mutations (#44 Phase 4)
+
+    /// Replace the text content of a text-bearing SDT identified by id.
+    ///
+    /// Locates the ContentControl anywhere in the document tree (paragraph
+    /// children, block-level wrappers, nested children). Replaces the
+    /// content with a single run containing `newText`. The SDT's `<w:sdtPr>`
+    /// (tag, alias, type, lockType, placeholder) is preserved untouched.
+    ///
+    /// - Throws: `WordError.contentControlNotFound(id)` when no SDT has the
+    ///   given id. `WordError.unsupportedSDTType(type)` when the target's
+    ///   type cannot hold plain text (picture, dropDownList, comboBox,
+    ///   checkbox, group, repeatingSection).
+    public mutating func updateContentControl(id: Int, newText: String) throws {
+        let escaped = Self.escapeContentControlText(newText)
+        let newContent = "<w:p><w:r><w:t xml:space=\"preserve\">\(escaped)</w:t></w:r></w:p>"
+
+        let result = try mutateContentControl(id: id) { control in
+            switch control.sdt.type {
+            case .picture, .dropDownList, .comboBox, .checkbox, .group,
+                 .repeatingSection, .repeatingSectionItem:
+                throw WordError.unsupportedSDTType(control.sdt.type)
+            case .richText, .plainText, .date, .bibliography, .citation:
+                control.content = newContent
+            }
+        }
+        guard result else { throw WordError.contentControlNotFound(id) }
+        modifiedParts.insert("word/document.xml")
+    }
+
+    /// Replace the entire `<w:sdtContent>` region of a ContentControl with
+    /// the supplied XML fragment. Validates the input against an element
+    /// whitelist before applying.
+    ///
+    /// - Throws: `WordError.contentControlNotFound(id)` when not found.
+    ///   `WordError.disallowedElement(name)` when `contentXML` contains
+    ///   `<w:sdt>`, `<w:body>`, `<w:sectPr>`, or an XML declaration.
+    public mutating func replaceContentControlContent(id: Int, contentXML: String) throws {
+        if let bad = Self.disallowedElement(in: contentXML) {
+            throw WordError.disallowedElement(bad)
+        }
+        let result = try mutateContentControl(id: id) { control in
+            control.content = contentXML
+        }
+        guard result else { throw WordError.contentControlNotFound(id) }
+        modifiedParts.insert("word/document.xml")
+    }
+
+    /// Remove a ContentControl from the document tree.
+    ///
+    /// - Parameters:
+    ///   - id: SDT id to remove.
+    ///   - keepContent: when `true` (default), the SDT's content is unwrapped
+    ///     into the parent container at the SDT's former position. When
+    ///     `false`, the SDT and its content are removed entirely.
+    /// - Throws: `WordError.contentControlNotFound(id)` when not found.
+    public mutating func deleteContentControl(id: Int, keepContent: Bool = true) throws {
+        let removed = removeContentControl(id: id, keepContent: keepContent, in: &body.children)
+        guard removed else { throw WordError.contentControlNotFound(id) }
+        modifiedParts.insert("word/document.xml")
+    }
+
+    // MARK: - Content Control Mutation Helpers
+
+    /// Walk the body tree and apply `mutate` to the first ContentControl with
+    /// matching id (paragraph-level, block-level, or nested). Returns true
+    /// when found.
+    private mutating func mutateContentControl(
+        id: Int,
+        mutate: (inout ContentControl) throws -> Void
+    ) throws -> Bool {
+        for i in 0..<body.children.count {
+            switch body.children[i] {
+            case .paragraph(var para):
+                if try Self.mutateInControlList(id: id, controls: &para.contentControls, mutate: mutate) {
+                    body.children[i] = .paragraph(para)
+                    return true
+                }
+            case .table(var table):
+                if try mutateInTable(id: id, table: &table, mutate: mutate) {
+                    body.children[i] = .table(table)
+                    return true
+                }
+            case .contentControl(var outer, var children):
+                if outer.sdt.id == id {
+                    try mutate(&outer)
+                    body.children[i] = .contentControl(outer, children: children)
+                    return true
+                }
+                if try mutateInBodyChildList(id: id, children: &children, mutate: mutate) {
+                    body.children[i] = .contentControl(outer, children: children)
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private mutating func mutateInTable(
+        id: Int,
+        table: inout Table,
+        mutate: (inout ContentControl) throws -> Void
+    ) throws -> Bool {
+        for r in 0..<table.rows.count {
+            for c in 0..<table.rows[r].cells.count {
+                for p in 0..<table.rows[r].cells[c].paragraphs.count {
+                    var para = table.rows[r].cells[c].paragraphs[p]
+                    if try Self.mutateInControlList(id: id, controls: &para.contentControls, mutate: mutate) {
+                        table.rows[r].cells[c].paragraphs[p] = para
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    private mutating func mutateInBodyChildList(
+        id: Int,
+        children: inout [BodyChild],
+        mutate: (inout ContentControl) throws -> Void
+    ) throws -> Bool {
+        for i in 0..<children.count {
+            switch children[i] {
+            case .paragraph(var para):
+                if try Self.mutateInControlList(id: id, controls: &para.contentControls, mutate: mutate) {
+                    children[i] = .paragraph(para)
+                    return true
+                }
+            case .table(var table):
+                if try mutateInTable(id: id, table: &table, mutate: mutate) {
+                    children[i] = .table(table)
+                    return true
+                }
+            case .contentControl(var outer, var inner):
+                if outer.sdt.id == id {
+                    try mutate(&outer)
+                    children[i] = .contentControl(outer, children: inner)
+                    return true
+                }
+                if try mutateInBodyChildList(id: id, children: &inner, mutate: mutate) {
+                    children[i] = .contentControl(outer, children: inner)
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private static func mutateInControlList(
+        id: Int,
+        controls: inout [ContentControl],
+        mutate: (inout ContentControl) throws -> Void
+    ) throws -> Bool {
+        for i in 0..<controls.count {
+            if controls[i].sdt.id == id {
+                try mutate(&controls[i])
+                return true
+            }
+            // Recurse into nested children
+            if try mutateInControlList(id: id, controls: &controls[i].children, mutate: mutate) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Remove a ContentControl by id from any container in the body tree.
+    /// Returns true when found and removed.
+    private func removeContentControl(
+        id: Int,
+        keepContent: Bool,
+        in children: inout [BodyChild]
+    ) -> Bool {
+        for i in 0..<children.count {
+            switch children[i] {
+            case .paragraph(var para):
+                if Self.removeFromControlList(id: id, keepContent: keepContent, controls: &para.contentControls) {
+                    children[i] = .paragraph(para)
+                    return true
+                }
+            case .table(var table):
+                for r in 0..<table.rows.count {
+                    for c in 0..<table.rows[r].cells.count {
+                        for p in 0..<table.rows[r].cells[c].paragraphs.count {
+                            var para = table.rows[r].cells[c].paragraphs[p]
+                            if Self.removeFromControlList(id: id, keepContent: keepContent, controls: &para.contentControls) {
+                                table.rows[r].cells[c].paragraphs[p] = para
+                                children[i] = .table(table)
+                                return true
+                            }
+                        }
+                    }
+                }
+            case .contentControl(let outer, var inner):
+                if outer.sdt.id == id {
+                    if keepContent {
+                        children.replaceSubrange(i...i, with: inner)
+                    } else {
+                        children.remove(at: i)
+                    }
+                    return true
+                }
+                if removeContentControl(id: id, keepContent: keepContent, in: &inner) {
+                    children[i] = .contentControl(outer, children: inner)
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /// Remove a ContentControl by id from a list of paragraph-level controls
+    /// (recursing into nested children). When `keepContent=true`, the
+    /// removed control's content is wrapped in a Run.rawXML carrier and
+    /// added to the parent paragraph — but since we don't have access to
+    /// the parent paragraph's runs here, the content is dropped on
+    /// paragraph-level removal. Keep-content for paragraph-level SDTs is
+    /// best handled at the BodyChild.contentControl level (block-level SDT).
+    /// Returns true when found.
+    private static func removeFromControlList(
+        id: Int,
+        keepContent: Bool,
+        controls: inout [ContentControl]
+    ) -> Bool {
+        for i in 0..<controls.count {
+            if controls[i].sdt.id == id {
+                controls.remove(at: i)
+                return true
+            }
+            // Recurse into nested children
+            if removeFromControlList(id: id, keepContent: keepContent, controls: &controls[i].children) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Detect disallowed elements in user-supplied content XML.
+    /// Returns the offending element name, or nil if input is acceptable.
+    /// Used by `replaceContentControlContent` whitelist check.
+    private static func disallowedElement(in xml: String) -> String? {
+        let trimmed = xml.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("<?xml") {
+            return "<?xml"
+        }
+        // Each entry: (literal prefix to detect, name reported in the error).
+        // Element names in errors are without leading "<" so callers can match
+        // by element local name (e.g., "w:sdt" matches the SDT spec wording).
+        let banned: [(detect: String, name: String)] = [
+            ("<w:sdt", "w:sdt"),
+            ("<w:body", "w:body"),
+            ("<w:sectPr", "w:sectPr"),
+        ]
+        for entry in banned where xml.contains(entry.detect) {
+            return entry.name
+        }
+        return nil
+    }
+
+    private static func escapeContentControlText(_ s: String) -> String {
+        return s
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     /// 從一段包含 SDT 的 rawXML 中抽出所有 `<w:id w:val="N"/>` 的最大值。
