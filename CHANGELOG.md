@@ -2,6 +2,22 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.19.1] - 2026-04-25
+
+### Fixed — pPr double-emission on Phase 4 sort-by-position round-trip (Refs PsychQuant/che-word-mcp#56 follow-up)
+
+Found while running the v0.19.0 round-trip suite against a 570-paragraph NTPU master's thesis fixture. The new sort-by-position emit added in v0.19.0 silently captured `<w:pPr>` into `Paragraph.unrecognizedChildren` because `parseParagraph` had no explicit `case "pPr": break` branch — pPr was already consumed by the dedicated `parseParagraphProperties(from:)` call above the child walker, but it then fell into `default` in the switch and got captured AGAIN as a verbatim raw-carrier.
+
+Symptom: `<w:pPr>` got written twice on save (once via the legacy pPr block at the top of `Paragraph.toXMLSortedByPosition`, once verbatim from `unrecognizedChildren`). xmllint accepts the duplicate (Word ignores the second pPr per ECMA-376), and text content remained intact, but `unrecognizedChildren` count ballooned every round-trip (NTPU thesis: 799 → 1333 entries, +534 spurious pPr captures across 570 paragraphs). File size grew by ~1 KB per paragraph per round-trip.
+
+Fix: 1-line case branch — `case "pPr": break` — stops pPr falling through to the default raw-capture path. Source data: 799 → 229 entries (only oMath, the legitimate raw-carriers). Round-trip: 229 → 229 ✓.
+
+Regression test: `testParseParagraphSkipsPPrInChildWalker` asserts `parseParagraph` never adds `<w:pPr>` to `unrecognizedChildren`.
+
+### Test coverage
+
+548 tests pass (1 skipped, 0 failures).
+
 ## [0.19.0] - 2026-04-25
 
 ### Fixed — `document.xml` lossless round-trip (Refs PsychQuant/che-word-mcp#56, P0)

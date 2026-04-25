@@ -569,6 +569,19 @@ public struct DocxReader {
             defer { childPosition += 1 }
 
             switch childElement.localName {
+            case "pPr":
+                // v0.19.1+ (#56 follow-up): pPr is consumed by the dedicated
+                // `paragraph.properties = parseParagraphProperties(from: pPr)`
+                // call ABOVE this loop. Letting it fall through to the
+                // `default` branch in v0.19.0 silently captured pPr into
+                // `unrecognizedChildren` AS WELL, causing the sort-by-position
+                // emit to write `<w:pPr>` twice (once via the legacy pPr block
+                // at the top of `Paragraph.toXMLSortedByPosition`, once
+                // verbatim from `unrecognizedChildren`). xmllint accepts the
+                // duplicate but file size grows by ~1 KB per round-trip per
+                // paragraph. Skip explicitly here.
+                break
+
             case "r":
                 var parsedRun = try parseRun(from: childElement, relationships: relationships)
                 // v0.19.0+ (#56) Phase 4: assign source-order position so the

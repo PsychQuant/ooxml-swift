@@ -415,6 +415,69 @@ final class DocumentXmlLosslessRoundTripTests: XCTestCase {
         }
     }
 
+    // MARK: - v0.19.1 follow-up: pPr double-capture regression guard
+
+    /// Regression test for the v0.19.0 → v0.19.1 follow-up. v0.19.0 silently
+    /// captured `<w:pPr>` into `Paragraph.unrecognizedChildren` because the
+    /// parseParagraph switch did not have an explicit `case "pPr": break`
+    /// branch — pPr fell into `default` even though it was already consumed
+    /// by the dedicated `parseParagraphProperties` call above the walker.
+    /// Result: `<w:pPr>` got written twice on save (once via the legacy pPr
+    /// block, once verbatim from `unrecognizedChildren`), and `unrecognized`
+    /// counts grew on every round-trip. This test catches the pattern by
+    /// asserting parseParagraph never adds pPr to `unrecognizedChildren`.
+    func testParseParagraphSkipsPPrInChildWalker() throws {
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ppr-skip-staging-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: stagingDir) }
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+
+        func write(_ content: String, to relativePath: String) throws {
+            let url = stagingDir.appendingPathComponent(relativePath)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try content.write(to: url, atomically: true, encoding: .utf8)
+        }
+        try write(contentTypesMinimalXML, to: "[Content_Types].xml")
+        try write(packageRelsMinimalXML, to: "_rels/.rels")
+        try write(documentRelsMinimalXML, to: "word/_rels/document.xml.rels")
+        let pPrDocXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <w:body>
+        <w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>centered</w:t></w:r></w:p>
+        <w:sectPr></w:sectPr>
+        </w:body>
+        </w:document>
+        """
+        try write(pPrDocXML, to: "word/document.xml")
+
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ppr-skip-fixture-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let archive = try Archive(url: outputURL, accessMode: .create)
+        let normalizedStaging = stagingDir.resolvingSymlinksInPath().path
+        let basePathLen = normalizedStaging.count + 1
+        let enumerator = FileManager.default.enumerator(at: stagingDir, includingPropertiesForKeys: [.isDirectoryKey])!
+        for case let fileURL as URL in enumerator {
+            let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            if isDir { continue }
+            let normalizedFile = fileURL.resolvingSymlinksInPath().path
+            let entryName = String(normalizedFile.dropFirst(basePathLen))
+            try archive.addEntry(with: entryName, fileURL: fileURL, compressionMethod: .deflate)
+        }
+
+        var doc = try DocxReader.read(from: outputURL)
+        defer { doc.close() }
+        let paras = doc.getParagraphs()
+        XCTAssertGreaterThan(paras.count, 0)
+        let pPrCapturedCount = paras.reduce(0) { $0 + $1.unrecognizedChildren.filter { $0.name == "pPr" }.count }
+        XCTAssertEqual(pPrCapturedCount, 0,
+                       "parseParagraph must NOT add <w:pPr> to unrecognizedChildren — it is consumed by parseParagraphProperties before the child walker. v0.19.0 regression: pPr fell into the default branch and got double-emitted on save.")
+    }
+
     // MARK: - Phase 1: Create-from-scratch minimal namespace set
 
     /// Implements spec scenario "Create-from-scratch document emits minimal namespace set".
