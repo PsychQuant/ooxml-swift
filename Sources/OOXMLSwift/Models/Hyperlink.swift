@@ -3,16 +3,57 @@ import Foundation
 // MARK: - Hyperlink
 
 /// 超連結（外部 URL 或內部書籤連結）
+///
+/// v0.19.0+ (PsychQuant/che-word-mcp#56) hybrid model:
+/// - `runs: [Run]` — typed editable surface; `replace_text` / `format_text`
+///   walk this to apply tool-mediated edits to text inside the hyperlink
+///   (the v3.12.0 silent failure mode).
+/// - `text: String` — computed property `runs.map { $0.text }.joined()`
+///   so existing 218 MCP tools that read `hyperlink.text` keep working.
+///   Setter collapses to single Run (matches pre-fix observable behavior).
+/// - `rawAttributes` / `rawChildren` — raw passthrough escape hatch for
+///   unrecognized `<w:hyperlink>` attributes / direct children so they
+///   survive a no-op round-trip even when not modeled.
+/// - `position: Int` — source-document order, used by Phase 4
+///   sort-by-position emit in `Paragraph.toXML()`.
 public struct Hyperlink: Equatable {
     public var id: String              // 唯一識別碼（用於管理）
     public var relationshipId: String? // 關係 ID（外部連結使用 rId）
     public var anchor: String?         // 書籤名稱（內部連結使用）
     public var url: String?            // 外部 URL
-    public var text: String            // 顯示文字
+    /// v0.19.0+ (#56): typed editable runs that replace the previous single
+    /// `text: String` storage. `text` is now a computed convenience property
+    /// projecting joined run text.
+    public var runs: [Run] = []
     public var tooltip: String?        // 滑鼠懸停提示
     /// v0.17.0+ (#50): controls `w:history` attribute. `true` (default) = link
     /// is added to "visited" history; `false` = emit `w:history="0"`.
     public var history: Bool = true
+
+    /// v0.19.0+ (#56): unmodeled `<w:hyperlink>` attribute → value passthrough
+    /// (e.g., `w:tgtFrame`, `w:docLocation`, vendor extensions). Writer emits
+    /// these alongside the typed attribute set so attribute-level losses are
+    /// impossible.
+    public var rawAttributes: [String: String] = [:]
+
+    /// v0.19.0+ (#56): direct children of `<w:hyperlink>` that are not Runs
+    /// (e.g., nested SDTs, future extensions). Stored as verbatim XML strings
+    /// so unknown content survives a round-trip without typed modeling.
+    public var rawChildren: [String] = []
+
+    /// v0.19.0+ (#56): source-document order index for Phase 4 sort-by-position
+    /// emit. Default 0 for hyperlinks created via initializers (those rely on
+    /// the existing `Paragraph.toXML()` paths until Phase 4 lands).
+    public var position: Int = 0
+
+    /// v0.19.0+ (#56): displayed text computed as the joined run text. Setter
+    /// collapses `runs` to a single Run carrying the assigned string (matches
+    /// the pre-fix observable behavior — assigning `text = "foo"` to a
+    /// multi-run hyperlink already replaced the entire visible text).
+    public var text: String {
+        get { runs.map { $0.text }.joined() }
+        set { runs = [Run(text: newValue)] }
+    }
 
     // 連結類型
     public var type: HyperlinkType {
@@ -26,7 +67,7 @@ public struct Hyperlink: Equatable {
 
     public init(id: String, text: String, url: String, relationshipId: String, tooltip: String? = nil, history: Bool = true) {
         self.id = id
-        self.text = text
+        self.runs = [Run(text: text)]
         self.url = url
         self.relationshipId = relationshipId
         self.anchor = nil
@@ -36,12 +77,38 @@ public struct Hyperlink: Equatable {
 
     public init(id: String, text: String, anchor: String, tooltip: String? = nil, history: Bool = true) {
         self.id = id
-        self.text = text
+        self.runs = [Run(text: text)]
         self.anchor = anchor
         self.relationshipId = nil
         self.url = nil
         self.tooltip = tooltip
         self.history = history
+    }
+
+    /// v0.19.0+ (#56): full-control initializer for the typed Reader path.
+    /// Used by `DocxReader` to populate the hybrid surface from source XML.
+    public init(
+        id: String,
+        runs: [Run],
+        relationshipId: String? = nil,
+        anchor: String? = nil,
+        url: String? = nil,
+        tooltip: String? = nil,
+        history: Bool = true,
+        rawAttributes: [String: String] = [:],
+        rawChildren: [String] = [],
+        position: Int = 0
+    ) {
+        self.id = id
+        self.runs = runs
+        self.relationshipId = relationshipId
+        self.anchor = anchor
+        self.url = url
+        self.tooltip = tooltip
+        self.history = history
+        self.rawAttributes = rawAttributes
+        self.rawChildren = rawChildren
+        self.position = position
     }
 
     /// 建立外部連結

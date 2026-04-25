@@ -637,10 +637,16 @@ public struct DocxWriter {
     }
 
     private static func writeDocument(_ document: WordDocument, to baseURL: URL) throws {
+        // v0.19.0+ (PsychQuant/che-word-mcp#56): rebuild the <w:document> open
+        // tag from `documentRootAttributes` so a no-op (or dirty-marked) round-trip
+        // preserves every source xmlns:* + mc:Ignorable declaration. Falling back
+        // to the hardcoded xmlns:w + xmlns:r pair only when the dictionary is
+        // empty keeps create-from-scratch (`WordDocument()` initializer) behavior
+        // unchanged.
+        let rootOpenTag = renderDocumentRootOpenTag(document.documentRootAttributes)
         var xml = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-                    xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        \(rootOpenTag)
         <w:body>
         """
 
@@ -656,6 +662,73 @@ public struct DocxWriter {
 
         let url = baseURL.appendingPathComponent("word/document.xml")
         try xml.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Render the `<w:document …>` open tag from the captured root attributes
+    /// dictionary (PsychQuant/che-word-mcp#56). Falls back to the legacy
+    /// 2-namespace template when the dictionary is empty so create-from-scratch
+    /// `WordDocument()` documents still emit a valid root with no spurious
+    /// declarations.
+    ///
+    /// Attribute emit order: `xmlns:w` first (so the default namespace is
+    /// stable for downstream parsers), then `xmlns:r`, then every other
+    /// namespace prefix in alphabetical order, then non-namespace attributes
+    /// (`mc:Ignorable` etc.) in alphabetical order. Dictionaries do not preserve
+    /// insertion order, so a deterministic emit order avoids spurious diffs in
+    /// regression suites.
+    static func renderDocumentRootOpenTag(_ attrs: [String: String]) -> String {
+        if attrs.isEmpty {
+            return """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            """
+        }
+        var xmlnsW: String? = nil
+        var xmlnsR: String? = nil
+        var otherXmlns: [(String, String)] = []
+        var nonNamespace: [(String, String)] = []
+        for (name, value) in attrs {
+            if name == "xmlns:w" {
+                xmlnsW = value
+            } else if name == "xmlns:r" {
+                xmlnsR = value
+            } else if name.hasPrefix("xmlns:") {
+                otherXmlns.append((name, value))
+            } else {
+                nonNamespace.append((name, value))
+            }
+        }
+        otherXmlns.sort { $0.0 < $1.0 }
+        nonNamespace.sort { $0.0 < $1.0 }
+
+        var pieces: [String] = []
+        let xmlnsWValue = xmlnsW ?? "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        let xmlnsRValue = xmlnsR ?? "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        pieces.append(#"xmlns:w="\#(escapeAttr(xmlnsWValue))""#)
+        pieces.append(#"xmlns:r="\#(escapeAttr(xmlnsRValue))""#)
+        for (name, value) in otherXmlns {
+            pieces.append("\(name)=\"\(escapeAttr(value))\"")
+        }
+        for (name, value) in nonNamespace {
+            pieces.append("\(name)=\"\(escapeAttr(value))\"")
+        }
+        return "<w:document " + pieces.joined(separator: " ") + ">"
+    }
+
+    /// Minimal XML attribute-value escape: `&` `<` `>` `"` are the only
+    /// characters that may not appear unescaped inside a `"…"`-quoted value.
+    private static func escapeAttr(_ s: String) -> String {
+        var result = ""
+        result.reserveCapacity(s.count)
+        for c in s {
+            switch c {
+            case "&": result += "&amp;"
+            case "<": result += "&lt;"
+            case ">": result += "&gt;"
+            case "\"": result += "&quot;"
+            default: result.append(c)
+            }
+        }
+        return result
     }
 
     // MARK: - Styles

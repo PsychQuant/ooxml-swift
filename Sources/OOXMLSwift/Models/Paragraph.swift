@@ -32,6 +32,57 @@ public struct Paragraph: Equatable {
     /// emit as proper siblings of runs: `<w:p><w:r>...</w:r><w:sdt>...</w:sdt></w:p>`.
     public var contentControls: [ContentControl] = []
 
+    /// v0.19.0+ (PsychQuant/che-word-mcp#56): position-indexed range markers for
+    /// `<w:bookmarkStart>` / `<w:bookmarkEnd>` parsed from source. Parallel to
+    /// `bookmarks` (the typed name+id model) — the marker carries source-order
+    /// position so Phase 4's sort-by-position emit can re-emit at original
+    /// relative offsets. Empty for paragraphs created via initializer / API
+    /// (those rely on `bookmarks` + the existing wrap-around `toXML` emit path).
+    public var bookmarkMarkers: [BookmarkRangeMarker] = []
+
+    /// v0.19.0+ (#56) Phase 3: typed `<w:fldSimple>` wrappers parsed from source.
+    /// Holds field expression (`instr`) + rendered runs so `replace_text` /
+    /// `format_text` can apply edits inside SEQ Table captions, REF
+    /// cross-references, etc.
+    public var fieldSimples: [FieldSimple] = []
+
+    /// v0.19.0+ (#56) Phase 3: typed `<mc:AlternateContent>` wrappers parsed
+    /// from source. Holds verbatim `rawXML` for byte-equivalent re-emit plus
+    /// typed `fallbackRuns` for tool-mediated read access to `<mc:Fallback>`
+    /// content (math transliterations, drawing flat text, etc.).
+    public var alternateContents: [AlternateContent] = []
+
+    /// v0.19.0+ (#56) Phase 4: position-indexed `<w:commentRangeStart>` /
+    /// `<w:commentRangeEnd>` markers. Parallel to `commentIds` (legacy
+    /// position-less collection) — `commentIds` stays for backward compat
+    /// while `commentRangeMarkers` carries the source position needed for
+    /// sort-by-position emit.
+    public var commentRangeMarkers: [CommentRangeMarker] = []
+
+    /// v0.19.0+ (#56) Phase 4: position-indexed `<w:permStart>` / `<w:permEnd>`
+    /// markers (editor permission gates).
+    public var permissionRangeMarkers: [PermissionRangeMarker] = []
+
+    /// v0.19.0+ (#56) Phase 4: position-indexed `<w:proofErr>` markers
+    /// (Word Proofing UI annotations).
+    public var proofErrorMarkers: [ProofErrorMarker] = []
+
+    /// v0.19.0+ (#56) Phase 4: position-indexed `<w:smartTag>` raw-carriers.
+    public var smartTags: [SmartTagBlock] = []
+
+    /// v0.19.0+ (#56) Phase 4: position-indexed `<w:customXml>` raw-carriers.
+    public var customXmlBlocks: [CustomXmlBlock] = []
+
+    /// v0.19.0+ (#56) Phase 4: position-indexed `<w:dir>` / `<w:bdo>` raw-carriers.
+    public var bidiOverrides: [BidiOverrideBlock] = []
+
+    /// v0.19.0+ (#56) Phase 4: fallback for any `<w:p>` child whose local
+    /// name does not match any typed parser or registered raw-carrier.
+    /// Surfaces ECMA-376 spec gaps so the round-trip test suite can XCTFail
+    /// with the unknown element name (per design decision "ecma-376 `<w:p>`
+    /// schema as the completeness checklist").
+    public var unrecognizedChildren: [UnrecognizedChild] = []
+
     public init(runs: [Run] = [], properties: ParagraphProperties = ParagraphProperties()) {
         self.runs = runs
         self.properties = properties
@@ -184,8 +235,37 @@ public struct NumberingInfo: Equatable {
 // MARK: - XML 生成
 
 extension Paragraph {
+    /// v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 4: detect whether this
+    /// paragraph carries source-loaded position-indexed children (markers,
+    /// new typed wrappers, raw-carriers). Hyperlinks alone DO NOT trigger
+    /// sort-emit because the legacy emit path already handles them and many
+    /// API-built paragraphs construct hyperlinks without positions; only the
+    /// new collections introduced in Phases 2–4 are signal of source loading.
+    fileprivate var hasSourcePositionedChildren: Bool {
+        return !bookmarkMarkers.isEmpty
+            || !fieldSimples.isEmpty
+            || !alternateContents.isEmpty
+            || !commentRangeMarkers.isEmpty
+            || !permissionRangeMarkers.isEmpty
+            || !proofErrorMarkers.isEmpty
+            || !smartTags.isEmpty
+            || !customXmlBlocks.isEmpty
+            || !bidiOverrides.isEmpty
+            || !unrecognizedChildren.isEmpty
+    }
+
     /// 轉換為 OOXML XML 字串
     public func toXML() -> String {
+        if hasSourcePositionedChildren {
+            return toXMLSortedByPosition()
+        }
+        return toXMLLegacy()
+    }
+
+    /// Legacy emit path used by API-built paragraphs (no source-loaded markers).
+    /// Mirrors v3.12.0 behavior: bookmarks / commentRanges / runs / SDTs /
+    /// hyperlinks / footnoteRefs / endnoteRefs / bookmark-end in fixed order.
+    fileprivate func toXMLLegacy() -> String {
         var xml = "<w:p>"
 
         // Paragraph Properties
@@ -285,6 +365,169 @@ extension Paragraph {
 
         xml += "</w:p>"
         return xml
+    }
+
+    // MARK: - Sort-by-position emit (Phase 4)
+
+    /// v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 4: emit `<w:p>` content in
+    /// source-document order using each child's `position` field. Used when
+    /// the paragraph carries any of the new position-indexed collections
+    /// (bookmarkMarkers, fieldSimples, alternateContents, the 6 raw-carriers,
+    /// unrecognizedChildren). Implements design decision "Position-index
+    /// ordering, not enum refactor": each parallel array contributes
+    /// `(position, xml-string)` tuples that are sorted then emitted.
+    ///
+    /// Coexistence with legacy paragraph fields:
+    /// - pPr emits first (pre-content per ECMA-376).
+    /// - hasPageBreak / footnoteIds / endnoteIds / contentControls /
+    ///   commentIds (legacy single-list collections without position) keep
+    ///   their position-less semantics — they emit AFTER the sort-by-position
+    ///   children. For source-loaded paragraphs these collections are
+    ///   typically empty (the new typed collections supplant them).
+    /// - bookmarks (legacy id+name list) is NOT re-emitted here because
+    ///   bookmarkMarkers fully drives bookmarkStart / bookmarkEnd emit at
+    ///   their original positions.
+    fileprivate func toXMLSortedByPosition() -> String {
+        var xml = "<w:p>"
+
+        // Paragraph Properties (mirrors legacy path).
+        let propsXML = properties.toXML()
+        let formatChangeRevision: Revision? = {
+            guard let id = paragraphFormatChangeRevisionId else { return nil }
+            return revisions.first { $0.id == id }
+        }()
+        let needsPPr = !propsXML.isEmpty
+            || properties.sectionBreak != nil
+            || formatChangeRevision != nil
+        if needsPPr {
+            xml += "<w:pPr>\(propsXML)"
+            if let sectionBreak = properties.sectionBreak {
+                xml += "<w:sectPr><w:type w:val=\"\(sectionBreak.rawValue)\"/></w:sectPr>"
+            }
+            if let revision = formatChangeRevision, let prev = previousProperties {
+                xml += revision.toOpeningXML()
+                xml += "<w:pPr>\(prev.toXML())</w:pPr>"
+                xml += revision.toClosingXML()
+            }
+            xml += "</w:pPr>"
+        }
+
+        // Build (position, xml) pairs from every position-indexed collection.
+        var positioned: [(position: Int, xml: String)] = []
+
+        for run in runs {
+            positioned.append((run.position, Self.emitRun(run, asDelText: false, paragraphRevisions: revisions)))
+        }
+        for hyperlink in hyperlinks {
+            positioned.append((hyperlink.position, hyperlink.toXML()))
+        }
+        for field in fieldSimples {
+            positioned.append((field.position, Self.emitFieldSimple(field)))
+        }
+        for ac in alternateContents {
+            positioned.append((ac.position, ac.rawXML))
+        }
+        for marker in bookmarkMarkers {
+            positioned.append((marker.position, Self.emitBookmarkMarker(marker, paragraph: self)))
+        }
+        for marker in commentRangeMarkers {
+            positioned.append((marker.position, Self.emitCommentRangeMarker(marker)))
+        }
+        for marker in permissionRangeMarkers {
+            positioned.append((marker.position, Self.emitPermissionRangeMarker(marker)))
+        }
+        for marker in proofErrorMarkers {
+            positioned.append((marker.position, "<w:proofErr w:type=\"\(marker.type.rawValue)\"/>"))
+        }
+        for tag in smartTags {
+            positioned.append((tag.position, tag.rawXML))
+        }
+        for block in customXmlBlocks {
+            positioned.append((block.position, block.rawXML))
+        }
+        for block in bidiOverrides {
+            positioned.append((block.position, block.rawXML))
+        }
+        for child in unrecognizedChildren {
+            positioned.append((child.position, child.rawXML))
+        }
+
+        // Stable sort by position. Equal positions retain insertion order.
+        positioned.sort { $0.position < $1.position }
+        for entry in positioned {
+            xml += entry.xml
+        }
+
+        xml += "</w:p>"
+        return xml
+    }
+
+    /// Emit a `<w:bookmarkStart>` or `<w:bookmarkEnd>` from a marker. For
+    /// `.start`, look up the matching `Bookmark` in `paragraph.bookmarks`
+    /// to retrieve the name (the marker only carries id).
+    fileprivate static func emitBookmarkMarker(_ marker: BookmarkRangeMarker, paragraph: Paragraph) -> String {
+        switch marker.kind {
+        case .start:
+            let name = paragraph.bookmarks.first(where: { $0.id == marker.id })?.name ?? ""
+            return "<w:bookmarkStart w:id=\"\(marker.id)\" w:name=\"\(escapeXMLAttribute(name))\"/>"
+        case .end:
+            return "<w:bookmarkEnd w:id=\"\(marker.id)\"/>"
+        }
+    }
+
+    fileprivate static func emitCommentRangeMarker(_ marker: CommentRangeMarker) -> String {
+        switch marker.kind {
+        case .start:
+            return "<w:commentRangeStart w:id=\"\(marker.id)\"/>"
+        case .end:
+            return "<w:commentRangeEnd w:id=\"\(marker.id)\"/>"
+        }
+    }
+
+    fileprivate static func emitPermissionRangeMarker(_ marker: PermissionRangeMarker) -> String {
+        switch marker.kind {
+        case .start:
+            var attrs = "w:id=\"\(escapeXMLAttribute(marker.id))\""
+            if let editorGroup = marker.editorGroup {
+                attrs += " w:edGrp=\"\(escapeXMLAttribute(editorGroup))\""
+            }
+            if let editor = marker.editor {
+                attrs += " w:ed=\"\(escapeXMLAttribute(editor))\""
+            }
+            return "<w:permStart \(attrs)/>"
+        case .end:
+            return "<w:permEnd w:id=\"\(escapeXMLAttribute(marker.id))\"/>"
+        }
+    }
+
+    fileprivate static func emitFieldSimple(_ field: FieldSimple) -> String {
+        var xml = "<w:fldSimple w:instr=\"\(escapeXMLAttribute(field.instr))\""
+        for (name, value) in field.rawAttributes.sorted(by: { $0.key < $1.key }) {
+            xml += " \(name)=\"\(escapeXMLAttribute(value))\""
+        }
+        xml += ">"
+        for run in field.runs {
+            xml += run.toXML()
+        }
+        xml += "</w:fldSimple>"
+        return xml
+    }
+
+    /// Minimal XML attribute escape (shared with DocxWriter). Local copy to
+    /// avoid cross-module dependency from the model layer.
+    fileprivate static func escapeXMLAttribute(_ s: String) -> String {
+        var result = ""
+        result.reserveCapacity(s.count)
+        for c in s {
+            switch c {
+            case "&": result += "&amp;"
+            case "<": result += "&lt;"
+            case ">": result += "&gt;"
+            case "\"": result += "&quot;"
+            default: result.append(c)
+            }
+        }
+        return result
     }
 
     // MARK: - Revision Grouping (v0.18.0+)
