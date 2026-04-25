@@ -2,6 +2,45 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.19.0] - 2026-04-25
+
+### Fixed — `document.xml` lossless round-trip (Refs PsychQuant/che-word-mcp#56, P0)
+
+Fixes the critical regression where `save_document` silently corrupts `word/document.xml` on every body-mutating MCP call. A trivial `open → insert_paragraph → save` on a typical Word document used to strip 32 of 34 namespace declarations from the `<w:document>` root, wipe 100% of `<w:bookmarkStart>` bookmarks, and drop 354 `<w:t>` text nodes living inside `<w:hyperlink>` / `<w:fldSimple>` / `<mc:AlternateContent>` wrappers (TOC anchor text, cross-reference placeholders, table caption SEQ fields, math notation). All other 41 OOXML parts byte-equal — only `document.xml` itself became invalid.
+
+Three orthogonal root causes addressed in 5 phases (all bundled — splitting Phase 1 alone would change the failure mode from "XML invalid" to "XML valid but text/bookmarks gone", a worse UX):
+
+**Phase 1 — Document root namespace preservation.**
+- New `WordDocument.documentRootAttributes: [String: String]` capturing every `xmlns:*` declaration plus `mc:Ignorable` from the source `<w:document>` root.
+- `DocxReader.read(from:)` extracts attributes via raw-bytes parser (bypasses libxml2's silent xmlns drop on unused prefixes).
+- `DocxWriter.writeDocument` rebuilds the open tag from the captured map, falling back to `xmlns:w` + `xmlns:r` only when the dictionary is empty (preserves create-from-scratch behavior).
+
+**Phase 2 — Bookmark Reader parsing + range markers.**
+- New `BookmarkRangeMarker` (kind: start/end, id, position) on `Paragraph.bookmarkMarkers`.
+- `DocxReader` paragraph walker now parses `<w:bookmarkStart w:id w:name/>` and `<w:bookmarkEnd w:id/>` (previously zero hits — the `Bookmark` model existed but was write-only).
+
+**Phase 3 — Wrapper hybrid model (typed editable surface + raw passthrough).**
+- `Hyperlink` gains `runs: [Run]`, `rawAttributes: [String: String]`, `rawChildren: [String]`, `position: Int`. Existing `text: String` becomes a computed property `runs.map { $0.text }.joined()` for backward compat with existing call sites (zero breaking changes for downstream consumers reading `hyperlink.text`).
+- New `FieldSimple` model: `instr: String` + `runs: [Run]` + `rawAttributes` + `position`. `w:instr` whitespace preserved exactly.
+- New `AlternateContent` model: `rawXML: String` (verbatim source for byte-equivalent emit) + `fallbackRuns: [Run]` (typed editable mirror of `<mc:Fallback>` content). Documented Non-Goal: edits to `fallbackRuns` may diverge from `<mc:Choice>` content (Word reconciles per its own rules).
+- `DocxReader.parseHyperlink` / `parseFieldSimple` / `parseAlternateContent` helpers.
+
+**Phase 4 — `<w:p>` child schema completeness + Writer sort-by-position emit.**
+- 6 new raw-carrier types: `CommentRangeMarker`, `PermissionRangeMarker`, `ProofErrorMarker`, `SmartTagBlock`, `CustomXmlBlock`, `BidiOverrideBlock` (each with `position: Int`).
+- New `Paragraph.unrecognizedChildren` fallback collection — any `<w:p>` direct child whose local name does not match any typed parser or registered raw-carrier survives the round-trip with verbatim XML + position. Surfaces ECMA-376 spec gaps without silent drops.
+- `Run.position: Int` added so direct-child runs participate in sort-by-position emit.
+- `Paragraph.toXML()` refactored: when any source-loaded marker collection is non-empty, dispatches to `toXMLSortedByPosition()` which collects `(position, xml)` tuples from every parallel array, sorts by position, and emits in source order. API-built paragraphs (no source markers) keep the legacy emit path — zero breaking changes for existing tools.
+- Reader paragraph walker uses `defer { childPosition += 1 }` to assign source-document order positions to every direct child (typed or raw).
+
+**Phase 5 — Test fixture dual-track + tool-mediated edit safety.**
+- New `LosslessRoundTripFixtureBuilder` synthesizes a 50–100 KB `.docx` exercising every code path the new Reader / Writer pair must preserve (5+ bookmarks, 3 hyperlinks, 2 fldSimple, 1 AlternateContent, 12 xmlns + mc:Ignorable on root, mixed runs/wrappers across 6 paragraphs).
+- New `DocumentXmlLosslessRoundTripTests` (8 tests) covering namespace preservation, bookmark round-trip, hyperlink runs + raw passthrough, FieldSimple SEQ caption, AlternateContent math block, comment range markers, interleaved-children sort-by-position emit, and the builder fixture as a CI regression.
+- `WordDocument.replaceText` extended to walk `Hyperlink.runs`, `FieldSimple.runs`, `AlternateContent.fallbackRuns` so tool-mediated edits inside structural wrappers SHALL apply (no silent failure — the v3.12.0 `replace_text` regression where edits inside hyperlinks / SEQ Table captions / math fallbacks returned success but produced no change).
+
+**Test coverage:** 546 ooxml-swift tests pass with 0 failures (8 new tests added by this change).
+
+**Breaking changes:** None. `Hyperlink.text` is now a computed property but observationally equivalent for read access; the setter collapses to single-Run (matching pre-fix multi-run-overwrite behavior).
+
 ## [0.18.0] - 2026-04-25
 
 ### Added — Track Changes write-side: 5 revision generators + writer extensions (Refs PsychQuant/che-word-mcp#45)

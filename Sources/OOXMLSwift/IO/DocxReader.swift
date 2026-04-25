@@ -50,6 +50,21 @@ public struct DocxReader {
 
         // 5. 讀取 styles.xml（先解析，用於語義標註）
         var document = WordDocument()
+
+        // 5a. v0.19.0+ (PsychQuant/che-word-mcp#56): preserve every attribute
+        // (xmlns:* declarations, mc:Ignorable, anything else) on the source
+        // <w:document> root so DocxWriter can rebuild the open tag verbatim
+        // instead of collapsing to the hardcoded xmlns:w + xmlns:r pair.
+        // Without this, libxml2 reports "unbound prefix" on every body element
+        // that references an undeclared namespace.
+        //
+        // Foundation's XMLDocument (libxml2 under the hood) splits namespace
+        // declarations onto `XMLNode.namespaces` (separate from `attributes`)
+        // and silently drops xmlns:* prefixes that are not referenced in the
+        // tree it can see — so to capture the source set verbatim we re-parse
+        // the root open tag from raw bytes instead of relying on the DOM.
+        document.documentRootAttributes = Self.parseDocumentRootAttributes(from: documentData)
+
         let stylesURL = tempDir.appendingPathComponent("word/styles.xml")
         if FileManager.default.fileExists(atPath: stylesURL.path) {
             let stylesData = try Data(contentsOf: stylesURL)
@@ -540,13 +555,26 @@ public struct DocxReader {
             }
         }
 
-        // 解析 Runs（包含 w:ins/w:del 追蹤修訂）
+        // 解析 Runs（包含 w:ins/w:del 追蹤修訂）。
+        //
+        // v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 2: track a `position`
+        // counter that increments by 1 per direct child element of <w:p>, so
+        // `BookmarkRangeMarker.position` (and the other position-indexed
+        // raw-carriers Phase 4 adds) record source-document order. This is the
+        // input the Phase 4 sort-by-position emit consumes — it has no effect
+        // until Paragraph.toXML() refactor lands, so behavior is additive here.
+        var childPosition = 0
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement else { continue }
+            defer { childPosition += 1 }
 
             switch childElement.localName {
             case "r":
-                let parsedRun = try parseRun(from: childElement, relationships: relationships)
+                var parsedRun = try parseRun(from: childElement, relationships: relationships)
+                // v0.19.0+ (#56) Phase 4: assign source-order position so the
+                // sort-by-position emit interleaves runs with bookmarks /
+                // hyperlinks / fldSimple / etc. correctly.
+                parsedRun.position = childPosition
                 paragraph.runs.append(parsedRun)
                 // Part B: detect <w:rPrChange> inside <w:rPr> for run formatting change tracking
                 if let rPrChangeRev = Self.detectRPrChangeRevision(in: childElement, isoFormatter: isoFormatter) {
@@ -645,6 +673,100 @@ public struct DocxReader {
                 if let idStr = childElement.attribute(forName: "w:id")?.stringValue,
                    let id = Int(idStr) {
                     paragraph.commentIds.append(id)
+                    // v0.19.0+ (#56) Phase 4: also populate the position-indexed
+                    // marker so sort-by-position emit can re-emit at original offset.
+                    paragraph.commentRangeMarkers.append(
+                        CommentRangeMarker(kind: .start, id: id, position: childPosition)
+                    )
+                }
+
+            case "commentRangeEnd":
+                // v0.19.0+ (#56) Phase 4: previously dropped silently. Now
+                // captured as a position-indexed marker for round-trip preservation.
+                if let idStr = childElement.attribute(forName: "w:id")?.stringValue,
+                   let id = Int(idStr) {
+                    paragraph.commentRangeMarkers.append(
+                        CommentRangeMarker(kind: .end, id: id, position: childPosition)
+                    )
+                }
+
+            case "permStart":
+                // v0.19.0+ (#56) Phase 4: editor-permission gate start.
+                let id = childElement.attribute(forName: "w:id")?.stringValue ?? ""
+                let editorGroup = childElement.attribute(forName: "w:edGrp")?.stringValue
+                let editor = childElement.attribute(forName: "w:ed")?.stringValue
+                paragraph.permissionRangeMarkers.append(
+                    PermissionRangeMarker(
+                        kind: .start, id: id,
+                        editorGroup: editorGroup, editor: editor,
+                        position: childPosition
+                    )
+                )
+
+            case "permEnd":
+                let id = childElement.attribute(forName: "w:id")?.stringValue ?? ""
+                paragraph.permissionRangeMarkers.append(
+                    PermissionRangeMarker(kind: .end, id: id, position: childPosition)
+                )
+
+            case "proofErr":
+                // v0.19.0+ (#56) Phase 4: proof error markers (spelling /
+                // grammar). Source attribute `w:type` distinguishes start / end
+                // and spell / grammar.
+                if let typeStr = childElement.attribute(forName: "w:type")?.stringValue,
+                   let errType = ProofErrorMarker.ErrorType(rawValue: typeStr) {
+                    paragraph.proofErrorMarkers.append(
+                        ProofErrorMarker(type: errType, position: childPosition)
+                    )
+                }
+
+            case "smartTag":
+                // v0.19.0+ (#56) Phase 4: smart tag raw-carrier. Stored verbatim
+                // because its <w:smartTagPr> child surface is vendor-specific.
+                paragraph.smartTags.append(
+                    SmartTagBlock(rawXML: childElement.xmlString, position: childPosition)
+                )
+
+            case "customXml":
+                // v0.19.0+ (#56) Phase 4: custom XML wrapper raw-carrier.
+                paragraph.customXmlBlocks.append(
+                    CustomXmlBlock(rawXML: childElement.xmlString, position: childPosition)
+                )
+
+            case "dir":
+                // v0.19.0+ (#56) Phase 4: directional override (RTL / LTR) wrapper.
+                paragraph.bidiOverrides.append(
+                    BidiOverrideBlock(element: .dir, rawXML: childElement.xmlString, position: childPosition)
+                )
+
+            case "bdo":
+                // v0.19.0+ (#56) Phase 4: bidirectional override wrapper.
+                paragraph.bidiOverrides.append(
+                    BidiOverrideBlock(element: .bdo, rawXML: childElement.xmlString, position: childPosition)
+                )
+
+            case "bookmarkStart":
+                // v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 2: source-side
+                // bookmark population. Each <w:bookmarkStart w:id w:name/>
+                // produces both a typed Bookmark on `paragraph.bookmarks`
+                // (legacy model used by 218 MCP tools) and a position-indexed
+                // BookmarkRangeMarker on `paragraph.bookmarkMarkers` so Phase 4
+                // sort-by-position emit can re-emit at original relative offset.
+                if let idStr = childElement.attribute(forName: "w:id")?.stringValue,
+                   let id = Int(idStr),
+                   let name = childElement.attribute(forName: "w:name")?.stringValue {
+                    paragraph.bookmarks.append(Bookmark(id: id, name: name))
+                    paragraph.bookmarkMarkers.append(
+                        BookmarkRangeMarker(kind: .start, id: id, position: childPosition)
+                    )
+                }
+
+            case "bookmarkEnd":
+                if let idStr = childElement.attribute(forName: "w:id")?.stringValue,
+                   let id = Int(idStr) {
+                    paragraph.bookmarkMarkers.append(
+                        BookmarkRangeMarker(kind: .end, id: id, position: childPosition)
+                    )
                 }
 
             case "sdt":
@@ -654,10 +776,60 @@ public struct DocxReader {
                 // `che-word-mcp-content-controls-read-write`.
                 paragraph.contentControls.append(SDTParser.parseSDT(from: childElement))
 
+            case "hyperlink":
+                // v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 3: parse
+                // <w:hyperlink> wrappers as typed Hyperlink instances. Inner
+                // <w:r> children populate `runs` (typed editable surface so
+                // tool-mediated `replace_text` / `format_text` find content
+                // inside hyperlinks); unrecognized attributes / non-Run
+                // children flow into `rawAttributes` / `rawChildren` for
+                // byte-level survival.
+                let parsedHyperlink = try parseHyperlink(
+                    from: childElement,
+                    relationships: relationships,
+                    position: childPosition
+                )
+                paragraph.hyperlinks.append(parsedHyperlink)
+
+            case "fldSimple":
+                // v0.19.0+ (#56) Phase 3: typed FieldSimple model so SEQ Table
+                // captions / REF cross-references / TOC entries are addressable
+                // by `replace_text` / `format_text`.
+                let parsedField = try parseFieldSimple(
+                    from: childElement,
+                    relationships: relationships,
+                    position: childPosition
+                )
+                paragraph.fieldSimples.append(parsedField)
+
+            case "AlternateContent":
+                // v0.19.0+ (#56) Phase 3: <mc:AlternateContent> hybrid model.
+                // Captures verbatim raw XML for byte-equivalent emit and
+                // extracts <mc:Fallback> runs as typed surface for tool reads.
+                let parsedAC = try parseAlternateContent(
+                    from: childElement,
+                    relationships: relationships,
+                    position: childPosition
+                )
+                paragraph.alternateContents.append(parsedAC)
+
             default:
+                // v0.19.0+ (#56) Phase 4: every unrecognized <w:p> child is
+                // captured verbatim with its source position so the round-trip
+                // suite can XCTFail with the element name (per design decision
+                // "ECMA-376 <w:p> schema as the completeness checklist").
+                // Without this, dropped elements would silently disappear and
+                // the test would have no way to surface the gap.
+                let name = childElement.localName ?? "<nil>"
+                paragraph.unrecognizedChildren.append(
+                    UnrecognizedChild(
+                        name: name,
+                        rawXML: childElement.xmlString,
+                        position: childPosition
+                    )
+                )
                 if DocxReader.debugLoggingEnabled {
-                    let name = childElement.localName ?? "<nil>"
-                    let line = "DocxReader.parseParagraph: skipped unknown element \(name)\n"
+                    let line = "DocxReader.parseParagraph: captured unmodeled element \(name) at position \(childPosition)\n"
                     if let data = line.data(using: .utf8) {
                         FileHandle.standardError.write(data)
                     }
@@ -873,6 +1045,147 @@ public struct DocxReader {
     }
 
     // MARK: - Run Parsing
+
+    /// v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 3: parse a `<w:hyperlink>`
+    /// element into the hybrid `Hyperlink` model. Inner `<w:r>` children become
+    /// typed Runs (so MCP tools can edit text inside hyperlinks). Recognized
+    /// attributes (`r:id`, `w:anchor`, `w:tooltip`, `w:history`, `w:tgtFrame`,
+    /// `w:docLocation`) populate typed fields. Anything else is captured by
+    /// the raw passthrough fields so a no-op round-trip preserves the wrapper
+    /// byte-equivalent.
+    internal static func parseHyperlink(
+        from element: XMLElement,
+        relationships: RelationshipsCollection,
+        position: Int
+    ) throws -> Hyperlink {
+        let recognizedAttrs: Set<String> = [
+            "r:id", "w:anchor", "w:tooltip", "w:history", "w:tgtFrame", "w:docLocation",
+        ]
+
+        let rId = element.attribute(forName: "r:id")?.stringValue
+        let anchor = element.attribute(forName: "w:anchor")?.stringValue
+        let tooltip = element.attribute(forName: "w:tooltip")?.stringValue
+        // `w:history` defaults true; only `"0"` flips it false (per Hyperlink doc).
+        let historyAttr = element.attribute(forName: "w:history")?.stringValue
+        let history = (historyAttr != "0")
+
+        var rawAttributes: [String: String] = [:]
+        for attr in element.attributes ?? [] {
+            guard let name = attr.name, !recognizedAttrs.contains(name) else { continue }
+            rawAttributes[name] = attr.stringValue ?? ""
+        }
+
+        var runs: [Run] = []
+        var rawChildren: [String] = []
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement else { continue }
+            if childElement.localName == "r" {
+                runs.append(try parseRun(from: childElement, relationships: relationships))
+            } else {
+                rawChildren.append(childElement.xmlString)
+            }
+        }
+
+        // For external hyperlinks, resolve the URL via the rels collection so
+        // downstream consumers (e.g., visualization, link audit tools) can read
+        // `Hyperlink.url` without separately joining against rels.
+        var url: String? = nil
+        if let rId = rId {
+            url = relationships.relationships.first(where: { $0.id == rId })?.target
+        }
+
+        // Allocate a stable id from the relationship id when available, else
+        // use a deterministic hash of the source position so duplicates parse
+        // distinctly. The `id` field is internal to the model — Writer paths
+        // do not emit it.
+        let id = rId ?? anchor ?? "hl-\(position)"
+
+        return Hyperlink(
+            id: id,
+            runs: runs,
+            relationshipId: rId,
+            anchor: anchor,
+            url: url,
+            tooltip: tooltip,
+            history: history,
+            rawAttributes: rawAttributes,
+            rawChildren: rawChildren,
+            position: position
+        )
+    }
+
+    /// v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 3: parse a `<w:fldSimple>`
+    /// element into the typed `FieldSimple` model. `w:instr` whitespace is
+    /// preserved exactly so existing field-recalc tools that match on the raw
+    /// instruction string continue to work. Inner `<w:r>` children populate
+    /// `runs` so `replace_text` / `format_text` can edit the rendered field
+    /// result. Unrecognized attributes flow into `rawAttributes`.
+    internal static func parseFieldSimple(
+        from element: XMLElement,
+        relationships: RelationshipsCollection,
+        position: Int
+    ) throws -> FieldSimple {
+        let recognizedAttrs: Set<String> = ["w:instr", "w:fldLock", "w:dirty"]
+
+        let instr = element.attribute(forName: "w:instr")?.stringValue ?? ""
+
+        var rawAttributes: [String: String] = [:]
+        for attr in element.attributes ?? [] {
+            guard let name = attr.name, !recognizedAttrs.contains(name) else { continue }
+            rawAttributes[name] = attr.stringValue ?? ""
+        }
+
+        var runs: [Run] = []
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement else { continue }
+            if childElement.localName == "r" {
+                runs.append(try parseRun(from: childElement, relationships: relationships))
+            }
+        }
+
+        return FieldSimple(
+            instr: instr,
+            runs: runs,
+            rawAttributes: rawAttributes,
+            position: position
+        )
+    }
+
+    /// v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 3: parse an
+    /// `<mc:AlternateContent>` block into the hybrid `AlternateContent` model.
+    /// `rawXML` captures the verbatim source XML (so Writer emits byte-equivalent
+    /// output and `<mc:Choice>` content is preserved without typed modeling);
+    /// `fallbackRuns` extracts `<w:r>` children inside `<mc:Fallback>` as
+    /// typed Runs for tool-mediated read access (e.g., reporting math
+    /// transliterations or letting a future SDD apply edits).
+    internal static func parseAlternateContent(
+        from element: XMLElement,
+        relationships: RelationshipsCollection,
+        position: Int
+    ) throws -> AlternateContent {
+        // Capture verbatim XML via XMLNode.xmlString (Foundation guarantees this
+        // is well-formed XML even though it may differ from the source bytes by
+        // canonicalization). For Phase 3 this is acceptable; if we ever need
+        // strict byte equality, callers can mark the part dirty and the original
+        // ZIP entry stays preserved-by-default via overlay mode.
+        let rawXML = element.xmlString
+
+        // Walk children to find <mc:Fallback> and extract its <w:r> children.
+        var fallbackRuns: [Run] = []
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement else { continue }
+            if childElement.localName == "Fallback" {
+                for grandchild in childElement.children ?? [] {
+                    guard let runElement = grandchild as? XMLElement else { continue }
+                    if runElement.localName == "r" {
+                        fallbackRuns.append(try parseRun(from: runElement, relationships: relationships))
+                    }
+                }
+            }
+        }
+
+        return AlternateContent(rawXML: rawXML, fallbackRuns: fallbackRuns, position: position)
+    }
 
     /// Parse a `<w:r>` element into a `Run`. Internal access (was private)
     /// so `@testable import OOXMLSwift` consumers can drive parser directly.
@@ -1918,5 +2231,75 @@ public struct DocxReader {
             }
         }
         return nil
+    }
+
+    // MARK: - Document root attribute extraction (PsychQuant/che-word-mcp#56)
+
+    /// Parse every attribute (xmlns:* declarations, mc:Ignorable, etc.) from the
+    /// `<w:document>` opening tag in raw `document.xml` bytes. Bypasses
+    /// Foundation's `XMLDocument` because libxml2 silently drops xmlns:*
+    /// declarations whose prefix it sees as unused — and OOXML routinely declares
+    /// 30+ extension namespaces that are referenced only inside parts the typed
+    /// model has not yet expanded (e.g., w16cex inside `<w:document>` body).
+    ///
+    /// Locates the substring between `<w:document` and the matching `>` (skipping
+    /// `?>` from the XML prolog), splits attributes on whitespace while respecting
+    /// quoted values, and returns them as a `[name: value]` map.
+    static func parseDocumentRootAttributes(from data: Data) -> [String: String] {
+        guard let raw = String(data: data, encoding: .utf8) else { return [:] }
+        guard let openRange = raw.range(of: "<w:document") else { return [:] }
+        // Find the closing `>` of the open tag (ignoring `>` inside attribute values).
+        var idx = openRange.upperBound
+        var inQuote: Character? = nil
+        while idx < raw.endIndex {
+            let c = raw[idx]
+            if let q = inQuote {
+                if c == q { inQuote = nil }
+            } else if c == "\"" || c == "'" {
+                inQuote = c
+            } else if c == ">" {
+                break
+            }
+            idx = raw.index(after: idx)
+        }
+        guard idx < raw.endIndex else { return [:] }
+        // attrSlice is "<w:document ATTRS" — strip element name keep ATTRS.
+        let attrSlice = String(raw[raw.index(openRange.lowerBound, offsetBy: "<w:document".count)..<idx])
+        return splitAttributes(attrSlice)
+    }
+
+    /// Split a whitespace-and-attribute string like ` xmlns:w="..." mc:Ignorable="w14"`
+    /// into a name→value map. Handles either `"` or `'` quoting and ignores the
+    /// trailing `/` self-closing slash.
+    private static func splitAttributes(_ s: String) -> [String: String] {
+        var result: [String: String] = [:]
+        var i = s.startIndex
+        let end = s.endIndex
+        while i < end {
+            // Skip whitespace.
+            while i < end, s[i].isWhitespace { i = s.index(after: i) }
+            if i >= end { break }
+            if s[i] == "/" { break }   // self-closing slash before `>`.
+            // Read attribute name up to `=`.
+            let nameStart = i
+            while i < end, s[i] != "=" { i = s.index(after: i) }
+            if i >= end { break }
+            let name = String(s[nameStart..<i]).trimmingCharacters(in: .whitespaces)
+            i = s.index(after: i)   // skip `=`.
+            // Skip whitespace before value.
+            while i < end, s[i].isWhitespace { i = s.index(after: i) }
+            if i >= end { break }
+            // Read quoted value.
+            let quote = s[i]
+            guard quote == "\"" || quote == "'" else { break }
+            i = s.index(after: i)
+            let valueStart = i
+            while i < end, s[i] != quote { i = s.index(after: i) }
+            if i >= end { break }
+            let value = String(s[valueStart..<i])
+            i = s.index(after: i)
+            if !name.isEmpty { result[name] = value }
+        }
+        return result
     }
 }

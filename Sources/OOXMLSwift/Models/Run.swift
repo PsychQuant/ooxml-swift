@@ -46,6 +46,14 @@ public struct Run: Equatable {
     /// tracked revision.
     public var formatChangeRevisionId: Int?
 
+    /// v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 4: source-document order
+    /// index for `Paragraph.toXML()` sort-by-position emit. Populated by
+    /// `DocxReader.parseParagraph` for direct `<w:r>` children only — runs
+    /// inside revision wrappers (`<w:ins>` / `<w:del>` / etc.) leave this
+    /// at 0 because their emit order is governed by the enclosing wrapper.
+    /// Default 0 keeps backward compat with API-built Runs.
+    public var position: Int = 0
+
     public init(text: String, properties: RunProperties = RunProperties()) {
         self.text = text
         self.properties = properties

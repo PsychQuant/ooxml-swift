@@ -183,9 +183,14 @@ final class RevisionParsingTests: XCTestCase {
             _ = try self.parse(el)
         }
 
+        // v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 4: log message updated
+        // from "skipped" → "captured" because unknown elements are now
+        // preserved on `Paragraph.unrecognizedChildren` for round-trip
+        // survival, not silently dropped. Position is the source-order index
+        // assigned during the paragraph child walk.
         XCTAssertEqual(
             captured,
-            "DocxReader.parseParagraph: skipped unknown element customElement\n"
+            "DocxReader.parseParagraph: captured unmodeled element customElement at position 0\n"
         )
     }
 }

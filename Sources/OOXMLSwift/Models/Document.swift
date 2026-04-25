@@ -80,6 +80,20 @@ public struct WordDocument: Equatable {
     /// settings.xml — when true, headers/footers of type `even` apply to even pages.
     public var evenAndOddHeaders: Bool = false
 
+    /// v0.19.0+ (PsychQuant/che-word-mcp#56): every attribute (including all
+    /// `xmlns:*` namespace declarations and `mc:Ignorable`) found on the source
+    /// `<w:document>` root element. Populated by `DocxReader.read(from:)` from
+    /// the parsed source. Emitted verbatim by `DocxWriter.writeDocument(_:to:)`
+    /// so a no-op round-trip preserves the original namespace decl set instead
+    /// of collapsing to the hardcoded `xmlns:w` + `xmlns:r` pair (the v3.12.0
+    /// failure mode that caused `libxml2` to report "unbound prefix" errors on
+    /// every body that referenced `mc:`, `wp:`, `w14:`, etc.).
+    ///
+    /// Empty for documents constructed via `WordDocument()` initializer without
+    /// a source ZIP — the Writer falls back to emitting only `xmlns:w` + `xmlns:r`
+    /// so create-from-scratch behavior stays unchanged.
+    public var documentRootAttributes: [String: String] = [:]
+
     public init() {
         self.body = Body()
         self.styles = Style.defaultStyles
@@ -128,6 +142,7 @@ public struct WordDocument: Equatable {
             && lhs.endnotes == rhs.endnotes
             && lhs.nextBookmarkId == rhs.nextBookmarkId
             && lhs.nextHyperlinkId == rhs.nextHyperlinkId
+            && lhs.documentRootAttributes == rhs.documentRootAttributes
     }
 
     // MARK: - Document Info
@@ -293,6 +308,40 @@ public struct WordDocument: Equatable {
     ///   pattern is invalid.
     /// Recursive helper for `replaceText` to descend into block-level SDT
     /// children (#44 task 3.4). Returns total replacements made.
+    /// v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 5: walk every editable run
+    /// surface on a paragraph (top-level runs + Hyperlink.runs +
+    /// FieldSimple.runs + AlternateContent.fallbackRuns) so `replace_text` /
+    /// `format_text` no longer silently fail on text living inside structural
+    /// wrappers. Returns the number of replacements made on this paragraph.
+    private static func replaceInParagraphSurfaces(
+        _ para: inout Paragraph,
+        find: String,
+        with replacement: String,
+        options: ReplaceOptions
+    ) throws -> Int {
+        var count = 0
+        count += try TextReplacementEngine.replace(
+            runs: &para.runs, find: find, with: replacement, options: options
+        )
+        for hIdx in 0..<para.hyperlinks.count {
+            count += try TextReplacementEngine.replace(
+                runs: &para.hyperlinks[hIdx].runs, find: find, with: replacement, options: options
+            )
+        }
+        for fIdx in 0..<para.fieldSimples.count {
+            count += try TextReplacementEngine.replace(
+                runs: &para.fieldSimples[fIdx].runs, find: find, with: replacement, options: options
+            )
+        }
+        for acIdx in 0..<para.alternateContents.count {
+            count += try TextReplacementEngine.replace(
+                runs: &para.alternateContents[acIdx].fallbackRuns,
+                find: find, with: replacement, options: options
+            )
+        }
+        return count
+    }
+
     private mutating func replaceTextInBodyChildren(
         _ children: inout [BodyChild],
         find: String,
@@ -303,8 +352,8 @@ public struct WordDocument: Equatable {
         for i in 0..<children.count {
             switch children[i] {
             case .paragraph(var para):
-                count += try TextReplacementEngine.replace(
-                    runs: &para.runs, find: find, with: replacement, options: options
+                count += try Self.replaceInParagraphSurfaces(
+                    &para, find: find, with: replacement, options: options
                 )
                 children[i] = .paragraph(para)
             case .table(var table):
@@ -312,8 +361,8 @@ public struct WordDocument: Equatable {
                     for cellIdx in 0..<table.rows[rowIdx].cells.count {
                         for paraIdx in 0..<table.rows[rowIdx].cells[cellIdx].paragraphs.count {
                             var para = table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx]
-                            count += try TextReplacementEngine.replace(
-                                runs: &para.runs, find: find, with: replacement, options: options
+                            count += try Self.replaceInParagraphSurfaces(
+                                &para, find: find, with: replacement, options: options
                             )
                             table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx] = para
                         }
@@ -338,12 +387,14 @@ public struct WordDocument: Equatable {
     ) throws -> Int {
         var count = 0
 
-        // Body + tables (always scanned)
+        // Body + tables (always scanned). v0.19.0+ (#56) uses
+        // `replaceInParagraphSurfaces` so edits inside Hyperlink / FieldSimple /
+        // AlternateContent.fallbackRuns are no longer silently dropped.
         for i in 0..<body.children.count {
             switch body.children[i] {
             case .paragraph(var para):
-                count += try TextReplacementEngine.replace(
-                    runs: &para.runs, find: find, with: replacement, options: options
+                count += try Self.replaceInParagraphSurfaces(
+                    &para, find: find, with: replacement, options: options
                 )
                 body.children[i] = .paragraph(para)
             case .table(var table):
@@ -351,8 +402,8 @@ public struct WordDocument: Equatable {
                     for cellIdx in 0..<table.rows[rowIdx].cells.count {
                         for paraIdx in 0..<table.rows[rowIdx].cells[cellIdx].paragraphs.count {
                             var para = table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx]
-                            count += try TextReplacementEngine.replace(
-                                runs: &para.runs, find: find, with: replacement, options: options
+                            count += try Self.replaceInParagraphSurfaces(
+                                &para, find: find, with: replacement, options: options
                             )
                             table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx] = para
                         }
