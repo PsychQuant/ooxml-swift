@@ -111,8 +111,14 @@ public struct DocxReader {
                 from: headerXML,
                 relationships: relationships, styles: document.styles, numbering: document.numbering
             )
+            // v0.19.2+ (#56 follow-up F4): preserve `<w:hdr>` root attributes
+            // (xmlns:* + mc:Ignorable + vendor) so VML watermark prefixes
+            // round-trip beyond the hardcoded 5-namespace template.
+            let rootAttrs = Self.parseContainerRootAttributes(
+                from: headerData, rootElementOpenPrefix: "<w:hdr"
+            )
             document.headers.append(
-                Header(id: rel.id, paragraphs: paragraphs, originalFileName: rel.target)
+                Header(id: rel.id, paragraphs: paragraphs, originalFileName: rel.target, rootAttributes: rootAttrs)
             )
         }
 
@@ -134,8 +140,12 @@ public struct DocxReader {
                 from: footerXML,
                 relationships: relationships, styles: document.styles, numbering: document.numbering
             )
+            // v0.19.2+ (#56 follow-up F4): preserve `<w:ftr>` root attributes.
+            let rootAttrs = Self.parseContainerRootAttributes(
+                from: footerData, rootElementOpenPrefix: "<w:ftr"
+            )
             document.footers.append(
-                Footer(id: rel.id, paragraphs: paragraphs, originalFileName: rel.target)
+                Footer(id: rel.id, paragraphs: paragraphs, originalFileName: rel.target, rootAttributes: rootAttrs)
             )
         }
 
@@ -144,6 +154,10 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: footnotesURL.path) {
             let footnotesData = try Data(contentsOf: footnotesURL)
             let footnotesXML = try XMLDocument(data: footnotesData)
+            // v0.19.2+ (#56 follow-up F4): preserve `<w:footnotes>` root attributes.
+            document.footnotes.rootAttributes = Self.parseContainerRootAttributes(
+                from: footnotesData, rootElementOpenPrefix: "<w:footnotes"
+            )
             if let root = footnotesXML.rootElement() {
                 for child in root.children ?? [] {
                     guard
@@ -172,6 +186,10 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: endnotesURL.path) {
             let endnotesData = try Data(contentsOf: endnotesURL)
             let endnotesXML = try XMLDocument(data: endnotesData)
+            // v0.19.2+ (#56 follow-up F4): preserve `<w:endnotes>` root attributes.
+            document.endnotes.rootAttributes = Self.parseContainerRootAttributes(
+                from: endnotesData, rootElementOpenPrefix: "<w:endnotes"
+            )
             if let root = endnotesXML.rootElement() {
                 for child in root.children ?? [] {
                     guard
@@ -603,7 +621,14 @@ public struct DocxReader {
 
                 var insertedText = ""
                 for insRun in childElement.elements(forName: "w:r") {
-                    let parsedRun = try parseRun(from: insRun, relationships: relationships)
+                    var parsedRun = try parseRun(from: insRun, relationships: relationships)
+                    // v0.19.2+ (#56 follow-up F3): assign source-order position so
+                    // sort-by-position emit doesn't collapse all wrapper-internal
+                    // runs to position=0 (paragraph front). Set revisionId so the
+                    // sort path can re-wrap consecutive same-revisionId runs in
+                    // <w:ins>/<w:del>/<w:moveFrom>/<w:moveTo> on emit.
+                    parsedRun.position = childPosition
+                    parsedRun.revisionId = revId
                     paragraph.runs.append(parsedRun)
                     insertedText += parsedRun.text
                 }
@@ -628,6 +653,14 @@ public struct DocxReader {
                     for delText in delRun.elements(forName: "w:delText") {
                         deletedText += delText.stringValue ?? ""
                     }
+                    // v0.19.2+ (#56 F3): persist run with position + revisionId
+                    // so sort-by-position emit can re-wrap with <w:del>. Without
+                    // this, the deletion wrapper is silently dropped on round-trip
+                    // and the deletion looks accepted in Word post-save.
+                    var parsedRun = try parseRun(from: delRun, relationships: relationships)
+                    parsedRun.position = childPosition
+                    parsedRun.revisionId = revId
+                    paragraph.runs.append(parsedRun)
                 }
 
                 if !deletedText.isEmpty {
@@ -647,7 +680,10 @@ public struct DocxReader {
 
                 var movedText = ""
                 for moveRun in childElement.elements(forName: "w:r") {
-                    let parsedRun = try parseRun(from: moveRun, relationships: relationships)
+                    var parsedRun = try parseRun(from: moveRun, relationships: relationships)
+                    // v0.19.2+ (#56 F3): position + revisionId for sort path wrapping
+                    parsedRun.position = childPosition
+                    parsedRun.revisionId = revId
                     paragraph.runs.append(parsedRun)
                     movedText += parsedRun.text
                 }
@@ -669,7 +705,10 @@ public struct DocxReader {
 
                 var movedText = ""
                 for moveRun in childElement.elements(forName: "w:r") {
-                    let parsedRun = try parseRun(from: moveRun, relationships: relationships)
+                    var parsedRun = try parseRun(from: moveRun, relationships: relationships)
+                    // v0.19.2+ (#56 F3): position + revisionId for sort path wrapping
+                    parsedRun.position = childPosition
+                    parsedRun.revisionId = revId
                     paragraph.runs.append(parsedRun)
                     movedText += parsedRun.text
                 }
@@ -2259,8 +2298,27 @@ public struct DocxReader {
     /// `?>` from the XML prolog), splits attributes on whitespace while respecting
     /// quoted values, and returns them as a `[name: value]` map.
     static func parseDocumentRootAttributes(from data: Data) -> [String: String] {
+        return parseContainerRootAttributes(from: data, rootElementOpenPrefix: "<w:document")
+    }
+
+    /// v0.19.2+ (#56 follow-up F4): generalized version of
+    /// `parseDocumentRootAttributes` for any container's root element.
+    /// Used by header (`<w:hdr`), footer (`<w:ftr`), footnotes
+    /// (`<w:footnotes`) and endnotes (`<w:endnotes`) raw-byte ingestion so
+    /// every part type — not just `word/document.xml` — preserves source
+    /// `xmlns:*` declarations and other root-level attributes through a
+    /// no-op round-trip.
+    ///
+    /// Pass the literal opening prefix including `<` and the element local
+    /// name (e.g., `"<w:hdr"`). Behaviour matches the document.xml variant:
+    /// returns `[:]` on UTF-8 decode failure, missing prefix, or unterminated
+    /// open tag (Writer falls back to its hardcoded namespace template).
+    static func parseContainerRootAttributes(
+        from data: Data,
+        rootElementOpenPrefix: String
+    ) -> [String: String] {
         guard let raw = String(data: data, encoding: .utf8) else { return [:] }
-        guard let openRange = raw.range(of: "<w:document") else { return [:] }
+        guard let openRange = raw.range(of: rootElementOpenPrefix) else { return [:] }
         // Find the closing `>` of the open tag (ignoring `>` inside attribute values).
         var idx = openRange.upperBound
         var inQuote: Character? = nil
@@ -2276,8 +2334,8 @@ public struct DocxReader {
             idx = raw.index(after: idx)
         }
         guard idx < raw.endIndex else { return [:] }
-        // attrSlice is "<w:document ATTRS" — strip element name keep ATTRS.
-        let attrSlice = String(raw[raw.index(openRange.lowerBound, offsetBy: "<w:document".count)..<idx])
+        // attrSlice is "<w:hdr ATTRS" — strip element name, keep ATTRS.
+        let attrSlice = String(raw[raw.index(openRange.lowerBound, offsetBy: rootElementOpenPrefix.count)..<idx])
         return splitAttributes(attrSlice)
     }
 

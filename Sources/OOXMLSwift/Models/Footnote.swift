@@ -69,6 +69,17 @@ extension Footnote {
 public struct FootnotesCollection: Equatable {
     public var footnotes: [Footnote] = []
 
+    /// v0.19.2+ (#56 follow-up F4): captured `<w:footnotes>` root attributes
+    /// from the source `footnotes.xml`. Empty when API-built — fallback
+    /// emits `xmlns:w` + `xmlns:r` only (sufficient for default footnotes
+    /// without VML / smart-art / extension elements).
+    public var rootAttributes: [String: String] = [:]
+
+    public init(footnotes: [Footnote] = [], rootAttributes: [String: String] = [:]) {
+        self.footnotes = footnotes
+        self.rootAttributes = rootAttributes
+    }
+
     /// 取得下一個可用的腳註 ID
     mutating func nextFootnoteId() -> Int {
         // 腳註 ID 從 1 開始（0 和 -1 是保留的分隔符）
@@ -78,10 +89,9 @@ public struct FootnotesCollection: Equatable {
 
     /// 產生完整的 footnotes.xml 內容
     func toXML() -> String {
-        var xml = """
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-                     xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        xml += ContainerRootTag.render(elementName: "w:footnotes", attributes: rootAttributes)
+        xml += """
             <w:footnote w:type="separator" w:id="-1">
                 <w:p>
                     <w:r>
@@ -182,6 +192,16 @@ extension Endnote {
 public struct EndnotesCollection: Equatable {
     public var endnotes: [Endnote] = []
 
+    /// v0.19.2+ (#56 follow-up F4): captured `<w:endnotes>` root attributes
+    /// from the source `endnotes.xml`. See `FootnotesCollection.rootAttributes`
+    /// for full semantics.
+    public var rootAttributes: [String: String] = [:]
+
+    public init(endnotes: [Endnote] = [], rootAttributes: [String: String] = [:]) {
+        self.endnotes = endnotes
+        self.rootAttributes = rootAttributes
+    }
+
     /// 取得下一個可用的尾註 ID
     mutating func nextEndnoteId() -> Int {
         // 尾註 ID 從 1 開始（0 和 -1 是保留的分隔符）
@@ -191,10 +211,9 @@ public struct EndnotesCollection: Equatable {
 
     /// 產生完整的 endnotes.xml 內容
     func toXML() -> String {
-        var xml = """
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-                    xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        xml += ContainerRootTag.render(elementName: "w:endnotes", attributes: rootAttributes)
+        xml += """
             <w:endnote w:type="separator" w:id="-1">
                 <w:p>
                     <w:r>
