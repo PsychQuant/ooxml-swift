@@ -2,6 +2,28 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.19.2] - 2026-04-26
+
+### Fixed — 4 blocking findings from PsychQuant/che-word-mcp#56 verification (F1–F4)
+
+The v3.13.1 release of che-word-mcp shipped on top of v0.19.1 and went through 6-AI cross-verification. Five of the six reviewers initially marked the four #56 Expected requirements as FULLY addressed; the Devil's Advocate reviewer downgraded all four to PARTIAL after surfacing 4 blocking sub-issues that the existing smoke tests didn't cover (concat-text SHA256 + element-count parity miss run-property loss, marker desync, revision wrapper drop, and per-part namespace strip). v0.19.2 fixes all four.
+
+**F1 — `Hyperlink.toXML()` ignored Reader-collected runs / rawAttributes / rawChildren** (`Sources/OOXMLSwift/Models/Hyperlink.swift:151-187`). v0.19.0 added the hybrid model fields but the writer kept emitting a hardcoded single-run blue-underlined `Hyperlink`-styled `<w:r>` regardless of source. Inner-run formatting (bold/italic/color/font), unmodeled `<w:hyperlink>` attributes (`w:tgtFrame`, `w:docLocation`, vendor extensions), and non-Run direct children (nested SDT) were all silently dropped on every round-trip. Rewritten to iterate `runs` (preserving each `RunProperties` via `Run.toXML()`), emit `rawAttributes` alphabetically (skipping any name colliding with a typed attribute), and append `rawChildren` verbatim. Empty-`runs` (API-built path) falls back to the legacy hardcoded styled-run template.
+
+**F2 — `addBookmark` / `deleteBookmark` did not sync `bookmarkMarkers`** (`Sources/OOXMLSwift/Models/Document.swift:1607-1644`). Source-loaded paragraphs always go through `Paragraph.toXMLSortedByPosition` because their existing markers are non-empty. The mutation API only updated `Paragraph.bookmarks` (the typed list), not `Paragraph.bookmarkMarkers` (the position-indexed list the writer actually consults). Result: new bookmarks added via API silently dropped on save (typed entry created but writer never emitted them); deletes left zombie `<w:bookmarkStart w:id="N" w:name=""/>` markers because `emitBookmarkMarker` looked up the deleted bookmark's name via `?? ""` fallthrough. New helper `appendBookmarkSyncingMarkers(to:bookmark:)` is the single insertion entry point, computing `position = max(existing positions) + 1` (start) and `+2` (end) so new bookmarks always land at paragraph tail. `deleteBookmark` now also runs `bookmarkMarkers.removeAll { $0.id == removed.id }`.
+
+**F3 — `<w:ins>` / `<w:del>` / `<w:moveFrom>` / `<w:moveTo>` Reader did not assign `position` or `revisionId` to inner runs** (`Sources/OOXMLSwift/IO/DocxReader.swift:597-684`). Pre-fix, every wrapper-internal run was appended to `paragraph.runs` with `position` defaulting to 0, so source-loaded paragraphs with revision tracking sorted all inserted/moved runs to paragraph front (NEW-1 in the verify report — devil's advocate caught this by comparing line 590 normal `<w:r>` handling against lines 606/650/672). The wrapper element itself was also dropped because the sort-by-position emit (Paragraph.swift:418) emitted runs individually rather than re-grouping by `revisionId`. Two-part fix: Reader assigns `parsedRun.position = childPosition` AND `parsedRun.revisionId = revId` in all four cases; Writer's sort path now uses a `PositionedEntry` enum (`.run(Run)` vs `.xml(String)`) so a post-sort pass can group consecutive `.run` entries with the same `revisionId` and wrap them in a single `<w:ins>` / `<w:del>` / `<w:moveFrom>` / `<w:moveTo>` block via `Revision.toOpeningXML()` / `toClosingXML()`. Track Changes round-trips intact for source-loaded documents (the v3.12.0 #45 feature now composes correctly with #56's source-load infrastructure).
+
+**F4 — Namespace preservation only covered `word/document.xml`** (NEW-2 in the verify report). v0.19.0's `documentRootAttributes` plumbing solved the unbound-prefix problem for the document body but headers, footers, footnotes, and endnotes each still used hardcoded namespace templates. NTPU thesis-class documents have 6 headers with VML watermarks that frequently declare `mc`/`wp`/`w14`/`w15` beyond the hardcoded 5-namespace template — those declarations were silently dropped on round-trip. New `ContainerRootTag.render(elementName:attributes:)` helper generalizes the document-level `renderDocumentRootOpenTag` pattern over any container root element. Reader's `parseDocumentRootAttributes` is now the thin wrapper over a generalized `parseContainerRootAttributes(from:rootElementOpenPrefix:)`. Each of `Header`, `Footer`, `FootnotesCollection`, `EndnotesCollection` gains a `rootAttributes: [String: String]` field; Reader populates from raw bytes per part; their `toXML()` methods consult it and fall back to element-specific defaults (header/footer = 5-namespace VML template; footnotes/endnotes = 2-namespace minimal) when empty. API-built parts emit byte-identical pre-fix output; source-loaded parts round-trip every declaration verbatim.
+
+### Test coverage
+
+557 tests pass (548 from v0.19.1 + 9 new in `Issue56FollowupTests`), 1 skipped, 0 failures. New tests cover each F1–F4 fix plus their fallback behaviors (empty-runs hyperlink, empty-rootAttributes container).
+
+### No breaking changes
+
+All new fields default to empty (`runs: []`, `rootAttributes: [:]`, `revisionId: nil`). API-built objects produce byte-identical pre-fix output. Existing 218+ MCP tools in che-word-mcp are unchanged.
+
 ## [0.19.1] - 2026-04-25
 
 ### Fixed — pPr double-emission on Phase 4 sort-by-position round-trip (Refs PsychQuant/che-word-mcp#56 follow-up)

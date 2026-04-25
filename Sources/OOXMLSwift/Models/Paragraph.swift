@@ -412,54 +412,104 @@ extension Paragraph {
             xml += "</w:pPr>"
         }
 
-        // Build (position, xml) pairs from every position-indexed collection.
-        var positioned: [(position: Int, xml: String)] = []
+        // Build (position, payload) pairs from every position-indexed collection.
+        // v0.19.2+ (#56 F3): runs are kept as `.run(Run)` rather than pre-emitted
+        // strings so the post-sort pass can group consecutive same-revisionId
+        // runs and wrap them in <w:ins>/<w:del>/<w:moveFrom>/<w:moveTo>. Without
+        // this grouping, source-loaded paragraphs with revision tracking would
+        // emit individual <w:r>...</w:r> with no enclosing revision wrapper —
+        // i.e., revision history silently wiped on round-trip.
+        var positioned: [(position: Int, entry: PositionedEntry)] = []
 
         for run in runs {
-            positioned.append((run.position, Self.emitRun(run, asDelText: false, paragraphRevisions: revisions)))
+            positioned.append((run.position, .run(run)))
         }
         for hyperlink in hyperlinks {
-            positioned.append((hyperlink.position, hyperlink.toXML()))
+            positioned.append((hyperlink.position, .xml(hyperlink.toXML())))
         }
         for field in fieldSimples {
-            positioned.append((field.position, Self.emitFieldSimple(field)))
+            positioned.append((field.position, .xml(Self.emitFieldSimple(field))))
         }
         for ac in alternateContents {
-            positioned.append((ac.position, ac.rawXML))
+            positioned.append((ac.position, .xml(ac.rawXML)))
         }
         for marker in bookmarkMarkers {
-            positioned.append((marker.position, Self.emitBookmarkMarker(marker, paragraph: self)))
+            positioned.append((marker.position, .xml(Self.emitBookmarkMarker(marker, paragraph: self))))
         }
         for marker in commentRangeMarkers {
-            positioned.append((marker.position, Self.emitCommentRangeMarker(marker)))
+            positioned.append((marker.position, .xml(Self.emitCommentRangeMarker(marker))))
         }
         for marker in permissionRangeMarkers {
-            positioned.append((marker.position, Self.emitPermissionRangeMarker(marker)))
+            positioned.append((marker.position, .xml(Self.emitPermissionRangeMarker(marker))))
         }
         for marker in proofErrorMarkers {
-            positioned.append((marker.position, "<w:proofErr w:type=\"\(marker.type.rawValue)\"/>"))
+            positioned.append((marker.position, .xml("<w:proofErr w:type=\"\(marker.type.rawValue)\"/>")))
         }
         for tag in smartTags {
-            positioned.append((tag.position, tag.rawXML))
+            positioned.append((tag.position, .xml(tag.rawXML)))
         }
         for block in customXmlBlocks {
-            positioned.append((block.position, block.rawXML))
+            positioned.append((block.position, .xml(block.rawXML)))
         }
         for block in bidiOverrides {
-            positioned.append((block.position, block.rawXML))
+            positioned.append((block.position, .xml(block.rawXML)))
         }
         for child in unrecognizedChildren {
-            positioned.append((child.position, child.rawXML))
+            positioned.append((child.position, .xml(child.rawXML)))
         }
 
         // Stable sort by position. Equal positions retain insertion order.
         positioned.sort { $0.position < $1.position }
-        for entry in positioned {
-            xml += entry.xml
+
+        // Walk the sorted list. Whenever consecutive entries are `.run(_)`
+        // sharing the same `revisionId`, emit them inside a single revision
+        // wrapper. `.xml(_)` entries flush as-is.
+        var i = 0
+        while i < positioned.count {
+            switch positioned[i].entry {
+            case .xml(let s):
+                xml += s
+                i += 1
+            case .run(let firstRun):
+                // Collect run group: consecutive .run entries with same revisionId.
+                var group: [Run] = [firstRun]
+                var j = i + 1
+                while j < positioned.count {
+                    if case .run(let next) = positioned[j].entry, next.revisionId == firstRun.revisionId {
+                        group.append(next)
+                        j += 1
+                    } else {
+                        break
+                    }
+                }
+
+                if let revId = firstRun.revisionId,
+                   let revision = revisions.first(where: { $0.id == revId }) {
+                    xml += revision.toOpeningXML()
+                    let asDelText = revision.type == .deletion
+                    for r in group {
+                        xml += Self.emitRun(r, asDelText: asDelText, paragraphRevisions: revisions)
+                    }
+                    xml += revision.toClosingXML()
+                } else {
+                    for r in group {
+                        xml += Self.emitRun(r, asDelText: false, paragraphRevisions: revisions)
+                    }
+                }
+                i = j
+            }
         }
 
         xml += "</w:p>"
         return xml
+    }
+
+    /// v0.19.2+ (#56 F3): Tagged payload for sort-by-position emit so the
+    /// post-sort pass can recognize runs (and group them by revisionId) vs
+    /// pre-rendered XML fragments.
+    fileprivate enum PositionedEntry {
+        case run(Run)
+        case xml(String)
     }
 
     /// Emit a `<w:bookmarkStart>` or `<w:bookmarkEnd>` from a marker. For

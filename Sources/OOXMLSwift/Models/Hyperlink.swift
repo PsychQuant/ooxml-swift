@@ -147,40 +147,76 @@ public struct HyperlinkReference: Equatable {
 // MARK: - XML Generation
 
 extension Hyperlink {
+    /// Reserved attribute names that have a typed surface on `Hyperlink` —
+    /// emitted from the typed fields, never from `rawAttributes`. Anything
+    /// else in `rawAttributes` is appended verbatim (alphabetically sorted
+    /// for determinism).
+    private static let typedAttributeNames: Set<String> = [
+        "r:id", "w:anchor", "w:tooltip", "w:history",
+    ]
+
     /// 轉換為 OOXML XML（放在段落內）
+    ///
+    /// v0.19.2+ (#56 follow-up F1): rewrite to honour the v0.19.0 hybrid model:
+    /// - Iterate `runs` (preserving each `RunProperties` and any per-run
+    ///   `rawXML`/`rawElements` via `Run.toXML()`) instead of collapsing to a
+    ///   single hardcoded `<w:r>` with bake-in `Hyperlink` style.
+    /// - Emit `rawAttributes` (sorted) so vendor / unmodeled attributes
+    ///   (`w:tgtFrame`, `w:docLocation`, etc.) round-trip byte-equivalent.
+    /// - Append `rawChildren` verbatim after runs so non-Run direct children
+    ///   (nested SDT, future extensions) survive.
+    /// - Fallback path for `runs.isEmpty` — happens when `Hyperlink` is built
+    ///   via the API initializers using `text:` (which now populates a single
+    ///   Run) but defensively also when caller blanks the runs collection.
+    ///   Emits the legacy hardcoded styled run carrying empty text so the
+    ///   output stays valid OOXML.
     func toXML() -> String {
         var xml = "<w:hyperlink"
 
-        // 外部連結使用 r:id，內部連結使用 w:anchor
+        // Typed attributes first (deterministic order, matches pre-fix output).
         if let rId = relationshipId {
-            xml += " r:id=\"\(rId)\""
+            xml += " r:id=\"\(escapeXML(rId))\""
         } else if let anchor = anchor {
             xml += " w:anchor=\"\(escapeXML(anchor))\""
         }
-
-        // 提示文字
         if let tooltip = tooltip {
             xml += " w:tooltip=\"\(escapeXML(tooltip))\""
         }
-
         // v0.17.0+ (#50): w:history (only emit when false; true is default)
         if !history {
             xml += " w:history=\"0\""
         }
 
+        // v0.19.2+ (#56 F1): unmodeled passthrough attributes from source.
+        // Skip any whose name collides with a typed attribute we already
+        // emitted (prevents duplicate-attribute corruption).
+        for (name, value) in rawAttributes.sorted(by: { $0.key < $1.key }) {
+            guard !Self.typedAttributeNames.contains(name) else { continue }
+            xml += " \(name)=\"\(escapeXML(value))\""
+        }
+
         xml += ">"
 
-        // 連結文字（帶有藍色底線樣式）
-        xml += """
-        <w:r>
-            <w:rPr>
-                <w:rStyle w:val="Hyperlink"/>
-                <w:color w:val="0563C1"/>
-                <w:u w:val="single"/>
-            </w:rPr>
-            <w:t xml:space="preserve">\(escapeXML(text))</w:t>
-        </w:r>
-        """
+        // Content: prefer typed runs (preserves RunProperties for source-loaded
+        // hyperlinks via Run.toXML()). Only fall back to the hardcoded styled
+        // run when runs is empty — this happens for API-built hyperlinks whose
+        // caller cleared runs, never for source-loaded hyperlinks (Reader
+        // always populates runs).
+        if runs.isEmpty {
+            xml += """
+            <w:r><w:rPr><w:rStyle w:val="Hyperlink"/><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr><w:t xml:space="preserve"></w:t></w:r>
+            """
+        } else {
+            for run in runs {
+                xml += run.toXML()
+            }
+        }
+
+        // v0.19.2+ (#56 F1): non-Run direct children (e.g., nested SDT inside
+        // a hyperlink, vendor extensions). Stored as verbatim XML by Reader.
+        for raw in rawChildren {
+            xml += raw
+        }
 
         xml += "</w:hyperlink>"
         return xml

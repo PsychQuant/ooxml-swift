@@ -1604,7 +1604,7 @@ public struct WordDocument: Equatable {
 
             let actualIndex = paragraphIndices[index]
             if case .paragraph(var para) = body.children[actualIndex] {
-                para.bookmarks.append(bookmark)
+                Self.appendBookmarkSyncingMarkers(to: &para, bookmark: bookmark)
                 body.children[actualIndex] = .paragraph(para)
             }
         } else {
@@ -1614,12 +1614,12 @@ public struct WordDocument: Equatable {
                 return false
             }) {
                 if case .paragraph(var para) = body.children[lastIndex] {
-                    para.bookmarks.append(bookmark)
+                    Self.appendBookmarkSyncingMarkers(to: &para, bookmark: bookmark)
                     body.children[lastIndex] = .paragraph(para)
                 }
             } else {
                 var para = Paragraph()
-                para.bookmarks.append(bookmark)
+                Self.appendBookmarkSyncingMarkers(to: &para, bookmark: bookmark)
                 appendParagraph(para)
             }
         }
@@ -1633,7 +1633,13 @@ public struct WordDocument: Equatable {
         for i in 0..<body.children.count {
             if case .paragraph(var para) = body.children[i] {
                 if let index = para.bookmarks.firstIndex(where: { $0.name == name }) {
-                    para.bookmarks.remove(at: index)
+                    let removed = para.bookmarks.remove(at: index)
+                    // v0.19.2+ (#56 follow-up F2): keep `bookmarkMarkers` in sync
+                    // so source-loaded paragraphs (which always go through the
+                    // sort-by-position emit path) don't leave behind zombie
+                    // `<w:bookmarkStart>` markers with empty `w:name=""` from
+                    // the markers-only side of the model.
+                    para.bookmarkMarkers.removeAll { $0.id == removed.id }
                     body.children[i] = .paragraph(para)
                     modifiedParts.insert("word/document.xml")
                     return
@@ -1641,6 +1647,53 @@ public struct WordDocument: Equatable {
             }
         }
         throw BookmarkError.notFound(name)
+    }
+
+    /// v0.19.2+ (#56 follow-up F2): central helper for adding a `Bookmark`
+    /// to a paragraph that ALSO appends the matching `BookmarkRangeMarker`
+    /// pair (start + end) needed by the sort-by-position emit path.
+    ///
+    /// Without this sync, source-loaded paragraphs (which trigger sort-by-
+    /// position because their existing markers are non-empty) silently drop
+    /// any newly-added bookmarks at save time — the typed `bookmarks` entry
+    /// is created but the writer only emits markers, never the typed list.
+    ///
+    /// **Position assignment**: the new markers land just after every
+    /// existing positioned child (max position + 1 for start, +2 for end).
+    /// This produces a zero-width point bookmark sitting at the paragraph
+    /// tail, which matches the API semantics ("name this paragraph") since
+    /// `addBookmark` doesn't accept a span argument. Callers needing a
+    /// span-bookmark across specific runs should construct
+    /// `BookmarkRangeMarker` explicitly via the typed model.
+    private static func appendBookmarkSyncingMarkers(
+        to paragraph: inout Paragraph,
+        bookmark: Bookmark
+    ) {
+        paragraph.bookmarks.append(bookmark)
+
+        // Compute the next free position after every existing positioned child.
+        // Mirrors the collections enumerated by `Paragraph.toXMLSortedByPosition`.
+        let positions: [Int] =
+            paragraph.runs.map { $0.position }
+            + paragraph.hyperlinks.map { $0.position }
+            + paragraph.fieldSimples.map { $0.position }
+            + paragraph.alternateContents.map { $0.position }
+            + paragraph.bookmarkMarkers.map { $0.position }
+            + paragraph.commentRangeMarkers.map { $0.position }
+            + paragraph.permissionRangeMarkers.map { $0.position }
+            + paragraph.proofErrorMarkers.map { $0.position }
+            + paragraph.smartTags.map { $0.position }
+            + paragraph.customXmlBlocks.map { $0.position }
+            + paragraph.bidiOverrides.map { $0.position }
+            + paragraph.unrecognizedChildren.map { $0.position }
+        let nextPosition = (positions.max() ?? -1) + 1
+
+        paragraph.bookmarkMarkers.append(
+            BookmarkRangeMarker(kind: .start, id: bookmark.id, position: nextPosition)
+        )
+        paragraph.bookmarkMarkers.append(
+            BookmarkRangeMarker(kind: .end, id: bookmark.id, position: nextPosition + 1)
+        )
     }
 
     /// 列出所有書籤

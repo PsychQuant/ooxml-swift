@@ -25,11 +25,21 @@ public struct Header: Equatable {
         }
     }
 
-    public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, originalFileName: String? = nil) {
+    /// v0.19.2+ (#56 follow-up F4): captured `<w:hdr>` root attributes from the
+    /// source `header*.xml` (every `xmlns:*` declaration plus `mc:Ignorable`
+    /// and any vendor / unmodeled attributes). Empty when the header is
+    /// API-built — `toXML()` then falls back to the hardcoded 5-namespace
+    /// template that Word's exported headers minimally need (`w`/`r`/`v`/`o`/`w10`).
+    /// Source-loaded headers (e.g., NTPU thesis with VML watermarks declaring
+    /// `mc`/`wp`/`w14`/`w15`) round-trip every declaration verbatim.
+    public var rootAttributes: [String: String] = [:]
+
+    public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, originalFileName: String? = nil, rootAttributes: [String: String] = [:]) {
         self.id = id
         self.paragraphs = paragraphs
         self.type = type
         self.originalFileName = Self.sanitizeOriginalFileName(originalFileName)
+        self.rootAttributes = rootAttributes
     }
 
     /// Sanitize a candidate `originalFileName` per #55 security baseline.
@@ -84,43 +94,25 @@ extension Header {
     /// `<v:shape>` / `<o:lock>` / `<w10:wrap>` resolve when the saved
     /// `header*.xml` is re-read.
     func toXML() -> String {
-        var xml = """
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-               xmlns:v="urn:schemas-microsoft-com:vml"
-               xmlns:o="urn:schemas-microsoft-com:office:office"
-               xmlns:w10="urn:schemas-microsoft-com:office:word">
-        """
-
+        var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        xml += ContainerRootTag.render(elementName: "w:hdr", attributes: rootAttributes)
         for para in paragraphs {
             xml += para.toXML()
         }
-
         // 如果沒有段落，加一個空段落
         if paragraphs.isEmpty {
             xml += "<w:p/>"
         }
-
         xml += "</w:hdr>"
         return xml
     }
 
     /// 轉換為含頁碼的頁首 XML
     func toXMLWithPageNumber() -> String {
-        var xml = """
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-               xmlns:v="urn:schemas-microsoft-com:vml"
-               xmlns:o="urn:schemas-microsoft-com:office:office"
-               xmlns:w10="urn:schemas-microsoft-com:office:word">
-        <w:p>
-        <w:pPr><w:jc w:val="center"/></w:pPr>
-        """
-
+        var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        xml += ContainerRootTag.render(elementName: "w:hdr", attributes: rootAttributes)
+        xml += "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr>"
         xml += pageFieldXML()
-
         xml += "</w:p></w:hdr>"
         return xml
     }

@@ -24,13 +24,20 @@ public struct Footer: Equatable {
         }
     }
 
-    public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, pageNumberFormat: PageNumberFormat? = nil, pageNumberAlignment: ParagraphAlignment = .center, originalFileName: String? = nil) {
+    /// v0.19.2+ (#56 follow-up F4): captured `<w:ftr>` root attributes from the
+    /// source `footer*.xml`. Empty when API-built — fallback in `toXML()` uses
+    /// the hardcoded 5-namespace template (`w`/`r`/`v`/`o`/`w10`). See
+    /// `Header.rootAttributes` for full semantics.
+    public var rootAttributes: [String: String] = [:]
+
+    public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, pageNumberFormat: PageNumberFormat? = nil, pageNumberAlignment: ParagraphAlignment = .center, originalFileName: String? = nil, rootAttributes: [String: String] = [:]) {
         self.id = id
         self.paragraphs = paragraphs
         self.type = type
         self.pageNumberFormat = pageNumberFormat
         self.pageNumberAlignment = pageNumberAlignment
         self.originalFileName = Self.sanitizeOriginalFileName(originalFileName)
+        self.rootAttributes = rootAttributes
     }
 
     /// Sanitize per #55 security baseline. See `Header.sanitizeOriginalFileName`.
@@ -74,40 +81,23 @@ public enum PageNumberFormat: Equatable {
 extension Footer {
     /// 轉換為完整的 footer.xml 內容
     func toXML() -> String {
-        var xml = """
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-               xmlns:v="urn:schemas-microsoft-com:vml"
-               xmlns:o="urn:schemas-microsoft-com:office:office"
-               xmlns:w10="urn:schemas-microsoft-com:office:word">
-        """
-
+        var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        xml += ContainerRootTag.render(elementName: "w:ftr", attributes: rootAttributes)
         for para in paragraphs {
             xml += para.toXML()
         }
-
-        // 如果沒有段落，加一個空段落
         if paragraphs.isEmpty {
             xml += "<w:p/>"
         }
-
         xml += "</w:ftr>"
         return xml
     }
 
     /// 轉換為含頁碼的頁尾 XML
     func toXMLWithPageNumber(format: PageNumberFormat = .simple, alignment: ParagraphAlignment = .center) -> String {
-        var xml = """
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-               xmlns:v="urn:schemas-microsoft-com:vml"
-               xmlns:o="urn:schemas-microsoft-com:office:office"
-               xmlns:w10="urn:schemas-microsoft-com:office:word">
-        <w:p>
-        <w:pPr><w:jc w:val="\(alignment.rawValue)"/></w:pPr>
-        """
+        var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        xml += ContainerRootTag.render(elementName: "w:ftr", attributes: rootAttributes)
+        xml += "<w:p><w:pPr><w:jc w:val=\"\(alignment.rawValue)\"/></w:pPr>"
 
         // 根據格式添加內容
         switch format {
