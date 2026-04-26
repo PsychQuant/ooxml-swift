@@ -1389,9 +1389,19 @@ public struct DocxReader {
         // For external hyperlinks, resolve the URL via the rels collection so
         // downstream consumers (e.g., visualization, link audit tools) can read
         // `Hyperlink.url` without separately joining against rels.
+        //
+        // v0.19.5+ (#56 R5-CONT-2 P1 #7): filter by type == .hyperlink to
+        // avoid wrong-type resolution edge case. Pre-fix the lookup matched
+        // any rel with matching id — if `header*.xml.rels` lacked rId1 but
+        // `document.xml.rels` had rId1 of type `header` (Type=header
+        // Target=header1.xml), the header hyperlink's URL silently resolved
+        // to the part path instead of nil. Per-container rels merge order
+        // (R5-CONT P1 #8 container-first) plus this type filter close the
+        // gap together.
         var url: String? = nil
         if let rId = rId {
-            url = relationships.relationships.first(where: { $0.id == rId })?.target
+            url = relationships.relationships
+                .first(where: { $0.id == rId && $0.type == .hyperlink })?.target
         }
 
         // v0.19.3+ (#56 round 2 P1-7): allocate a unique id by appending the
