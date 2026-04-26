@@ -20,30 +20,24 @@ internal enum DocumentWalker {
     static let footnotesPartKey = "word/footnotes.xml"
     static let endnotesPartKey = "word/endnotes.xml"
 
+    /// v0.19.5+ (#56 R5-CONT P0 #4): delegate to `Header.fileName` /
+    /// `Footer.fileName` — the same accessor `DocxWriter` uses for the
+    /// dirty-gate check (`writeHeader` / `writeFooter` line 141-149).
+    /// Pre-fix this enum carried its own `defaultHeaderFileName` /
+    /// `defaultFooterFileName` switch that returned `header1.xml` /
+    /// `header2.xml` / `header3.xml` for `.first` / `.even` / `.default`,
+    /// while `Header.fileName` returned `headerFirst.xml` / `headerEven.xml`
+    /// / `header1.xml` for the same enum cases. For any API-built container
+    /// (no `originalFileName`), `handleMixedContentWrapperRevision` /
+    /// `applyToHyperlink` would mark the walker-default key dirty, but the
+    /// writer's overlay-mode dirty-gate would check the model accessor key
+    /// → mismatch → silent loss-on-save (verify R5 P0 #4 / Logic L1).
     static func headerPartKey(for header: Header) -> String {
-        let fileName = header.originalFileName ?? defaultHeaderFileName(for: header.type)
-        return "word/\(fileName)"
+        return "word/\(header.fileName)"
     }
 
     static func footerPartKey(for footer: Footer) -> String {
-        let fileName = footer.originalFileName ?? defaultFooterFileName(for: footer.type)
-        return "word/\(fileName)"
-    }
-
-    private static func defaultHeaderFileName(for type: HeaderFooterType) -> String {
-        switch type {
-        case .first: return "header1.xml"
-        case .even: return "header2.xml"
-        case .default: return "header3.xml"
-        }
-    }
-
-    private static func defaultFooterFileName(for type: HeaderFooterType) -> String {
-        switch type {
-        case .first: return "footer1.xml"
-        case .even: return "footer2.xml"
-        case .default: return "footer3.xml"
-        }
+        return "word/\(footer.fileName)"
     }
 
     // MARK: - walkAllParagraphs

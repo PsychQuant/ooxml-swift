@@ -1025,6 +1025,57 @@ final class Issue56R4StackTests: XCTestCase {
                        "Roundtrip-persisted header table cell SHALL carry replaced text")
     }
 
+    // MARK: - §11.4 R5-CONTINUATION P0 #4: partKey alignment between DocumentWalker and Header.fileName
+
+    /// v0.19.5+ (#56 R5-CONT P0 #4): R5 verify (Logic L1) flagged that
+    /// `DocumentWalker.headerPartKey` (`header2.xml` for `.even`) and
+    /// `Header.fileName` (`headerEven.xml` for `.even`) produce different
+    /// strings for API-built containers (no `originalFileName`). All
+    /// existing R5 tests masked the asymmetry by passing `originalFileName`
+    /// explicitly. For an API-built `Header(id:..., type: .even)`,
+    /// `handleMixedContentWrapperRevision` writes `"word/header2.xml"` to
+    /// `modifiedParts`, but `DocxWriter.writeHeader` dirty-gates on
+    /// `"word/headerEven.xml"` → mismatch → header part not re-emitted →
+    /// silent loss-on-save. This test pins that the two namespaces converge
+    /// for every (type, originalFileName) combination.
+    func testAPIBuiltHeaderEvenAcceptRevisionMarksWriterCheckedPartDirty() throws {
+        var doc = WordDocument()
+
+        // API-built .even header WITHOUT originalFileName.
+        var headerPara = makeMixedContentWrapperParagraph(revisionId: 91, author: "Eve", innerText: "even-link")
+        let _ = headerPara
+        var header = Header(id: "rId11", paragraphs: [headerPara], type: .even)
+        XCTAssertNil(header.originalFileName,
+                     "Sanity: API-built header SHALL NOT carry originalFileName")
+        // Sanity: the two namespaces disagree pre-fix for .even type.
+        // (Header.fileName = "headerEven.xml"; DocumentWalker default was "header2.xml")
+        let walkerKey = DocumentWalker.headerPartKey(for: header)
+        let writerKey = "word/\(header.fileName)"
+        XCTAssertEqual(walkerKey, writerKey,
+                       "DocumentWalker.headerPartKey SHALL agree with writer-checked Header.fileName for every (type, originalFileName) combination — got walker=\(walkerKey) writer=\(writerKey)")
+
+        // End-to-end: revision accept on this API-built header should mark
+        // exactly the part the writer will check.
+        doc.headers.append(header)
+        var docRev = header.paragraphs[0].revisions[0]
+        docRev.source = .header(id: "rId11")
+        doc.revisions.revisions.append(docRev)
+        try doc.acceptRevision(revisionId: 91)
+        XCTAssertTrue(doc.modifiedParts.contains(writerKey),
+                      "Accept on API-built .even header SHALL mark \(writerKey) (the writer-checked path); got: \(doc.modifiedParts)")
+    }
+
+    /// Footer mirror of the above — pins the same partKey-alignment contract
+    /// for footers across every type.
+    func testAPIBuiltFooterFirstPartKeyAlignsWithWriter() {
+        let footer = Footer(id: "rId12", paragraphs: [], type: .first)
+        XCTAssertNil(footer.originalFileName)
+        let walkerKey = DocumentWalker.footerPartKey(for: footer)
+        let writerKey = "word/\(footer.fileName)"
+        XCTAssertEqual(walkerKey, writerKey,
+                       "DocumentWalker.footerPartKey SHALL agree with writer-checked Footer.fileName — got walker=\(walkerKey) writer=\(writerKey)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
