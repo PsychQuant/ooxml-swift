@@ -2749,41 +2749,185 @@ public struct WordDocument: Equatable {
             return
         }
 
-        // 根據修訂類型處理
+        // v0.19.5+ (#56 R5-CONT P0 #5): typed `.deletion` now routes by
+        // `revision.source` instead of indexing body.children unconditionally.
+        // Pre-fix the body-only branch could either silently no-op (paragraph
+        // index out of body bounds) or DELETE THE WRONG body paragraph (if
+        // the index happened to fall in body range), then mark the wrong
+        // part dirty. Container `.deletion` revisions therefore corrupted
+        // body content and lost their own marker without surfacing — strictly
+        // worse than R4's notFound (which at least reported failure).
+        // See verify R5 P0 #5 (DA C2 + H2).
+        var partKeyForDirty = "word/document.xml"
         switch revision.type {
         case .insertion:
             // 接受插入：移除標記，保留文字（文字已在文件中）
-            break
+            partKeyForDirty = sourceToPartKey(revision.source)
         case .deletion:
             // 接受刪除：實際移除被標記為刪除的文字
-            let paragraphIndices = body.children.enumerated().compactMap { (i, child) -> Int? in
-                if case .paragraph = child { return i }
-                return nil
-            }
-
-            if revision.paragraphIndex >= 0 && revision.paragraphIndex < paragraphIndices.count {
-                let actualIndex = paragraphIndices[revision.paragraphIndex]
-                if case .paragraph(var para) = body.children[actualIndex] {
-                    // 移除被刪除的文字
-                    if let originalText = revision.originalText {
-                        for j in 0..<para.runs.count {
-                            para.runs[j].text = para.runs[j].text.replacingOccurrences(of: originalText, with: "")
-                        }
-                    }
-                    body.children[actualIndex] = .paragraph(para)
+            let originalText = revision.originalText
+            let removeText: (inout Paragraph) -> Void = { para in
+                guard let txt = originalText else { return }
+                for j in 0..<para.runs.count {
+                    para.runs[j].text = para.runs[j].text.replacingOccurrences(of: txt, with: "")
                 }
             }
-        case .formatting, .paragraphChange, .formatChange:
-            // 接受格式變更：保留新格式
-            break
-        case .moveFrom, .moveTo:
-            // 接受移動：保留目標位置的文字
-            break
+            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: removeText) {
+                partKeyForDirty = key
+            } else {
+                // No matching paragraph in the source part — surface the
+                // failure instead of silently dropping the typed Revision.
+                throw RevisionError.notFound(revisionId)
+            }
+        case .formatting, .paragraphChange, .formatChange, .moveFrom, .moveTo:
+            // No body-only mutation to apply for these types yet; honour
+            // the source part for dirty-tracking accuracy regardless.
+            partKeyForDirty = sourceToPartKey(revision.source)
         }
 
         // 移除修訂記錄
         revisions.revisions.remove(at: index)
-        modifiedParts.insert("word/document.xml")
+        modifiedParts.insert(partKeyForDirty)
+    }
+
+    /// v0.19.5+ (#56 R5-CONT P0 #5): map a `RevisionSource` to the part
+    /// key the writer's overlay-mode dirty-gate checks. Mirrors
+    /// `DocumentWalker.headerPartKey` / `footerPartKey` for `.header(id:)` /
+    /// `.footer(id:)` and routes notes / body to their canonical paths.
+    private func sourceToPartKey(_ source: RevisionSource) -> String {
+        switch source {
+        case .body:
+            return "word/document.xml"
+        case .header(let id):
+            if let h = headers.first(where: { $0.id == id }) {
+                return DocumentWalker.headerPartKey(for: h)
+            }
+            return "word/document.xml"
+        case .footer(let id):
+            if let f = footers.first(where: { $0.id == id }) {
+                return DocumentWalker.footerPartKey(for: f)
+            }
+            return "word/document.xml"
+        case .footnote:
+            return DocumentWalker.footnotesPartKey
+        case .endnote:
+            return DocumentWalker.endnotesPartKey
+        }
+    }
+
+    /// v0.19.5+ (#56 R5-CONT P0 #5): apply `mutate` to the paragraph at the
+    /// given `paragraphIndex` within the part identified by `source`.
+    /// Walks `bodyChildren` flat-by-source-paragraph-index for body and
+    /// containers — matches the index semantics
+    /// `propagateRevisionsFromBodyChildren` writes (each visited paragraph
+    /// gets the same `paragraphIndex` argument the helper receives).
+    /// Returns the part key on hit, nil on miss.
+    private mutating func applyToParagraph(
+        at paragraphIndex: Int,
+        in source: RevisionSource,
+        mutate: (inout Paragraph) -> Void
+    ) -> String? {
+        switch source {
+        case .body:
+            return Self.applyToFlatParagraph(at: paragraphIndex, in: &body.children, mutate: mutate, partKey: "word/document.xml")
+        case .header(let id):
+            guard let hi = headers.firstIndex(where: { $0.id == id }) else { return nil }
+            let key = DocumentWalker.headerPartKey(for: headers[hi])
+            return Self.applyToFlatParagraph(at: paragraphIndex, in: &headers[hi].bodyChildren, mutate: mutate, partKey: key)
+        case .footer(let id):
+            guard let fi = footers.firstIndex(where: { $0.id == id }) else { return nil }
+            let key = DocumentWalker.footerPartKey(for: footers[fi])
+            return Self.applyToFlatParagraph(at: paragraphIndex, in: &footers[fi].bodyChildren, mutate: mutate, partKey: key)
+        case .footnote(let id):
+            guard let fni = footnotes.footnotes.firstIndex(where: { $0.id == id }) else { return nil }
+            return Self.applyToFlatParagraph(at: paragraphIndex, in: &footnotes.footnotes[fni].bodyChildren, mutate: mutate, partKey: DocumentWalker.footnotesPartKey)
+        case .endnote(let id):
+            guard let eni = endnotes.endnotes.firstIndex(where: { $0.id == id }) else { return nil }
+            return Self.applyToFlatParagraph(at: paragraphIndex, in: &endnotes.endnotes[eni].bodyChildren, mutate: mutate, partKey: DocumentWalker.endnotesPartKey)
+        }
+    }
+
+    /// Static recursive helper for `applyToParagraph`. Walks bodyChildren
+    /// counting `.paragraph` cases (incl. those inside `.table` cells,
+    /// nested tables, and `.contentControl` children) until the
+    /// `paragraphIndex`-th paragraph is reached, applies `mutate`, and
+    /// returns `partKey`. Counter is value-typed (passed by reference via
+    /// inout) so the recursion can short-circuit cleanly.
+    private static func applyToFlatParagraph(
+        at paragraphIndex: Int,
+        in children: inout [BodyChild],
+        mutate: (inout Paragraph) -> Void,
+        partKey: String
+    ) -> String? {
+        var counter = 0
+        var hit = false
+        applyToFlatParagraphRecursive(
+            in: &children,
+            target: paragraphIndex,
+            counter: &counter,
+            hit: &hit,
+            mutate: mutate
+        )
+        return hit ? partKey : nil
+    }
+
+    private static func applyToFlatParagraphRecursive(
+        in children: inout [BodyChild],
+        target: Int,
+        counter: inout Int,
+        hit: inout Bool,
+        mutate: (inout Paragraph) -> Void
+    ) {
+        for i in 0..<children.count {
+            if hit { return }
+            switch children[i] {
+            case .paragraph(var para):
+                if counter == target {
+                    mutate(&para)
+                    children[i] = .paragraph(para)
+                    hit = true
+                    return
+                }
+                counter += 1
+            case .table(var table):
+                for r in 0..<table.rows.count {
+                    if hit { break }
+                    for c in 0..<table.rows[r].cells.count {
+                        if hit { break }
+                        for p in 0..<table.rows[r].cells[c].paragraphs.count {
+                            if hit { break }
+                            if counter == target {
+                                var para = table.rows[r].cells[c].paragraphs[p]
+                                mutate(&para)
+                                table.rows[r].cells[c].paragraphs[p] = para
+                                hit = true
+                                break
+                            }
+                            counter += 1
+                        }
+                        // Recurse into nested tables.
+                        for nt in 0..<table.rows[r].cells[c].nestedTables.count {
+                            if hit { break }
+                            var nestedChildren: [BodyChild] = [.table(table.rows[r].cells[c].nestedTables[nt])]
+                            applyToFlatParagraphRecursive(in: &nestedChildren, target: target, counter: &counter, hit: &hit, mutate: mutate)
+                            if hit, case .table(let updated) = nestedChildren[0] {
+                                table.rows[r].cells[c].nestedTables[nt] = updated
+                            }
+                        }
+                    }
+                }
+                if hit {
+                    children[i] = .table(table)
+                    return
+                }
+            case .contentControl(let cc, var inner):
+                applyToFlatParagraphRecursive(in: &inner, target: target, counter: &counter, hit: &hit, mutate: mutate)
+                if hit {
+                    children[i] = .contentControl(cc, children: inner)
+                    return
+                }
+            }
+        }
     }
 
     /// 拒絕修訂
