@@ -119,12 +119,28 @@ public struct DocxReader {
             guard FileManager.default.fileExists(atPath: headerURL.path) else { continue }
             let headerData = try Data(contentsOf: headerURL)
             let headerXML = try XMLDocument(data: headerData)
+            // v0.19.5+ (#56 R5-CONT P1 #8): load per-container rels
+            // (`word/_rels/header*.xml.rels`) and merge with document-scope
+            // rels so hyperlinks inside the header resolve their URLs via
+            // the container's own rels file. Pre-fix the parser only
+            // consulted document.xml.rels → header hyperlink URLs always
+            // came back nil.
+            let headerRelsURL = tempDir
+                .appendingPathComponent("word/_rels/\(rel.target).rels")
+            let headerRels = try Self.parseRelationshipsFile(at: headerRelsURL)
+            // v0.19.5+ (#56 R5-CONT P1 #8): rIds are per-part scoped — a
+            // header's rId1 is independent of document.xml.rels rId1. The
+            // parser uses first-match lookup so container rels MUST appear
+            // FIRST in the merged collection (else colliding ids resolve
+            // against the wrong part). Codex caught this during scoped verify.
+            var mergedRels = RelationshipsCollection()
+            mergedRels.relationships = headerRels.relationships + relationships.relationships
             // v0.19.5+ (#56 R5 P0 #6): use parseContainerBody to capture both
             // <w:p> and <w:tbl> direct children in source order. Pre-R5
             // parseContainerParagraphs silently dropped tables.
             let bodyChildren = try parseContainerBody(
                 from: headerXML,
-                relationships: relationships, styles: document.styles, numbering: document.numbering
+                relationships: mergedRels, styles: document.styles, numbering: document.numbering
             )
             // v0.19.2+ (#56 follow-up F4): preserve `<w:hdr>` root attributes
             // (xmlns:* + mc:Ignorable + vendor) so VML watermark prefixes
@@ -134,6 +150,7 @@ public struct DocxReader {
             )
             var header = Header(id: rel.id, originalFileName: rel.target, rootAttributes: rootAttrs)
             header.bodyChildren = bodyChildren
+            header.relationships = headerRels  // store ONLY the container's own rels (not merged)
             document.headers.append(header)
         }
 
@@ -151,10 +168,17 @@ public struct DocxReader {
             guard FileManager.default.fileExists(atPath: footerURL.path) else { continue }
             let footerData = try Data(contentsOf: footerURL)
             let footerXML = try XMLDocument(data: footerData)
+            // v0.19.5+ (#56 R5-CONT P1 #8): per-container rels — see header parse.
+            // Container rels prepended for first-match correctness.
+            let footerRelsURL = tempDir
+                .appendingPathComponent("word/_rels/\(rel.target).rels")
+            let footerRels = try Self.parseRelationshipsFile(at: footerRelsURL)
+            var mergedRels = RelationshipsCollection()
+            mergedRels.relationships = footerRels.relationships + relationships.relationships
             // v0.19.5+ (#56 R5 P0 #6): see header parse comment.
             let bodyChildren = try parseContainerBody(
                 from: footerXML,
-                relationships: relationships, styles: document.styles, numbering: document.numbering
+                relationships: mergedRels, styles: document.styles, numbering: document.numbering
             )
             // v0.19.2+ (#56 follow-up F4): preserve `<w:ftr>` root attributes.
             let rootAttrs = Self.parseContainerRootAttributes(
@@ -162,6 +186,7 @@ public struct DocxReader {
             )
             var footer = Footer(id: rel.id, originalFileName: rel.target, rootAttributes: rootAttrs)
             footer.bodyChildren = bodyChildren
+            footer.relationships = footerRels
             document.footers.append(footer)
         }
 
@@ -170,6 +195,15 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: footnotesURL.path) {
             let footnotesData = try Data(contentsOf: footnotesURL)
             let footnotesXML = try XMLDocument(data: footnotesData)
+            // v0.19.5+ (#56 R5-CONT P1 #8): per-collection rels for the
+            // footnotes part. See header parse comment for full rationale.
+            let footnotesRels = try Self.parseRelationshipsFile(
+                at: tempDir.appendingPathComponent("word/_rels/footnotes.xml.rels")
+            )
+            document.footnotes.relationships = footnotesRels
+            // Container rels first — per-part rId scope (see header parse).
+            var mergedFootnoteRels = RelationshipsCollection()
+            mergedFootnoteRels.relationships = footnotesRels.relationships + relationships.relationships
             // v0.19.2+ (#56 follow-up F4): preserve `<w:footnotes>` root attributes.
             document.footnotes.rootAttributes = Self.parseContainerRootAttributes(
                 from: footnotesData, rootElementOpenPrefix: "<w:footnotes"
@@ -188,7 +222,7 @@ public struct DocxReader {
                     // v0.19.5+ (#56 R5 P0 #6): capture w:tbl too via bodyChildren.
                     let bodyChildren = try parseContainerChildBodyChildren(
                         in: element,
-                        relationships: relationships, styles: document.styles, numbering: document.numbering
+                        relationships: mergedFootnoteRels, styles: document.styles, numbering: document.numbering
                     )
                     let paragraphsOnly = bodyChildren.compactMap { c -> Paragraph? in
                         if case .paragraph(let p) = c { return p } else { return nil }
@@ -206,6 +240,14 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: endnotesURL.path) {
             let endnotesData = try Data(contentsOf: endnotesURL)
             let endnotesXML = try XMLDocument(data: endnotesData)
+            // v0.19.5+ (#56 R5-CONT P1 #8): per-collection rels for endnotes.
+            let endnotesRels = try Self.parseRelationshipsFile(
+                at: tempDir.appendingPathComponent("word/_rels/endnotes.xml.rels")
+            )
+            document.endnotes.relationships = endnotesRels
+            // Container rels first — per-part rId scope (see header parse).
+            var mergedEndnoteRels = RelationshipsCollection()
+            mergedEndnoteRels.relationships = endnotesRels.relationships + relationships.relationships
             // v0.19.2+ (#56 follow-up F4): preserve `<w:endnotes>` root attributes.
             document.endnotes.rootAttributes = Self.parseContainerRootAttributes(
                 from: endnotesData, rootElementOpenPrefix: "<w:endnotes"
@@ -224,7 +266,7 @@ public struct DocxReader {
                     // v0.19.5+ (#56 R5 P0 #6): capture w:tbl too via bodyChildren.
                     let bodyChildren = try parseContainerChildBodyChildren(
                         in: element,
-                        relationships: relationships, styles: document.styles, numbering: document.numbering
+                        relationships: mergedEndnoteRels, styles: document.styles, numbering: document.numbering
                     )
                     let paragraphsOnly = bodyChildren.compactMap { c -> Paragraph? in
                         if case .paragraph(let p) = c { return p } else { return nil }
@@ -397,9 +439,18 @@ public struct DocxReader {
 
     /// 解析關係檔案
     private static func parseRelationships(from tempDir: URL) throws -> RelationshipsCollection {
+        return try parseRelationshipsFile(at: tempDir.appendingPathComponent("word/_rels/document.xml.rels"))
+    }
+
+    /// v0.19.5+ (#56 R5-CONT P1 #8): generic per-file rels parser.
+    /// Used for `word/_rels/document.xml.rels` AND for per-container rels
+    /// (`word/_rels/header*.xml.rels`, `word/_rels/footer*.xml.rels`,
+    /// `word/_rels/footnotes.xml.rels`, `word/_rels/endnotes.xml.rels`).
+    /// Returns empty collection when the file doesn't exist (legitimate
+    /// for parts that carry no external relationships).
+    static func parseRelationshipsFile(at relsURL: URL) throws -> RelationshipsCollection {
         var collection = RelationshipsCollection()
 
-        let relsURL = tempDir.appendingPathComponent("word/_rels/document.xml.rels")
         guard FileManager.default.fileExists(atPath: relsURL.path) else {
             // 沒有關係檔案也是合法的
             return collection
@@ -420,10 +471,12 @@ public struct DocxReader {
                 continue
             }
 
+            let targetMode = element.attribute(forName: "TargetMode")?.stringValue
             let relationship = Relationship(
                 id: id,
                 type: RelationshipType(rawValue: typeStr),
-                target: target
+                target: target,
+                targetMode: targetMode
             )
             collection.relationships.append(relationship)
         }

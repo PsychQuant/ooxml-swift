@@ -127,6 +127,12 @@ public struct FootnotesCollection: Equatable {
     /// without VML / smart-art / extension elements).
     public var rootAttributes: [String: String] = [:]
 
+    /// v0.19.5+ (#56 R5-CONT P1 #8): captured
+    /// `word/_rels/footnotes.xml.rels` (per-collection relationships).
+    /// Hyperlink rIds inside any footnote resolve here, NOT in
+    /// `document.xml.rels`. See `Header.relationships` for full rationale.
+    public var relationships: RelationshipsCollection = RelationshipsCollection()
+
     public init(footnotes: [Footnote] = [], rootAttributes: [String: String] = [:]) {
         self.footnotes = footnotes
         self.rootAttributes = rootAttributes
@@ -292,6 +298,10 @@ public struct EndnotesCollection: Equatable {
     /// from the source `endnotes.xml`. See `FootnotesCollection.rootAttributes`
     /// for full semantics.
     public var rootAttributes: [String: String] = [:]
+
+    /// v0.19.5+ (#56 R5-CONT P1 #8): captured `word/_rels/endnotes.xml.rels`.
+    /// See `Header.relationships` for full rationale.
+    public var relationships: RelationshipsCollection = RelationshipsCollection()
 
     public init(endnotes: [Endnote] = [], rootAttributes: [String: String] = [:]) {
         self.endnotes = endnotes

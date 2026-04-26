@@ -42,6 +42,17 @@ public struct Header: Equatable {
     /// `mc`/`wp`/`w14`/`w15`) round-trip every declaration verbatim.
     public var rootAttributes: [String: String] = [:]
 
+    /// v0.19.5+ (#56 R5-CONT P1 #8): captured `word/_rels/header*.xml.rels`
+    /// (per-container relationships). Hyperlink rIds inside this header
+    /// resolve here, NOT in `document.xml.rels`. Pre-fix the model carried
+    /// no per-container rels storage so any URL update via
+    /// `Document.updateHyperlink(url:)` only landed in document-scope
+    /// `hyperlinkReferences` and never reached the actual `header*.xml.rels`
+    /// file → URL change silently doesn't persist for container hyperlinks.
+    /// Empty for API-built headers; populated by DocxReader; emitted back
+    /// by DocxWriter when dirty.
+    public var relationships: RelationshipsCollection = RelationshipsCollection()
+
     public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, originalFileName: String? = nil, rootAttributes: [String: String] = [:]) {
         self.id = id
         self.bodyChildren = paragraphs.map { .paragraph($0) }

@@ -1505,6 +1505,11 @@ public struct WordDocument: Equatable {
         // any hyperlink living inside a header table cell (or any container
         // table) raised `invalidFormat("Hyperlink ... not found")` even though
         // it existed and `list_hyperlinks` could see it. (DA-N4 from R4.)
+        // v0.19.5+ (#56 R5-CONT P1 #8): capture the rId during the typed
+        // mutation walk so the URL sync can target the OWNING part's rels
+        // file (header*.xml.rels / footer*.xml.rels / footnotes.xml.rels /
+        // endnotes.xml.rels / document.xml.rels), not always document-scope.
+        var capturedRId: String? = nil
         let mutator: (inout Hyperlink) -> Void = { hyperlink in
             if let newText = text {
                 hyperlink.text = newText
@@ -1512,18 +1517,64 @@ public struct WordDocument: Equatable {
             if let newUrl = url {
                 hyperlink.url = newUrl
             }
+            capturedRId = hyperlink.relationshipId
         }
         guard let partKey = applyToHyperlink(id: hyperlinkId, apply: mutator) else {
             throw WordError.invalidFormat("Hyperlink '\(hyperlinkId)' not found")
         }
-        // Sync the matching HyperlinkReference URL when caller updated URL.
-        if let newUrl = url,
-           let rId = findRelationshipId(forHyperlinkId: hyperlinkId),
-           let refIndex = hyperlinkReferences.firstIndex(where: { $0.relationshipId == rId }) {
-            hyperlinkReferences[refIndex].url = newUrl
-        }
         modifiedParts.insert(partKey)
-        modifiedParts.insert("word/_rels/document.xml.rels")
+
+        // Sync the matching Relationship URL into the owning part's rels.
+        if let newUrl = url, let rId = capturedRId {
+            let relsKey = relsPartKey(forBodyPartKey: partKey)
+            updateHyperlinkRelTarget(rId: rId, newUrl: newUrl, partKey: partKey)
+            modifiedParts.insert(relsKey)
+        }
+    }
+
+    /// v0.19.5+ (#56 R5-CONT P1 #8): map a body/container part key
+    /// (`word/header1.xml`) to its corresponding rels file key
+    /// (`word/_rels/header1.xml.rels`). Mirrors the OOXML convention where
+    /// `word/<part>.xml` has rels at `word/_rels/<part>.xml.rels`.
+    private func relsPartKey(forBodyPartKey partKey: String) -> String {
+        // Strip "word/" prefix, append ".rels" inside _rels/.
+        let prefix = "word/"
+        if partKey.hasPrefix(prefix) {
+            let suffix = String(partKey.dropFirst(prefix.count))
+            return "word/_rels/\(suffix).rels"
+        }
+        return "word/_rels/document.xml.rels"
+    }
+
+    /// v0.19.5+ (#56 R5-CONT P1 #8): update the hyperlink relationship's
+    /// target URL inside the owning part's relationships collection.
+    /// Body uses document-scope `hyperlinkReferences`; containers use
+    /// their own `relationships`.
+    private mutating func updateHyperlinkRelTarget(rId: String, newUrl: String, partKey: String) {
+        switch partKey {
+        case "word/document.xml":
+            if let idx = hyperlinkReferences.firstIndex(where: { $0.relationshipId == rId }) {
+                hyperlinkReferences[idx].url = newUrl
+            }
+        case "word/footnotes.xml":
+            updateRelTarget(in: &footnotes.relationships, rId: rId, newUrl: newUrl)
+        case "word/endnotes.xml":
+            updateRelTarget(in: &endnotes.relationships, rId: rId, newUrl: newUrl)
+        default:
+            // Header / footer paths: word/header*.xml or word/footer*.xml.
+            for hi in 0..<headers.count where DocumentWalker.headerPartKey(for: headers[hi]) == partKey {
+                updateRelTarget(in: &headers[hi].relationships, rId: rId, newUrl: newUrl)
+            }
+            for fi in 0..<footers.count where DocumentWalker.footerPartKey(for: footers[fi]) == partKey {
+                updateRelTarget(in: &footers[fi].relationships, rId: rId, newUrl: newUrl)
+            }
+        }
+    }
+
+    private func updateRelTarget(in collection: inout RelationshipsCollection, rId: String, newUrl: String) {
+        if let idx = collection.relationships.firstIndex(where: { $0.id == rId }) {
+            collection.relationships[idx].target = newUrl
+        }
     }
 
     /// 刪除超連結

@@ -461,6 +461,113 @@ final class Issue56R4StackTests: XCTestCase {
         try ZipHelper.zip(stagingURL, to: url)
     }
 
+    /// §11.8 helper for the per-part rId collision regression test:
+    /// `document.xml.rels` carries a hyperlink rel with the SAME id as the
+    /// header's rels, with a different Target URL. Verifies the header's
+    /// hyperlink resolves via header rels, not document rels.
+    private func buildMinimalDocxWithCollidingRels(
+        documentXML: String,
+        headerXML: String,
+        documentRelsExtra: String,
+        headerRelsXML: String,
+        to url: URL
+    ) throws {
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5cont-p1-8-coll-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId50" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+
+        // document.xml.rels has the header rel + the colliding hyperlink rId.
+        let documentRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+        \(documentRelsExtra)
+        </Relationships>
+        """
+        try documentRels.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+
+        try documentXML.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+        try headerXML.write(to: stagingURL.appendingPathComponent("word/header1.xml"), atomically: true, encoding: .utf8)
+        try headerRelsXML.write(to: stagingURL.appendingPathComponent("word/_rels/header1.xml.rels"), atomically: true, encoding: .utf8)
+
+        try ZipHelper.zip(stagingURL, to: url)
+    }
+
+    /// §11.8 helper: like `buildMinimalDocxWithHeader` but also writes
+    /// `word/_rels/header1.xml.rels` with caller-supplied content (so a
+    /// hyperlink rId in the header XML can resolve to a real Target URL).
+    private func buildMinimalDocxWithHeaderRels(
+        documentXML: String,
+        headerXML: String,
+        headerRId: String,
+        headerRelsXML: String,
+        to url: URL
+    ) throws {
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5cont-p1-8-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+
+        let documentRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="\(headerRId)" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+        </Relationships>
+        """
+        try documentRels.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+
+        try documentXML.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+        try headerXML.write(to: stagingURL.appendingPathComponent("word/header1.xml"), atomically: true, encoding: .utf8)
+        try headerRelsXML.write(to: stagingURL.appendingPathComponent("word/_rels/header1.xml.rels"), atomically: true, encoding: .utf8)
+
+        try ZipHelper.zip(stagingURL, to: url)
+    }
+
     /// §11.2 helper: minimal .docx that also drops a header part + document →
     /// header relationship + header content-type override.
     private func buildMinimalDocxWithHeader(documentXML: String, headerXML: String, headerRId: String, to url: URL) throws {
@@ -690,10 +797,15 @@ final class Issue56R4StackTests: XCTestCase {
         var header = Header(id: "rId10", paragraphs: [], type: .default,
                             originalFileName: "header1.xml")
         header.bodyChildren.append(.table(table))
-        document.headers.append(header)
-        document.hyperlinkReferences.append(
-            HyperlinkReference(relationshipId: "rId99", url: "https://old.example")
+        // v0.19.5+ (#56 R5-CONT P1 #8): per-container rels live on
+        // header.relationships, NOT document.hyperlinkReferences. Pre-R5-CONT
+        // this test populated document.hyperlinkReferences as a workaround
+        // because the model didn't have header.relationships yet.
+        header.relationships.relationships.append(
+            Relationship(id: "rId99", type: .hyperlink,
+                         target: "https://old.example", targetMode: "External")
         )
+        document.headers.append(header)
 
         // Pre-fix this throws "Hyperlink 'h1' not found".
         try document.updateHyperlink(hyperlinkId: "h1",
@@ -710,13 +822,18 @@ final class Issue56R4StackTests: XCTestCase {
         XCTAssertEqual(mutated.url, "https://new.example",
                        "Hyperlink URL inside header table SHALL be updated")
 
-        // Verify hyperlinkReferences URL was synced.
-        let ref = document.hyperlinkReferences.first { $0.relationshipId == "rId99" }
-        XCTAssertEqual(ref?.url, "https://new.example")
+        // v0.19.5+ (#56 R5-CONT P1 #8): URL update lands in header.relationships
+        // (not document.hyperlinkReferences) for container-scope hyperlinks.
+        let updatedRel = document.headers[0].relationships.relationships
+            .first { $0.id == "rId99" }
+        XCTAssertEqual(updatedRel?.target, "https://new.example",
+                       "Header rels SHALL carry the new URL after updateHyperlink")
 
-        // Verify modifiedParts now includes the header file (not just document.xml).
+        // Verify modifiedParts now includes the header file AND its rels.
         XCTAssertTrue(document.modifiedParts.contains("word/header1.xml"),
                       "modifiedParts SHALL include the header part containing the mutated hyperlink, got: \(document.modifiedParts)")
+        XCTAssertTrue(document.modifiedParts.contains("word/_rels/header1.xml.rels"),
+                      "modifiedParts SHALL include header rels file after URL update; got: \(document.modifiedParts)")
     }
 
     // MARK: - §8.4 P1: SDTParser.parseSDT recursive call SHALL pass position
@@ -1237,6 +1354,150 @@ final class Issue56R4StackTests: XCTestCase {
         let headerEntry = hyperlinks.first { $0.id == "header-table-link" }
         XCTAssertEqual(headerEntry?.text, "header-cell-text")
         XCTAssertEqual(headerEntry?.url, "https://header.example")
+    }
+
+    // MARK: - §11.8 R5-CONTINUATION P1: updateHyperlink URL sync targets owning part rels
+
+    /// v0.19.5+ (#56 R5-CONT P1): R5 verify (Codex P1 #4 + Logic L4) flagged
+    /// that `updateHyperlink(url:)` URL sync only writes to
+    /// `document.hyperlinkReferences` and unconditionally marks
+    /// `word/_rels/document.xml.rels` dirty. Hyperlink relationships inside a
+    /// header live in `word/_rels/header*.xml.rels` (similarly footers /
+    /// footnotes / endnotes). Pre-fix the URL update in the typed model
+    /// landed but never reached the actual container rels file → URL change
+    /// silently doesn't persist for container hyperlinks on save.
+    func testUpdateHyperlinkUrlInsideHeaderTargetsHeaderRels() throws {
+        // Build a docx with a header containing a hyperlink that has its
+        // rId in word/_rels/header1.xml.rels (NOT document.xml.rels).
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:body>
+            <w:p><w:r><w:t>body</w:t></w:r></w:p>
+            <w:sectPr><w:headerReference w:type="default" r:id="rId10"/></w:sectPr>
+          </w:body>
+        </w:document>
+        """
+        let headerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:p>
+            <w:hyperlink r:id="rId99">
+              <w:r><w:t>old-url</w:t></w:r>
+            </w:hyperlink>
+          </w:p>
+        </w:hdr>
+        """
+        let docxURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5cont-p1-8-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        try buildMinimalDocxWithHeaderRels(
+            documentXML: documentXML,
+            headerXML: headerXML,
+            headerRId: "rId10",
+            headerRelsXML: """
+            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://old.example" TargetMode="External"/>
+            </Relationships>
+            """,
+            to: docxURL
+        )
+
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+
+        // Find the header's hyperlink id (parser builds <rId>@<position>).
+        // Note: listed.url is nil pre-fix because the parser doesn't consult
+        // header rels — that's part of what this test surfaces. Use the id
+        // directly (the hyperlink IS listed by getHyperlinks per R5-CONT P0
+        // #7, just without its resolved URL).
+        let listed = doc.getHyperlinks().first { $0.id.hasPrefix("rId99") }
+        guard let headerHyperlinkId = listed?.id else {
+            return XCTFail("Pre-condition: getHyperlinks SHALL list the header hyperlink (R5-CONT P0 #7); got: \(doc.getHyperlinks())")
+        }
+
+        try doc.updateHyperlink(hyperlinkId: headerHyperlinkId,
+                                url: "https://new.example")
+
+        // The header part SHALL be marked dirty AND header1.xml.rels SHALL
+        // be marked dirty (not document.xml.rels in isolation).
+        XCTAssertTrue(doc.modifiedParts.contains("word/header1.xml"),
+                      "Header part SHALL be dirty after URL update; got: \(doc.modifiedParts)")
+        XCTAssertTrue(doc.modifiedParts.contains("word/_rels/header1.xml.rels"),
+                      "Header rels file SHALL be dirty after URL update; got: \(doc.modifiedParts)")
+
+        // Roundtrip and assert the URL change persists on the actual header
+        // hyperlink (re-read paragraph in the header).
+        let reread = try roundtrip(doc)
+        guard let rHeader = reread.headers.first(where: { $0.originalFileName == "header1.xml" }),
+              case .paragraph(let rPara) = rHeader.bodyChildren.first ?? .paragraph(Paragraph()),
+              let rHyperlink = rPara.hyperlinks.first
+        else {
+            return XCTFail("Re-read header missing or no hyperlink")
+        }
+        XCTAssertEqual(rHyperlink.url, "https://new.example",
+                       "Roundtrip-persisted header hyperlink URL SHALL reflect the update")
+    }
+
+    /// v0.19.5+ (#56 R5-CONT P1 #8 — Codex-caught edge case): rIds are
+    /// per-part scoped in OOXML. A header's `rId1` is independent of the
+    /// document's `rId1`. The merged-rels lookup must search the container's
+    /// rels FIRST so colliding ids resolve against the correct part. Pre-fix
+    /// to-this-fix the merge appended container rels after document rels →
+    /// `first(where:)` returned the document-scope target for any colliding
+    /// rId in a header hyperlink. This test pins the per-part-precedence
+    /// contract.
+    func testHeaderHyperlinkResolvesViaContainerRelsWhenRIdCollidesWithDocumentRels() throws {
+        // document.xml.rels carries rId1 → "https://wrong-document.example"
+        // header1.xml.rels carries rId1 → "https://right-header.example"
+        // The header hyperlink uses r:id="rId1" — should resolve to the HEADER target.
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:body>
+            <w:p><w:r><w:t>body</w:t></w:r></w:p>
+            <w:sectPr><w:headerReference w:type="default" r:id="rId10"/></w:sectPr>
+          </w:body>
+        </w:document>
+        """
+        let headerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:p>
+            <w:hyperlink r:id="rId1">
+              <w:r><w:t>collision-test</w:t></w:r>
+            </w:hyperlink>
+          </w:p>
+        </w:hdr>
+        """
+        let docxURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5cont-p1-8-collision-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        try buildMinimalDocxWithCollidingRels(
+            documentXML: documentXML,
+            headerXML: headerXML,
+            documentRelsExtra: """
+            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://wrong-document.example" TargetMode="External"/>
+            """,
+            headerRelsXML: """
+            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://right-header.example" TargetMode="External"/>
+            </Relationships>
+            """,
+            to: docxURL
+        )
+
+        let doc = try DocxReader.read(from: docxURL)
+        guard let header = doc.headers.first,
+              case .paragraph(let para) = header.bodyChildren.first ?? .paragraph(Paragraph()),
+              let hyperlink = para.hyperlinks.first
+        else {
+            return XCTFail("Expected header with one hyperlink in re-read doc")
+        }
+        XCTAssertEqual(hyperlink.url, "https://right-header.example",
+                       "Header hyperlink rId1 SHALL resolve via header rels (not document rels) — got: \(hyperlink.url ?? "nil")")
     }
 
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
