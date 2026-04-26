@@ -916,6 +916,266 @@ final class Issue56R3StackTests: XCTestCase {
         try ZipHelper.zip(stagingDir, to: docxURL)
         return docxURL
     }
+
+    // MARK: - §9 R5 stack-completion: roundtrip variants
+    //
+    // v0.19.5+ (#56 R5 §9): each R3 in-memory test gets a `_RoundtripVariant`
+    // that exercises the full DocxWriter→DocxReader cycle via
+    // `roundtrip(_:)` from RoundtripHelper. The R3 stack's all-in-memory
+    // pattern was the proven blind spot of the R2→R3→R4 cycle (writer-side
+    // regressions invisible to `para.toXML()` alone), per the R5 design's
+    // ooxml-roundtrip-fidelity Requirement 2.
+    //
+    // Each variant marks the touched parts dirty (DocxWriter overlay mode
+    // skips re-emitting un-dirty parts), then re-reads and re-asserts the
+    // post-fix invariant on the re-read document instead of on the in-memory
+    // mutation.
+
+    func testReplaceText_OnSourceLoadedHyperlink_EmitsNewText_RoundtripVariant() throws {
+        let docxURL = try Self.buildHyperlinkSourceFixture(text: "old")
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+        _ = try doc.replaceText(find: "old", with: "new")
+        let reread = try roundtrip(doc)
+        guard case .paragraph(let para) = reread.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-roundtrip")
+        }
+        XCTAssertEqual(para.hyperlinks.first?.text, "new",
+                       "Re-read hyperlink SHALL show 'new' after replaceText + roundtrip")
+        XCTAssertNotEqual(para.hyperlinks.first?.text, "old",
+                          "Re-read hyperlink SHALL NOT show 'old' after replaceText + roundtrip")
+    }
+
+    func testUpdateHyperlinkText_OnSourceLoadedHyperlink_EmitsNewText_RoundtripVariant() throws {
+        let docxURL = try Self.buildHyperlinkSourceFixture(text: "old")
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+        guard case .paragraph(let para) = doc.body.children[0],
+              let firstHyperlink = para.hyperlinks.first else {
+            return XCTFail("Expected source-loaded hyperlink in body[0]")
+        }
+        try doc.updateHyperlink(hyperlinkId: firstHyperlink.id, text: "Updated")
+        let reread = try roundtrip(doc)
+        guard case .paragraph(let rPara) = reread.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-roundtrip")
+        }
+        XCTAssertEqual(rPara.hyperlinks.first?.text, "Updated",
+                       "Re-read hyperlink SHALL show 'Updated' after updateHyperlink + roundtrip")
+    }
+
+    func testParagraphLevelSDT_BetweenRuns_RoundTripsAtSourcePosition_RoundtripVariant() throws {
+        let docxURL = try Self.buildSDTBetweenRunsFixture()
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+        // No mutation — assert the no-op roundtrip preserves source order.
+        doc.modifiedParts.insert("word/document.xml")
+        let reread = try roundtrip(doc)
+        guard case .paragraph(let para) = reread.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-roundtrip")
+        }
+        let xml = para.toXML()
+        guard let aPos = xml.range(of: ">A<")?.lowerBound,
+              let sdtPos = xml.range(of: "<w:sdt")?.lowerBound,
+              let bPos = xml.range(of: ">B<")?.lowerBound else {
+            return XCTFail("Re-read XML missing A / sdt / B markers. Output:\n\(xml)")
+        }
+        XCTAssertLessThan(aPos, sdtPos, "Run 'A' SHALL precede <w:sdt> after roundtrip")
+        XCTAssertLessThan(sdtPos, bPos, "<w:sdt> SHALL precede run 'B' after roundtrip")
+    }
+
+    func testInsertComment_OnSourceParagraphWithExistingComments_EmitsNewAnchors_RoundtripVariant() throws {
+        let docxURL = try Self.buildExistingCommentsFixture()
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+        let newCommentId = try doc.insertComment(text: "second", author: "Tester", paragraphIndex: 0)
+        let reread = try roundtrip(doc)
+        guard case .paragraph(let para) = reread.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-roundtrip")
+        }
+        let xml = para.toXML()
+        XCTAssertTrue(xml.contains("<w:commentRangeStart w:id=\"3\""),
+                      "Original comment id=3 markers SHALL survive roundtrip")
+        let newIdStr = String(newCommentId)
+        XCTAssertTrue(xml.contains("<w:commentRangeStart w:id=\"\(newIdStr)\""),
+                      "New comment id=\(newIdStr) start marker SHALL survive roundtrip")
+        XCTAssertTrue(xml.contains("<w:commentReference w:id=\"\(newIdStr)\""),
+                      "New comment id=\(newIdStr) reference SHALL survive roundtrip")
+    }
+
+    func testMixedContentInsRevision_PopulatesBothRawAndTypedRevision_RoundtripVariant() throws {
+        let docxURL = try Self.buildMixedContentInsRevisionFixture()
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+        doc.modifiedParts.insert("word/document.xml")
+        let reread = try roundtrip(doc)
+        guard case .paragraph(let para) = reread.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-roundtrip")
+        }
+        // Raw representation must persist.
+        let hasRawIns = para.unrecognizedChildren.contains {
+            $0.name == "ins" && $0.rawXML.contains("<w:ins") && $0.rawXML.contains("w:id=\"5\"")
+        }
+        XCTAssertTrue(hasRawIns,
+                      "Re-read paragraph SHALL still carry the raw <w:ins> wrapper")
+        // Typed representation must also persist.
+        let typedRev = para.revisions.first { $0.id == 5 }
+        XCTAssertNotNil(typedRev,
+                        "Re-read paragraph SHALL still carry typed Revision id=5")
+    }
+
+    func testAcceptRevision_OnMixedContentWrapper_UnwrapsInnerContent_RoundtripVariant() throws {
+        let docxURL = try Self.buildMixedContentInsRevisionFixture()
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+        try doc.acceptRevision(revisionId: 5)
+        let reread = try roundtrip(doc)
+        guard case .paragraph(let para) = reread.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-roundtrip")
+        }
+        let xml = para.toXML()
+        XCTAssertFalse(xml.contains("<w:ins"),
+                       "After accept + roundtrip, <w:ins> SHALL be gone. Output:\n\(xml)")
+        // After accept, the inner content survives (as a typed Hyperlink in
+        // the re-read paragraph since the parser recognizes <w:hyperlink>).
+        XCTAssertFalse(para.hyperlinks.isEmpty,
+                       "After accept + roundtrip, the inner hyperlink SHALL survive")
+    }
+
+    func testRejectRevision_OnMixedContentWrapper_RemovesEntireWrapper_RoundtripVariant() throws {
+        let docxURL = try Self.buildMixedContentInsRevisionFixture()
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+        try doc.rejectRevision(revisionId: 5)
+        let reread = try roundtrip(doc)
+        guard case .paragraph(let para) = reread.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-roundtrip")
+        }
+        let xml = para.toXML()
+        XCTAssertFalse(xml.contains("<w:ins"),
+                       "After reject + roundtrip, <w:ins> SHALL be gone. Output:\n\(xml)")
+        XCTAssertTrue(para.hyperlinks.isEmpty,
+                      "After reject of insertion + roundtrip, inner hyperlink SHALL be removed too")
+    }
+
+    func testBookmarkInTableCell_CalibratesNextBookmarkId_RoundtripVariant() throws {
+        let docxURL = try Self.buildBookmarkInTableFixture(maxId: 99)
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+        let newId = try doc.insertBookmark(name: "added")
+        XCTAssertGreaterThan(newId, 99,
+                             "Pre-roundtrip nextBookmarkId SHALL be calibrated past table-cell max")
+        let reread = try roundtrip(doc)
+        let secondId = try reread.body.children.compactMap { (c: BodyChild) -> Paragraph? in
+            if case .paragraph(let p) = c { return p } else { return nil }
+        }.first?.bookmarks.first?.id
+        // Roundtrip preserves the inserted bookmark id verbatim — verify.
+        XCTAssertEqual(secondId, newId,
+                       "Post-roundtrip bookmark id SHALL equal the in-memory inserted id")
+    }
+
+    func testBookmarkInHeader_CalibratesNextBookmarkId_RoundtripVariant() throws {
+        let docxURL = try Self.buildBookmarkInHeaderFixture(bodyId: 5, headerId: 50)
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+        let newId = try doc.insertBookmark(name: "added")
+        XCTAssertGreaterThan(newId, 50,
+                             "Pre-roundtrip nextBookmarkId SHALL be calibrated past header max")
+        let reread = try roundtrip(doc)
+        // Re-read calibration SHALL still skip past 50 (header max) AND past
+        // the freshly-inserted body bookmark.
+        var rereadDoc = reread
+        let nextAfterReread = try rereadDoc.insertBookmark(name: "after-roundtrip")
+        XCTAssertGreaterThan(nextAfterReread, max(50, newId),
+                             "Post-roundtrip nextBookmarkId calibration SHALL still skip header max + inserted id")
+    }
+
+    func testRStyle_WithEmbeddedQuoteAndAngleBracket_DoesNotInjectSiblings_RoundtripVariant() throws {
+        let maliciousRStyle = "x\"/><injected/><w:dummy w:val=\"y"
+        var doc = WordDocument()
+        var run = Run(text: "payload")
+        run.properties.rStyle = maliciousRStyle
+        var para = Paragraph(runs: [run])
+        // Force legacy emit path (position == 0 sentinel) so the rStyle attr
+        // routes through the audited toXML path under test.
+        _ = para.toXML()
+        doc.body.children.append(.paragraph(para))
+        doc.modifiedParts.insert("word/document.xml")
+        let reread = try roundtrip(doc)
+        guard case .paragraph(let rPara) = reread.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-roundtrip")
+        }
+        XCTAssertEqual(rPara.runs.first?.properties.rStyle, maliciousRStyle,
+                       "Re-read rStyle SHALL equal the malicious source string verbatim (escape→re-parse round-trips)")
+    }
+
+    func testHyperlinkVendorNamespaceDeclarationSurvivesRoundTrip_RoundtripVariant() throws {
+        // Build a minimal doc carrying a single <w:hyperlink> with a vendor
+        // namespace + prefixed attribute, write it to disk via DocxWriter,
+        // re-read via DocxReader, and assert the vendor declarations survive
+        // the full save→reread cycle (not just the in-memory toXML emit).
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:vendor="https://example.com/vendor">
+          <w:body>
+            <w:p>
+              <w:hyperlink r:id="rId1" vendor:custom="payload">
+                <w:r><w:t>linked</w:t></w:r>
+              </w:hyperlink>
+            </w:p>
+          </w:body>
+        </w:document>
+        """
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5-§9-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+        try """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>
+        """.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+        try documentXML.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+        let docxURL = FileManager.default.temporaryDirectory.appendingPathComponent("r5-§9-vendor-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        try ZipHelper.zip(stagingURL, to: docxURL)
+
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+        doc.modifiedParts.insert("word/document.xml")
+        let reread = try roundtrip(doc)
+        guard case .paragraph(let para) = reread.body.children[0],
+              let h = para.hyperlinks.first else {
+            return XCTFail("Expected hyperlink in re-read paragraph")
+        }
+        XCTAssertEqual(h.rawAttributes["vendor:custom"], "payload",
+                       "Re-read hyperlink SHALL preserve vendor:custom attribute. Got rawAttributes: \(h.rawAttributes)")
+    }
 }
 
 // MARK: - R3-NEW-6 Audit Table (task 7.4)
