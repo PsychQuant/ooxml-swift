@@ -7,12 +7,42 @@ public struct Footnote: Equatable {
     public var id: Int                 // 腳註唯一 ID
     public var text: String            // 腳註文字
     public var paragraphIndex: Int     // 腳註附加的段落索引
-    public var paragraphs: [Paragraph] = []  // 從 DocxReader 解析的完整段落結構（含 revisions / comments）
+
+    /// v0.19.5+ (#56 R5 P0 #6): canonical storage for footnote body children.
+    /// See `Header.bodyChildren` for rationale.
+    public var bodyChildren: [BodyChild] = []
 
     public init(id: Int, text: String, paragraphIndex: Int) {
         self.id = id
         self.text = text
         self.paragraphIndex = paragraphIndex
+    }
+
+    /// v0.19.5+ (#56 R5 P0 #6): backward-compatible computed view of
+    /// `.paragraph` cases inside `bodyChildren`. Same semantics as
+    /// `Header.paragraphs`.
+    public var paragraphs: [Paragraph] {
+        get {
+            bodyChildren.compactMap { if case .paragraph(let p) = $0 { return p } else { return nil } }
+        }
+        set {
+            var result: [BodyChild] = []
+            var newIter = newValue.makeIterator()
+            for child in bodyChildren {
+                switch child {
+                case .paragraph:
+                    if let np = newIter.next() {
+                        result.append(.paragraph(np))
+                    }
+                case .table, .contentControl:
+                    result.append(child)
+                }
+            }
+            while let np = newIter.next() {
+                result.append(.paragraph(np))
+            }
+            bodyChildren = result
+        }
     }
 }
 
@@ -28,8 +58,16 @@ extension Footnote {
     /// further paragraph mutation.
     func toXML() -> String {
         let inner: String
-        if !paragraphs.isEmpty {
-            inner = paragraphs.map { $0.toXML() }.joined()
+        if !bodyChildren.isEmpty {
+            // v0.19.5+ (#56 R5 P0 #6): emit from bodyChildren so direct-child
+            // tables round-trip in addition to paragraphs.
+            inner = bodyChildren.map { child -> String in
+                switch child {
+                case .paragraph(let p): return p.toXML()
+                case .table(let t): return t.toXML()
+                case .contentControl: return ""
+                }
+            }.joined()
         } else {
             inner = """
             <w:p>
@@ -144,12 +182,39 @@ public struct Endnote: Equatable {
     public var id: Int                 // 尾註唯一 ID
     public var text: String            // 尾註文字
     public var paragraphIndex: Int     // 尾註附加的段落索引
-    public var paragraphs: [Paragraph] = []  // 從 DocxReader 解析的完整段落結構（含 revisions / comments）
+
+    /// v0.19.5+ (#56 R5 P0 #6): canonical storage. See Header.bodyChildren.
+    public var bodyChildren: [BodyChild] = []
 
     public init(id: Int, text: String, paragraphIndex: Int) {
         self.id = id
         self.text = text
         self.paragraphIndex = paragraphIndex
+    }
+
+    /// v0.19.5+ (#56 R5 P0 #6): backward-compatible computed view.
+    public var paragraphs: [Paragraph] {
+        get {
+            bodyChildren.compactMap { if case .paragraph(let p) = $0 { return p } else { return nil } }
+        }
+        set {
+            var result: [BodyChild] = []
+            var newIter = newValue.makeIterator()
+            for child in bodyChildren {
+                switch child {
+                case .paragraph:
+                    if let np = newIter.next() {
+                        result.append(.paragraph(np))
+                    }
+                case .table, .contentControl:
+                    result.append(child)
+                }
+            }
+            while let np = newIter.next() {
+                result.append(.paragraph(np))
+            }
+            bodyChildren = result
+        }
     }
 }
 
@@ -161,8 +226,15 @@ extension Endnote {
     /// rationale as `Footnote.toXML` above.
     func toXML() -> String {
         let inner: String
-        if !paragraphs.isEmpty {
-            inner = paragraphs.map { $0.toXML() }.joined()
+        if !bodyChildren.isEmpty {
+            // v0.19.5+ (#56 R5 P0 #6): emit from bodyChildren — see Footnote.toXML.
+            inner = bodyChildren.map { child -> String in
+                switch child {
+                case .paragraph(let p): return p.toXML()
+                case .table(let t): return t.toXML()
+                case .contentControl: return ""
+                }
+            }.joined()
         } else {
             inner = """
             <w:p>

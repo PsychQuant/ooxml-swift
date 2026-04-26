@@ -5,7 +5,15 @@ import Foundation
 /// 頁首
 public struct Header: Equatable {
     public var id: String           // 關係 ID (如 "rId10")
-    public var paragraphs: [Paragraph]
+
+    /// v0.19.5+ (#56 R5 P0 #6): canonical storage for header body children
+    /// in source order. Captures both `<w:p>` (as `.paragraph`) and `<w:tbl>`
+    /// (as `.table`) direct children of the source `<w:hdr>`. Pre-R5 the
+    /// container parser only kept paragraphs, silently dropping table
+    /// children — see DocumentWalker, calibration, and revision walker
+    /// recursion that all now route through this collection.
+    public var bodyChildren: [BodyChild] = []
+
     public var type: HeaderFooterType
 
     /// Archive file path the header was read from (v0.13.0+).
@@ -36,10 +44,41 @@ public struct Header: Equatable {
 
     public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, originalFileName: String? = nil, rootAttributes: [String: String] = [:]) {
         self.id = id
-        self.paragraphs = paragraphs
+        self.bodyChildren = paragraphs.map { .paragraph($0) }
         self.type = type
         self.originalFileName = Self.sanitizeOriginalFileName(originalFileName)
         self.rootAttributes = rootAttributes
+    }
+
+    /// v0.19.5+ (#56 R5 P0 #6): backward-compatible computed view of the
+    /// `.paragraph` cases inside `bodyChildren`. Get extracts in source order;
+    /// set replaces every `.paragraph` slot in `bodyChildren` (in order),
+    /// preserving relative positions of `.table` siblings. If the new array
+    /// is longer than the current paragraph count, extras append to the end.
+    /// Existing call sites that mutate `header.paragraphs[i].xxx` continue to
+    /// work via Swift's modify accessor on a `var` computed property.
+    public var paragraphs: [Paragraph] {
+        get {
+            bodyChildren.compactMap { if case .paragraph(let p) = $0 { return p } else { return nil } }
+        }
+        set {
+            var result: [BodyChild] = []
+            var newIter = newValue.makeIterator()
+            for child in bodyChildren {
+                switch child {
+                case .paragraph:
+                    if let np = newIter.next() {
+                        result.append(.paragraph(np))
+                    }
+                case .table, .contentControl:
+                    result.append(child)
+                }
+            }
+            while let np = newIter.next() {
+                result.append(.paragraph(np))
+            }
+            bodyChildren = result
+        }
     }
 
     /// Sanitize a candidate `originalFileName` per #55 security baseline.
@@ -96,11 +135,19 @@ extension Header {
     func toXML() -> String {
         var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         xml += ContainerRootTag.render(elementName: "w:hdr", attributes: rootAttributes)
-        for para in paragraphs {
-            xml += para.toXML()
+        // v0.19.5+ (#56 R5 P0 #6): emit from bodyChildren so direct-child
+        // tables round-trip. ContentControl branch is parsed as raw XML
+        // by the Reader's container parser (currently only p/tbl handled);
+        // emit a no-op for it here for forward compat.
+        for child in bodyChildren {
+            switch child {
+            case .paragraph(let p): xml += p.toXML()
+            case .table(let t): xml += t.toXML()
+            case .contentControl: break
+            }
         }
-        // 如果沒有段落，加一個空段落
-        if paragraphs.isEmpty {
+        // 如果沒有段落且沒有任何 bodyChildren，加一個空段落
+        if bodyChildren.isEmpty {
             xml += "<w:p/>"
         }
         xml += "</w:hdr>"

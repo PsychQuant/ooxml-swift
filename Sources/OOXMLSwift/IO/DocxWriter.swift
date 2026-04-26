@@ -794,13 +794,17 @@ public struct DocxWriter {
         let xml: String
 
         // 如果有指定頁碼格式，使用頁碼格式生成 XML
+        // v0.19.5+ (#56 R5 P0 #6): condition checks bodyChildren.isEmpty, not
+        // paragraphs.isEmpty. With bodyChildren containing only tables, the
+        // computed `paragraphs` view is empty even though the footer has real
+        // content — so the page-number fallback would overwrite tables.
         if let format = footer.pageNumberFormat {
             xml = footer.toXMLWithPageNumber(format: format, alignment: footer.pageNumberAlignment)
-        } else if footer.paragraphs.isEmpty {
-            // 沒有段落也沒有頁碼格式，使用預設簡單頁碼
+        } else if footer.bodyChildren.isEmpty {
+            // 沒有任何 bodyChildren，也沒有頁碼格式，使用預設簡單頁碼
             xml = footer.toXMLWithPageNumber(format: .simple)
         } else {
-            // 有段落內容，使用一般 XML 輸出
+            // 有 bodyChildren，使用一般 XML 輸出
             xml = footer.toXML()
         }
 

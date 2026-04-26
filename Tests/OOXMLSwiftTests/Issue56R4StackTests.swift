@@ -199,6 +199,129 @@ final class Issue56R4StackTests: XCTestCase {
                          "accept_revision SHALL NOT throw notFound for SDT-wrapped revision")
     }
 
+    // MARK: - §7 P0 #6: DocxReader SHALL capture w:tbl direct children of header, footer, footnote, and endnote roots
+
+    func testHeaderTableBookmarkSurfacesInNextBookmarkIdCalibration() throws {
+        // Header containing both a paragraph and a table; the table cell has
+        // a paragraph with a bookmarkStart id=42. Pre-R5: parseContainerParagraphs
+        // discards the <w:tbl> sibling, so id=42 never enters the model and
+        // nextBookmarkId calibration misses it (could collide on insert).
+        let docXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <w:body><w:p/></w:body>
+        </w:document>
+        """
+        // Build a complete .docx where word/header1.xml has a paragraph + table.
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5-§7-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+
+        let documentRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+        </Relationships>
+        """
+        try documentRels.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+
+        let docXMLWithHeader = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <w:body>
+          <w:p/>
+          <w:sectPr><w:headerReference w:type="default" r:id="rId10"/></w:sectPr>
+        </w:body>
+        </w:document>
+        """
+        _ = docXML  // silence unused warning
+        try docXMLWithHeader.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+
+        let header1XML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:p><w:r><w:t>header-text</w:t></w:r></w:p>
+          <w:tbl>
+            <w:tr>
+              <w:tc>
+                <w:p><w:bookmarkStart w:id="42" w:name="HeaderBookmark"/><w:r><w:t>cell</w:t></w:r></w:p>
+              </w:tc>
+            </w:tr>
+          </w:tbl>
+        </w:hdr>
+        """
+        try header1XML.write(to: stagingURL.appendingPathComponent("word/header1.xml"), atomically: true, encoding: .utf8)
+
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5-§7-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: outURL) }
+        try ZipHelper.zip(stagingURL, to: outURL)
+
+        let doc = try DocxReader.read(from: outURL)
+
+        XCTAssertGreaterThanOrEqual(doc.nextBookmarkId, 43,
+            "nextBookmarkId SHALL surface header table bookmark id 42 (and be > 42); got \(doc.nextBookmarkId)")
+        XCTAssertEqual(doc.headers.count, 1, "Expected 1 header parsed")
+        let header = doc.headers[0]
+        XCTAssertEqual(header.bodyChildren.count, 2, "Header SHALL have 2 bodyChildren (paragraph then table); got \(header.bodyChildren.count)")
+        if case .paragraph = header.bodyChildren[0] {} else {
+            XCTFail("Header bodyChildren[0] SHALL be .paragraph")
+        }
+        if case .table = header.bodyChildren[1] {} else {
+            XCTFail("Header bodyChildren[1] SHALL be .table")
+        }
+    }
+
+    func testFooterTableContentSurvivesRoundtrip() throws {
+        // Build doc with a footer that has a single <w:tbl> direct child;
+        // round-trip via DocxWriter then DocxReader; assert table content survives.
+        var doc = WordDocument()
+        var inner = Paragraph()
+        inner.runs = [Run(text: "footer-cell")]
+        let cell = TableCell(paragraphs: [inner])
+        let row = TableRow(cells: [cell])
+        let table = Table(rows: [row])
+        var footer = Footer(id: "rId11", paragraphs: [], type: .default, originalFileName: "footer1.xml")
+        footer.bodyChildren = [.table(table)]
+        doc.footers = [footer]
+
+        let reread = try roundtrip(doc)
+        let rereadFooter = try XCTUnwrap(reread.footers.first)
+        XCTAssertTrue(rereadFooter.bodyChildren.contains(where: {
+            if case .table(let t) = $0,
+               let firstCellPara = t.rows.first?.cells.first?.paragraphs.first,
+               firstCellPara.runs.contains(where: { $0.text == "footer-cell" }) {
+                return true
+            }
+            return false
+        }), "Footer table content 'footer-cell' SHALL survive roundtrip")
+        // Computed view: paragraphs should be empty (only table direct child)
+        XCTAssertEqual(rereadFooter.paragraphs.count, 0,
+                       "Footer.paragraphs computed view SHALL be empty when only direct child is a table")
+    }
+
     // MARK: - §6 P0 #5: Document.replaceText headers/footers/footnotes/endnotes symmetric surface walk
 
     func testReplaceTextInsideHeaderHyperlinkAppliesAndPersists() throws {
