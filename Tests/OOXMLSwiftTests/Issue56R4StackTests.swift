@@ -100,6 +100,118 @@ final class Issue56R4StackTests: XCTestCase {
                        "Reject of insertion-wrapper SHALL drop the inner content too")
     }
 
+    // MARK: - §3 P0 #2: DocxReader SHALL assign source paragraph child positions starting at 1
+
+    func testFirstChildSourceSDTRoundTripsAtFirstPosition() throws {
+        // Build a `.docx` whose first paragraph has an SDT as its first child
+        // followed by a run "B". Round-trip and assert the SDT comes first
+        // (preserving source order) instead of being demoted to end-of-paragraph.
+        let sourceXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p>
+        <w:sdt><w:sdtPr><w:tag w:val="T"/><w:alias w:val="A"/></w:sdtPr><w:sdtContent><w:r><w:t>A</w:t></w:r></w:sdtContent></w:sdt>
+        <w:r><w:t>B</w:t></w:r>
+        </w:p>
+        </w:body>
+        </w:document>
+        """
+        let doc = try parseDocXMLToWordDocument(sourceXML)
+        let firstPara = try XCTUnwrap(doc.body.children.first.flatMap { (c: BodyChild) -> Paragraph? in
+            if case .paragraph(let p) = c { return p } else { return nil }
+        }, "expected first body child to be a paragraph")
+
+        // Reader assigns position >= 1 for ALL source children — first child is 1, not 0.
+        XCTAssertEqual(firstPara.contentControls.count, 1, "Expected one source SDT in first paragraph")
+        XCTAssertGreaterThan(firstPara.contentControls[0].position, 0,
+                             "First-child source SDT SHALL receive position > 0; got \(firstPara.contentControls[0].position)")
+        XCTAssertGreaterThan(firstPara.runs.first?.position ?? 0, firstPara.contentControls[0].position,
+                             "Run after SDT SHALL receive higher position than the SDT")
+
+        // Round-trip — emitted XML SHALL place the SDT before the run, matching source.
+        let reread = try roundtrip(doc)
+        let rereadFirstPara = try XCTUnwrap(reread.body.children.first.flatMap { (c: BodyChild) -> Paragraph? in
+            if case .paragraph(let p) = c { return p } else { return nil }
+        })
+        let emit = rereadFirstPara.toXML()
+        // Debug: dump the emit when assertions miss to surface the actual ordering.
+        let sdtRange = try XCTUnwrap(emit.range(of: "<w:sdt"), "Re-read paragraph emit missing <w:sdt>: \(emit)")
+        let runBRange = try XCTUnwrap(emit.range(of: ">B<"), "Re-read paragraph emit missing run B; emit was: \(emit)")
+        XCTAssertLessThan(sdtRange.lowerBound, runBRange.lowerBound,
+                          "SDT SHALL be emitted before run B (source order); got: \(emit)")
+    }
+
+    func testAPIBuiltContentControlPreservesPositionZeroSentinel() throws {
+        // Programmatically constructed paragraph: API-built ContentControl
+        // defaults to position == 0. Emit SHALL go through the legacy
+        // post-content path that appends API-built children at end.
+        var p = Paragraph()
+        p.runs = [Run(text: "first")]
+        p.runs[0].position = 1  // simulate a source-positioned run for sorted-emit routing
+        let cc = ContentControl.richText(tag: "API", alias: "API", content: "<w:r><w:t>API</w:t></w:r>")
+        XCTAssertEqual(cc.position, 0, "API-built ContentControl SHALL default to position 0")
+        p.contentControls.append(cc)
+
+        let emit = p.toXML()
+        let sdtRange = try XCTUnwrap(emit.range(of: "<w:sdt"), "API-built SDT not emitted: \(emit)")
+        let runRange = try XCTUnwrap(emit.range(of: ">first<"), "Run text not emitted: \(emit)")
+        XCTAssertGreaterThan(sdtRange.lowerBound, runRange.lowerBound,
+                             "API-built (position 0) SDT SHALL be emitted AFTER source-positioned runs (legacy post-content path); got: \(emit)")
+    }
+
+    // Helper: parse raw document.xml string into a WordDocument by writing a
+    // minimal docx ZIP and reading via DocxReader. Used by §3 tests that need
+    // to inject specific source XML for the parser to assign positions to.
+    private func parseDocXMLToWordDocument(_ documentXML: String) throws -> WordDocument {
+        let tmpURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5-§3-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: tmpURL)
+        return try DocxReader.read(from: tmpURL)
+    }
+
+    private func buildMinimalDocx(documentXML: String, to url: URL) throws {
+        // Minimal valid .docx with the given document.xml content.
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5-§3-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+
+        let documentRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        </Relationships>
+        """
+        try documentRels.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+
+        try documentXML.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+
+        // Zip the staging directory into url.
+        try ZipHelper.zip(stagingURL, to: url)
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")

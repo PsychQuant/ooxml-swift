@@ -612,7 +612,16 @@ public struct DocxReader {
         // raw-carriers Phase 4 adds) record source-document order. This is the
         // input the Phase 4 sort-by-position emit consumes — it has no effect
         // until Paragraph.toXML() refactor lands, so behavior is additive here.
-        var childPosition = 0
+        //
+        // v0.19.5+ (#56 R5 P0 #2): start at 1 (not 0) so the first source child
+        // receives position == 1. Reserves position == 0 for the "API-built
+        // sentinel" semantic — children added programmatically without
+        // specifying a position keep position 0 and route through the legacy
+        // post-content emit path, while every source-loaded child routes
+        // through the sorted positioned-emit path. This eliminates the
+        // collision flagged by R4 verify (Codex R4-NEW-1) where a first-child
+        // source SDT was silently demoted to end-of-paragraph.
+        var childPosition = 1
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement else { continue }
             defer { childPosition += 1 }

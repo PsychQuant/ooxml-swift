@@ -209,14 +209,17 @@ final class DocumentXmlLosslessRoundTripTests: XCTestCase {
         XCTAssertEqual(field.runs.count, 1, "FieldSimple inner Run count")
         XCTAssertEqual(field.runs[0].text, "1", "FieldSimple inner Run text")
 
-        // Spec scenario asserts surrounding paragraph runs at positions 0 and 2.
+        // v0.19.5+ (#56 R5 P0 #2): childPosition starts at 1 (was 0), so
+        // surrounding paragraph runs sit at positions 1 and 3, fieldSimple
+        // sits between them at position 2.
         let para = try XCTUnwrap(doc.getParagraphs().first(where: { !$0.fieldSimples.isEmpty }))
         XCTAssertEqual(para.runs.count, 2, "2 surrounding paragraph runs (Table , : caption text)")
         XCTAssertEqual(para.runs[0].text, "Table ")
         XCTAssertEqual(para.runs[1].text, ": caption text")
-        // FieldSimple position 1 sits between paragraph run positions 0 and 2.
-        XCTAssertEqual(field.position, 1,
-                       "FieldSimple position must reflect source order between surrounding runs")
+        XCTAssertEqual(field.position, 2,
+                       "FieldSimple position must reflect source order between surrounding runs (R5: positions start at 1)")
+        XCTAssertEqual(para.runs[0].position, 1, "First run at source position 1 (R5: positions start at 1)")
+        XCTAssertEqual(para.runs[1].position, 3, "Second run at source position 3 (after fieldSimple at position 2)")
     }
 
     // MARK: - Phase 3: Wrapper hybrid model — AlternateContent
