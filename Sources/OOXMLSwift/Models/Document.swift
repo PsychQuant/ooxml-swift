@@ -1756,24 +1756,27 @@ public struct WordDocument: Equatable {
     }
 
     /// 列出所有超連結
+    /// v0.19.5+ (#56 R5-CONT P0 #7): walks every paragraph across body
+    /// (incl. nested tables / SDT children), headers, footers, footnotes,
+    /// endnotes via `DocumentWalker.walkAllParagraphs`. Pre-fix only body
+    /// top-level paragraphs were listed → the listed-id set was a strict
+    /// subset of what `updateHyperlink` / `deleteHyperlink` (R5 P1 #3)
+    /// could find, so callers couldn't programmatically discover ids
+    /// they were allowed to mutate. Verify R5 P0 #7 (DA C5).
     public func getHyperlinks() -> [(id: String, text: String, url: String?, anchor: String?, type: String)] {
         var result: [(id: String, text: String, url: String?, anchor: String?, type: String)] = []
-
-        for child in body.children {
-            if case .paragraph(let para) = child {
-                for hyperlink in para.hyperlinks {
-                    let typeStr = hyperlink.type == .external ? "external" : "internal"
-                    result.append((
-                        id: hyperlink.id,
-                        text: hyperlink.text,
-                        url: hyperlink.url,
-                        anchor: hyperlink.anchor,
-                        type: typeStr
-                    ))
-                }
+        DocumentWalker.walkAllParagraphs(in: self) { para, _ in
+            for hyperlink in para.hyperlinks {
+                let typeStr = hyperlink.type == .external ? "external" : "internal"
+                result.append((
+                    id: hyperlink.id,
+                    text: hyperlink.text,
+                    url: hyperlink.url,
+                    anchor: hyperlink.anchor,
+                    type: typeStr
+                ))
             }
         }
-
         return result
     }
 

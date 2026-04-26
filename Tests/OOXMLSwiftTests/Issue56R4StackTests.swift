@@ -1179,6 +1179,66 @@ final class Issue56R4StackTests: XCTestCase {
                        "Appended API-built Run SHALL emit AFTER source-loaded runs in document order; got: \(texts)")
     }
 
+    // MARK: - §11.7 R5-CONTINUATION P0 #7: getHyperlinks() walks all parts
+
+    /// v0.19.5+ (#56 R5-CONT P0 #7): R5 verify (DA C5) flagged that public
+    /// `getHyperlinks()` only walks `body.children` top-level paragraphs. The
+    /// listed-id set is a strict subset of what `updateHyperlink` /
+    /// `deleteHyperlink` (R5 P1 #3) can find — so a user could never
+    /// programmatically discover an id they're allowed to mutate. After
+    /// R5 P0 #6 elevated `<w:tbl>` direct children of containers into
+    /// `bodyChildren`, the gap is widest yet: the entire MCP listing API
+    /// hides container hyperlinks from callers.
+    func testGetHyperlinksListsHyperlinkInsideHeaderTable() {
+        var doc = WordDocument()
+
+        // Body hyperlink for sanity (the pre-fix path).
+        var bodyPara = Paragraph()
+        let bodyHyper = Hyperlink(id: "body-link", text: "body-text", url: "https://body.example",
+                                  relationshipId: "rId50", tooltip: nil, history: true)
+        bodyPara.hyperlinks.append(bodyHyper)
+        doc.body.children.append(.paragraph(bodyPara))
+
+        // Header → table → cell → paragraph → hyperlink.
+        var innerPara = Paragraph()
+        let headerHyper = Hyperlink(id: "header-table-link", text: "header-cell-text",
+                                    url: "https://header.example", relationshipId: "rId51",
+                                    tooltip: nil, history: true)
+        innerPara.hyperlinks.append(headerHyper)
+        let cell = TableCell(paragraphs: [innerPara])
+        let row = TableRow(cells: [cell])
+        let table = Table(rows: [row])
+        var header = Header(id: "rId10", paragraphs: [], type: .default,
+                            originalFileName: "header1.xml")
+        header.bodyChildren.append(.table(table))
+        doc.headers.append(header)
+
+        // Footer paragraph hyperlink (top-level).
+        var footerPara = Paragraph()
+        let footerHyper = Hyperlink(id: "footer-link", text: "footer-text",
+                                    url: "https://footer.example", relationshipId: "rId52",
+                                    tooltip: nil, history: true)
+        footerPara.hyperlinks.append(footerHyper)
+        var footer = Footer(id: "rId11", paragraphs: [footerPara], type: .default,
+                            originalFileName: "footer1.xml")
+        let _ = footer
+        doc.footers.append(footer)
+
+        let hyperlinks = doc.getHyperlinks()
+        let ids = Set(hyperlinks.map { $0.id })
+        XCTAssertTrue(ids.contains("body-link"),
+                      "Body hyperlink SHALL be listed (sanity); got: \(ids)")
+        XCTAssertTrue(ids.contains("header-table-link"),
+                      "Header table cell hyperlink SHALL be listed by getHyperlinks; got: \(ids)")
+        XCTAssertTrue(ids.contains("footer-link"),
+                      "Footer top-level hyperlink SHALL be listed by getHyperlinks; got: \(ids)")
+
+        // Verify text/url propagate correctly for the cross-part case.
+        let headerEntry = hyperlinks.first { $0.id == "header-table-link" }
+        XCTAssertEqual(headerEntry?.text, "header-cell-text")
+        XCTAssertEqual(headerEntry?.url, "https://header.example")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
