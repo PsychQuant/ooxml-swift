@@ -461,6 +461,50 @@ final class Issue56R4StackTests: XCTestCase {
         try ZipHelper.zip(stagingURL, to: url)
     }
 
+    /// §11.2 helper: minimal .docx that also drops a header part + document →
+    /// header relationship + header content-type override.
+    private func buildMinimalDocxWithHeader(documentXML: String, headerXML: String, headerRId: String, to url: URL) throws {
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5cont-p0-2-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+
+        let documentRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="\(headerRId)" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+        </Relationships>
+        """
+        try documentRels.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+
+        try documentXML.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+        try headerXML.write(to: stagingURL.appendingPathComponent("word/header1.xml"), atomically: true, encoding: .utf8)
+
+        try ZipHelper.zip(stagingURL, to: url)
+    }
+
     /// §8.2 helper: minimal .docx that also drops a footnotes part + the
     /// document → footnotes relationship + footnotes content-type override.
     private func buildMinimalDocxWithFootnotes(documentXML: String, footnotesXML: String, to url: URL) throws {
@@ -859,6 +903,71 @@ final class Issue56R4StackTests: XCTestCase {
         let rawConcat = updatedPara.unrecognizedChildren.map { $0.rawXML }.joined()
         XCTAssertFalse(rawConcat.contains("<w:ins"),
                        "Header table cell paragraph SHALL NOT contain <w:ins> wrapper after accept; got: \(rawConcat)")
+    }
+
+    // MARK: - §11.2 R5-CONTINUATION P0 #2: DocxReader propagates revisions from container bodyChildren
+
+    /// v0.19.5+ (#56 R5-CONT P0 #2): R5 verify (Logic L3) flagged the four
+    /// per-container revision propagation loops in `DocxReader.read`
+    /// (header/footer/footnote/endnote, lines 305-347) walk
+    /// `container.paragraphs` (flat view), missing typed Revisions on
+    /// paragraphs inside container tables / content controls.
+    /// `document.revisions.revisions` therefore can't see them → MCP
+    /// `get_revisions` / `accept_revision` / `reject_revision` invisibility
+    /// for any tracked change inside a header table.
+    ///
+    /// Test fixture: a header containing `<w:tbl>` whose cell paragraph
+    /// carries a mixed-content `<w:ins>` wrapper (parser surfaces the typed
+    /// Revision into the inner paragraph). Pre-fix `document.revisions`
+    /// stays empty for that revision; post-fix it contains the revision
+    /// with `source = .header(id: <rId>)`.
+    func testRevisionInsideHeaderTableSurfacesInDocumentRevisions() throws {
+        // Build a minimal docx with a header containing <w:tbl> whose
+        // cell paragraph has a <w:ins> wrapper.
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:body>
+            <w:p><w:r><w:t>body</w:t></w:r></w:p>
+            <w:sectPr><w:headerReference w:type="default" r:id="rId10"/></w:sectPr>
+          </w:body>
+        </w:document>
+        """
+        let headerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:tbl>
+            <w:tr>
+              <w:tc>
+                <w:p>
+                  <w:ins w:id="88" w:author="Carol">
+                    <w:r><w:t>tracked-in-header-table</w:t></w:r>
+                  </w:ins>
+                </w:p>
+              </w:tc>
+            </w:tr>
+          </w:tbl>
+        </w:hdr>
+        """
+        let docxURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5cont-p0-2-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        try buildMinimalDocxWithHeader(documentXML: documentXML, headerXML: headerXML, headerRId: "rId10", to: docxURL)
+
+        let document = try DocxReader.read(from: docxURL)
+
+        // Post-fix: revision id=88 surfaces with source = .header(id: "rId10").
+        let rev = document.revisions.revisions.first { $0.id == 88 }
+        XCTAssertNotNil(rev,
+                        "Typed Revision id=88 inside header table cell SHALL surface in document.revisions.revisions; got: \(document.revisions.revisions.map { ($0.id, $0.source) })")
+        if let r = rev {
+            if case .header(let id) = r.source {
+                XCTAssertEqual(id, "rId10",
+                               "Revision source SHALL carry the header rId, not hardcoded .body")
+            } else {
+                XCTFail("Revision source SHALL be .header(id: \"rId10\"), got: \(r.source)")
+            }
+        }
     }
 
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
