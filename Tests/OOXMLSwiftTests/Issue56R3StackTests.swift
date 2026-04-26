@@ -427,6 +427,44 @@ final class Issue56R3StackTests: XCTestCase {
         }
     }
 
+    // MARK: - D-3: vendor xmlns declarations on hyperlink survive round-trip
+
+    /// Pre-v0.19.4: parseHyperlink only iterated `XMLElement.attributes`,
+    /// missing `XMLElement.namespaces` (the separate xmlns: declaration
+    /// collection in Foundation XMLElement). A source `<w:hyperlink
+    /// xmlns:vendor="https://x" vendor:custom="y">` round-tripped with the
+    /// prefixed attribute but no namespace declaration → Word schema reject.
+    func testHyperlinkVendorNamespaceDeclarationSurvivesRoundTrip() throws {
+        let elementXML = """
+        <w:hyperlink xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" \
+        xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" \
+        xmlns:vendor="https://example.com/vendor" \
+        r:id="rId1" vendor:custom="payload">\
+        <w:r><w:t>linked</w:t></w:r>\
+        </w:hyperlink>
+        """
+        let parsed = try XMLDocument(xmlString: elementXML, options: [])
+        guard let hlElement = parsed.rootElement() else {
+            XCTFail("Failed to parse element")
+            return
+        }
+        let hl = try DocxReader.parseHyperlink(
+            from: hlElement,
+            relationships: RelationshipsCollection(),
+            position: 0
+        )
+        let xml = hl.toXML()
+
+        XCTAssertTrue(
+            xml.contains("xmlns:vendor=\"https://example.com/vendor\""),
+            "Re-emitted hyperlink XML must preserve the vendor xmlns declaration. Output:\n\(xml)"
+        )
+        XCTAssertTrue(
+            xml.contains("vendor:custom=\"payload\""),
+            "Re-emitted hyperlink XML must preserve the prefixed attribute. Output:\n\(xml)"
+        )
+    }
+
     // MARK: - Fixture builders
 
     /// Builds a minimal valid `.docx` whose body contains exactly one paragraph
