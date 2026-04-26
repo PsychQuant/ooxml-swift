@@ -90,26 +90,17 @@ public struct DocxReader {
         )
         document.images = images
 
-        // v0.19.3+ (#56 round 2 P1-1): calibrate nextBookmarkId past every
-        // bookmark id present in the source so subsequent `insertBookmark`
-        // calls cannot collide with existing source bookmarks. Pre-fix the
-        // counter started at 1 regardless of source content; F2 turned the
-        // resulting collision from a silent drop into a silent overwrite
-        // (Word may schema-reject or treat both bookmarks as one).
-        var maxBookmarkId = 0
-        for child in document.body.children {
-            if case .paragraph(let para) = child {
-                for bookmark in para.bookmarks {
-                    if bookmark.id > maxBookmarkId { maxBookmarkId = bookmark.id }
-                }
-                for marker in para.bookmarkMarkers {
-                    if marker.id > maxBookmarkId { maxBookmarkId = marker.id }
-                }
-            }
-        }
-        if maxBookmarkId > 0 {
-            document.nextBookmarkId = maxBookmarkId + 1
-        }
+        // v0.19.4+ (#56 R3-NEW-5): nextBookmarkId calibration moved AFTER
+        // all parts (body + headers + footers + footnotes + endnotes) load.
+        // Pre-v0.19.4 (R2 P1-1) calibration scanned only body.children's
+        // top-level `.paragraph` cases — missed table cells, block-level SDT
+        // children, and ran BEFORE headers/footers/footnotes/endnotes were
+        // even parsed. A document with bookmark id 99 inside a table cell or
+        // any header would false-succeed at calibration → subsequent
+        // insertBookmark allocates id 1 → collision with source id 99 →
+        // silent overwrite or Word schema reject. The post-load scan below
+        // walks every part recursively. See R3-NEW-5 in spectra change
+        // `che-word-mcp-issue-56-r3-stack-completion`.
 
         // 7b. 讀取 headers (Part C of ooxml-swift#1)
         // v0.13.0+: preserve `originalFileName` from rel.target so multi-instance
@@ -346,6 +337,25 @@ public struct DocxReader {
             let extData = try Data(contentsOf: commentsExtURL)
             let extXML = try XMLDocument(data: extData)
             try parseCommentsExtended(from: extXML, into: &document.comments)
+        }
+
+        // v0.19.4+ (#56 R3-NEW-5): comprehensive nextBookmarkId calibration.
+        // Walks every paragraph in body (recursing into tables and content
+        // controls), headers, footers, footnotes, and endnotes for the max
+        // bookmark id across both `bookmarks` (typed) and `bookmarkMarkers`
+        // (raw). Sets nextBookmarkId past the global max so subsequent
+        // insertBookmark cannot collide with any source bookmark.
+        var maxBookmarkId = 0
+        Self.walkAllParagraphs(in: document) { para in
+            for bookmark in para.bookmarks where bookmark.id > maxBookmarkId {
+                maxBookmarkId = bookmark.id
+            }
+            for marker in para.bookmarkMarkers where marker.id > maxBookmarkId {
+                maxBookmarkId = marker.id
+            }
+        }
+        if maxBookmarkId > 0 {
+            document.nextBookmarkId = maxBookmarkId + 1
         }
 
         // Hand tempDir ownership to the returned WordDocument. Caller MUST call
@@ -1575,6 +1585,46 @@ public struct DocxReader {
             }
         }
         return false
+    }
+
+    /// v0.19.4+ (#56 R3-NEW-5): visit every Paragraph reachable from the
+    /// document — body (recursing into tables and content controls), headers,
+    /// footers, footnotes, and endnotes. Used by the post-load nextBookmarkId
+    /// calibration to find the global max bookmark id across all parts.
+    private static func walkAllParagraphs(in document: WordDocument, _ visit: (Paragraph) -> Void) {
+        func walkTable(_ table: Table) {
+            for row in table.rows {
+                for cell in row.cells {
+                    for para in cell.paragraphs { visit(para) }
+                    // v0.19.4+ (#56 R3-NEW-5 codex P1): recurse into nested
+                    // tables (depth-limited to 5 by parser per ooxml-swift#49).
+                    for nested in cell.nestedTables { walkTable(nested) }
+                }
+            }
+        }
+        func walkBodyChild(_ child: BodyChild) {
+            switch child {
+            case .paragraph(let para):
+                visit(para)
+            case .table(let table):
+                walkTable(table)
+            case .contentControl(_, let inner):
+                for c in inner { walkBodyChild(c) }
+            }
+        }
+        for child in document.body.children { walkBodyChild(child) }
+        for header in document.headers {
+            for para in header.paragraphs { visit(para) }
+        }
+        for footer in document.footers {
+            for para in footer.paragraphs { visit(para) }
+        }
+        for footnote in document.footnotes.footnotes {
+            for para in footnote.paragraphs { visit(para) }
+        }
+        for endnote in document.endnotes.endnotes {
+            for para in endnote.paragraphs { visit(para) }
+        }
     }
 
     private static func parseRunProperties(from element: XMLElement) -> RunProperties {
