@@ -33,6 +33,11 @@ public struct Footer: Equatable {
     /// `Header.rootAttributes` for full semantics.
     public var rootAttributes: [String: String] = [:]
 
+    /// v0.19.5+ (#56 R5-CONT P1 #8): captured `word/_rels/footer*.xml.rels`
+    /// (per-container relationships). See `Header.relationships` for
+    /// rationale — same per-container rels gap pre-fix.
+    public var relationships: RelationshipsCollection = RelationshipsCollection()
+
     public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, pageNumberFormat: PageNumberFormat? = nil, pageNumberAlignment: ParagraphAlignment = .center, originalFileName: String? = nil, rootAttributes: [String: String] = [:]) {
         self.id = id
         self.bodyChildren = paragraphs.map { .paragraph($0) }

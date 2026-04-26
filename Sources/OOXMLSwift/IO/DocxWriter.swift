@@ -786,6 +786,17 @@ public struct DocxWriter {
         let xml = header.toXML()
         let url = baseURL.appendingPathComponent("word/\(header.fileName)")
         try xml.write(to: url, atomically: true, encoding: .utf8)
+
+        // v0.19.5+ (#56 R5-CONT P1 #8): emit per-container rels file
+        // (`word/_rels/<header>.xml.rels`) when the header carries any
+        // relationships. Pre-fix the writer never emitted these → URL
+        // updates against container hyperlinks silently failed to persist.
+        if !header.relationships.relationships.isEmpty {
+            try writeRelationshipsCollection(
+                header.relationships,
+                to: baseURL.appendingPathComponent("word/_rels/\(header.fileName).rels")
+            )
+        }
     }
 
     // MARK: - Footer
@@ -809,6 +820,36 @@ public struct DocxWriter {
         }
 
         let url = baseURL.appendingPathComponent("word/\(footer.fileName)")
+        try xml.write(to: url, atomically: true, encoding: .utf8)
+
+        // v0.19.5+ (#56 R5-CONT P1 #8): emit per-container rels — see writeHeader.
+        if !footer.relationships.relationships.isEmpty {
+            try writeRelationshipsCollection(
+                footer.relationships,
+                to: baseURL.appendingPathComponent("word/_rels/\(footer.fileName).rels")
+            )
+        }
+    }
+
+    /// v0.19.5+ (#56 R5-CONT P1 #8): emit a `RelationshipsCollection` to a
+    /// `word/_rels/*.xml.rels` file. Used for per-container rels (header,
+    /// footer, footnotes, endnotes) so URL updates against container
+    /// hyperlinks persist on save. The body's document.xml.rels is still
+    /// emitted by `writeDocumentRelationships` (it carries header/footer
+    /// part references and document-scope hyperlink rels).
+    private static func writeRelationshipsCollection(_ collection: RelationshipsCollection, to url: URL) throws {
+        var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        xml += "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+        for rel in collection.relationships {
+            xml += "<Relationship Id=\"\(escapeXMLAttribute(rel.id))\""
+            xml += " Type=\"\(escapeXMLAttribute(rel.type.rawValue))\""
+            xml += " Target=\"\(escapeXMLAttribute(rel.target))\""
+            if let mode = rel.targetMode {
+                xml += " TargetMode=\"\(escapeXMLAttribute(mode))\""
+            }
+            xml += "/>"
+        }
+        xml += "</Relationships>"
         try xml.write(to: url, atomically: true, encoding: .utf8)
     }
 
@@ -957,6 +998,14 @@ public struct DocxWriter {
         let xml = footnotes.toXML()
         let url = baseURL.appendingPathComponent("word/footnotes.xml")
         try xml.write(to: url, atomically: true, encoding: .utf8)
+
+        // v0.19.5+ (#56 R5-CONT P1 #8): emit per-collection rels.
+        if !footnotes.relationships.relationships.isEmpty {
+            try writeRelationshipsCollection(
+                footnotes.relationships,
+                to: baseURL.appendingPathComponent("word/_rels/footnotes.xml.rels")
+            )
+        }
     }
 
     // MARK: - Endnotes
@@ -965,6 +1014,14 @@ public struct DocxWriter {
         let xml = endnotes.toXML()
         let url = baseURL.appendingPathComponent("word/endnotes.xml")
         try xml.write(to: url, atomically: true, encoding: .utf8)
+
+        // v0.19.5+ (#56 R5-CONT P1 #8): emit per-collection rels.
+        if !endnotes.relationships.relationships.isEmpty {
+            try writeRelationshipsCollection(
+                endnotes.relationships,
+                to: baseURL.appendingPathComponent("word/_rels/endnotes.xml.rels")
+            )
+        }
     }
 
     // MARK: - Helpers

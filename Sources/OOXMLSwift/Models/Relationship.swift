@@ -3,15 +3,27 @@ import Foundation
 // MARK: - Relationship
 
 /// OOXML 關係定義（用於解析 .rels 檔案）
-public struct Relationship {
+///
+/// v0.19.5+ (#56 R5-CONT P1 #8): mutable + Equatable so per-container
+/// `RelationshipsCollection` can live on `Header` / `Footer` / `Footnote` /
+/// `Endnote` (which are themselves Equatable). `target` is var so URL
+/// updates inside container hyperlinks can rewrite the rels Target without
+/// rebuilding the whole Relationship.
+public struct Relationship: Equatable {
     public let id: String           // 關係 ID (rId1, rId2, ...)
     public let type: RelationshipType
-    public let target: String       // 目標路徑 (media/image1.png)
+    public var target: String       // 目標路徑 (media/image1.png) or URL
+    /// v0.19.5+ (#56 R5-CONT P1 #8): hyperlink relationships carry
+    /// `TargetMode="External"`. Captured here so DocxWriter can re-emit
+    /// the attribute byte-equivalently for hyperlink rels in
+    /// `header*.xml.rels` / `footer*.xml.rels` / etc.
+    public var targetMode: String?
 
-    public init(id: String, type: RelationshipType, target: String) {
+    public init(id: String, type: RelationshipType, target: String, targetMode: String? = nil) {
         self.id = id
         self.type = type
         self.target = target
+        self.targetMode = targetMode
     }
 }
 
@@ -71,7 +83,7 @@ public enum RelationshipType: String {
 // MARK: - Relationships Collection
 
 /// 關係集合（來自 .rels 檔案）
-public struct RelationshipsCollection {
+public struct RelationshipsCollection: Equatable {
     public var relationships: [Relationship] = []
 
     public init() {}
