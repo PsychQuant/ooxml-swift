@@ -1076,6 +1076,69 @@ final class Issue56R4StackTests: XCTestCase {
                        "DocumentWalker.footerPartKey SHALL agree with writer-checked Footer.fileName — got walker=\(walkerKey) writer=\(writerKey)")
     }
 
+    // MARK: - §11.5 R5-CONTINUATION P0 #5: acceptRevision typed .deletion routes by revision.source
+
+    /// v0.19.5+ (#56 R5-CONT P0 #5): R5 verify (DA C2 + H2) flagged that
+    /// `acceptRevision`'s typed `.deletion` branch (Document.swift:2757-2775)
+    /// only walks `body.children`. For a typed `.deletion` Revision with
+    /// `source = .footnote(id:N)`, the branch indexes `body.children`
+    /// (case-insensitive to source) and either silently no-ops OR deletes
+    /// the wrong paragraph in body. Then `revisions.revisions.remove(at:)`
+    /// + `modifiedParts.insert("word/document.xml")` fire regardless →
+    /// ghost text in footnote, vanished revision marker, wrong part dirty.
+    /// Worse than R4's notFound (which at least reported failure).
+    func testAcceptRevisionTypedDeletionInFootnoteRemovesText() throws {
+        var doc = WordDocument()
+
+        // Footnote with one paragraph carrying "to-keep" + "to-delete-text".
+        var fnPara = Paragraph()
+        fnPara.runs.append(Run(text: "to-keep "))
+        fnPara.runs.append(Run(text: "to-delete-text"))
+        var fn = Footnote(id: 1, text: "", paragraphIndex: 0)
+        fn.bodyChildren = [.paragraph(fnPara)]
+        doc.footnotes.footnotes = [fn]
+
+        // Body has an unrelated paragraph at index 0 that SHOULD NOT be touched.
+        var bodyPara = Paragraph()
+        bodyPara.runs.append(Run(text: "body-untouched"))
+        doc.body.children = [.paragraph(bodyPara)]
+
+        // Typed .deletion Revision pointing at the footnote.
+        var rev = Revision(id: 55, type: .deletion, author: "Dan")
+        rev.source = .footnote(id: 1)
+        rev.paragraphIndex = 0
+        rev.originalText = "to-delete-text"
+        doc.revisions.revisions.append(rev)
+
+        try doc.acceptRevision(revisionId: 55)
+
+        // Post-fix: footnote text actually gets deleted.
+        let updatedFnPara = doc.footnotes.footnotes[0].paragraphs[0]
+        let fnConcat = updatedFnPara.runs.map { $0.text }.joined()
+        XCTAssertFalse(fnConcat.contains("to-delete-text"),
+                       "Accept .deletion(source: .footnote) SHALL remove footnote text; got: \(fnConcat)")
+        XCTAssertTrue(fnConcat.contains("to-keep"),
+                      "Accept .deletion SHALL preserve sibling text; got: \(fnConcat)")
+
+        // Body paragraph SHALL NOT have been touched (pre-fix would index body
+        // by revision.paragraphIndex == 0 and try to mutate body.children[0]).
+        guard case .paragraph(let bodyAfter) = doc.body.children[0] else {
+            return XCTFail("Body[0] SHALL remain a paragraph")
+        }
+        XCTAssertEqual(bodyAfter.runs.first?.text, "body-untouched",
+                       "Body paragraph SHALL be untouched by footnote-source deletion")
+
+        // modifiedParts SHALL mark the footnotes part, NOT word/document.xml.
+        XCTAssertTrue(doc.modifiedParts.contains("word/footnotes.xml"),
+                      "modifiedParts SHALL include word/footnotes.xml; got: \(doc.modifiedParts)")
+        XCTAssertFalse(doc.modifiedParts.contains("word/document.xml"),
+                       "modifiedParts SHALL NOT include word/document.xml for footnote-source deletion; got: \(doc.modifiedParts)")
+
+        // Typed Revision SHALL be removed.
+        XCTAssertFalse(doc.revisions.revisions.contains(where: { $0.id == 55 }),
+                       "Typed Revision id=55 SHALL be removed after accept")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
