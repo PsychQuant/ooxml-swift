@@ -1539,6 +1539,55 @@ final class Issue56R4StackTests: XCTestCase {
                       "Footer.toXML SHALL emit the SDT tag attribute; got:\n\(xml)")
     }
 
+    // MARK: - §11.11 R5-CONTINUATION P1: roundtrip variants for high-risk mutation tests
+
+    /// v0.19.5+ (#56 R5-CONT P1 #11): R5 verify (devils-advocate H5)
+    /// flagged that the original `testBlockLevelSDTWrappedRevisionSurfacesInDocumentRevisions`
+    /// only checks in-memory `doc.revisions` after parse + asserts
+    /// `acceptRevision` doesn't throw — but doesn't verify the reread
+    /// document state. Combined with R5-CONT P0 #5 (acceptRevision typed
+    /// .deletion now routes by source), the reread state is the actual
+    /// integrity check. Variant exercises full save→reread cycle.
+    func testBlockLevelSDTWrappedRevisionAcceptPersistsThroughRoundtrip() throws {
+        // Source: SDT in body containing a paragraph with <w:ins> wrapper
+        // around a hyperlink. Per R5 P0 #4, the typed Revision surfaces in
+        // document.revisions. Per R5 P0 #1 + R5-CONT P0 #1, acceptRevision
+        // unwraps the wrapper. Verify the unwrap survives roundtrip.
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:body>
+            <w:sdt>
+              <w:sdtPr><w:id w:val="42"/><w:tag w:val="block-sdt"/></w:sdtPr>
+              <w:sdtContent>
+                <w:p>
+                  <w:ins w:id="13" w:author="Mia">
+                    <w:hyperlink r:id="rId1"><w:r><w:t>tracked-link</w:t></w:r></w:hyperlink>
+                  </w:ins>
+                </w:p>
+              </w:sdtContent>
+            </w:sdt>
+          </w:body>
+        </w:document>
+        """
+        var doc = try parseDocXMLToWordDocument(documentXML)
+        XCTAssertTrue(doc.revisions.revisions.contains(where: { $0.id == 13 }),
+                      "R5 P0 #4 sanity: typed Revision SHALL surface in document.revisions")
+
+        try doc.acceptRevision(revisionId: 13)
+        let reread = try roundtrip(doc)
+
+        // Re-read SDT child paragraph SHALL no longer carry <w:ins>.
+        guard case .contentControl(_, let inner) = reread.body.children[0],
+              case .paragraph(let para) = inner[0]
+        else {
+            return XCTFail("Expected SDT containing a paragraph in reread doc")
+        }
+        let rawConcat = para.unrecognizedChildren.map { $0.rawXML }.joined()
+        XCTAssertFalse(rawConcat.contains("<w:ins"),
+                       "After accept + roundtrip, SDT inner paragraph SHALL NOT contain <w:ins>; got: \(rawConcat)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
