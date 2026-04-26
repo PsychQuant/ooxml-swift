@@ -229,12 +229,26 @@ extension Hyperlink {
 
         xml += ">"
 
-        // v0.19.3+ (#56 round 2 P0-3): if Reader populated `children`, walk it
-        // in source-document order so `<w:r>A</w:r><w:sdt>X</w:sdt><w:r>B</w:r>`
-        // round-trips A→SDT→B (not A→B→SDT). API-built hyperlinks leave
-        // `children` empty and fall through to the legacy runs+rawChildren
-        // path, which preserves the v0.19.2 ordering for unchanged callers.
-        if !children.isEmpty {
+        // v0.19.3+ (#56 round 2 P0-3): if Reader populated `children`, prefer
+        // walking it in source-document order so `<w:r>A</w:r><w:sdt>X</w:sdt><w:r>B</w:r>`
+        // round-trips A→SDT→B (not A→B→SDT).
+        //
+        // v0.19.4+ (#56 R3-NEW-1): mutation detection — when `runs` text no
+        // longer matches the run text derived from `children`, an API mutation
+        // (`Hyperlink.text` setter / `replaceText` / `updateHyperlink`) has
+        // touched `runs` and the saved XML must reflect that. Fall through to
+        // the `runs`+`rawChildren` path so mutations are visible on save.
+        // Trade-off: when mutation occurs on a hyperlink whose `children` carries
+        // non-run elements (rare), the non-run order is lost; the spec change
+        // `che-word-mcp-issue-56-r3-stack-completion` documents this as
+        // acceptable because silent edit-failure has the wider blast radius.
+        let childrenRunText = children.reduce(into: "") { acc, child in
+            if case .run(let run) = child { acc += run.text }
+        }
+        let runsText = runs.reduce(into: "") { $0 += $1.text }
+        let childrenAuthoritative = !children.isEmpty && childrenRunText == runsText
+
+        if childrenAuthoritative {
             for child in children {
                 switch child {
                 case .run(let run):
