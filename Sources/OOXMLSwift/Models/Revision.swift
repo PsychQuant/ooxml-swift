@@ -414,6 +414,14 @@ public enum RevisionError: Error, LocalizedError {
     case trackChangesDisabled
     case cannotAccept(String)
     case cannotReject(String)
+    /// v0.19.5+ (#56 R5 P1 #5): aggregate failure raised by
+    /// `acceptAllRevisions`/`rejectAllRevisions` when one or more
+    /// per-revision helpers threw. The associated value is the list of
+    /// failing revision ids in the order encountered. Successful sibling
+    /// revisions are still applied — partial-success semantics — so the
+    /// caller can decide whether to retry the failing ones, surface a
+    /// warning, or roll back.
+    case partialFailure([Int])
 
     public var errorDescription: String? {
         switch self {
@@ -425,6 +433,8 @@ public enum RevisionError: Error, LocalizedError {
             return "Cannot accept revision: \(reason)"
         case .cannotReject(let reason):
             return "Cannot reject revision: \(reason)"
+        case .partialFailure(let ids):
+            return "Partial revision failure: \(ids.count) revision(s) failed (ids: \(ids))"
         }
     }
 }

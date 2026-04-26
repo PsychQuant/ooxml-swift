@@ -2846,19 +2846,63 @@ public struct WordDocument: Equatable {
         modifiedParts.insert("word/document.xml")
     }
 
-    /// 接受所有修訂
+    /// 接受所有修訂（legacy non-throwing API; preserved for backward compat)
+    ///
+    /// v0.19.5+ (#56 R5 P1 #5): per-revision errors are still swallowed
+    /// here for backward compatibility (this signature is consumed by
+    /// downstream `che-word-mcp` per the R5 design's zero-MCP-source-change
+    /// discipline). Callers that need to surface aggregate failure SHALL
+    /// use `tryAcceptAllRevisions()` instead — same semantics but throws
+    /// `RevisionError.partialFailure([Int])` if any per-revision helper
+    /// failed.
     public mutating func acceptAllRevisions() {
+        try? tryAcceptAllRevisions()
+    }
+
+    /// 拒絕所有修訂（legacy non-throwing API; preserved for backward compat）
+    ///
+    /// See `acceptAllRevisions` — same backward-compat rationale. Use
+    /// `tryRejectAllRevisions()` when aggregate failure surfacing matters.
+    public mutating func rejectAllRevisions() {
+        try? tryRejectAllRevisions()
+    }
+
+    /// v0.19.5+ (#56 R5 P1 #5): throwing variant of `acceptAllRevisions`.
+    /// Per-revision errors are aggregated; if any failed, throws
+    /// `RevisionError.partialFailure([Int])` listing the failing ids.
+    /// Successful sibling revisions are still applied (partial-success
+    /// semantics) so a single orphan id cannot block the rest. Closes
+    /// DA-N9 — the silent-corruption mode where `try?` swallowed all
+    /// failures and let the caller assume all-clear.
+    public mutating func tryAcceptAllRevisions() throws {
+        var failedIds: [Int] = []
         // 從後往前接受，避免索引問題
         for revision in revisions.revisions.reversed() {
-            try? acceptRevision(revisionId: revision.id)
+            do {
+                try acceptRevision(revisionId: revision.id)
+            } catch {
+                failedIds.append(revision.id)
+            }
+        }
+        if !failedIds.isEmpty {
+            throw RevisionError.partialFailure(failedIds)
         }
     }
 
-    /// 拒絕所有修訂
-    public mutating func rejectAllRevisions() {
+    /// v0.19.5+ (#56 R5 P1 #5): throwing variant of `rejectAllRevisions`.
+    /// See `tryAcceptAllRevisions` — same aggregate-failure semantics.
+    public mutating func tryRejectAllRevisions() throws {
+        var failedIds: [Int] = []
         // 從後往前拒絕，避免索引問題
         for revision in revisions.revisions.reversed() {
-            try? rejectRevision(revisionId: revision.id)
+            do {
+                try rejectRevision(revisionId: revision.id)
+            } catch {
+                failedIds.append(revision.id)
+            }
+        }
+        if !failedIds.isEmpty {
+            throw RevisionError.partialFailure(failedIds)
         }
     }
 

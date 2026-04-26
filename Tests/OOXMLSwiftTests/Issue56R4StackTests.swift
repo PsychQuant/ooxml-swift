@@ -756,6 +756,51 @@ final class Issue56R4StackTests: XCTestCase {
                        "Nested sibling SDTs SHALL receive one-based sibling positions")
     }
 
+    // MARK: - §8.5 P1: acceptAllRevisions/rejectAllRevisions SHALL surface aggregate failure
+
+    /// v0.19.5+ (#56 R5 P1 #5): acceptAllRevisions / rejectAllRevisions
+    /// SHALL surface a typed aggregate failure instead of silently swallowing
+    /// per-revision errors with `try?`. Pre-fix, an orphan revision id
+    /// (typed Revision exists but no wrapper / target paragraph) silently
+    /// failed inside `try?` and stayed in `revisions.revisions` while the
+    /// caller assumed all-clear. R4 P1 DA-N9 — silent corruption mode.
+    func testAcceptAllRevisionsSurfacesNotFoundFromOneFailedHelper() throws {
+        var doc = WordDocument()
+
+        // Valid wrapper revision: typed Revision + matching unrecognizedChild.
+        let okPara = makeMixedContentWrapperParagraph(revisionId: 5, author: "Alice", innerText: "kept")
+        doc.body.children.append(.paragraph(okPara))
+        var okRev = okPara.revisions[0]
+        okRev.source = .body
+        doc.revisions.revisions.append(okRev)
+
+        // Orphan revision: typed Revision exists, NO matching wrapper anywhere.
+        var orphan = Revision(id: 99, type: .insertion, author: "Phantom")
+        orphan.isMixedContentWrapper = true
+        orphan.source = .body
+        doc.revisions.revisions.append(orphan)
+
+        // Pre-fix: silently swallows the orphan's notFound, returns clean.
+        // Post-fix: throws RevisionError.partialFailure([99]) via the new
+        // `tryAcceptAllRevisions()` API (legacy non-throwing variant
+        // preserved for che-word-mcp source-compat per R5 design).
+        XCTAssertThrowsError(try doc.tryAcceptAllRevisions()) { err in
+            guard case RevisionError.partialFailure(let ids) = err else {
+                XCTFail("Expected RevisionError.partialFailure, got \(err)")
+                return
+            }
+            XCTAssertEqual(ids, [99],
+                           "partialFailure SHALL aggregate the failing revision ids only")
+        }
+
+        // The valid revision SHALL still have been accepted.
+        XCTAssertFalse(doc.revisions.revisions.contains(where: { $0.id == 5 }),
+                       "Valid wrapper revision (id 5) SHALL be accepted even when sibling revision throws")
+        // The orphan SHALL remain — accept failed, so its typed Revision stays.
+        XCTAssertTrue(doc.revisions.revisions.contains(where: { $0.id == 99 }),
+                      "Orphan revision (id 99) SHALL stay in revisions list when accept throws notFound")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
