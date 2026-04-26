@@ -233,20 +233,26 @@ extension Hyperlink {
         // walking it in source-document order so `<w:r>A</w:r><w:sdt>X</w:sdt><w:r>B</w:r>`
         // round-trips A→SDT→B (not A→B→SDT).
         //
-        // v0.19.4+ (#56 R3-NEW-1): mutation detection — when `runs` text no
-        // longer matches the run text derived from `children`, an API mutation
-        // (`Hyperlink.text` setter / `replaceText` / `updateHyperlink`) has
-        // touched `runs` and the saved XML must reflect that. Fall through to
-        // the `runs`+`rawChildren` path so mutations are visible on save.
-        // Trade-off: when mutation occurs on a hyperlink whose `children` carries
-        // non-run elements (rare), the non-run order is lost; the spec change
-        // `che-word-mcp-issue-56-r3-stack-completion` documents this as
-        // acceptable because silent edit-failure has the wider blast radius.
-        let childrenRunText = children.reduce(into: "") { acc, child in
-            if case .run(let run) = child { acc += run.text }
+        // v0.19.4+ (#56 R3-NEW-1): mutation detection — when `runs` no longer
+        // matches the run sequence derived from `children`, an API mutation
+        // (`Hyperlink.text` setter / `replaceText` / `updateHyperlink` /
+        // `format_text` / property-only edits like `runs[0].properties.bold`)
+        // has touched `runs` and the saved XML must reflect that. Fall through
+        // to the `runs` + `rawChildren` path so mutations are visible on save.
+        //
+        // v0.19.5+ (#56 R5 P1 #1): upgrade detection from joined-text comparison
+        // to deep `[Run]` equality (synthesized `Equatable` covers `text` +
+        // `properties`). Pre-fix the text-only check missed property-only
+        // mutations (e.g., `runs[0].properties.bold = true` with same text)
+        // and equal-length text swaps that re-derive the same joined string;
+        // both silently dropped on save. Trade-off restated: when a mutation
+        // touches a hyperlink whose `children` carries non-run elements
+        // (rare), the non-run order is lost — `design.md` deems this
+        // acceptable since silent edit-failure has the wider blast radius.
+        let childrenRuns = children.compactMap { child -> Run? in
+            if case .run(let run) = child { return run } else { return nil }
         }
-        let runsText = runs.reduce(into: "") { $0 += $1.text }
-        let childrenAuthoritative = !children.isEmpty && childrenRunText == runsText
+        let childrenAuthoritative = !children.isEmpty && childrenRuns == runs
 
         if childrenAuthoritative {
             for child in children {
