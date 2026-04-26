@@ -1938,6 +1938,51 @@ final class Issue56R4StackTests: XCTestCase {
                        "After reject + roundtrip, paragraph XML SHALL NOT contain <w:del> wrapper. Output:\n\(xml)")
     }
 
+    // MARK: - §15.3 R5-CONT-3 P1 #3: sourceToPartKey throws on orphan container source
+
+    /// v0.19.5+ (#56 R5-CONT-3 P1 #3): R5-CONT-2 verify (DA R6-NEW-3 +
+    /// Logic P2) flagged that `sourceToPartKey` silently fell back to
+    /// `"word/document.xml"` when source container was missing (e.g.,
+    /// `revision.source = .header(id: "rId99")` but no header with that
+    /// rId exists). Wrong-part dirty masked orphan-revision logic bugs.
+    /// Now: throws `RevisionError.notFound` so the caller can rollback
+    /// the typed Revision removal.
+    func testAcceptRevisionWithOrphanedHeaderSourceThrowsNotFound() throws {
+        var doc = WordDocument()
+
+        // Body has unrelated content.
+        var bodyP = Paragraph()
+        bodyP.runs.append(Run(text: "body-keep"))
+        doc.body.children = [.paragraph(bodyP)]
+
+        // Typed `.insertion` Revision with orphaned source (no header
+        // with id "rId99" exists in document.headers).
+        var rev = Revision(id: 88, type: .insertion, author: "Phantom")
+        rev.source = .header(id: "rId99")
+        rev.paragraphIndex = 0
+        rev.newText = "phantom-text"
+        doc.revisions.revisions.append(rev)
+
+        // Pre-fix this silently fell back to body, removed Revision
+        // from document.revisions, and dirtied word/document.xml.
+        // Post-fix it throws notFound and preserves the typed Revision
+        // for the caller to handle.
+        XCTAssertThrowsError(try doc.acceptRevision(revisionId: 88)) { err in
+            guard case RevisionError.notFound(let id) = err else {
+                XCTFail("Expected RevisionError.notFound, got: \(err)")
+                return
+            }
+            XCTAssertEqual(id, 88)
+        }
+
+        // Typed Revision SHALL remain — accept threw, no removal happened.
+        XCTAssertTrue(doc.revisions.revisions.contains { $0.id == 88 },
+                      "Orphaned-source revision SHALL remain in revisions list when accept throws notFound")
+        // Body SHALL NOT have been wrongly dirtied.
+        XCTAssertFalse(doc.modifiedParts.contains("word/document.xml"),
+                       "modifiedParts SHALL NOT include word/document.xml for orphaned-source rejection; got: \(doc.modifiedParts)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")

@@ -2851,7 +2851,7 @@ public struct WordDocument: Equatable {
         switch revision.type {
         case .insertion:
             // 接受插入：移除標記，保留文字（文字已在文件中）
-            partKeyForDirty = sourceToPartKey(revision.source)
+            partKeyForDirty = try sourceToPartKey(revision.source, revisionId: revisionId)
         case .deletion:
             // 接受刪除：實際移除被標記為刪除的文字
             let originalText = revision.originalText
@@ -2871,7 +2871,7 @@ public struct WordDocument: Equatable {
         case .formatting, .paragraphChange, .formatChange, .moveFrom, .moveTo:
             // No body-only mutation to apply for these types yet; honour
             // the source part for dirty-tracking accuracy regardless.
-            partKeyForDirty = sourceToPartKey(revision.source)
+            partKeyForDirty = try sourceToPartKey(revision.source, revisionId: revisionId)
         }
 
         // 移除修訂記錄
@@ -2883,7 +2883,16 @@ public struct WordDocument: Equatable {
     /// key the writer's overlay-mode dirty-gate checks. Mirrors
     /// `DocumentWalker.headerPartKey` / `footerPartKey` for `.header(id:)` /
     /// `.footer(id:)` and routes notes / body to their canonical paths.
-    private func sourceToPartKey(_ source: RevisionSource) -> String {
+    ///
+    /// v0.19.5+ (#56 R5-CONT-3 P1 #3): throws `RevisionError.notFound`
+    /// when source is `.header(id:X)` / `.footer(id:X)` but no container
+    /// with that rId exists. Pre-fix the silent fallback to
+    /// `"word/document.xml"` masked orphan-revision logic bugs (e.g.,
+    /// container was renamed between propagation and accept, or caller
+    /// constructed `.header(id: "rId-typo")` by mistake → wrong-part
+    /// dirty + revision still removed). Surface the failure so the
+    /// caller can rollback the typed Revision removal.
+    private func sourceToPartKey(_ source: RevisionSource, revisionId: Int) throws -> String {
         switch source {
         case .body:
             return "word/document.xml"
@@ -2891,12 +2900,12 @@ public struct WordDocument: Equatable {
             if let h = headers.first(where: { $0.id == id }) {
                 return DocumentWalker.headerPartKey(for: h)
             }
-            return "word/document.xml"
+            throw RevisionError.notFound(revisionId)
         case .footer(let id):
             if let f = footers.first(where: { $0.id == id }) {
                 return DocumentWalker.footerPartKey(for: f)
             }
-            return "word/document.xml"
+            throw RevisionError.notFound(revisionId)
         case .footnote:
             return DocumentWalker.footnotesPartKey
         case .endnote:
@@ -3147,7 +3156,7 @@ public struct WordDocument: Equatable {
                 // source for dirty-tracking and fall through to the
                 // remove-from-document-revisions step. Don't throw notFound
                 // because the operation is semantically "no-op" not "error".
-                partKeyForDirty = sourceToPartKey(revision.source)
+                partKeyForDirty = try sourceToPartKey(revision.source, revisionId: revisionId)
             }
         }
 
