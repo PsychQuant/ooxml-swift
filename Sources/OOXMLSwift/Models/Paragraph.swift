@@ -651,22 +651,12 @@ extension Paragraph {
         return xml
     }
 
-    /// Minimal XML attribute escape (shared with DocxWriter). Local copy to
-    /// avoid cross-module dependency from the model layer.
-    fileprivate static func escapeXMLAttribute(_ s: String) -> String {
-        var result = ""
-        result.reserveCapacity(s.count)
-        for c in s {
-            switch c {
-            case "&": result += "&amp;"
-            case "<": result += "&lt;"
-            case ">": result += "&gt;"
-            case "\"": result += "&quot;"
-            default: result.append(c)
-            }
-        }
-        return result
-    }
+    // v0.19.5+ (#56 R5 P0 #3): the prior fileprivate static escapeXMLAttribute
+    // was deleted. Call sites now route through the shared internal
+    // `escapeXMLAttribute(_:)` from `IO/XMLAttributeEscape.swift`. The shared
+    // helper additionally escapes `'` → `&apos;` (the prior local copy
+    // missed it), closing the apostrophe-injection gap and standardizing on
+    // `&apos;` (not `&#39;`) for byte-equivalence with Word's emit.
 
     // MARK: - Revision Grouping (v0.18.0+)
 
@@ -762,7 +752,7 @@ extension ParagraphProperties {
 
         // 樣式
         if let style = style {
-            parts.append("<w:pStyle w:val=\"\(style)\"/>")
+            parts.append("<w:pStyle w:val=\"\(escapeXMLAttribute(style))\"/>")
         }
 
         // 編號

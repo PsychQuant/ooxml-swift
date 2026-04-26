@@ -374,7 +374,7 @@ extension Drawing {
                                 <pic:cNvPicPr/>
                             </pic:nvPicPr>
                             <pic:blipFill>
-                                <a:blip r:embed="\(imageId)" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/>
+                                <a:blip r:embed="\(escapeXMLAttribute(imageId))" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/>
                                 <a:stretch>
                                     <a:fillRect/>
                                 </a:stretch>
@@ -464,7 +464,7 @@ extension Drawing {
                                 <pic:cNvPicPr/>
                             </pic:nvPicPr>
                             <pic:blipFill>
-                                <a:blip r:embed="\(imageId)" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/>
+                                <a:blip r:embed="\(escapeXMLAttribute(imageId))" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/>
                                 <a:stretch>
                                     <a:fillRect/>
                                 </a:stretch>
@@ -493,7 +493,7 @@ extension Drawing {
         return """
         <a:ln w="\(borderWidth)">
             <a:solidFill>
-                <a:srgbClr val="\(borderColor)"/>
+                <a:srgbClr val="\(escapeXMLAttribute(borderColor))"/>
             </a:solidFill>
         </a:ln>
         """

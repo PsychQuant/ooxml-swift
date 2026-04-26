@@ -209,7 +209,10 @@ public struct CellShading: Equatable {
 
     /// 產生 XML 字串（供段落屬性使用）
     public func toXML() -> String {
-        var attrs = ["w:fill=\"\(fill)\""]
+        // v0.19.5+ (#56 R5 P0 #3): caller-controlled fill / color routed
+        // through escapeXMLAttribute (MCP `set_paragraph_shading`,
+        // `set_table_conditional_style`).
+        var attrs = ["w:fill=\"\(escapeXMLAttribute(fill))\""]
 
         if let pattern = pattern {
             attrs.insert("w:val=\"\(pattern.rawValue)\"", at: 0)
@@ -218,7 +221,7 @@ public struct CellShading: Equatable {
         }
 
         if let color = color {
-            attrs.append("w:color=\"\(color)\"")
+            attrs.append("w:color=\"\(escapeXMLAttribute(color))\"")
         }
 
         return "<w:shd \(attrs.joined(separator: " "))/>"
@@ -355,7 +358,7 @@ public struct TableConditionalStyle: Equatable {
         if properties.bold == true { rPrParts.append("<w:b/>") }
         if properties.italic == true { rPrParts.append("<w:i/>") }
         if let c = properties.color {
-            rPrParts.append("<w:color w:val=\"\(c)\"/>")
+            rPrParts.append("<w:color w:val=\"\(escapeXMLAttribute(c))\"/>")
         }
         if let sz = properties.fontSize {
             rPrParts.append("<w:sz w:val=\"\(sz)\"/>")
@@ -363,7 +366,7 @@ public struct TableConditionalStyle: Equatable {
 
         var tcPrParts: [String] = []
         if let bg = properties.backgroundColor {
-            tcPrParts.append("<w:shd w:val=\"clear\" w:fill=\"\(bg)\"/>")
+            tcPrParts.append("<w:shd w:val=\"clear\" w:fill=\"\(escapeXMLAttribute(bg))\"/>")
         }
 
         var xml = "<w:tblStylePr w:type=\"\(type.rawValue)\">"
@@ -493,7 +496,8 @@ extension TableBorders {
 
 extension Border {
     public func toXML(name: String) -> String {
-        return "<w:\(name) w:val=\"\(style.rawValue)\" w:sz=\"\(size)\" w:color=\"\(color)\"/>"
+        // v0.19.5+ (#56 R5 P0 #3): caller-controlled color routed through escape.
+        return "<w:\(name) w:val=\"\(style.rawValue)\" w:sz=\"\(size)\" w:color=\"\(escapeXMLAttribute(color))\"/>"
     }
 }
 
@@ -600,8 +604,10 @@ extension TableCellProperties {
 
         // 底色
         if let shading = shading {
-            var attrs = "w:fill=\"\(shading.fill)\""
-            if let color = shading.color { attrs += " w:color=\"\(color)\"" }
+            // v0.19.5+ (#56 R5 P0 #3): caller-controlled fill / color routed
+            // through escape (MCP `set_paragraph_shading` for cell shading).
+            var attrs = "w:fill=\"\(escapeXMLAttribute(shading.fill))\""
+            if let color = shading.color { attrs += " w:color=\"\(escapeXMLAttribute(color))\"" }
             if let pattern = shading.pattern { attrs += " w:val=\"\(pattern.rawValue)\"" }
             parts.append("<w:shd \(attrs)/>")
         }

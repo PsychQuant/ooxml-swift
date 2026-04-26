@@ -160,6 +160,39 @@ final class Issue56R4StackTests: XCTestCase {
                              "API-built (position 0) SDT SHALL be emitted AFTER source-positioned runs (legacy post-content path); got: \(emit)")
     }
 
+    // MARK: - §4 P0 #3: XML attribute escape sweep
+
+    func testApplyStyleWithAttackerControlledNameDoesNotInjectOOXML() {
+        var p = Paragraph()
+        // PoC injection: caller-controlled style id closes the w:val attribute,
+        // injects a bookmarkStart, then re-opens a w:pStyle so the rest stays valid.
+        let attackerInput = "Foo\"><w:bookmarkStart w:id=\"99\" w:name=\"PWNED\"/><w:pStyle w:val=\""
+        p.properties.style = attackerInput
+
+        let emit = p.toXML()
+
+        XCTAssertFalse(emit.contains("<w:bookmarkStart w:id=\"99\""),
+                       "Attacker-controlled style id SHALL NOT inject <w:bookmarkStart> via attribute escape; emit was: \(emit)")
+        XCTAssertTrue(emit.contains("&quot;"),
+                      "Emit SHALL contain escaped \" via &quot; for the attacker-controlled value")
+        XCTAssertTrue(emit.contains("&lt;") && emit.contains("&gt;"),
+                      "Emit SHALL contain escaped < and > for the attacker-controlled value")
+    }
+
+    func testCreateStyleWithSpecialCharIdRoundTripsByteEquivalent() {
+        var style = Style(id: "Heading&Title", name: "<Test>", type: .paragraph)
+        style.basedOn = "Normal'Quoted"
+
+        let emit = style.toXML()
+
+        XCTAssertTrue(emit.contains("w:styleId=\"Heading&amp;Title\""),
+                      "Style.id SHALL be escaped (& → &amp;); emit: \(emit)")
+        XCTAssertTrue(emit.contains("<w:name w:val=\"&lt;Test&gt;\"/>"),
+                      "Style.name SHALL be escaped (< → &lt;, > → &gt;); emit: \(emit)")
+        XCTAssertTrue(emit.contains("<w:basedOn w:val=\"Normal&apos;Quoted\"/>"),
+                      "Style.basedOn SHALL be escaped (' → &apos;); emit: \(emit)")
+    }
+
     // Helper: parse raw document.xml string into a WordDocument by writing a
     // minimal docx ZIP and reading via DocxReader. Used by §3 tests that need
     // to inject specific source XML for the parser to assign positions to.
@@ -241,12 +274,84 @@ final class Issue56R4StackTests: XCTestCase {
 // "Issue56R4StackTests SHALL include an allow-list audit table for emit sites
 // NOT routed through escapeXMLAttribute". This is the explicit allow-list of
 // exemptions, NOT a deny-list claiming "all sites covered". A reviewer can
-// verify by checking that every emit site is either (a) routed through
-// `escapeXMLAttribute(_:)` from `XMLAttributeEscape.swift`, or (b) named here
-// with rationale.
+// verify by checking that every caller-controlled String attribute interpolation
+// is either (a) routed through `escapeXMLAttribute(_:)` from
+// `XMLAttributeEscape.swift`, or (b) named here with rationale.
 //
-// Format: `<file>:<line(s)>` — <rationale>
+// Scope: only String values whose source is a public-API parameter, an MCP
+// tool argument, or a model field that originated from a public mutator are
+// in scope. Out-of-scope (always safe, exempt by category):
 //
-// Initial allow-list (populated as §4 sweep proceeds):
-// - (none — every emit site SHALL be routed through escapeXMLAttribute or
-//   listed here with rationale before §4.13 is marked done)
+//   Category A — Numeric attribute values via String(Int) / String(Double)
+//   ─ All sites of the form `w:val="\(intValue)"`, `w:sz="\(size)"`,
+//     `w:id="\(integer)"`, `w:left="\(indent)"`, etc., are out-of-scope:
+//     numeric-to-string conversion produces only digits / sign / decimal,
+//     none of which are XML-special chars. No injection surface.
+//   Category B — Enum rawValue interpolations
+//   ─ All `\(someEnum.rawValue)` where the enum is defined inside ooxml-swift
+//     are constants from a closed set (e.g., `BorderStyle`, `RevisionType`,
+//     `HeaderFooterType`). Author-controlled at build time, not user input.
+//     No injection surface.
+//   Category C — Hardcoded string literals
+//   ─ Sites like `w:type="default"`, `w:val="clear"`, `w:hint="default"`
+//     are author-controlled compile-time constants. No injection surface.
+//   Category D — Pre-validated identifier strings
+//   ─ Relationship IDs like `rId1`, `rId2` produced by RelationshipIdAllocator
+//     are constrained to `r` + digits format by the allocator's API. No
+//     injection surface (covered by allocator unit tests).
+//   Category E — Verbatim XML round-trip (rawXML fields)
+//   ─ `unrecognizedChild.rawXML`, `alternateContent.rawXML`,
+//     `customXmlBlock.rawXML`, `bidiOverride.rawXML`, `smartTag.rawXML`
+//     hold a verbatim XML *fragment* (not an attribute value). They are
+//     emitted as-is to preserve byte-equivalence with source. The Reader
+//     captured them, so they are well-formed XML by construction.
+//
+// Explicit named exemptions (Category F — site-specific rationale):
+//
+//   File:Line — Rationale
+//   ─ packages/ooxml-swift/Sources/OOXMLSwift/IO/DocxWriter.swift
+//     ─ root preamble emits (`<?xml version="1.0" ...?>`, `xmlns:*` declarations)
+//       are author-controlled namespace constants, not user input.
+//   ─ packages/ooxml-swift/Sources/OOXMLSwift/Models/Paragraph.swift
+//     ─ Footnote/Endnote reference rStyle val "FootnoteReference" /
+//       "EndnoteReference" are hardcoded style names, not user input.
+//   ─ packages/ooxml-swift/Sources/OOXMLSwift/IO/SDTParser.swift
+//     ─ Tag/alias values emitted by SDT parser come from typed parser output,
+//       routed through hyperlink/SDT models that themselves emit via
+//       escape-aware paths.
+//
+// Test fixture builders (Category G — test-only emitters):
+//   ─ buildMinimalDocx in this file emits known-safe constants for ZIP
+//     packaging (Content_Types.xml, .rels). Test-only — never reachable
+//     from production MCP tool surface.
+//
+// Alternate escape helpers (Category H — pending consolidation):
+//   ─ Sites that route caller-controlled values through `escapeXML(_:)` (a
+//     private helper in `Hyperlink.swift`, `DocxWriter.swift`, etc.) escape
+//     the four attribute-significant chars (& < > ") and do NOT have a
+//     quote-injection vulnerability for caller input. Specific sites:
+//     ─ Hyperlink.swift around line 210 (anchor / target / display text)
+//     ─ Field.swift around 157 (text input field)
+//     ─ Revision.swift around 187 (revision wrapper attributes)
+//     ─ Bookmark.swift around 67 (bookmark range marker name)
+//     ─ DocxWriter.swift around 608 (numbering definition values)
+//     These remain on the local `escapeXML` helper for v0.19.5; the
+//     consolidation onto the shared `escapeXMLAttribute(_:)` is a
+//     follow-up (post-R5) consistency cleanup. No injection surface
+//     because the local helper does cover all four attribute-significant
+//     chars; only `'` is missed, which has no attribute-injection effect
+//     when emitted between double quotes (the only attribute-quote style
+//     ooxml-swift uses).
+//   ─ MathComponent.swift `escapeMathXML` covers `& < >` (sufficient for
+//     element text). Sites that use it for ATTRIBUTE values (e.g.,
+//     `MathAccent.accentChar` at line 144) were migrated to
+//     `escapeXMLAttribute` in R5 P0 #3 because attribute escape requires
+//     `"` coverage too. Element-text usage of `escapeMathXML` (e.g.,
+//     `MathRun.text` at line 49) remains intentional — `"` is allowed
+//     inside element text, so the narrower escape is correct.
+//
+// Reviewer protocol: when adding a NEW caller-controlled String attribute
+// emit site, EITHER route through `escapeXMLAttribute(_:)`, OR add the
+// site to this allow-list with explicit rationale. If the rationale is
+// "I think it's safe", that's not enough — must cite the category above
+// or add a new explicit Category F entry with concrete reasoning.

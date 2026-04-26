@@ -759,7 +759,9 @@ public struct DocxWriter {
     private static func renderLatentStylesBlock(_ entries: [LatentStyle]) -> String {
         var xml = "<w:latentStyles>"
         for e in entries {
-            var attrs = "w:name=\"\(e.name)\""
+            // v0.19.5+ (#56 R5 P0 #3): caller-controlled latent style name
+            // routed through escapeXMLAttribute (MCP `set_latent_styles`).
+            var attrs = "w:name=\"\(escapeXMLAttribute(e.name))\""
             if let p = e.uiPriority { attrs += " w:uiPriority=\"\(p)\"" }
             if e.semiHidden { attrs += " w:semiHidden=\"1\"" }
             if e.unhideWhenUsed { attrs += " w:unhideWhenUsed=\"1\"" }
