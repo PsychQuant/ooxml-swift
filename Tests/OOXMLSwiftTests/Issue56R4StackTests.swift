@@ -970,6 +970,61 @@ final class Issue56R4StackTests: XCTestCase {
         }
     }
 
+    // MARK: - §11.3 R5-CONTINUATION P0 #3: replaceText(.all) containers walk bodyChildren
+
+    /// v0.19.5+ (#56 R5-CONT P0 #3): R5 verify (Codex P1 + Regression F1 +
+    /// DA C1) flagged `Document.replaceText(scope: .all)` container loops
+    /// iterate `headers[i].paragraphs[j]` (flat backward-compat view).
+    /// After R5 P0 #6 elevated container `<w:tbl>` direct children into
+    /// `bodyChildren`, header table cell text became visible to readers /
+    /// writers / hyperlink CRUD but `replaceText` could not reach it →
+    /// silent edit-failure recurs in the new surface.
+    func testReplaceTextInsideHeaderTableCellAppliesAndPersists() throws {
+        var doc = WordDocument()
+
+        // Header containing a 1×1 table whose cell paragraph carries
+        // "old-cell-text".
+        var innerPara = Paragraph()
+        innerPara.runs.append(Run(text: "old-cell-text"))
+        let cell = TableCell(paragraphs: [innerPara])
+        let row = TableRow(cells: [cell])
+        let table = Table(rows: [row])
+        var header = Header(id: "rId10", paragraphs: [], type: .default,
+                            originalFileName: "header1.xml")
+        header.bodyChildren.append(.table(table))
+        doc.headers = [header]
+
+        let count = try doc.replaceText(
+            find: "old-cell-text",
+            with: "new-cell-text",
+            options: ReplaceOptions(scope: .all)
+        )
+
+        XCTAssertEqual(count, 1,
+                       "replaceText SHALL substitute exactly 1 occurrence inside header table cell")
+        XCTAssertTrue(doc.modifiedParts.contains("word/header1.xml"),
+                      "modifiedParts SHALL include the header part containing the mutated table cell, got: \(doc.modifiedParts)")
+
+        // In-memory verification: the mutated cell paragraph carries the new text.
+        guard case .table(let updatedTable) = doc.headers[0].bodyChildren[0] else {
+            return XCTFail("Expected first header child to remain a table")
+        }
+        let updatedPara = updatedTable.rows[0].cells[0].paragraphs[0]
+        XCTAssertEqual(updatedPara.runs.first?.text, "new-cell-text",
+                       "Header table cell paragraph SHALL carry the replaced text")
+
+        // Roundtrip the mutation through write→reread.
+        let reread = try roundtrip(doc)
+        guard let rHeader = reread.headers.first(where: { $0.originalFileName == "header1.xml" }),
+              case .table(let rTable) = rHeader.bodyChildren.first ?? .paragraph(Paragraph()),
+              let rCellPara = rTable.rows.first?.cells.first?.paragraphs.first
+        else {
+            return XCTFail("Re-read header missing or empty")
+        }
+        XCTAssertEqual(rCellPara.runs.first?.text, "new-cell-text",
+                       "Roundtrip-persisted header table cell SHALL carry replaced text")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")

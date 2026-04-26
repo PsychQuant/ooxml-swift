@@ -426,59 +426,57 @@ public struct WordDocument: Equatable {
         // Headers / footers / footnotes / endnotes — only under .all scope
         guard options.scope == .all else { return count }
 
-        // v0.19.5+ (#56 R5 P0 #5): containers route through
-        // `replaceInParagraphSurfaces` for symmetry with the body path.
-        // Prior behavior walked only `para.runs`, silently dropping edits to
-        // text inside hyperlinks / fieldSimples / alternateContents living in
-        // headers/footers/footnotes/endnotes (DA-N3 from R4 verify).
+        // v0.19.5+ (#56 R5-CONT P0 #3): containers route through the same
+        // `replaceTextInBodyChildren` recursion the body path uses, so text
+        // inside container tables / nested tables / SDT children is reachable.
+        // Pre-fix the four loops iterated `.paragraphs` (the R5 P0 #6 flat
+        // backward-compat view) — `replaceText(scope: .all)` against a
+        // header / footer / note table cell silently returned 0 matches
+        // even though the text existed and round-tripped on save (verify
+        // R5 P0 #3 / Codex P1 / Regression F1 / DA C1).
+        // Local-var copy avoids the Swift exclusivity violation that
+        // `&self` (the recursion lock on `replaceTextInBodyChildren`)
+        // would otherwise raise for `&headers[i].bodyChildren`.
         for i in 0..<headers.count {
             let beforeCount = count
-            for j in 0..<headers[i].paragraphs.count {
-                var para = headers[i].paragraphs[j]
-                count += try Self.replaceInParagraphSurfaces(
-                    &para, find: find, with: replacement, options: options
-                )
-                headers[i].paragraphs[j] = para
-            }
+            var children = headers[i].bodyChildren
+            count += try replaceTextInBodyChildren(
+                &children, find: find, with: replacement, options: options
+            )
+            headers[i].bodyChildren = children
             if count > beforeCount {
                 modifiedParts.insert("word/\(headers[i].fileName)")
             }
         }
         for i in 0..<footers.count {
             let beforeCount = count
-            for j in 0..<footers[i].paragraphs.count {
-                var para = footers[i].paragraphs[j]
-                count += try Self.replaceInParagraphSurfaces(
-                    &para, find: find, with: replacement, options: options
-                )
-                footers[i].paragraphs[j] = para
-            }
+            var children = footers[i].bodyChildren
+            count += try replaceTextInBodyChildren(
+                &children, find: find, with: replacement, options: options
+            )
+            footers[i].bodyChildren = children
             if count > beforeCount {
                 modifiedParts.insert("word/\(footers[i].fileName)")
             }
         }
         let beforeFootnotes = count
         for i in 0..<footnotes.footnotes.count {
-            for j in 0..<footnotes.footnotes[i].paragraphs.count {
-                var para = footnotes.footnotes[i].paragraphs[j]
-                count += try Self.replaceInParagraphSurfaces(
-                    &para, find: find, with: replacement, options: options
-                )
-                footnotes.footnotes[i].paragraphs[j] = para
-            }
+            var children = footnotes.footnotes[i].bodyChildren
+            count += try replaceTextInBodyChildren(
+                &children, find: find, with: replacement, options: options
+            )
+            footnotes.footnotes[i].bodyChildren = children
         }
         if count > beforeFootnotes {
             modifiedParts.insert("word/footnotes.xml")
         }
         let beforeEndnotes = count
         for i in 0..<endnotes.endnotes.count {
-            for j in 0..<endnotes.endnotes[i].paragraphs.count {
-                var para = endnotes.endnotes[i].paragraphs[j]
-                count += try Self.replaceInParagraphSurfaces(
-                    &para, find: find, with: replacement, options: options
-                )
-                endnotes.endnotes[i].paragraphs[j] = para
-            }
+            var children = endnotes.endnotes[i].bodyChildren
+            count += try replaceTextInBodyChildren(
+                &children, find: find, with: replacement, options: options
+            )
+            endnotes.endnotes[i].bodyChildren = children
         }
         if count > beforeEndnotes {
             modifiedParts.insert("word/endnotes.xml")
