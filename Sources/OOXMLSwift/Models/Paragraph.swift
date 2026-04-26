@@ -261,6 +261,9 @@ extension Paragraph {
             || !unrecognizedChildren.isEmpty
             || runs.contains(where: { $0.position > 0 })
             || hyperlinks.contains(where: { $0.position > 0 })
+            // v0.19.4+ (#56 R3-NEW-2): paragraph-level <w:sdt> with source
+            // position participates in sort-by-position emit.
+            || contentControls.contains(where: { $0.position > 0 })
     }
 
     /// 轉換為 OOXML XML 字串
@@ -495,6 +498,12 @@ extension Paragraph {
         for child in unrecognizedChildren {
             positioned.append((child.position, .xml(child.rawXML)))
         }
+        // v0.19.4+ (#56 R3-NEW-2): paragraph-level <w:sdt> with source position
+        // joins the sorted emit. Position-0 controls are API-built and stay on
+        // the post-content legacy path below for backward-compatibility.
+        for control in contentControls where control.position > 0 {
+            positioned.append((control.position, .xml(control.toXML())))
+        }
 
         // Stable sort by position. Equal positions retain insertion order.
         positioned.sort { $0.position < $1.position }
@@ -543,7 +552,12 @@ extension Paragraph {
         // single-list collections on a sort-routed paragraph still gets their
         // children emitted. For source-loaded paragraphs these collections are
         // empty (parser populates the positioned variants instead).
-        for control in contentControls {
+        //
+        // v0.19.4+ (#56 R3-NEW-2): only emit position-0 contentControls here
+        // (API-built). Position>0 controls were already emitted in the sorted
+        // list above at their source position; emitting them again would
+        // duplicate the SDT in the output.
+        for control in contentControls where control.position == 0 {
             xml += control.toXML()
         }
         if commentRangeMarkers.isEmpty {
