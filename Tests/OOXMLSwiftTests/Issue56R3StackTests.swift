@@ -297,6 +297,45 @@ final class Issue56R3StackTests: XCTestCase {
         )
     }
 
+    // MARK: - R3-NEW-5: nextBookmarkId calibration SHALL scan all bookmark-bearing document parts
+
+    /// Spec scenario "Bookmark in table cell calibrates nextBookmarkId":
+    /// max id 99 inside a table cell, expect nextBookmarkId == 100.
+    ///
+    /// Pre-v0.19.4: calibration only iterated `body.children` matching `.paragraph`,
+    /// missed `.table` cells. Subsequent `insertBookmark` would allocate id 1
+    /// (no calibration applied) → collision with source id 99 → silent
+    /// overwrite or schema rejection.
+    func testBookmarkInTableCell_CalibratesNextBookmarkId() throws {
+        let docxURL = try Self.buildBookmarkInTableFixture(maxId: 99)
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+
+        let newId = try doc.insertBookmark(name: "added")
+        XCTAssertGreaterThan(
+            newId, 99,
+            "nextBookmarkId must be calibrated past table-cell source max (99). Got \(newId)."
+        )
+    }
+
+    /// Spec scenario "Bookmark in header calibrates nextBookmarkId":
+    /// body max 5, header max 50, expect nextBookmarkId == 51.
+    func testBookmarkInHeader_CalibratesNextBookmarkId() throws {
+        let docxURL = try Self.buildBookmarkInHeaderFixture(bodyId: 5, headerId: 50)
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+
+        let newId = try doc.insertBookmark(name: "added")
+        XCTAssertGreaterThan(
+            newId, 50,
+            "nextBookmarkId must be calibrated past header source max (50). Got \(newId)."
+        )
+    }
+
     // MARK: - Fixture builders
 
     /// Builds a minimal valid `.docx` whose body contains exactly one paragraph
@@ -588,6 +627,163 @@ final class Issue56R3StackTests: XCTestCase {
 
         let docxURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("r3-rev-fixture-\(UUID().uuidString).docx")
+        try ZipHelper.zip(stagingDir, to: docxURL)
+        return docxURL
+    }
+
+    /// Builds a `.docx` whose ONLY bookmark lives inside a table cell paragraph,
+    /// using the supplied numeric id. Used by R3-NEW-5 table-cell calibration test.
+    private static func buildBookmarkInTableFixture(maxId: Int) throws -> URL {
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r3-tbl-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: stagingDir.appendingPathComponent("_rels"),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: stagingDir.appendingPathComponent("word/_rels"),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+            <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+            <Default Extension="xml" ContentType="application/xml"/>
+            <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        </Types>
+        """
+        try contentTypes.write(
+            to: stagingDir.appendingPathComponent("[Content_Types].xml"),
+            atomically: true, encoding: .utf8
+        )
+
+        let rootRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rootRels.write(
+            to: stagingDir.appendingPathComponent("_rels/.rels"),
+            atomically: true, encoding: .utf8
+        )
+
+        let docRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        </Relationships>
+        """
+        try docRels.write(
+            to: stagingDir.appendingPathComponent("word/_rels/document.xml.rels"),
+            atomically: true, encoding: .utf8
+        )
+
+        let documentXml = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:body>
+                <w:tbl>
+                    <w:tr>
+                        <w:tc>
+                            <w:p><w:bookmarkStart w:id="\(maxId)" w:name="cell-bm"/><w:r><w:t>cell</w:t></w:r><w:bookmarkEnd w:id="\(maxId)"/></w:p>
+                        </w:tc>
+                    </w:tr>
+                </w:tbl>
+                <w:p><w:r><w:t>after table</w:t></w:r></w:p>
+            </w:body>
+        </w:document>
+        """
+        try documentXml.write(
+            to: stagingDir.appendingPathComponent("word/document.xml"),
+            atomically: true, encoding: .utf8
+        )
+
+        let docxURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r3-tbl-fixture-\(UUID().uuidString).docx")
+        try ZipHelper.zip(stagingDir, to: docxURL)
+        return docxURL
+    }
+
+    /// Builds a `.docx` with a body bookmark (id `bodyId`) AND a header bookmark
+    /// (id `headerId`). Used by R3-NEW-5 header calibration test.
+    private static func buildBookmarkInHeaderFixture(bodyId: Int, headerId: Int) throws -> URL {
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r3-hdr-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: stagingDir.appendingPathComponent("_rels"),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: stagingDir.appendingPathComponent("word/_rels"),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+            <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+            <Default Extension="xml" ContentType="application/xml"/>
+            <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+            <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+        </Types>
+        """
+        try contentTypes.write(
+            to: stagingDir.appendingPathComponent("[Content_Types].xml"),
+            atomically: true, encoding: .utf8
+        )
+
+        let rootRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rootRels.write(
+            to: stagingDir.appendingPathComponent("_rels/.rels"),
+            atomically: true, encoding: .utf8
+        )
+
+        let docRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+        </Relationships>
+        """
+        try docRels.write(
+            to: stagingDir.appendingPathComponent("word/_rels/document.xml.rels"),
+            atomically: true, encoding: .utf8
+        )
+
+        let documentXml = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <w:body>
+                <w:p><w:bookmarkStart w:id="\(bodyId)" w:name="body-bm"/><w:r><w:t>body</w:t></w:r><w:bookmarkEnd w:id="\(bodyId)"/></w:p>
+                <w:sectPr><w:headerReference r:id="rId10" w:type="default"/></w:sectPr>
+            </w:body>
+        </w:document>
+        """
+        try documentXml.write(
+            to: stagingDir.appendingPathComponent("word/document.xml"),
+            atomically: true, encoding: .utf8
+        )
+
+        let headerXml = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:p><w:bookmarkStart w:id="\(headerId)" w:name="header-bm"/><w:r><w:t>header</w:t></w:r><w:bookmarkEnd w:id="\(headerId)"/></w:p>
+        </w:hdr>
+        """
+        try headerXml.write(
+            to: stagingDir.appendingPathComponent("word/header1.xml"),
+            atomically: true, encoding: .utf8
+        )
+
+        let docxURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r3-hdr-fixture-\(UUID().uuidString).docx")
         try ZipHelper.zip(stagingDir, to: docxURL)
         return docxURL
     }
