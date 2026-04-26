@@ -8,7 +8,7 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [0.19.5] - 2026-04-26
 
-### Fixed — 6 P0 + 5 P1 + R5-CONT 7 P0 + 5 P1 + R5-CONT-2 5 P0 + 4 P1 + R5-CONT-3 1 P0 + 4 P1 from PsychQuant/che-word-mcp#56 rounds 4 + 5 + 6 + 7 verify
+### Fixed — 6 P0 + 5 P1 + R5-CONT 7 P0 + 5 P1 + R5-CONT-2 5 P0 + 4 P1 + R5-CONT-3 1 P0 + 4 P1 + R5-CONT-4 1 P0 + 3 P1 from PsychQuant/che-word-mcp#56 rounds 4 + 5 + 6 + 7 + 8 verify
 
 The R3 stack landed in commits dated 2026-04-26 but the round-4 6-AI verify (Agent Team × 5 + Codex) returned BLOCK with 6 P0 + 7 P1 findings spanning walker asymmetry, sentinel collision, attribute-escape gaps, block-level SDT propagation, container-symmetric `replaceText`, and container `<w:tbl>` capture. The R5 stack closed those (see "R5 stack" sub-block below). The round-5 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321866434) then returned BLOCK with 7 NEW P0 findings rooted in a single structural pattern: R5 P0 #6 promoted `bodyChildren` to canonical container storage with `paragraphs` as a flat backward-compat computed view, but several call sites still iterated `.paragraphs`, silently dropping anything inside container tables / contentControls. The R5-CONTINUATION sub-block (§11) closes those + 5 adjacent P1 findings via the same per-task verify gate discipline, in the same release. v0.19.5 ships both stacks as a single coordinated tag.
 
@@ -156,6 +156,45 @@ Caller pattern: call `repairContainerFileNames()` just before save when construc
 - `Document.containerFileNameCollisions: [(scope: String, fileName: String, indices: [Int])]` — public diagnostic
 - `Document.repairContainerFileNames()` — public mutator (idempotent)
 - `sourceToPartKey` is private — internal change, no API impact
+
+### R5-CONT-4 sub-block — 1 P0 + 3 P1 from R5-CONT-3 6-AI verify (round-8 acceptRevision symmetry + matrix-pin tightening)
+
+The R5-CONT-3 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4322571860 + Codex confirmation 4322576289) returned BLOCK with 1 P0 + 4 P1. The P0: `acceptRevision` typed cases (`.insertion` / `.deletion` / `.formatting` / `.paragraphChange` / `.formatChange` / `.moveFrom` / `.moveTo`) all left paragraph/run revision markers in place — `paragraph.revisions[id]` / `run.revisionId` / `run.formatChangeRevisionId` / `paragraphFormatChangeRevisionId` were never cleared, so `Paragraph.toXML()` re-emitted `<w:ins>` / `<w:del>` / `<w:rPrChange>` / `<w:pPrChange>` wrappers on save. API state said "accepted" but file persistence still had the wrapper. Same class as R5-CONT-2 P0 #1 + R5-CONT-3 P0 #1 — but on the ACCEPT side and across ALL 7 typed branches. R5-CONT-3's §15.6 matrix-pin had an `if operation == "reject"` guard that documented the bug as expected behavior. R5-CONT-4 closes the P0 by mirroring R5-CONT-3's clearMarker pattern onto the accept side, removes the asymmetry guard so the matrix-pin asserts both sides, and replaces a ternary `XCTAssertNil` anti-pattern that false-passed on regression. §17.4 closes the related Logic HIGH `repairContainerFileNames` rels-dirty-marking gap.
+
+#### R5-CONT-4 P0 #1 — `acceptRevision` typed cases clear paragraph + run revision state
+
+`acceptRevision` typed branches now route through `applyToParagraph(in: revision.source, mutate: clearAllMarkers)` with a `clearAllMarkers` closure that:
+- removes the typed Revision id from `paragraph.revisions`
+- clears `run.revisionId` for any matching run
+- clears `paragraph.paragraphFormatChangeRevisionId` (for pPrChange)
+- clears `run.formatChangeRevisionId` (for rPrChange)
+
+Mirror of R5-CONT-3 P0 #1 + P1 #2's reject-side fix, applied to all 7 accept-side typed branches. `.deletion` keeps the `removeText` behavior AND adds `clearAllMarkers`. Throws `RevisionError.notFound` on miss instead of silent no-op. `modifiedParts` marked with the actual mutated part. Closes verify R5-CONT-3 P0 #1 + DA R6-NEW-1 (4 adversarial tests DA added all failed pre-fix: `.insertion` → `<w:ins>` remains; `.deletion` → `<w:del>` remains with empty `<w:delText>` — worse corruption; `.formatChange` → `<w:rPrChange>` remains; `.paragraphChange` → `<w:pPrChange>` remains).
+
+#### R5-CONT-4 P1 #2 — Matrix-pin asserts both accept AND reject — removes asymmetry guard
+
+R5-CONT-3's `testRevisionTypeMatrixAcceptRejectCompleteness` had `if operation == "reject"` guarding the paragraph-state cleanup assertions, with comment "consistent with their CURRENT contracts". R5-CONT-3 verify proved that documented "current contract" WAS the bug: the guard hid the §17.1 P0. R5-CONT-4 removes the guard. Both accept and reject SHALL satisfy the same paragraph-state cleanup invariants. The matrix now exercises 14 cases (7 typed Revision types × accept + reject) and asserts file-state convergence on EVERY case. Closes verify R5-CONT-3 P1 §15.6.
+
+#### R5-CONT-4 P1 #3 — Replace ternary `XCTAssertNil` anti-pattern with `XCTAssertNotEqual`
+
+The matrix-pin had `XCTAssertNil(<bool> ? 1000 : nil)` — if a regression set `revisionId = 2000` instead of nil, the ternary would still evaluate to nil (because the `<bool>` would be false) and the assertion would PASS, silently masking the bug. Replaced with `XCTAssertNotEqual(value, 1000)`, which fails for both nil-but-wrong-value AND non-cleared-marker regressions. Closes verify R5-CONT-3 P1 §15.6 / DA R6-NEW-3 / Logic L7.
+
+#### R5-CONT-4 §17.4 — `repairContainerFileNames` marks document rels + content-types dirty
+
+Pre-fix `repairContainerFileNames` reassigned `originalFileName` and marked the renamed container's part dirty (e.g., `word/header2.xml`), but `word/_rels/document.xml.rels` still referenced the OLD path (`header1.xml`) and `[Content_Types].xml` still listed it. `hasNewTypedRelationships` returned false (header IDs unchanged) so the writer's overlay-mode skipped re-emitting `document.xml.rels`. After save, rels pointed to `header1.xml` but the actual file lived at `header2.xml` — Word couldn't open the result. Fix: introduces a `renamed` flag; when ANY rename occurs, marks BOTH `word/_rels/document.xml.rels` AND `[Content_Types].xml` dirty so the writer's overlay-mode re-emits both with the new container fileName references. New test `testRepairContainerFileNamesDirtiesDocumentRels` verifies the dirty-set membership. Closes verify R5-CONT-3 Logic HIGH §15.4.
+
+### Tests — R5-CONT-4 stack
+
+- 2 new tests in `Tests/OOXMLSwiftTests/Issue56R4StackTests.swift` (one per §17.1 P0 + §17.4 Logic HIGH); §17.2 + §17.3 tighten the existing matrix-pin from §15.6
+- Suite total: 652 tests pass / 1 skipped / 0 failures (650 R5-CONT-3 baseline + 2 R5-CONT-4 new)
+
+### Caveats — R5-CONT-4
+
+- **§15.5 deferred (contested finding)**: R5-CONT-3 verify Logic HIGH flagged `removeHyperlinkRelTarget`'s legacy doc-scope sweep as over-aggressive (could delete legitimate body rels when a header rel uses the same rId). Codex independently assessed §15.5 as appropriate for its narrow scope (sweep only fires for non-body partKey, the colliding-rId-as-legitimate-body-rel scenario requires migrated docs that already had rId scope ambiguity). Deferred pending agreement; the contested finding is documented here so consumers know the conservative behavior is per-design under at least one reviewer's interpretation.
+
+### API additions (R5-CONT-4, additive — no breaking change vs. R5-CONT-3 contract)
+
+- No new public API. R5-CONT-4 is internal (acceptRevision branches) + test-tightening (matrix-pin) + writer dirty-set repair (`repairContainerFileNames`).
 
 ### R5 stack — original 6 P0 + 5 P1 (preserved verbatim from initial v0.19.5 draft)
 
