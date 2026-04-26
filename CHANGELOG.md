@@ -6,6 +6,63 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.19.6] - 2026-04-27
+
+### Fixed — PsychQuant/che-word-mcp#58 (sub-stack A of document-content-preservation)
+
+Body-level `<w:bookmarkStart>` / `<w:bookmarkEnd>` (e.g., TOC `_Toc<digits>` anchors that wrap multiple paragraphs) were silently dropped on body-mutating save. `DocxReader.parseBodyChildren` switch only handled `<w:p>` / `<w:tbl>` / `<w:sdt>`; the `default: continue` branch silently dropped any other direct child of `<w:body>`. Reproduced on the thesis fixture: 1 of 45 bookmarks lost on round-trip (the TOC anchor matching `_Toc\d+`).
+
+#### Architectural change: BodyChild typed + raw catch-all
+
+`BodyChild` enum gains two cases under the unifying principle "**if not typed, preserve as raw**":
+
+```swift
+public enum BodyChild: Equatable {
+    case paragraph(Paragraph)
+    case table(Table)
+    case contentControl(ContentControl, children: [BodyChild])
+    case bookmarkMarker(BookmarkRangeMarker)        // ← NEW typed
+    case rawBlockElement(RawElement)                 // ← NEW generic catch-all
+}
+```
+
+- `parseBodyChildren` switch gains explicit `case "bookmarkStart"` and `case "bookmarkEnd"` branches producing `BodyChild.bookmarkMarker(BookmarkRangeMarker(...))`.
+- The `default:` branch now captures unrecognized elements as `BodyChild.rawBlockElement(RawElement(name:..., xml:...))` — same architectural pattern as `Run.rawElements` (v0.14.0+, #52). Forward-compatible with other EG_BlockLevelElts members (`<w:moveFromRangeStart>`, body-level `<w:commentRangeStart>`, vendor extensions).
+- `<w:sectPr>` gets an explicit `case "sectPr": continue` to preserve pre-fix behavior (it's parsed separately into `WordDocument.sectionProperties`, not into `BodyChild`).
+
+#### `BookmarkRangeMarker.name: String?` field
+
+Added `name: String?` (default nil) to `BookmarkRangeMarker` so body-level marker entries can carry the bookmark's name (paragraph-level markers have the name on `Paragraph.bookmarks`, but body-level markers have no enclosing paragraph). Existing initializer call sites unaffected (new param has default).
+
+#### `nextBookmarkId` calibration extension
+
+The `nextBookmarkId` calibration walker now ALSO walks body-level `BookmarkRangeMarker` entries across body / headers / footers / footnotes / endnotes — not just paragraph-level `paragraph.bookmarkMarkers`. This prevents future API-built bookmarks from colliding with existing body-level ids.
+
+#### Cross-cutting matrix-pin (initial version)
+
+New `testDocumentContentEqualityInvariant` (in `Tests/OOXMLSwiftTests/Issue58_60ContentPreservationTests.swift`) asserts content-equality round-trip on the thesis fixture across preservation classes:
+
+- **Sub-stack A (this version)**: `<w:bookmarkStart>` count parity (catches #58 class). Test passes with 45=45 on thesis fixture.
+- **Sub-stack B (lands with v0.19.7 / #59)**: `<w:t>` total character content parity.
+- **Sub-stack C (lands with v0.20.0 / #60)**: `<w:rFonts>` / `<w:noProof>` / `<w:lang>` / `<w:kern>` / `w14:*` count parity.
+
+The pin asserts CONTENT equality (counts and joined-strings), not BYTE equality — Word's own canonicalization (e.g., adjacent run consolidation) is allowed to differ. Same architectural pattern as R5-CONT-4's `testRevisionTypeMatrixAcceptRejectCompleteness` structural-symmetry pin.
+
+### Tests
+
+- 4 new tests in `Tests/OOXMLSwiftTests/Issue58_60ContentPreservationTests.swift`: `testBodyLevelBookmarkRoundTripPreserved`, `testBodyLevelUnknownElementPreservedAsRaw`, `testNextBookmarkIdReflectsBodyLevelBookmarksAfterRead`, `testDocumentContentEqualityInvariant` (initial version)
+- Suite total: 656 tests pass / 1 skipped / 0 failures (652 v0.19.5 baseline + 4 v0.19.6 new tests)
+
+### API additions (v0.19.6, additive — no breaking change vs v0.19.5 contract)
+
+- `BodyChild.bookmarkMarker(BookmarkRangeMarker)` — typed body-level bookmark marker
+- `BodyChild.rawBlockElement(RawElement)` — generic catch-all for unrecognized direct children of `<w:body>`
+- `BookmarkRangeMarker.name: String?` — new optional field; default nil; existing callers unaffected
+
+### Spectra change
+
+This release implements sub-stack A of `che-word-mcp-issue-58-59-60-document-content-preservation` (sub-stack B → v0.19.7 / #59 whitespace overlay; sub-stack C → v0.20.0 / #60 RunProperties audit + final matrix-pin extension).
+
 ## [0.19.5] - 2026-04-26
 
 ### Fixed — 6 P0 + 5 P1 + R5-CONT 7 P0 + 5 P1 + R5-CONT-2 5 P0 + 4 P1 + R5-CONT-3 1 P0 + 4 P1 + R5-CONT-4 1 P0 + 3 P1 from PsychQuant/che-word-mcp#56 rounds 4 + 5 + 6 + 7 + 8 verify

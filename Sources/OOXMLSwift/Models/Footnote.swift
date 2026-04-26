@@ -34,7 +34,8 @@ public struct Footnote: Equatable {
                     if let np = newIter.next() {
                         result.append(.paragraph(np))
                     }
-                case .table, .contentControl:
+                case .table, .contentControl, .bookmarkMarker, .rawBlockElement:
+                    // Non-paragraph children (incl. body-level markers per #58) pass through unchanged.
                     result.append(child)
                 }
             }
@@ -210,7 +211,8 @@ public struct Endnote: Equatable {
                     if let np = newIter.next() {
                         result.append(.paragraph(np))
                     }
-                case .table, .contentControl:
+                case .table, .contentControl, .bookmarkMarker, .rawBlockElement:
+                    // Non-paragraph children (incl. body-level markers per #58) pass through unchanged.
                     result.append(child)
                 }
             }

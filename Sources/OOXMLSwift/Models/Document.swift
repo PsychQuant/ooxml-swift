@@ -195,6 +195,10 @@ public struct WordDocument: Equatable {
             return table.getText() + "\n"
         case .contentControl(_, let children):
             return children.map { textOfBodyChild($0) }.joined()
+        case .bookmarkMarker, .rawBlockElement:
+            // Body-level markers (bookmarks / raw block elements) carry no
+            // user-visible text. PsychQuant/che-word-mcp#58.
+            return ""
         }
     }
 
@@ -217,6 +221,9 @@ public struct WordDocument: Equatable {
             break
         case .contentControl(_, let children):
             for c in children { collectTopLevelParagraphs(c, into: &result) }
+        case .bookmarkMarker, .rawBlockElement:
+            // No paragraphs to collect from body-level markers (#58).
+            break
         }
     }
 
@@ -243,6 +250,9 @@ public struct WordDocument: Equatable {
             }
         case .contentControl(_, let children):
             for c in children { collectAllParagraphs(c, into: &result) }
+        case .bookmarkMarker, .rawBlockElement:
+            // Body-level markers contain no paragraphs (#58).
+            break
         }
     }
 
@@ -351,6 +361,9 @@ public struct WordDocument: Equatable {
         var count = 0
         for i in 0..<children.count {
             switch children[i] {
+            case .bookmarkMarker, .rawBlockElement:
+                // Body-level markers contain no replaceable text (#58).
+                continue
             case .paragraph(var para):
                 count += try Self.replaceInParagraphSurfaces(
                     &para, find: find, with: replacement, options: options
@@ -392,6 +405,9 @@ public struct WordDocument: Equatable {
         // AlternateContent.fallbackRuns are no longer silently dropped.
         for i in 0..<body.children.count {
             switch body.children[i] {
+            case .bookmarkMarker, .rawBlockElement:
+                // Body-level markers contain no replaceable text (#58).
+                continue
             case .paragraph(var para):
                 count += try Self.replaceInParagraphSurfaces(
                     &para, find: find, with: replacement, options: options
@@ -1769,6 +1785,9 @@ public struct WordDocument: Equatable {
         apply: (inout Hyperlink) -> Void
     ) -> Bool {
         switch child {
+        case .bookmarkMarker, .rawBlockElement:
+            // Body-level markers carry no hyperlinks (#58).
+            return false
         case .paragraph(var para):
             if let idx = para.hyperlinks.firstIndex(where: { $0.id == hyperlinkId }) {
                 apply(&para.hyperlinks[idx])
@@ -1866,6 +1885,9 @@ public struct WordDocument: Equatable {
         captureRelationshipId: inout String?
     ) -> Bool {
         switch child {
+        case .bookmarkMarker, .rawBlockElement:
+            // Body-level markers carry no hyperlinks (#58).
+            return false
         case .paragraph(var para):
             if let idx = para.hyperlinks.firstIndex(where: { $0.id == hyperlinkId }) {
                 captureRelationshipId = para.hyperlinks[idx].relationshipId
@@ -2843,6 +2865,9 @@ public struct WordDocument: Equatable {
     ) -> String? {
         for i in 0..<children.count {
             switch children[i] {
+            case .bookmarkMarker, .rawBlockElement:
+                // Body-level markers contain no paragraphs to transform (#58).
+                continue
             case .paragraph(var para):
                 if transform(&para) {
                     children[i] = .paragraph(para)
@@ -3106,6 +3131,10 @@ public struct WordDocument: Equatable {
         for i in 0..<children.count {
             if hit { return }
             switch children[i] {
+            case .bookmarkMarker, .rawBlockElement:
+                // Body-level markers don't count as paragraphs and contain
+                // no paragraphs to mutate (#58).
+                continue
             case .paragraph(var para):
                 if counter == target {
                     mutate(&para)
@@ -3526,6 +3555,19 @@ public enum BodyChild: Equatable {
     /// than inside a `<w:p>`. The control's metadata is on `ContentControl.sdt`;
     /// `children` are the body elements that lived inside `<w:sdtContent>`.
     case contentControl(ContentControl, children: [BodyChild])
+    /// v0.19.6+ (PsychQuant/che-word-mcp#58): body-level `<w:bookmarkStart>` /
+    /// `<w:bookmarkEnd>` (e.g., TOC `_Toc<digits>` anchors that span multiple
+    /// paragraphs). Pre-fix `parseBodyChildren` silently dropped these via the
+    /// switch's `default: continue` branch. The marker carries `id` and (for
+    /// `.start`) `name`; `position` is 0 because there is no enclosing paragraph.
+    case bookmarkMarker(BookmarkRangeMarker)
+    /// v0.19.6+ (#58): catch-all for any other unrecognized direct child of
+    /// `<w:body>` (other EG_BlockLevelElts members like `<w:moveFromRangeStart>`,
+    /// body-level `<w:commentRangeStart>`, vendor extensions, etc.). Preserved
+    /// as raw XML so future element kinds round-trip byte-equivalent without
+    /// per-element parser/writer branches. Same architectural pattern as
+    /// `Run.rawElements` (v0.14.0+, #52).
+    case rawBlockElement(RawElement)
 }
 
 // MARK: - Document Properties
@@ -3966,6 +4008,9 @@ extension WordDocument {
     /// cells.
     private static func extractMaxSdtIdFromBodyChild(_ child: BodyChild) -> Int {
         switch child {
+        case .bookmarkMarker, .rawBlockElement:
+            // Body-level markers contain no SDTs (#58).
+            return 0
         case .paragraph(let paragraph):
             var maxId = 0
             for run in paragraph.runs {
@@ -4500,6 +4545,9 @@ extension WordDocument {
         var referenced: Set<Int> = []
         func collectFromBodyChild(_ child: BodyChild) {
             switch child {
+            case .bookmarkMarker, .rawBlockElement:
+                // Body-level markers carry no numbering references (#58).
+                return
             case .paragraph(let p):
                 if let numInfo = p.properties.numbering { referenced.insert(numInfo.numId) }
             case .table(let table):
@@ -4610,6 +4658,9 @@ extension WordDocument {
     ) throws -> Bool {
         for i in 0..<body.children.count {
             switch body.children[i] {
+            case .bookmarkMarker, .rawBlockElement:
+                // Body-level markers contain no content controls (#58).
+                continue
             case .paragraph(var para):
                 if try Self.mutateInControlList(id: id, controls: &para.contentControls, mutate: mutate) {
                     body.children[i] = .paragraph(para)
@@ -4661,6 +4712,9 @@ extension WordDocument {
     ) throws -> Bool {
         for i in 0..<children.count {
             switch children[i] {
+            case .bookmarkMarker, .rawBlockElement:
+                // Body-level markers contain no content controls (#58).
+                continue
             case .paragraph(var para):
                 if try Self.mutateInControlList(id: id, controls: &para.contentControls, mutate: mutate) {
                     children[i] = .paragraph(para)
@@ -4713,6 +4767,9 @@ extension WordDocument {
     ) -> Bool {
         for i in 0..<children.count {
             switch children[i] {
+            case .bookmarkMarker, .rawBlockElement:
+                // Body-level markers contain no content controls (#58).
+                continue
             case .paragraph(var para):
                 if Self.removeFromControlList(id: id, keepContent: keepContent, controls: &para.contentControls) {
                     children[i] = .paragraph(para)

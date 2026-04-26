@@ -640,6 +640,22 @@ public struct DocxWriter {
             for c in children { xml += xmlForBodyChild(c) }
             xml += "</w:sdtContent></w:sdt>"
             return xml
+        case .bookmarkMarker(let marker):
+            // v0.19.6+ (PsychQuant/che-word-mcp#58): body-level bookmark
+            // start/end (e.g., TOC `_Toc<digits>` anchor wrapping multiple
+            // paragraphs).
+            switch marker.kind {
+            case .start:
+                let nameAttr = marker.name.map { " w:name=\"\(escapeXMLAttribute($0))\"" } ?? ""
+                return "<w:bookmarkStart w:id=\"\(marker.id)\"\(nameAttr)/>"
+            case .end:
+                return "<w:bookmarkEnd w:id=\"\(marker.id)\"/>"
+            }
+        case .rawBlockElement(let raw):
+            // v0.19.6+ (#58): unrecognized direct child of <w:body> (other
+            // EG_BlockLevelElts members, vendor extensions). Captured raw XML
+            // emitted verbatim — same architectural pattern as `Run.rawElements`.
+            return raw.xml
         }
     }
 

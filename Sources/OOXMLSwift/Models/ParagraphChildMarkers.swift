@@ -38,11 +38,17 @@ public struct BookmarkRangeMarker: Equatable {
     public var kind: Kind
     public var id: Int
     public var position: Int
+    /// Bookmark name (only set on `kind == .start`; nil on `.end`). At
+    /// paragraph level the name is also carried via `Paragraph.bookmarks`,
+    /// but at body level (BodyChild.bookmarkMarker) there is no enclosing
+    /// paragraph so the marker carries the name directly. PsychQuant/che-word-mcp#58.
+    public var name: String?
 
-    public init(kind: Kind, id: Int, position: Int) {
+    public init(kind: Kind, id: Int, position: Int, name: String? = nil) {
         self.kind = kind
         self.id = id
         self.position = position
+        self.name = name
     }
 }
 

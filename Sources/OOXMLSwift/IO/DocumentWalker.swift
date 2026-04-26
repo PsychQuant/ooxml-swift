@@ -79,6 +79,9 @@ internal enum DocumentWalker {
                 walkTable(t, partKey: partKey, visit: visit)
             case .contentControl(_, let inner):
                 walkBodyChildren(inner, partKey: partKey, visit: visit)
+            case .bookmarkMarker, .rawBlockElement:
+                // Body-level markers contain no paragraphs to visit (#58).
+                continue
             }
         }
     }

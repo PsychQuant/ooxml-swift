@@ -402,6 +402,35 @@ public struct DocxReader {
                 maxBookmarkId = marker.id
             }
         }
+        // v0.19.6+ (#58): also walk body-level `.bookmarkMarker` BodyChild
+        // entries (TOC anchors that wrap multiple paragraphs land at body
+        // level, not inside any paragraph). Without this, a future API-built
+        // bookmark could collide with an existing body-level id.
+        func collectBodyLevelBookmarkIds(_ children: [BodyChild]) {
+            for child in children {
+                switch child {
+                case .bookmarkMarker(let marker):
+                    if marker.id > maxBookmarkId { maxBookmarkId = marker.id }
+                case .contentControl(_, let inner):
+                    collectBodyLevelBookmarkIds(inner)
+                case .paragraph, .table, .rawBlockElement:
+                    continue
+                }
+            }
+        }
+        collectBodyLevelBookmarkIds(document.body.children)
+        for header in document.headers {
+            collectBodyLevelBookmarkIds(header.bodyChildren)
+        }
+        for footer in document.footers {
+            collectBodyLevelBookmarkIds(footer.bodyChildren)
+        }
+        for footnote in document.footnotes.footnotes {
+            collectBodyLevelBookmarkIds(footnote.bodyChildren)
+        }
+        for endnote in document.endnotes.endnotes {
+            collectBodyLevelBookmarkIds(endnote.bodyChildren)
+        }
         if maxBookmarkId > 0 {
             document.nextBookmarkId = maxBookmarkId + 1
         }
@@ -627,8 +656,47 @@ public struct DocxReader {
                     )
                 }
                 children.append(.contentControl(metadata, children: sdtChildren))
-            default:
+            case "sectPr":
+                // <w:sectPr> as a direct child of <w:body> is the document-wide
+                // section properties block. It's parsed separately into
+                // `WordDocument.sectionProperties` (not into BodyChild) — skip
+                // here so it doesn't get captured as a `.rawBlockElement`.
+                // Pre-#58 this hit `default: continue`; post-#58 the default
+                // captures unknowns as raw, so we need an explicit skip.
                 continue
+            case "bookmarkStart":
+                // v0.19.6+ (PsychQuant/che-word-mcp#58): body-level
+                // `<w:bookmarkStart>` (e.g., TOC anchor wrapping multiple
+                // paragraphs). Pre-fix this hit `default: continue` and was
+                // silently dropped on save. Captured as typed BodyChild for
+                // structured access; `position: 0` because there is no
+                // enclosing paragraph to position within.
+                if let idStr = el.attribute(forName: "w:id")?.stringValue,
+                   let id = Int(idStr) {
+                    let name = el.attribute(forName: "w:name")?.stringValue
+                    children.append(.bookmarkMarker(
+                        BookmarkRangeMarker(kind: .start, id: id, position: 0, name: name)
+                    ))
+                }
+            case "bookmarkEnd":
+                // v0.19.6+ (#58): body-level `<w:bookmarkEnd>` matching
+                // body-level `<w:bookmarkStart>`.
+                if let idStr = el.attribute(forName: "w:id")?.stringValue,
+                   let id = Int(idStr) {
+                    children.append(.bookmarkMarker(
+                        BookmarkRangeMarker(kind: .end, id: id, position: 0)
+                    ))
+                }
+            default:
+                // v0.19.6+ (#58): unknown direct child of `<w:body>` (other
+                // EG_BlockLevelElts members like `<w:moveFromRangeStart>`,
+                // body-level `<w:commentRangeStart>`, vendor extensions).
+                // Pre-fix `continue` silently dropped these; now captured as
+                // raw XML so they round-trip byte-equivalent. Architectural
+                // pattern: same as `Run.rawElements` (v0.14.0+, #52).
+                children.append(.rawBlockElement(
+                    RawElement(name: el.localName ?? "unknown", xml: el.xmlString)
+                ))
             }
         }
         return children
@@ -1790,6 +1858,9 @@ public struct DocxReader {
         }
         func walk(_ child: inout BodyChild) {
             switch child {
+            case .bookmarkMarker, .rawBlockElement:
+                // Body-level markers carry no hyperlink ids (#58).
+                return
             case .paragraph(var para):
                 rewriteParagraph(&para)
                 child = .paragraph(para)
@@ -1855,6 +1926,9 @@ public struct DocxReader {
             case .table(let t): walkTable(t)
             case .contentControl(_, let inner):
                 for c in inner { walk(c) }
+            case .bookmarkMarker, .rawBlockElement:
+                // Body-level markers contain no paragraphs to visit (#58).
+                return
             }
         }
         for c in children { walk(c) }
