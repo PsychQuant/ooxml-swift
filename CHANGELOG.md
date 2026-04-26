@@ -2,7 +2,65 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
-## [0.19.4] - 2026-04-26
+## Skipped versions
+
+- **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
+
+## [0.19.5] - 2026-04-26
+
+### Fixed — 6 P0 + 5 P1 from PsychQuant/che-word-mcp#56 round 4 verify (R5 stack-completion)
+
+The R3 stack landed in commits dated 2026-04-26 but the round-4 6-AI verify (Agent Team × 5 + Codex) returned BLOCK with 6 P0 + 7 P1 findings spanning walker asymmetry, sentinel collision, attribute-escape gaps, block-level SDT propagation, container-symmetric `replaceText`, and container `<w:tbl>` capture. v0.19.5 closes those P0 + 5 P1 via the spectra change `che-word-mcp-issue-56-r4-stack-completion`. Each fix shipped as an independent commit with its own failing-test → implement → green → suite check → scoped Codex verify gate, continuing the R3-established discipline that breaks the bundle-and-regress cycle.
+
+#### R5 P0 #1 — Mixed-content revision wrapper walker SHALL find wrappers in every part
+
+`Document.handleMixedContentWrapperRevision` no longer body-only. New `DocumentWalker.walkAllParagraphs(in:visit:)` enumerates every paragraph across body (recursing into tables / nested tables / contentControl children), each header (`word/header*.xml`), each footer (`word/footer*.xml`), each footnote, and each endnote — with the originating part key passed to the visit callback. Helper now returns `(paragraph, indexInParagraph, partKey)` and throws `RevisionError.notFound(id)` on miss instead of silent return; caller updates `modifiedParts.insert(partKey)` (not blanket `word/document.xml`) on success and propagates the throw on miss. `acceptRevision` / `rejectRevision` / `acceptAllRevisions` / `rejectAllRevisions` now correctly handle wrappers in headers, footers, footnotes, and endnotes.
+
+#### R5 P0 #2 — Reader assigns source-paragraph child positions starting at 1
+
+`DocxReader.parseParagraph` now initializes `var childPosition = 1` (was 0). `Paragraph.toXMLSortedByPosition` includes ALL contentControls in the positioned-emit list (drops the `> 0` filter); legacy emit path includes only `contentControls.filter { $0.position == 0 }` (the API-built sentinel). `Paragraph.hasSourcePositionedChildren` keeps the `> 0` check (semantics now consistent with positions starting at 1). Eliminates the `position == 0` sentinel collision where a first-child source SDT round-tripped at the same logical position as an API-built one.
+
+#### R5 P0 #3 — Single shared `escapeXMLAttribute` helper across all attribute emit sites
+
+New `internal func escapeXMLAttribute(_:)` in `Sources/OOXMLSwift/IO/XMLAttributeEscape.swift` mapping `& < > " '` → `&amp; &lt; &gt; &quot; &apos;` (Decision 4: `&apos;` not `&#39;` for byte-equivalence with Word). Sweep deletes the 15+ fileprivate duplicates across `Run.swift`, `Revision.swift`, `Paragraph.swift`, `Style.swift`, `Numbering.swift`, `Table.swift`, `Field.swift`, `MathComponent.swift`, `Image.swift`, `Section.swift`, `Comment.swift`, `DocxWriter.swift`. R3-NEW-6's `&#39;` is upgraded to `&apos;` for byte-equivalence. Audit table comment in `Issue56R4StackTests.swift` migrates from R3's deny-list ("all sites covered") to an explicit allow-list naming every emit site that bypasses the helper with rationale (numeric interpolations, pre-validated rIds, verbatim XML, named site-specific exemptions, alternate escape helpers).
+
+#### R5 P0 #4 — Block-level SDT typed Revisions propagate into `document.revisions.revisions`
+
+`DocxReader.read` post-process loop's `case .contentControl` branch now recurses into `contentControl.children` via new `propagateRevisionsFromBodyChildren(_:paragraphIndex:into:)`, propagating any typed `Revision` (with `isMixedContentWrapper`) into `document.revisions.revisions`. Pre-fix `<w:sdt><w:sdtContent><w:p><w:ins w:id="N">...</w:ins></w:p></w:sdtContent></w:sdt>` parsed the typed Revision onto the inner paragraph but the document-level revisions list never saw it — `acceptRevision(id: N)` threw notFound.
+
+#### R5 P0 #5 — `Document.replaceText` symmetric across body and container parts
+
+Headers / footers / footnotes / endnotes branches in `replaceText` (`Document.swift:429-485`) now route through `replaceInParagraphSurfaces(_:find:with:options:)` — the same helper the body path uses. Pre-fix the container loops walked only `para.runs`, silently dropping edits to text inside hyperlinks, fieldSimples, and alternateContents living in headers/footers/footnotes/endnotes. P0 #5's commit also bundled R5 P1 #2 (Footnote.toXML / Endnote.toXML emit from `paragraphs` when populated) because the test path needed both fixes to GREEN.
+
+#### R5 P0 #6 — Container parser captures `<w:tbl>` direct children of header / footer / footnote / endnote roots
+
+`Header`, `Footer`, `Footnote`, `Endnote` gain `public var bodyChildren: [BodyChild] = []` as canonical storage. `paragraphs: [Paragraph]` is now a backward-compatible computed view (get + set; setter preserves table / contentControl positions). `DocxReader.parseContainerBody` and `parseContainerChildBodyChildren` capture both `<w:p>` and `<w:tbl>` direct children. Container `toXML()` emits from `bodyChildren` (Footnote / Endnote keep the legacy single-text-run fallback for API-built notes). `DocumentWalker.walkAllParagraphs` and `DocxReader.walkAllParagraphs` recurse into container `bodyChildren` so paragraphs nested inside container tables (and nested tables) are visible to all walker callers (calibration, mixed-content revision wrapper search, hyperlink ops). `DocxWriter.writeFooter` empty-body sentinel switches from `paragraphs.isEmpty` (would fire for table-only footers) to `bodyChildren.isEmpty`.
+
+### Fixed — P1 follow-ups
+
+- **R5 P1 #1** — `Hyperlink.toXML()` mutation detection upgrades from joined-text comparison to deep `[Run]` equality (`runs == childrenRuns` where `childrenRuns` is `compactMap` of `.run(_)` cases out of `children`). Synthesized `Run.Equatable` covers text + properties via `RunProperties.Equatable`. Closes property-only mutations (e.g., `runs[0].properties.bold = true` with same text) and equal-length text swaps that pre-fix silently dropped on save. Trade-off preserved (non-run order may be lost on hyperlinks containing non-run children, by design).
+- **R5 P1 #2** — `Footnote.toXML` and `Endnote.toXML` emit from `bodyChildren` when populated (P0 #5 commit + §6 + §7 cover this). Legacy single-text-run template only fires for API-built notes constructed via the `Footnote(id:text:paragraphIndex:)` initializer without further mutation. A dedicated regression test (`testFootnoteMultiParagraphMutationSurvivesRoundtrip`) pins the contract.
+- **R5 P1 #3** — `Document.updateHyperlink` and `Document.deleteHyperlink` walk every part instead of only `body.children[i].paragraph`. New `applyToHyperlink(id:apply:) -> String?` and `removeHyperlink(id:captureRelationshipId:) -> String?` helpers visit body (incl. nested tables / SDT children), headers via `header.bodyChildren`, footers via `footer.bodyChildren`, footnotes, endnotes. `modifiedParts` now picks up the actual owning part. Static dispatch + `Self.` recursion avoids Swift exclusivity errors that arise from `mutating self` recursive calls through `inout` bindings. Fixes the silent "Hyperlink ... not found" mode for any hyperlink living anywhere other than direct body paragraphs.
+- **R5 P1 #4** — `SDTParser.parseSDT` recursive call inside `<w:sdtContent>` now passes a positive sibling-counter starting at 1. Nested SDTs receive distinct positions matching their source-document order — no longer collide with the API-built `position == 0` sentinel. Closes DA-N8 (also added a sibling test pinning the one-based counter contract).
+- **R5 P1 #5** — Additive `tryAcceptAllRevisions() throws` / `tryRejectAllRevisions() throws` surface aggregate failure as `RevisionError.partialFailure([Int])` listing failing revision ids. Successful sibling revisions are still applied (partial-success semantics). Legacy non-throwing `acceptAllRevisions()` / `rejectAllRevisions()` preserved (delegating via `try?`) so che-word-mcp `Server.swift` compiles unchanged per the R5 design's zero-MCP-source-change discipline.
+
+### Tests — R5 stack
+
+- 14 new tests in `Tests/OOXMLSwiftTests/Issue56R4StackTests.swift` (one per P0 + P1 finding, plus a Codex-added sibling-counter test for §8.4)
+- 11 roundtrip variants in `Tests/OOXMLSwiftTests/Issue56R3StackTests.swift` exercising the full DocxWriter→DocxReader cycle on every R3 stack assertion (closes DA-N5 — the all-in-memory R3 pattern was the proven blind spot of R2→R3→R4)
+- New helpers: `Helpers/RoundtripHelper.swift` (`roundtrip(_:)`), `Sources/OOXMLSwift/IO/DocumentWalker.swift` (centralized walker abstraction)
+- Suite total: 628 tests pass / 1 skipped / 0 failures (582 v0.19.3 baseline + 12 R3 + 14 R4 + 11 roundtrip variants + 9 helper / walker / escape tests)
+- Per-task verify gate: scoped Codex CLI run after every P0 / P1 fix; flagged additions fixed inline before commit (e.g., §4 sweep additions for `MathAccent`, `Image`, `Section`, `Comment`)
+
+### API additions (R5 stack, additive — no breaking change vs. v0.19.4 contract)
+
+- `Header.bodyChildren: [BodyChild]`, `Footer.bodyChildren: [BodyChild]`, `Footnote.bodyChildren: [BodyChild]`, `Endnote.bodyChildren: [BodyChild]` — canonical storage promoted from the prior `paragraphs` field. Existing `paragraphs` accessors are now backward-compatible computed views (get + set).
+- `RevisionError.partialFailure([Int])` — new error case raised by `tryAcceptAllRevisions` / `tryRejectAllRevisions`.
+- `Document.tryAcceptAllRevisions() throws` / `Document.tryRejectAllRevisions() throws` — new throwing variants of the legacy non-throwing accept-all / reject-all methods.
+- `internal func escapeXMLAttribute(_:)` (file `XMLAttributeEscape.swift`) — single shared XML attribute escape helper.
+- `internal enum DocumentWalker` (file `DocumentWalker.swift`) — `walkAllParagraphs(in:visit:)` and `findUnrecognizedChild(in:name:idMarker:)` cross-part walker.
+
+## [0.19.4] - 2026-04-26 (rolled into v0.19.5; never tagged — see "Skipped versions" above)
 
 ### Fixed — 6 P0 + 2 P1 from PsychQuant/che-word-mcp#56 round 3 verify
 
