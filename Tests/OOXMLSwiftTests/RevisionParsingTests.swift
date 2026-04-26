@@ -188,9 +188,11 @@ final class RevisionParsingTests: XCTestCase {
         // preserved on `Paragraph.unrecognizedChildren` for round-trip
         // survival, not silently dropped. Position is the source-order index
         // assigned during the paragraph child walk.
+        // v0.19.5+ (#56 R5 P0 #2): position counter starts at 1 (was 0) so
+        // position 0 is the unambiguous "API-built sentinel" semantic.
         XCTAssertEqual(
             captured,
-            "DocxReader.parseParagraph: captured unmodeled element customElement at position 0\n"
+            "DocxReader.parseParagraph: captured unmodeled element customElement at position 1\n"
         )
     }
 }
