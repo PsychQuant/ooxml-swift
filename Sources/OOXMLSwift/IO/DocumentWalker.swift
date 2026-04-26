@@ -55,23 +55,24 @@ internal enum DocumentWalker {
     static func walkAllParagraphs(in document: WordDocument, visit: (Paragraph, _ partKey: String) -> Void) {
         // Body
         walkBodyChildren(document.body.children, partKey: bodyPartKey, visit: visit)
-        // Headers
+        // Headers — v0.19.5+ (#56 R5 P0 #6): walk bodyChildren so paragraphs
+        // inside header tables (incl. nested) are visible.
         for header in document.headers {
             let key = headerPartKey(for: header)
-            for para in header.paragraphs { visit(para, key) }
+            walkBodyChildren(header.bodyChildren, partKey: key, visit: visit)
         }
-        // Footers
+        // Footers — same as headers.
         for footer in document.footers {
             let key = footerPartKey(for: footer)
-            for para in footer.paragraphs { visit(para, key) }
+            walkBodyChildren(footer.bodyChildren, partKey: key, visit: visit)
         }
-        // Footnotes
+        // Footnotes — walk bodyChildren for table support.
         for footnote in document.footnotes.footnotes {
-            for para in footnote.paragraphs { visit(para, footnotesPartKey) }
+            walkBodyChildren(footnote.bodyChildren, partKey: footnotesPartKey, visit: visit)
         }
-        // Endnotes
+        // Endnotes — walk bodyChildren for table support.
         for endnote in document.endnotes.endnotes {
-            for para in endnote.paragraphs { visit(para, endnotesPartKey) }
+            walkBodyChildren(endnote.bodyChildren, partKey: endnotesPartKey, visit: visit)
         }
     }
 

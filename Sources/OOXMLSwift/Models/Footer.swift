@@ -5,7 +5,10 @@ import Foundation
 /// 頁尾
 public struct Footer: Equatable {
     public var id: String           // 關係 ID (如 "rId11")
-    public var paragraphs: [Paragraph]
+
+    /// v0.19.5+ (#56 R5 P0 #6): canonical storage. See Header.bodyChildren.
+    public var bodyChildren: [BodyChild] = []
+
     public var type: HeaderFooterType
     public var pageNumberFormat: PageNumberFormat?  // 頁碼格式（如果是頁碼頁尾）
     public var pageNumberAlignment: ParagraphAlignment  // 頁碼對齊方式
@@ -32,12 +35,38 @@ public struct Footer: Equatable {
 
     public init(id: String, paragraphs: [Paragraph] = [], type: HeaderFooterType = .default, pageNumberFormat: PageNumberFormat? = nil, pageNumberAlignment: ParagraphAlignment = .center, originalFileName: String? = nil, rootAttributes: [String: String] = [:]) {
         self.id = id
-        self.paragraphs = paragraphs
+        self.bodyChildren = paragraphs.map { .paragraph($0) }
         self.type = type
         self.pageNumberFormat = pageNumberFormat
         self.pageNumberAlignment = pageNumberAlignment
         self.originalFileName = Self.sanitizeOriginalFileName(originalFileName)
         self.rootAttributes = rootAttributes
+    }
+
+    /// v0.19.5+ (#56 R5 P0 #6): backward-compatible computed view. See
+    /// `Header.paragraphs` for full semantics.
+    public var paragraphs: [Paragraph] {
+        get {
+            bodyChildren.compactMap { if case .paragraph(let p) = $0 { return p } else { return nil } }
+        }
+        set {
+            var result: [BodyChild] = []
+            var newIter = newValue.makeIterator()
+            for child in bodyChildren {
+                switch child {
+                case .paragraph:
+                    if let np = newIter.next() {
+                        result.append(.paragraph(np))
+                    }
+                case .table, .contentControl:
+                    result.append(child)
+                }
+            }
+            while let np = newIter.next() {
+                result.append(.paragraph(np))
+            }
+            bodyChildren = result
+        }
     }
 
     /// Sanitize per #55 security baseline. See `Header.sanitizeOriginalFileName`.
@@ -80,13 +109,18 @@ public enum PageNumberFormat: Equatable {
 
 extension Footer {
     /// 轉換為完整的 footer.xml 內容
+    /// v0.19.5+ (#56 R5 P0 #6): emit from bodyChildren — see Header.toXML.
     func toXML() -> String {
         var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         xml += ContainerRootTag.render(elementName: "w:ftr", attributes: rootAttributes)
-        for para in paragraphs {
-            xml += para.toXML()
+        for child in bodyChildren {
+            switch child {
+            case .paragraph(let p): xml += p.toXML()
+            case .table(let t): xml += t.toXML()
+            case .contentControl: break
+            }
         }
-        if paragraphs.isEmpty {
+        if bodyChildren.isEmpty {
             xml += "<w:p/>"
         }
         xml += "</w:ftr>"

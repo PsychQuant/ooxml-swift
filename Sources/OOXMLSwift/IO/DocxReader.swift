@@ -119,7 +119,10 @@ public struct DocxReader {
             guard FileManager.default.fileExists(atPath: headerURL.path) else { continue }
             let headerData = try Data(contentsOf: headerURL)
             let headerXML = try XMLDocument(data: headerData)
-            let paragraphs = try parseContainerParagraphs(
+            // v0.19.5+ (#56 R5 P0 #6): use parseContainerBody to capture both
+            // <w:p> and <w:tbl> direct children in source order. Pre-R5
+            // parseContainerParagraphs silently dropped tables.
+            let bodyChildren = try parseContainerBody(
                 from: headerXML,
                 relationships: relationships, styles: document.styles, numbering: document.numbering
             )
@@ -129,9 +132,9 @@ public struct DocxReader {
             let rootAttrs = Self.parseContainerRootAttributes(
                 from: headerData, rootElementOpenPrefix: "<w:hdr"
             )
-            document.headers.append(
-                Header(id: rel.id, paragraphs: paragraphs, originalFileName: rel.target, rootAttributes: rootAttrs)
-            )
+            var header = Header(id: rel.id, originalFileName: rel.target, rootAttributes: rootAttrs)
+            header.bodyChildren = bodyChildren
+            document.headers.append(header)
         }
 
         // 7c. 讀取 footers
@@ -148,7 +151,8 @@ public struct DocxReader {
             guard FileManager.default.fileExists(atPath: footerURL.path) else { continue }
             let footerData = try Data(contentsOf: footerURL)
             let footerXML = try XMLDocument(data: footerData)
-            let paragraphs = try parseContainerParagraphs(
+            // v0.19.5+ (#56 R5 P0 #6): see header parse comment.
+            let bodyChildren = try parseContainerBody(
                 from: footerXML,
                 relationships: relationships, styles: document.styles, numbering: document.numbering
             )
@@ -156,9 +160,9 @@ public struct DocxReader {
             let rootAttrs = Self.parseContainerRootAttributes(
                 from: footerData, rootElementOpenPrefix: "<w:ftr"
             )
-            document.footers.append(
-                Footer(id: rel.id, paragraphs: paragraphs, originalFileName: rel.target, rootAttributes: rootAttrs)
-            )
+            var footer = Footer(id: rel.id, originalFileName: rel.target, rootAttributes: rootAttrs)
+            footer.bodyChildren = bodyChildren
+            document.footers.append(footer)
         }
 
         // 7d. 讀取 footnotes
@@ -181,13 +185,17 @@ public struct DocxReader {
                     // Skip structural footnotes (separator / continuationSeparator) by w:type attribute
                     let fnType = element.attribute(forName: "w:type")?.stringValue
                     if fnType == "separator" || fnType == "continuationSeparator" { continue }
-                    let paragraphs = try parseContainerChildParagraphs(
+                    // v0.19.5+ (#56 R5 P0 #6): capture w:tbl too via bodyChildren.
+                    let bodyChildren = try parseContainerChildBodyChildren(
                         in: element,
                         relationships: relationships, styles: document.styles, numbering: document.numbering
                     )
-                    let text = paragraphs.map { $0.getText() }.joined(separator: " ")
+                    let paragraphsOnly = bodyChildren.compactMap { c -> Paragraph? in
+                        if case .paragraph(let p) = c { return p } else { return nil }
+                    }
+                    let text = paragraphsOnly.map { $0.getText() }.joined(separator: " ")
                     var footnote = Footnote(id: id, text: text, paragraphIndex: 0)
-                    footnote.paragraphs = paragraphs
+                    footnote.bodyChildren = bodyChildren
                     document.footnotes.footnotes.append(footnote)
                 }
             }
@@ -213,13 +221,17 @@ public struct DocxReader {
                     // Skip structural endnotes (separator / continuationSeparator) by w:type attribute
                     let enType = element.attribute(forName: "w:type")?.stringValue
                     if enType == "separator" || enType == "continuationSeparator" { continue }
-                    let paragraphs = try parseContainerChildParagraphs(
+                    // v0.19.5+ (#56 R5 P0 #6): capture w:tbl too via bodyChildren.
+                    let bodyChildren = try parseContainerChildBodyChildren(
                         in: element,
                         relationships: relationships, styles: document.styles, numbering: document.numbering
                     )
-                    let text = paragraphs.map { $0.getText() }.joined(separator: " ")
+                    let paragraphsOnly = bodyChildren.compactMap { c -> Paragraph? in
+                        if case .paragraph(let p) = c { return p } else { return nil }
+                    }
+                    let text = paragraphsOnly.map { $0.getText() }.joined(separator: " ")
                     var endnote = Endnote(id: id, text: text, paragraphIndex: 0)
-                    endnote.paragraphs = paragraphs
+                    endnote.bodyChildren = bodyChildren
                     document.endnotes.endnotes.append(endnote)
                 }
             }
@@ -1118,8 +1130,26 @@ public struct DocxReader {
         styles: [Style],
         numbering: Numbering
     ) throws -> [Paragraph] {
+        let body = try parseContainerBody(
+            from: xml,
+            relationships: relationships, styles: styles, numbering: numbering
+        )
+        return body.compactMap { if case .paragraph(let p) = $0 { return p } else { return nil } }
+    }
+
+    /// v0.19.5+ (#56 R5 P0 #6): capture both `<w:p>` AND `<w:tbl>` direct
+    /// children of `<w:hdr>/<w:ftr>/<w:footnote>/<w:endnote>` roots into a
+    /// `[BodyChild]` collection. Pre-R5 the parser silently dropped `<w:tbl>`
+    /// siblings, hiding their bookmarks/revisions/contentControls from the
+    /// model.
+    static func parseContainerBody(
+        from xml: XMLDocument,
+        relationships: RelationshipsCollection,
+        styles: [Style],
+        numbering: Numbering
+    ) throws -> [BodyChild] {
         guard let root = xml.rootElement() else { return [] }
-        return try parseContainerChildParagraphs(
+        return try parseContainerChildBodyChildren(
             in: root,
             relationships: relationships, styles: styles, numbering: numbering
         )
@@ -1133,18 +1163,47 @@ public struct DocxReader {
         styles: [Style],
         numbering: Numbering
     ) throws -> [Paragraph] {
-        var paragraphs: [Paragraph] = []
+        let body = try parseContainerChildBodyChildren(
+            in: element,
+            relationships: relationships, styles: styles, numbering: numbering
+        )
+        return body.compactMap { if case .paragraph(let p) = $0 { return p } else { return nil } }
+    }
+
+    /// v0.19.5+ (#56 R5 P0 #6): Parse `<w:p>` AND `<w:tbl>` children of an
+    /// element into `[BodyChild]` preserving source order. Used for headers,
+    /// footers, footnotes, endnotes (and inline-walk for nested cases).
+    static func parseContainerChildBodyChildren(
+        in element: XMLElement,
+        relationships: RelationshipsCollection,
+        styles: [Style],
+        numbering: Numbering
+    ) throws -> [BodyChild] {
+        var children: [BodyChild] = []
         for child in element.children ?? [] {
-            guard let childElement = child as? XMLElement, childElement.localName == "p" else { continue }
-            let para = try parseParagraph(
-                from: childElement,
-                relationships: relationships,
-                styles: styles,
-                numbering: numbering
-            )
-            paragraphs.append(para)
+            guard let childElement = child as? XMLElement else { continue }
+            switch childElement.localName {
+            case "p":
+                let para = try parseParagraph(
+                    from: childElement,
+                    relationships: relationships,
+                    styles: styles,
+                    numbering: numbering
+                )
+                children.append(.paragraph(para))
+            case "tbl":
+                let table = try parseTable(
+                    from: childElement,
+                    relationships: relationships,
+                    styles: styles,
+                    numbering: numbering
+                )
+                children.append(.table(table))
+            default:
+                continue
+            }
         }
-        return paragraphs
+        return children
     }
 
     // MARK: - Nested Revision Helpers (Part B of ooxml-swift#1)
@@ -1673,17 +1732,20 @@ public struct DocxReader {
             }
         }
         for child in document.body.children { walkBodyChild(child) }
+        // v0.19.5+ (#56 R5 P0 #6): walk container bodyChildren so paragraphs
+        // inside header/footer/footnote/endnote tables are visible to the
+        // bookmark calibration walker.
         for header in document.headers {
-            for para in header.paragraphs { visit(para) }
+            for c in header.bodyChildren { walkBodyChild(c) }
         }
         for footer in document.footers {
-            for para in footer.paragraphs { visit(para) }
+            for c in footer.bodyChildren { walkBodyChild(c) }
         }
         for footnote in document.footnotes.footnotes {
-            for para in footnote.paragraphs { visit(para) }
+            for c in footnote.bodyChildren { walkBodyChild(c) }
         }
         for endnote in document.endnotes.endnotes {
-            for para in endnote.paragraphs { visit(para) }
+            for c in endnote.bodyChildren { walkBodyChild(c) }
         }
     }
 
