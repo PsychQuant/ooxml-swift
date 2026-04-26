@@ -1716,6 +1716,48 @@ final class Issue56R4StackTests: XCTestCase {
                        "Footer p1 revision SHALL carry paragraphIndex=1 (not hardcoded 0); got: \(rev?.paragraphIndex ?? -999)")
     }
 
+    // MARK: - §13.2 R5-CONT-2 P0 #2: deleteHyperlink targets owning part rels
+
+    /// v0.19.5+ (#56 R5-CONT-2 P0 #2): R5-CONT verify (Codex P1 / Logic L2 /
+    /// DA C3) flagged that `deleteHyperlink` only updates
+    /// `document.hyperlinkReferences` and unconditionally marks
+    /// `word/_rels/document.xml.rels` dirty. R5-CONT P1 #8 introduced
+    /// per-container `relationships` and fixed `updateHyperlink(url:)` to
+    /// route to the owning part's rels — but `deleteHyperlink` was not
+    /// mirrored. Container hyperlinks deleted leave orphan rels in
+    /// `header*.xml.rels` AND wrongly dirty document.xml.rels.
+    func testDeleteHyperlinkInHeaderRemovesContainerRelEntry() throws {
+        var doc = WordDocument()
+
+        // Header with a hyperlink that has its rId in header.relationships.
+        var innerPara = Paragraph()
+        let hyper = Hyperlink(id: "h1", text: "to-delete",
+                              url: "https://to-delete.example",
+                              relationshipId: "rId99",
+                              tooltip: nil, history: true)
+        innerPara.hyperlinks.append(hyper)
+        var header = Header(id: "rId10", paragraphs: [innerPara], type: .default,
+                            originalFileName: "header1.xml")
+        header.relationships.relationships.append(
+            Relationship(id: "rId99", type: .hyperlink,
+                         target: "https://to-delete.example", targetMode: "External")
+        )
+        doc.headers.append(header)
+
+        try doc.deleteHyperlink(hyperlinkId: "h1")
+
+        // Post-fix: header.relationships SHALL no longer contain the rel.
+        XCTAssertNil(doc.headers[0].relationships.relationships
+                        .first(where: { $0.id == "rId99" }),
+                     "Header relationship rId99 SHALL be removed when its hyperlink is deleted")
+
+        // modifiedParts SHALL mark the header rels file (not document rels).
+        XCTAssertTrue(doc.modifiedParts.contains("word/_rels/header1.xml.rels"),
+                      "modifiedParts SHALL include header rels file; got: \(doc.modifiedParts)")
+        XCTAssertFalse(doc.modifiedParts.contains("word/_rels/document.xml.rels"),
+                       "modifiedParts SHALL NOT include document.xml.rels for header-scope hyperlink delete; got: \(doc.modifiedParts)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
