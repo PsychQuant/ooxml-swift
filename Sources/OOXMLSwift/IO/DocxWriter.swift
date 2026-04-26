@@ -620,7 +620,14 @@ public struct DocxWriter {
     /// Recursive XML serialization for BodyChild including block-level SDTs
     /// (#44 task 3.4). Block-level SDTs emit `<w:sdt><w:sdtPr/><w:sdtContent>...children...</w:sdtContent></w:sdt>`
     /// with children re-serialized via this same helper.
-    private static func xmlForBodyChild(_ child: BodyChild) -> String {
+    ///
+    /// v0.19.5+ (#56 R5-CONT P1 #9): promoted to `internal` so container
+    /// `toXML()` (Header / Footer / Footnote / Endnote) can reuse the
+    /// `.contentControl` emit path. Pre-fix containers had
+    /// `case .contentControl: break` (or `return ""`) which silently
+    /// dropped any block-level SDT inside a header / footer / note on
+    /// save (verify R5 P1 #9 / Logic L6 / Codex P2).
+    static func xmlForBodyChild(_ child: BodyChild) -> String {
         switch child {
         case .paragraph(let para):
             return para.toXML()

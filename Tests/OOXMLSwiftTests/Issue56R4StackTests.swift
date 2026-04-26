@@ -1500,6 +1500,45 @@ final class Issue56R4StackTests: XCTestCase {
                        "Header hyperlink rId1 SHALL resolve via header rels (not document rels) — got: \(hyperlink.url ?? "nil")")
     }
 
+    // MARK: - §11.9 R5-CONTINUATION P1 #9: container toXML emits .contentControl
+
+    /// v0.19.5+ (#56 R5-CONT P1 #9): R5 verify (Logic L6 + Codex P2) flagged
+    /// that `Header.toXML()`, `Footer.toXML()`, `Footnote.toXML()`,
+    /// `Endnote.toXML()` `case .contentControl` arms were `break` /
+    /// `return ""` — silently dropping any block-level SDT held in
+    /// `bodyChildren`. Today's parser doesn't surface direct-child SDTs
+    /// for containers (only `<w:p>` and `<w:tbl>`), so the gap was
+    /// dormant; once an MCP caller (or future parser extension)
+    /// populates `header.bodyChildren = [.contentControl(...)]`, the
+    /// SDT would silently vanish on save.
+    func testFooterWithContentControlEmitsSdtElementOnRoundtrip() throws {
+        // Build an in-memory footer carrying a block-level ContentControl
+        // wrapping a paragraph "sdt-cell-text".
+        var doc = WordDocument()
+        var sdtPara = Paragraph()
+        sdtPara.runs.append(Run(text: "sdt-cell-text"))
+
+        var sdt = StructuredDocumentTag()
+        sdt.id = 555
+        sdt.tag = "FooterSDT"
+        sdt.alias = "Footer Block SDT"
+        let metadata = ContentControl(sdt: sdt, content: "", children: [], parentSdtId: nil, position: 0)
+
+        var footer = Footer(id: "rId11", paragraphs: [], type: .default,
+                            originalFileName: "footer1.xml")
+        footer.bodyChildren.append(.contentControl(metadata, children: [.paragraph(sdtPara)]))
+        doc.footers = [footer]
+
+        // Direct toXML emit MUST contain the <w:sdt> element + SDT inner content.
+        let xml = footer.toXML()
+        XCTAssertTrue(xml.contains("<w:sdt>"),
+                      "Footer.toXML SHALL emit <w:sdt> for .contentControl bodyChildren; got:\n\(xml)")
+        XCTAssertTrue(xml.contains("sdt-cell-text"),
+                      "Footer.toXML SHALL emit the SDT's inner paragraph text; got:\n\(xml)")
+        XCTAssertTrue(xml.contains("FooterSDT"),
+                      "Footer.toXML SHALL emit the SDT tag attribute; got:\n\(xml)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")

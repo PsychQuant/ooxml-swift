@@ -147,15 +147,14 @@ extension Header {
         var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         xml += ContainerRootTag.render(elementName: "w:hdr", attributes: rootAttributes)
         // v0.19.5+ (#56 R5 P0 #6): emit from bodyChildren so direct-child
-        // tables round-trip. ContentControl branch is parsed as raw XML
-        // by the Reader's container parser (currently only p/tbl handled);
-        // emit a no-op for it here for forward compat.
+        // tables round-trip.
+        // v0.19.5+ (#56 R5-CONT P1 #9): .contentControl now routes through
+        // the shared `DocxWriter.xmlForBodyChild` helper (recursive SDT
+        // serialization including nested children). Pre-fix the case
+        // arm was `break` which silently dropped any block-level SDT held
+        // in `bodyChildren` — verify R5 P1 #9 / Logic L6.
         for child in bodyChildren {
-            switch child {
-            case .paragraph(let p): xml += p.toXML()
-            case .table(let t): xml += t.toXML()
-            case .contentControl: break
-            }
+            xml += DocxWriter.xmlForBodyChild(child)
         }
         // 如果沒有段落且沒有任何 bodyChildren，加一個空段落
         if bodyChildren.isEmpty {
