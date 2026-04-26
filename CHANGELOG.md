@@ -6,6 +6,48 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.19.7] - 2026-04-27
+
+### Fixed — Sub-stack A-CONT of #58 (parser asymmetry mini-cycle from sub-stack A 6-AI verify)
+
+The sub-stack A 6-AI verify ([report](https://github.com/PsychQuant/che-word-mcp/issues/58#issuecomment-4323205184)) returned BLOCK with 2 P0 + 1 P1 + 4 P2/MEDIUM (3 of 6 reviewers PASS, 1 WARN, 1 BLOCK; BLOCK independently confirmed by R2 Logic + R5 Devil's Advocate + direct code read).
+
+Same convergence-cycle pattern as R5-CONT-4 (issue #56): per-task gate caught #58 in `parseBodyChildren` (body.xml entry point); 6-AI verify caught the symmetric sibling in `parseContainerChildBodyChildren` (header / footer / footnote / endnote entry point) that the per-task gate missed. The matrix-pin only exercised body source; container source slipped through.
+
+#### A-CONT P0 #1 — `parseContainerChildBodyChildren` mirrors `parseBodyChildren` branches
+
+`DocxReader.parseContainerChildBodyChildren` ([line 1291-1322](https://github.com/PsychQuant/ooxml-swift/blob/v0.19.7/Sources/OOXMLSwift/IO/DocxReader.swift#L1291-L1322)) had only `case "p"` / `case "tbl"` / `default: continue` after sub-stack A landed. Body-level `<w:bookmarkStart>` / `<w:bookmarkEnd>` inside `<w:hdr>` / `<w:ftr>` / `<w:footnote>` / `<w:endnote>` were still silently dropped on save — same data-loss class #58 was meant to close, just in a different parser entry point.
+
+The dead-code calibration walker added in sub-stack A (`collectBodyLevelBookmarkIds(header.bodyChildren)` at DocxReader.swift:422-432) was the smoking gun: it iterated structures the parser never populated. A-CONT mirrors the exact same fix shape from `parseBodyChildren` (typed branches for bookmarkStart/bookmarkEnd, explicit skip for sectPr, raw-passthrough default) into the container parser entry point.
+
+#### A-CONT P0 #2 — `Document.getBookmarks()` surfaces body-level `.bookmarkMarker` entries
+
+`Document.getBookmarks()` ([line 2122-2136](https://github.com/PsychQuant/ooxml-swift/blob/v0.19.7/Sources/OOXMLSwift/Models/Document.swift#L2122)) iterated only `case .paragraph` reading `para.bookmarks` — never `case .bookmarkMarker`. Pre-fix the marker was dropped on disk (so listing nothing was at least consistent); post-sub-stack-A the marker survives on disk but was invisible to MCP `list_bookmarks` discovery — silent UX regression where users couldn't see, name, jump-to, or delete preserved TOC anchors via MCP.
+
+A-CONT extends `getBookmarks()` to walk body-level `.bookmarkMarker(BookmarkRangeMarker)` entries. Only `.start` markers carry a name (per OOXML — `.end` markers match by id). `paragraphIndex = -1` sentinel indicates "not inside a paragraph" (the marker sits at body level). Tables / content controls / raw block elements remain out of `getBookmarks()` scope — a separate `getAllBookmarks()` walker covering full container coverage is a follow-up if needed.
+
+#### A-CONT P1 — Matrix-pin extension: container-source parity assertion
+
+`testDocumentContentEqualityInvariant` matrix-pin extended with `assertContainerBookmarkStartParity` helper that enumerates all `word/header*.xml` / `word/footer*.xml` / `word/footnotes.xml` / `word/endnotes.xml` parts in source + output, counts `<w:bookmarkStart>` per part, asserts parity. Catches future parser-asymmetry regressions of the same class.
+
+#### A-CONT P2 — Stale comment fix
+
+`parseBodyChildren`'s pre-fix doc comment ("Other elements are skipped") didn't reflect the v0.19.6 `default:` raw-preserve behavior. Updated to document the actual semantics — `<w:bookmarkStart>` / `<w:bookmarkEnd>` produce typed `BodyChild.bookmarkMarker`, `<w:sectPr>` is skipped, all other elements are captured as `BodyChild.rawBlockElement` ("if not typed, preserve as raw" principle).
+
+### Tests
+
+- 2 new tests in `Tests/OOXMLSwiftTests/Issue58_60ContentPreservationTests.swift`: `testHeaderBodyLevelBookmarkRoundTripPreserved`, `testGetBookmarksSurfacesBodyLevelMarkers`
+- `testDocumentContentEqualityInvariant` extended with `assertContainerBookmarkStartParity` call (4 container types)
+- Suite total: 658 tests pass / 1 skipped / 0 failures (656 v0.19.6 baseline + 2 A-CONT new tests)
+
+### API additions (v0.19.7, additive — no breaking change vs v0.19.6 contract)
+
+- No new public types or signatures. `getBookmarks()` return shape unchanged; the new `paragraphIndex = -1` sentinel for body-level markers is an additive semantic (callers that don't check the sentinel get the body-level bookmarks alongside paragraph-level ones, which is the intended behavior).
+
+### Spectra change
+
+This release ships sub-stack A-CONT mini-cycle. Re-numbers planned sub-stack B → v0.19.8 + v3.13.8 (sub-stack C unchanged at v0.20.0 + v3.14.0). The convergence-cycle methodology is working as intended: per-task gate caught one parser entry point; 6-AI verify caught the symmetric sibling. Sub-stack A took 2 sub-cycles (A + A-CONT) to drain #58 fully — same shape as R5 → R5-CONT-4 needing 5 sub-cycles to drain #56.
+
 ## [0.19.6] - 2026-04-27
 
 ### Fixed — PsychQuant/che-word-mcp#58 (sub-stack A of document-content-preservation)

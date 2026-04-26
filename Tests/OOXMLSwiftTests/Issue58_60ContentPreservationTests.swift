@@ -134,6 +134,94 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         )
     }
 
+    // MARK: - Sub-stack A-CONT: container parser entry point + getBookmarks walker
+
+    /// §1.14 — Body-level `<w:bookmarkStart>` / `<w:bookmarkEnd>` inside a
+    /// header SHALL survive body-mutating save. Pre-A-CONT-fix
+    /// `parseContainerChildBodyChildren` (DocxReader.swift:1291-1322) had only
+    /// `case "p"` / `case "tbl"` / `default: continue` — body-level markers in
+    /// headers were silently dropped. The dead-code calibration walker added in
+    /// sub-stack A (`collectBodyLevelBookmarkIds(header.bodyChildren)`) is the
+    /// smoking gun.
+    ///
+    /// Same fix shape as `parseBodyChildren` (mirror branches into the second
+    /// parser entry point).
+    func testHeaderBodyLevelBookmarkRoundTripPreserved() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p><w:r><w:t>body</w:t></w:r></w:p>
+        </w:body>
+        </w:document>
+        """
+        let headerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:bookmarkStart w:id="9" w:name="hdrAnchor"/>
+        <w:p><w:r><w:t>header text</w:t></w:r></w:p>
+        <w:bookmarkEnd w:id="9"/>
+        </w:hdr>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont-hdr-in-\(UUID().uuidString).docx")
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont-hdr-out-\(UUID().uuidString).docx")
+        defer {
+            try? FileManager.default.removeItem(at: inURL)
+            try? FileManager.default.removeItem(at: outURL)
+        }
+        try buildMinimalDocxWithHeader(documentXML: documentXML, headerXML: headerXML, headerRId: "rId10", to: inURL)
+
+        var doc = try DocxReader.read(from: inURL)
+        // Force header re-serialization to exercise the writer path.
+        doc.modifiedParts.insert("word/header1.xml")
+        try DocxWriter.write(doc, to: outURL)
+
+        let outHeaderXML = try Self.readPartXMLString(from: outURL, partPath: "word/header1.xml")
+        XCTAssertTrue(
+            outHeaderXML.contains("<w:bookmarkStart") && outHeaderXML.contains("w:name=\"hdrAnchor\""),
+            "body-level <w:bookmarkStart w:name=\"hdrAnchor\"/> SHALL survive in header round-trip; output:\n\(outHeaderXML)"
+        )
+        XCTAssertTrue(
+            outHeaderXML.contains("<w:bookmarkEnd") && outHeaderXML.contains("w:id=\"9\""),
+            "body-level <w:bookmarkEnd w:id=\"9\"/> SHALL survive in header round-trip; output:\n\(outHeaderXML)"
+        )
+    }
+
+    /// §1.16 — `Document.getBookmarks()` SHALL surface body-level `.bookmarkMarker`
+    /// entries. Pre-A-CONT-fix `getBookmarks()` (Document.swift:2122-2136)
+    /// iterated only `case .paragraph` reading `para.bookmarks` — never
+    /// `case .bookmarkMarker`. Body-level bookmarks preserved on disk by sub-stack A
+    /// were invisible to MCP `list_bookmarks`.
+    func testGetBookmarksSurfacesBodyLevelMarkers() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p><w:bookmarkStart w:id="1" w:name="paraLevel"/><w:bookmarkEnd w:id="1"/><w:r><w:t>x</w:t></w:r></w:p>
+        <w:bookmarkStart w:id="2" w:name="bodyLevel"/>
+        <w:p><w:r><w:t>y</w:t></w:r></w:p>
+        <w:bookmarkEnd w:id="2"/>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont-getbm-in-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        let bookmarks = doc.getBookmarks()
+        let names = bookmarks.map { $0.name }
+        XCTAssertTrue(names.contains("paraLevel"),
+            "paragraph-level bookmark SHALL be returned; got \(names)")
+        XCTAssertTrue(names.contains("bodyLevel"),
+            "body-level bookmark SHALL ALSO be returned post-A-CONT; got \(names)")
+    }
+
     // MARK: - Cross-cutting matrix-pin (incremental — sub-stack A initial version)
 
     /// §1.7 / §2.7 / §3.9 — Cross-cutting content-equality invariant against
@@ -184,6 +272,16 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
             "<w:bookmarkStart> count SHALL be preserved across round-trip; src=\(srcBookmarkStartCount), out=\(outBookmarkStartCount)"
         )
 
+        // §1.18 (A-CONT P1): container-source assertion. The thesis fixture has
+        // 6 distinct headers and 4 footers; assert bookmarkStart parity for each
+        // container part. Pre-A-CONT-fix, body-level bookmarks in headers/
+        // footers/footnotes/endnotes were silently dropped on save (parser
+        // asymmetry — `parseContainerChildBodyChildren` had only `case "p"` /
+        // `case "tbl"` / `default: continue` while `parseBodyChildren` had the
+        // typed cases). A-CONT mirrors the fix into the second parser entry
+        // point. The assertion below catches future regressions in that fix.
+        try Self.assertContainerBookmarkStartParity(srcURL: srcURL, outURL: outURL)
+
         // Preservation class 2 of 3 (#59): <w:t> total character content parity.
         // Lands with §2.7 (sub-stack B). Until then, this assertion is documented
         // but skipped to keep the matrix-pin green for sub-stack A.
@@ -204,6 +302,34 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
             searchRange = r.upperBound..<xml.endIndex
         }
         return count
+    }
+
+    /// §1.18 (A-CONT P1) helper: enumerate all `word/header*.xml`,
+    /// `word/footer*.xml`, `word/footnotes.xml`, `word/endnotes.xml` parts in
+    /// both source and output `.docx`, count `<w:bookmarkStart>` per part,
+    /// assert parity. Catches the parser-asymmetry class of regression.
+    static func assertContainerBookmarkStartParity(srcURL: URL, outURL: URL) throws {
+        let srcUnzipped = try ZipHelper.unzip(srcURL)
+        defer { ZipHelper.cleanup(srcUnzipped) }
+        let outUnzipped = try ZipHelper.unzip(outURL)
+        defer { ZipHelper.cleanup(outUnzipped) }
+
+        let containerPartPatterns = ["word/header", "word/footer", "word/footnotes.xml", "word/endnotes.xml"]
+        let srcWordDir = srcUnzipped.appendingPathComponent("word")
+        let fileNames = (try? FileManager.default.contentsOfDirectory(atPath: srcWordDir.path)) ?? []
+
+        for name in fileNames {
+            let isContainer = containerPartPatterns.contains { name.hasPrefix($0.replacingOccurrences(of: "word/", with: "")) || "word/\(name)" == $0 }
+            guard isContainer, name.hasSuffix(".xml") else { continue }
+            let srcXML = (try? String(contentsOf: srcUnzipped.appendingPathComponent("word/\(name)"), encoding: .utf8)) ?? ""
+            let outXML = (try? String(contentsOf: outUnzipped.appendingPathComponent("word/\(name)"), encoding: .utf8)) ?? ""
+            let srcCount = countBookmarkStartElements(in: srcXML)
+            let outCount = countBookmarkStartElements(in: outXML)
+            XCTAssertEqual(
+                outCount, srcCount,
+                "container `word/\(name)` <w:bookmarkStart> count SHALL be preserved across round-trip (#58 A-CONT — parser asymmetry between parseBodyChildren and parseContainerChildBodyChildren); src=\(srcCount), out=\(outCount)"
+            )
+        }
     }
 
     // MARK: - Helpers
@@ -257,5 +383,59 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         defer { ZipHelper.cleanup(unzipped) }
         let documentURL = unzipped.appendingPathComponent("word/document.xml")
         return try String(contentsOf: documentURL, encoding: .utf8)
+    }
+
+    /// Read an arbitrary part (e.g., `word/header1.xml`) from a saved `.docx`.
+    /// Used by A-CONT tests that exercise container parts.
+    static func readPartXMLString(from docxURL: URL, partPath: String) throws -> String {
+        let unzipped = try ZipHelper.unzip(docxURL)
+        defer { ZipHelper.cleanup(unzipped) }
+        let url = unzipped.appendingPathComponent(partPath)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    /// Build a minimal valid `.docx` that includes a header part. Same shape as
+    /// `Issue56R4StackTests.buildMinimalDocxWithHeader` (copied here because
+    /// that method is private to the other test class).
+    private func buildMinimalDocxWithHeader(documentXML: String, headerXML: String, headerRId: String, to url: URL) throws {
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont-hdr-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+
+        let documentRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="\(headerRId)" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+        </Relationships>
+        """
+        try documentRels.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+
+        try documentXML.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+        try headerXML.write(to: stagingURL.appendingPathComponent("word/header1.xml"), atomically: true, encoding: .utf8)
+
+        try ZipHelper.zip(stagingURL, to: url)
     }
 }

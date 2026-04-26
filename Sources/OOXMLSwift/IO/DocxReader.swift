@@ -603,7 +603,12 @@ public struct DocxReader {
     ///
     /// Walks direct children: `<w:p>` → paragraph, `<w:tbl>` → table,
     /// `<w:sdt>` → block-level ContentControl with recursively-parsed
-    /// `<w:sdtContent>` children. Other elements are skipped.
+    /// `<w:sdtContent>` children. `<w:bookmarkStart>` / `<w:bookmarkEnd>` →
+    /// typed `BodyChild.bookmarkMarker` (v0.19.6+, #58). `<w:sectPr>` is
+    /// skipped (parsed separately into `WordDocument.sectionProperties`).
+    /// All other elements are captured as `BodyChild.rawBlockElement` for
+    /// byte-equivalent round-trip (v0.19.6+, #58, "if not typed, preserve as raw"
+    /// principle — same pattern as `Run.rawElements` v0.14.0+/#52).
     ///
     /// The `collectingTablesInto` parameter preserves the existing
     /// `body.tables` flat list for backwards compatibility with consumers
@@ -1314,8 +1319,43 @@ public struct DocxReader {
                     numbering: numbering
                 )
                 children.append(.table(table))
-            default:
+            case "sectPr":
+                // <w:sectPr> as a direct child of a container is the section
+                // properties block. Skip — pre-#58 it hit `default: continue`,
+                // post-#58 we need an explicit skip so the new `default:`
+                // doesn't capture it as a `.rawBlockElement`. Same handling as
+                // `parseBodyChildren`.
                 continue
+            case "bookmarkStart":
+                // v0.19.7+ (#58 A-CONT): mirror the parseBodyChildren branch
+                // into the container parser entry point. Pre-A-CONT this hit
+                // `default: continue` and was silently dropped — body-level
+                // bookmarks in headers / footers / footnotes / endnotes had
+                // the same data-loss bug as #58 in the body parser.
+                if let idStr = childElement.attribute(forName: "w:id")?.stringValue,
+                   let id = Int(idStr) {
+                    let name = childElement.attribute(forName: "w:name")?.stringValue
+                    children.append(.bookmarkMarker(
+                        BookmarkRangeMarker(kind: .start, id: id, position: 0, name: name)
+                    ))
+                }
+            case "bookmarkEnd":
+                // v0.19.7+ (#58 A-CONT): mirror parseBodyChildren.
+                if let idStr = childElement.attribute(forName: "w:id")?.stringValue,
+                   let id = Int(idStr) {
+                    children.append(.bookmarkMarker(
+                        BookmarkRangeMarker(kind: .end, id: id, position: 0)
+                    ))
+                }
+            default:
+                // v0.19.7+ (#58 A-CONT): unrecognized direct child of a container
+                // (other EG_BlockLevelElts members, vendor extensions). Pre-A-CONT
+                // `continue` silently dropped these; now captured as raw XML so
+                // they round-trip byte-equivalent. Same architectural pattern as
+                // parseBodyChildren default: branch.
+                children.append(.rawBlockElement(
+                    RawElement(name: childElement.localName ?? "unknown", xml: childElement.xmlString)
+                ))
             }
         }
         return children

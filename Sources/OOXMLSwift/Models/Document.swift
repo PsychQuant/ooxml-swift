@@ -2124,11 +2124,28 @@ public struct WordDocument: Equatable {
         var paragraphCount = 0
 
         for child in body.children {
-            if case .paragraph(let para) = child {
+            switch child {
+            case .paragraph(let para):
                 for bookmark in para.bookmarks {
                     result.append((id: bookmark.id, name: bookmark.name, paragraphIndex: paragraphCount))
                 }
                 paragraphCount += 1
+            case .bookmarkMarker(let marker):
+                // v0.19.7+ (#58 A-CONT): surface body-level bookmark starts
+                // (TOC `_Toc<digits>` anchors that wrap multiple paragraphs).
+                // Only `.start` markers carry a name; `.end` markers are
+                // matched by id and don't represent a separate bookmark.
+                // paragraphIndex = -1 sentinel indicates "not inside a paragraph"
+                // (the marker sits at body level, between or wrapping paragraphs).
+                if marker.kind == .start, let name = marker.name {
+                    result.append((id: marker.id, name: name, paragraphIndex: -1))
+                }
+            case .table, .contentControl, .rawBlockElement:
+                // Tables / content controls / raw block elements are walked
+                // for bookmark coverage by `getAllBookmarks()` (which also
+                // descends into headers / footers / footnotes / endnotes).
+                // The legacy `getBookmarks()` path keeps body-level scope only.
+                break
             }
         }
 
