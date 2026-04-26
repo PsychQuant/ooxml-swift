@@ -127,6 +127,60 @@ final class Issue56R3StackTests: XCTestCase {
                           "<w:sdt> must precede run 'B' in source order. Pre-fix the SDT moved to end (A→B→SDT). Output:\n\(xml)")
     }
 
+    // MARK: - R3-NEW-3: insertComment SHALL emit anchor markers on source paragraphs with existing comment markers
+
+    /// Spec scenario "insertComment on source paragraph with existing comments emits new anchors":
+    /// load doc with `<w:commentRangeStart w:id="3"/>` markers, call insertComment,
+    /// expect both id=3 markers and id=4 markers in re-emitted XML.
+    ///
+    /// Pre-v0.19.4: Paragraph.toXMLSortedByPosition gates the legacy commentIds
+    /// emit (start, end, reference) on `commentRangeMarkers.isEmpty`. When source
+    /// has any commentRangeMarkers, the new commentId from insertComment lands
+    /// in `commentIds` but no `<w:commentRangeStart>` / `<w:commentRangeEnd>` /
+    /// `<w:commentReference>` are emitted for it — comment side-bar shows the
+    /// comment but no scope highlight.
+    func testInsertComment_OnSourceParagraphWithExistingComments_EmitsNewAnchors() throws {
+        let docxURL = try Self.buildExistingCommentsFixture()
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+
+        var doc = try DocxReader.read(from: docxURL)
+        defer { doc.close() }
+
+        let newCommentId = try doc.insertComment(text: "second", author: "Tester", paragraphIndex: 0)
+        XCTAssertNotEqual(newCommentId, 3, "new comment id must differ from source id 3")
+
+        guard case .paragraph(let para) = doc.body.children[0] else {
+            XCTFail("Expected paragraph at body[0]")
+            return
+        }
+        let xml = para.toXML()
+
+        // Original id=3 markers must survive.
+        XCTAssertTrue(
+            xml.contains("<w:commentRangeStart w:id=\"3\""),
+            "Original commentRangeStart id=3 must survive. Output:\n\(xml)"
+        )
+        XCTAssertTrue(
+            xml.contains("<w:commentRangeEnd w:id=\"3\""),
+            "Original commentRangeEnd id=3 must survive. Output:\n\(xml)"
+        )
+
+        // New commentId must produce matching start + end + reference markers.
+        let newIdStr = String(newCommentId)
+        XCTAssertTrue(
+            xml.contains("<w:commentRangeStart w:id=\"\(newIdStr)\""),
+            "New commentRangeStart id=\(newIdStr) must be emitted alongside source markers. Output:\n\(xml)"
+        )
+        XCTAssertTrue(
+            xml.contains("<w:commentRangeEnd w:id=\"\(newIdStr)\""),
+            "New commentRangeEnd id=\(newIdStr) must be emitted. Output:\n\(xml)"
+        )
+        XCTAssertTrue(
+            xml.contains("<w:commentReference w:id=\"\(newIdStr)\""),
+            "New commentReference id=\(newIdStr) must be emitted. Output:\n\(xml)"
+        )
+    }
+
     // MARK: - Fixture builders
 
     /// Builds a minimal valid `.docx` whose body contains exactly one paragraph
@@ -264,6 +318,90 @@ final class Issue56R3StackTests: XCTestCase {
 
         let docxURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("r3-sdt-fixture-\(UUID().uuidString).docx")
+        try ZipHelper.zip(stagingDir, to: docxURL)
+        return docxURL
+    }
+
+    /// Builds a minimal valid `.docx` with a paragraph carrying source-loaded
+    /// `<w:commentRangeStart w:id="3"/>` markers wrapping a run, plus a comments.xml
+    /// part declaring comment id=3. Used by R3-NEW-3 tests.
+    private static func buildExistingCommentsFixture() throws -> URL {
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r3-cmt-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: stagingDir.appendingPathComponent("_rels"),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: stagingDir.appendingPathComponent("word/_rels"),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+            <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+            <Default Extension="xml" ContentType="application/xml"/>
+            <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+            <Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>
+        </Types>
+        """
+        try contentTypes.write(
+            to: stagingDir.appendingPathComponent("[Content_Types].xml"),
+            atomically: true, encoding: .utf8
+        )
+
+        let rootRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rootRels.write(
+            to: stagingDir.appendingPathComponent("_rels/.rels"),
+            atomically: true, encoding: .utf8
+        )
+
+        let docRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>
+        </Relationships>
+        """
+        try docRels.write(
+            to: stagingDir.appendingPathComponent("word/_rels/document.xml.rels"),
+            atomically: true, encoding: .utf8
+        )
+
+        let documentXml = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:body>
+                <w:p><w:commentRangeStart w:id="3"/><w:r><w:t>anchored text</w:t></w:r><w:commentRangeEnd w:id="3"/><w:r><w:commentReference w:id="3"/></w:r></w:p>
+            </w:body>
+        </w:document>
+        """
+        try documentXml.write(
+            to: stagingDir.appendingPathComponent("word/document.xml"),
+            atomically: true, encoding: .utf8
+        )
+
+        let commentsXml = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:comment w:id="3" w:author="Original" w:date="2026-04-26T00:00:00Z" w:initials="O">
+                <w:p><w:r><w:t>existing note</w:t></w:r></w:p>
+            </w:comment>
+        </w:comments>
+        """
+        try commentsXml.write(
+            to: stagingDir.appendingPathComponent("word/comments.xml"),
+            atomically: true, encoding: .utf8
+        )
+
+        let docxURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r3-cmt-fixture-\(UUID().uuidString).docx")
         try ZipHelper.zip(stagingDir, to: docxURL)
         return docxURL
     }
