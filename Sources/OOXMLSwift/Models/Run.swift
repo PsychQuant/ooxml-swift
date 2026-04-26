@@ -286,24 +286,3 @@ extension RunProperties {
     }
 }
 
-/// v0.19.4+ (#56 R3-NEW-6): minimal XML attribute escape used by
-/// `RunProperties.toXML`. Replaces the 5 XML-significant characters with
-/// their entities. Mirrors `Paragraph.escapeXMLAttribute` and
-/// `DocxWriter.escapeXML`; not deduplicated yet to avoid a cross-file
-/// shared helper module just for this fix — see the audit table in
-/// `Issue56R3StackTests.swift`'s file-trailer comment block.
-fileprivate func escapeXMLAttribute(_ s: String) -> String {
-    var result = ""
-    result.reserveCapacity(s.count)
-    for c in s {
-        switch c {
-        case "&": result += "&amp;"
-        case "<": result += "&lt;"
-        case ">": result += "&gt;"
-        case "\"": result += "&quot;"
-        case "'": result += "&#39;"
-        default: result.append(c)
-        }
-    }
-    return result
-}
