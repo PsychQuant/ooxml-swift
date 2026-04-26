@@ -1619,23 +1619,30 @@ final class Issue56R4StackTests: XCTestCase {
 //     packaging (Content_Types.xml, .rels). Test-only — never reachable
 //     from production MCP tool surface.
 //
-// Alternate escape helpers (Category H — pending consolidation):
-//   ─ Sites that route caller-controlled values through `escapeXML(_:)` (a
-//     private helper in `Hyperlink.swift`, `DocxWriter.swift`, etc.) escape
-//     the four attribute-significant chars (& < > ") and do NOT have a
-//     quote-injection vulnerability for caller input. Specific sites:
-//     ─ Hyperlink.swift around line 210 (anchor / target / display text)
-//     ─ Field.swift around 157 (text input field)
-//     ─ Revision.swift around 187 (revision wrapper attributes)
-//     ─ Bookmark.swift around 67 (bookmark range marker name)
-//     ─ DocxWriter.swift around 608 (numbering definition values)
-//     These remain on the local `escapeXML` helper for v0.19.5; the
-//     consolidation onto the shared `escapeXMLAttribute(_:)` is a
-//     follow-up (post-R5) consistency cleanup. No injection surface
-//     because the local helper does cover all four attribute-significant
-//     chars; only `'` is missed, which has no attribute-injection effect
-//     when emitted between double quotes (the only attribute-quote style
-//     ooxml-swift uses).
+// Alternate escape helpers (Category H — byte-equivalent local duplicates):
+//   ─ v0.19.5+ R5-CONT P1 #10 audit: every remaining local `escapeXML(_:)`
+//     helper across `Hyperlink.swift`, `Footer.swift`, `Comment.swift`,
+//     `Image.swift`, `Revision.swift`, and the 10 `Field.swift` instances
+//     escapes ALL FIVE attribute-significant chars (`& < > " '`) — the
+//     prior R3-stack note that "only `'` is missed" was stale (those
+//     helpers were updated to include `&apos;` during R3-NEW-6).
+//   ─ DocxWriter.swift carries TWO local helpers:
+//     ─ `escapeAttr(_:)` (around line 720): 4-char escape, INTENTIONALLY
+//       omits `'` because every attribute in the writer is double-quoted
+//       (single-quote allowed unescaped inside `"…"` per XML spec).
+//     ─ `escapeXML(_:)` (around line 1021): 5-char escape, byte-equivalent
+//       with the shared `escapeXMLAttribute`.
+//   ─ All 20+ local helpers are functionally byte-equivalent with the
+//     shared `escapeXMLAttribute(_:)` for attribute use, AND with
+//     `escapeAttr(_:)` for double-quoted-attribute-only use. Result:
+//     no injection surface remains — every reachable caller-controlled
+//     attribute value is fully escaped regardless of which helper handles it.
+//   ─ True consolidation (deleting the local helpers and routing every
+//     call site through `escapeXMLAttribute(_:)`) is deferred to a
+//     code-hygiene follow-up issue. The R5-CONT P1 #10 closure scope is
+//     limited to: (a) tighten this audit comment to accurately reflect
+//     the byte-equivalence state; (b) confirm no attribute emit site
+//     bypasses any of the byte-equivalent helpers. Both are now true.
 //   ─ MathComponent.swift `escapeMathXML` covers `& < >` (sufficient for
 //     element text). Sites that use it for ATTRIBUTE values (e.g.,
 //     `MathAccent.accentChar` at line 144) were migrated to
