@@ -2326,6 +2326,98 @@ public struct WordDocument: Equatable {
             }
     }
 
+    /// v0.19.4+ (#56 R3-NEW-4): when a Revision was created by the Reader's
+    /// hasNonRunChild raw-capture branch, the wrapper lives as a verbatim XML
+    /// entry in `paragraph.unrecognizedChildren`. Run-text replacement won't
+    /// touch it. This helper searches body paragraphs (including paragraphs
+    /// nested inside table cells) for the matching entry by name + id and
+    /// either unwraps (accept) or removes (reject) it. Returns true when an
+    /// entry was found and acted on.
+    ///
+    /// `accept` true → replace the wrapper rawXML with just the inner content
+    /// (between the opening tag's `>` and the closing `</w:NAME>`).
+    /// `accept` false → remove the entry entirely (drops wrapper AND inner).
+    @discardableResult
+    private mutating func handleMixedContentWrapperRevision(
+        revisionId: Int,
+        wrapperName: String,
+        accept: Bool
+    ) -> Bool {
+        let openTagPrefix = "<w:\(wrapperName)"
+        let openIdMarker = "w:id=\"\(revisionId)\""
+        let closeTag = "</w:\(wrapperName)>"
+
+        // v0.19.4+ (#56 R3-NEW-4 codex P1): match `w:id` ONLY in the opening
+        // tag, not the full rawXML. A nested bookmark / comment / SDT carrying
+        // the same numeric id (e.g. `<w:ins w:id="3"><w:bookmarkStart w:id="5"/></w:ins>`)
+        // would otherwise produce a false hit on the outer wrapper for
+        // revision 5.
+        func match(_ child: UnrecognizedChild) -> Bool {
+            guard child.name == wrapperName,
+                  child.rawXML.hasPrefix(openTagPrefix),
+                  let openTagEnd = child.rawXML.firstIndex(of: ">") else { return false }
+            let openTag = child.rawXML[child.rawXML.startIndex..<openTagEnd]
+            return openTag.contains(openIdMarker)
+        }
+
+        func transformParagraph(_ para: inout Paragraph) -> Bool {
+            guard let idx = para.unrecognizedChildren.firstIndex(where: match) else { return false }
+            if accept {
+                let raw = para.unrecognizedChildren[idx].rawXML
+                guard let openEnd = raw.firstIndex(of: ">"),
+                      let closeStart = raw.range(of: closeTag, options: .backwards)?.lowerBound else {
+                    // Malformed wrapper — fall through to removal (safer than emitting it again).
+                    para.unrecognizedChildren.remove(at: idx)
+                    return true
+                }
+                let innerStart = raw.index(after: openEnd)
+                let inner = String(raw[innerStart..<closeStart])
+                if inner.isEmpty {
+                    para.unrecognizedChildren.remove(at: idx)
+                } else {
+                    para.unrecognizedChildren[idx] = UnrecognizedChild(
+                        name: "raw",
+                        rawXML: inner,
+                        position: para.unrecognizedChildren[idx].position
+                    )
+                }
+            } else {
+                para.unrecognizedChildren.remove(at: idx)
+            }
+            // Also drop the matching typed Revision from the per-paragraph list.
+            para.revisions.removeAll { $0.id == revisionId }
+            return true
+        }
+
+        for i in 0..<body.children.count {
+            switch body.children[i] {
+            case .paragraph(var para):
+                if transformParagraph(&para) {
+                    body.children[i] = .paragraph(para)
+                    return true
+                }
+            case .table(var table):
+                var hit = false
+                for r in 0..<table.rows.count {
+                    for c in 0..<table.rows[r].cells.count {
+                        for p in 0..<table.rows[r].cells[c].paragraphs.count {
+                            if transformParagraph(&table.rows[r].cells[c].paragraphs[p]) {
+                                hit = true
+                            }
+                        }
+                    }
+                }
+                if hit {
+                    body.children[i] = .table(table)
+                    return true
+                }
+            case .contentControl:
+                continue
+            }
+        }
+        return false
+    }
+
     /// 接受修訂
     public mutating func acceptRevision(revisionId: Int) throws {
         guard let index = revisions.revisions.firstIndex(where: { $0.id == revisionId }) else {
@@ -2333,6 +2425,32 @@ public struct WordDocument: Equatable {
         }
 
         let revision = revisions.revisions[index]
+
+        // v0.19.4+ (#56 R3-NEW-4): mixed-content wrapper revisions live in
+        // `paragraph.unrecognizedChildren` as raw XML. Strip / unwrap the raw
+        // entry before falling through to the legacy run-based logic (which
+        // would no-op on raw XML and silently leave the wrapper in place).
+        if revision.isMixedContentWrapper {
+            let wrapperName: String
+            switch revision.type {
+            case .insertion: wrapperName = "ins"
+            case .deletion: wrapperName = "del"
+            case .moveFrom: wrapperName = "moveFrom"
+            case .moveTo: wrapperName = "moveTo"
+            default: wrapperName = "ins"
+            }
+            // Accept = keep inner content (typical for insertion / moveTo) or
+            // drop both wrapper + inner (typical for deletion / moveFrom).
+            let keepInner = (revision.type == .insertion || revision.type == .moveTo)
+            handleMixedContentWrapperRevision(
+                revisionId: revisionId,
+                wrapperName: wrapperName,
+                accept: keepInner
+            )
+            revisions.revisions.remove(at: index)
+            modifiedParts.insert("word/document.xml")
+            return
+        }
 
         // 根據修訂類型處理
         switch revision.type {
@@ -2378,6 +2496,36 @@ public struct WordDocument: Equatable {
         }
 
         let revision = revisions.revisions[index]
+
+        // v0.19.4+ (#56 R3-NEW-4): mirror of acceptRevision's mixed-content
+        // handling. Reject of an insertion drops the wrapper AND inner content
+        // (matches Word's "reject all" semantics — inserted content disappears).
+        // Reject of a deletion would restore the deleted content; we restore by
+        // keeping the inner content (the wrapper went around what was already
+        // in the paragraph). moveFrom / moveTo follow the same pattern as
+        // deletion / insertion respectively.
+        if revision.isMixedContentWrapper {
+            let wrapperName: String
+            switch revision.type {
+            case .insertion: wrapperName = "ins"
+            case .deletion: wrapperName = "del"
+            case .moveFrom: wrapperName = "moveFrom"
+            case .moveTo: wrapperName = "moveTo"
+            default: wrapperName = "ins"
+            }
+            // Reject = drop inner for insertion / moveTo (the new content is
+            // rejected); keep inner for deletion / moveFrom (the deletion is
+            // rejected, so the original content is preserved).
+            let keepInner = (revision.type == .deletion || revision.type == .moveFrom)
+            handleMixedContentWrapperRevision(
+                revisionId: revisionId,
+                wrapperName: wrapperName,
+                accept: keepInner
+            )
+            revisions.revisions.remove(at: index)
+            modifiedParts.insert("word/document.xml")
+            return
+        }
 
         // 根據修訂類型處理
         switch revision.type {

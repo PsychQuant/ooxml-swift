@@ -56,6 +56,15 @@ public struct Revision: Equatable {
     public var originalText: String?       // 原始文字（刪除時）
     public var newText: String?            // 新文字（插入時）
 
+    /// v0.19.4+ (#56 R3-NEW-4): true when this Revision was created by the
+    /// Reader's `hasNonRunChild` raw-capture branch (paragraph carries the
+    /// verbatim wrapper XML in `unrecognizedChildren` AND a typed Revision
+    /// entry here). `accept_revision` / `reject_revision` use the flag to
+    /// strip / unwrap the corresponding `unrecognizedChildren` entry instead
+    /// of the run-text replacement applied to standard wrappers. Implements
+    /// design Decision: P0-7 raw capture also populates typed `Revision` model.
+    public var isMixedContentWrapper: Bool = false
+
     public init(id: Int, type: RevisionType, author: String, date: Date = Date(), content: String? = nil, previousFormat: RunProperties? = nil) {
         self.id = id
         self.type = type
