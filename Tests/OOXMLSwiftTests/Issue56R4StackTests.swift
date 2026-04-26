@@ -461,6 +461,60 @@ final class Issue56R4StackTests: XCTestCase {
         try ZipHelper.zip(stagingURL, to: url)
     }
 
+    // MARK: - §8.1 P1: Hyperlink mutation detection SHALL use deep Run equality
+
+    /// v0.19.5+ (#56 R5 P1 #1): formatting-only mutation (same text, different
+    /// `runs[0].properties.bold`) SHALL force the writer to emit from `runs`
+    /// instead of replaying source `children`. Pre-fix the detection compared
+    /// joined text strings only — a property-only mutation was silently
+    /// dropped. Closes R4 P1 L1+L2+DA-R2.
+    func testHyperlinkRunPropertyMutationDetectedByDeepEquality() throws {
+        // Source XML: hyperlink whose single child run has bold=false (no rPr).
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:body>
+            <w:p>
+              <w:hyperlink r:id="rId1">
+                <w:r><w:t>plain</w:t></w:r>
+              </w:hyperlink>
+            </w:p>
+          </w:body>
+        </w:document>
+        """
+        var document = try parseDocXMLToWordDocument(documentXML)
+
+        // Sanity: parser populated children (source-loaded) and runs.
+        let body = document.body
+        guard case .paragraph(var para) = body.children[0] else {
+            return XCTFail("Expected first body child to be a paragraph")
+        }
+        XCTAssertEqual(para.hyperlinks.count, 1)
+        XCTAssertEqual(para.hyperlinks[0].text, "plain")
+        XCTAssertFalse(para.hyperlinks[0].children.isEmpty,
+                       "Reader SHALL populate children for round-trip ordering")
+
+        // Mutation: same text, different formatting (bold=true).
+        para.hyperlinks[0].runs[0].properties.bold = true
+        document.body.children[0] = .paragraph(para)
+        // Mark body dirty — direct value-type mutation through `body.children[i]`
+        // does not propagate to `modifiedParts`; real MCP mutation paths
+        // (`replaceText`, `format_text`, etc.) mark dirty themselves. This
+        // test exercises the writer-side deep-equality detection only.
+        document.modifiedParts.insert("word/document.xml")
+
+        // Roundtrip and assert the bold mutation survives.
+        let reread = try roundtrip(document)
+        guard case .paragraph(let rPara) = reread.body.children[0] else {
+            return XCTFail("Expected first body child to be a paragraph after roundtrip")
+        }
+        XCTAssertEqual(rPara.hyperlinks.count, 1)
+        XCTAssertEqual(rPara.hyperlinks[0].text, "plain",
+                       "text SHALL be preserved across roundtrip")
+        XCTAssertTrue(rPara.hyperlinks[0].runs.first?.properties.bold ?? false,
+                      "Property-only hyperlink mutation SHALL persist via deep-equality detection")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
