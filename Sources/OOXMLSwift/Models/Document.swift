@@ -1057,6 +1057,59 @@ public struct WordDocument: Equatable {
         return allocator.allocate()
     }
 
+    /// v0.19.5+ (#56 R5-CONT-3 P1 #5): diagnostic for callers that bypass
+    /// `addHeader`/`addFooter` and append directly to `document.headers` /
+    /// `document.footers` without setting `originalFileName`. Returns
+    /// `(scope: "header"|"footer", fileName: String, indices: [Int])`
+    /// for every fileName shared by ≥2 containers. Empty when no
+    /// collisions. Public so MCP / diagnostic tools can warn before save.
+    public var containerFileNameCollisions: [(scope: String, fileName: String, indices: [Int])] {
+        var result: [(scope: String, fileName: String, indices: [Int])] = []
+        var headerSeen: [String: [Int]] = [:]
+        for (i, h) in headers.enumerated() {
+            headerSeen[h.fileName, default: []].append(i)
+        }
+        for (fn, idxs) in headerSeen where idxs.count > 1 {
+            result.append((scope: "header", fileName: fn, indices: idxs))
+        }
+        var footerSeen: [String: [Int]] = [:]
+        for (i, f) in footers.enumerated() {
+            footerSeen[f.fileName, default: []].append(i)
+        }
+        for (fn, idxs) in footerSeen where idxs.count > 1 {
+            result.append((scope: "footer", fileName: fn, indices: idxs))
+        }
+        return result
+    }
+
+    /// v0.19.5+ (#56 R5-CONT-3 P1 #5): auto-repair container fileName
+    /// collisions by reassigning `originalFileName` on the SECOND+
+    /// instances using the same allocator the public `addHeader` /
+    /// `addFooter` API uses. First instance keeps its existing
+    /// (possibly nil → type-default) fileName. Marks every reassigned
+    /// container's part dirty so the writer emits to the new path.
+    /// Idempotent: calling again on a clean doc does nothing.
+    /// Recommended call site: just before save when callers may have
+    /// constructed containers via direct `headers.append`.
+    public mutating func repairContainerFileNames() {
+        var seen: Set<String> = []
+        for i in 0..<headers.count {
+            if seen.contains(headers[i].fileName) {
+                headers[i].originalFileName = allocateHeaderFileName(for: headers[i].type)
+                modifiedParts.insert("word/\(headers[i].fileName)")
+            }
+            seen.insert(headers[i].fileName)
+        }
+        var seenF: Set<String> = []
+        for i in 0..<footers.count {
+            if seenF.contains(footers[i].fileName) {
+                footers[i].originalFileName = allocateFooterFileName(for: footers[i].type)
+                modifiedParts.insert("word/\(footers[i].fileName)")
+            }
+            seenF.insert(footers[i].fileName)
+        }
+    }
+
     /// v0.13.5+ (#53): allocate a unique header fileName for the given type
     /// among existing typed-model headers. Returns `headerN.xml` (default),
     /// `headerFirstN.xml`, or `headerEvenN.xml` where N is the smallest
