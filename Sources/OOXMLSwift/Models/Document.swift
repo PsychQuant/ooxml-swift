@@ -1092,11 +1092,13 @@ public struct WordDocument: Equatable {
     /// Recommended call site: just before save when callers may have
     /// constructed containers via direct `headers.append`.
     public mutating func repairContainerFileNames() {
+        var renamed = false
         var seen: Set<String> = []
         for i in 0..<headers.count {
             if seen.contains(headers[i].fileName) {
                 headers[i].originalFileName = allocateHeaderFileName(for: headers[i].type)
                 modifiedParts.insert("word/\(headers[i].fileName)")
+                renamed = true
             }
             seen.insert(headers[i].fileName)
         }
@@ -1105,8 +1107,22 @@ public struct WordDocument: Equatable {
             if seenF.contains(footers[i].fileName) {
                 footers[i].originalFileName = allocateFooterFileName(for: footers[i].type)
                 modifiedParts.insert("word/\(footers[i].fileName)")
+                renamed = true
             }
             seenF.insert(footers[i].fileName)
+        }
+        // v0.19.5+ (#56 R5-CONT-4 Logic HIGH §15.4): when a rename
+        // occurred, mark word/_rels/document.xml.rels dirty AND
+        // [Content_Types].xml dirty too. Pre-fix the rename only marked
+        // the new container-part path dirty — but document.xml.rels
+        // still referenced the OLD fileName as the rId target. Overlay
+        // mode preserved document.xml.rels from source archive →
+        // post-save reread doc had rels pointing to wrong path.
+        // [Content_Types].xml has Override entries for each container
+        // by PartName too — same staleness risk on rename.
+        if renamed {
+            modifiedParts.insert("word/_rels/document.xml.rels")
+            modifiedParts.insert("[Content_Types].xml")
         }
     }
 

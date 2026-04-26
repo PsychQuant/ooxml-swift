@@ -2216,6 +2216,37 @@ final class Issue56R4StackTests: XCTestCase {
                        "After accept + roundtrip, paragraph XML SHALL NOT contain <w:ins> wrapper. Output:\n\(xml)")
     }
 
+    // MARK: - §17.4 R5-CONT-4: repairContainerFileNames marks document rels + content-types dirty
+
+    /// v0.19.5+ (#56 R5-CONT-4 Logic HIGH §15.4): R5-CONT-3 verify
+    /// (Logic L2) flagged that repairContainerFileNames only marked the
+    /// new container path dirty but not word/_rels/document.xml.rels or
+    /// [Content_Types].xml. Overlay-mode then preserved document.xml.rels
+    /// from source → post-save reread doc had rels pointing to wrong
+    /// path. Now: when a rename occurs, BOTH the rels file AND
+    /// content-types are marked dirty.
+    func testRepairContainerFileNamesDirtiesDocumentRels() {
+        var doc = WordDocument()
+        let h1 = Header(id: "rId10", paragraphs: [], type: .default)
+        let h2 = Header(id: "rId11", paragraphs: [], type: .default)
+        doc.headers = [h1, h2]
+
+        XCTAssertEqual(doc.headers[0].fileName, "header1.xml")
+        XCTAssertEqual(doc.headers[1].fileName, "header1.xml")
+
+        doc.repairContainerFileNames()
+
+        // The repaired part is dirty (R5-CONT-3 §15.4 baseline behavior).
+        XCTAssertTrue(doc.modifiedParts.contains("word/header2.xml"),
+                      "Renamed container part SHALL be dirty")
+
+        // R5-CONT-4 fix: document rels + content-types ALSO dirty.
+        XCTAssertTrue(doc.modifiedParts.contains("word/_rels/document.xml.rels"),
+                      "Document rels SHALL be dirty after rename — overlay mode otherwise preserves stale rId target. Got: \(doc.modifiedParts)")
+        XCTAssertTrue(doc.modifiedParts.contains("[Content_Types].xml"),
+                      "Content types SHALL be dirty after rename — overlay mode otherwise preserves stale Override PartName. Got: \(doc.modifiedParts)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
