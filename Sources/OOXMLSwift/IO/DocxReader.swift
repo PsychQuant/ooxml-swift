@@ -881,7 +881,14 @@ public struct DocxReader {
                 // first-class ContentControl on Paragraph.contentControls
                 // (sibling of runs), not a Run.rawXML blob. See SDD
                 // `che-word-mcp-content-controls-read-write`.
-                paragraph.contentControls.append(SDTParser.parseSDT(from: childElement))
+                //
+                // v0.19.4+ (#56 R3-NEW-2): pass childPosition so the SDT
+                // round-trips at its source position via
+                // `Paragraph.toXMLSortedByPosition` (otherwise the post-content
+                // legacy emit forces it to end-of-paragraph).
+                paragraph.contentControls.append(
+                    SDTParser.parseSDT(from: childElement, position: childPosition)
+                )
 
             case "hyperlink":
                 // v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 3: parse

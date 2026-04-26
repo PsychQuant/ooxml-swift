@@ -17,10 +17,14 @@ internal enum SDTParser {
     ///   - element: The `<w:sdt>` XML element.
     ///   - parentSdtId: Outer SDT id when this SDT is nested (Task 3.3).
     ///                  `nil` for top-level SDTs.
+    ///   - position: v0.19.4+ (#56 R3-NEW-2) source-document order index used
+    ///               by `Paragraph.toXMLSortedByPosition` to emit the SDT at
+    ///               its source position rather than always at end-of-paragraph.
+    ///               Defaults to 0 (legacy behavior for non-paragraph callers).
     /// - Returns: A `ContentControl` with metadata populated from `<w:sdtPr>`
     ///   and `content` set to the verbatim XML string of `<w:sdtContent>`'s
     ///   children. Nested SDTs inside `<w:sdtContent>` populate `children`.
-    static func parseSDT(from element: XMLElement, parentSdtId: Int? = nil) -> ContentControl {
+    static func parseSDT(from element: XMLElement, parentSdtId: Int? = nil, position: Int = 0) -> ContentControl {
         let sdt = parseSdtPr(from: element)
 
         // <w:sdtContent> — the content region.
@@ -46,7 +50,8 @@ internal enum SDTParser {
             sdt: sdt,
             content: contentXML,
             children: children,
-            parentSdtId: parentSdtId
+            parentSdtId: parentSdtId,
+            position: position
         )
     }
 

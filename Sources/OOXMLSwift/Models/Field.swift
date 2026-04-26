@@ -1487,16 +1487,27 @@ public struct ContentControl: Equatable {
     public var children: [ContentControl]          // 巢狀子 SDT（Group / RepeatingSection 常用）
     public var parentSdtId: Int?                   // 所屬父 SDT 的 id；頂層 SDT 為 nil
 
+    /// v0.19.4+ (#56 R3-NEW-2): source-document order index for paragraph-level
+    /// `<w:sdt>` participation in `Paragraph.toXMLSortedByPosition`. Default 0
+    /// for ContentControls created via the API (those keep the legacy
+    /// post-content emit at end-of-paragraph). Reader-populated SDTs receive
+    /// the parent paragraph's `childPosition` so they round-trip in source
+    /// order between sibling runs / hyperlinks / markers. Implements design
+    /// Decision: Add `position: Int` to `ContentControl`.
+    public var position: Int
+
     public init(
         sdt: StructuredDocumentTag,
         content: String,
         children: [ContentControl] = [],
-        parentSdtId: Int? = nil
+        parentSdtId: Int? = nil,
+        position: Int = 0
     ) {
         self.sdt = sdt
         self.content = content
         self.children = children
         self.parentSdtId = parentSdtId
+        self.position = position
     }
 
     /// 建立富文本控制項
