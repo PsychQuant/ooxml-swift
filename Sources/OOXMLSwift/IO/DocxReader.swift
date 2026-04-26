@@ -1240,6 +1240,19 @@ public struct DocxReader {
             guard let name = attr.name, !recognizedAttrs.contains(name) else { continue }
             rawAttributes[name] = attr.stringValue ?? ""
         }
+        // v0.19.4+ (#56 D-3): capture vendor `xmlns:` declarations from
+        // `element.namespaces` (separate from `attributes` in Foundation
+        // XMLElement). Pre-fix `<w:hyperlink xmlns:vendor="..." vendor:custom="x">`
+        // would round-trip with the prefixed attribute but lose its namespace
+        // declaration → Word schema-rejects the unbound prefix on save.
+        // Foundation gives us the bare prefix (e.g. "vendor") in `name`; we
+        // prepend `xmlns:` so the writer's alphabetical attribute loop emits
+        // `xmlns:vendor="..."` correctly.
+        for ns in element.namespaces ?? [] {
+            guard let name = ns.name, !name.isEmpty else { continue }
+            let attrName = "xmlns:\(name)"
+            rawAttributes[attrName] = ns.stringValue ?? ""
+        }
 
         // v0.19.3+ (#56 round 2 P0-3): walk children once, building both the
         // ordered `children` list (source of truth for the writer) AND the

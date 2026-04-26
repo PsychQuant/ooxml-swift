@@ -2,6 +2,50 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.19.4] - 2026-04-26
+
+### Fixed — 6 P0 + 2 P1 from PsychQuant/che-word-mcp#56 round 3 verify
+
+The v3.13.3 release shipped on top of v0.19.3 and went through a third 6-AI cross-verification round (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321007538). Five of six reviewers (logic / regression / security / codex / devil's advocate) returned BLOCK — the R2 fixes themselves introduced 6 new P0 regressions in 4 of 4 batches (anti-pattern: "fixes that save absence but break preserve-order / sync mutation paths"). v0.19.4 closes those 6 P0 plus 2 P1 follow-ups via the spectra change `che-word-mcp-issue-56-r3-stack-completion`. Each fix shipped as an independent commit with its own failing-test → fix → scoped Codex verify gate, breaking the bundle-and-regress cycle.
+
+#### R3-NEW-1 — Hyperlink mutation API round-trips on source-loaded hyperlinks
+
+`Hyperlink.toXML()` now compares `children`-derived run text against `runs` text. Equal → walk `children` (preserves R2 P0-3 source-order between runs and non-run children). Different → walk `runs` (R3-NEW-1: edits via `replaceText` / `updateHyperlink` / `text` setter become visible). Pre-fix v0.19.3 always preferred `children` so source-loaded hyperlink edits silently no-op'd on save.
+
+#### R3-NEW-2 — Paragraph-level `<w:sdt>` round-trips at source position
+
+New `ContentControl.position: Int = 0` field. `DocxReader.parseParagraph` passes `childPosition` to `SDTParser.parseSDT`. `Paragraph.toXMLSortedByPosition` adds contentControls with `position > 0` to the sorted positioned-entry list; legacy post-content emit only fires for `position == 0` (API-built). `hasSourcePositionedChildren` includes `contentControls.position > 0` so SDT-only paragraphs route to sort path. Pre-fix `<w:r>A</w:r><w:sdt>X</w:sdt><w:r>B</w:r>` round-tripped as A → B → SDT.
+
+#### R3-NEW-3 — `insertComment` emits anchor markers on source paragraphs with existing comments
+
+Per-id gate replaces blanket `if commentRangeMarkers.isEmpty` in `Paragraph.toXMLSortedByPosition`. Computes `Set(commentRangeMarkers.map { $0.id })` once; emits `<w:commentRangeStart>` / `<w:commentRangeEnd>` / `<w:commentReference>` for commentIds NOT covered by a source marker. Pre-fix the blanket gate skipped the entire legacy emit when source had any commentRangeMarker → new commentIds via `insertComment` lost ALL their anchor output (comment side-bar showed comment but no scope highlight).
+
+#### R3-NEW-4 — Mixed-content revision wrappers populate both raw and typed representations + accept/reject support
+
+`Revision` gains `isMixedContentWrapper: Bool = false` field. All 4 hasNonRunChild branches in DocxReader (ins/del/moveFrom/moveTo) now append a typed `Revision` with the flag alongside the raw `unrecognizedChildren` capture. `Document.acceptRevision` / `.rejectRevision` detect the flag and delegate to new private `handleMixedContentWrapperRevision` helper that searches body paragraphs (incl. nested table cells) for the matching entry by name + opening-tag-only id match (codex P1 catch: nested bookmarks/comments with same id no longer false-hit), then either replaces rawXML with extracted inner content (accept on insertion/moveTo, reject on deletion/moveFrom) or removes the entry entirely. Pre-fix the typed Revision was missing → MCP `get_revisions` / `accept_*_revision` / `reject_*_revision` tools couldn't see the wrapper but raw XML still emitted on save.
+
+#### R3-NEW-5 — `nextBookmarkId` calibration recurses into tables, headers, footers, footnotes, endnotes
+
+Replaced the early body-only top-level `.paragraph` scan with a comprehensive post-load calibration after all parts are parsed. New private `walkAllParagraphs(in:visit:)` recursively visits paragraphs across body (recursing into tables, nested tables — codex P1 catch — and content controls), headers, footers, footnotes, and endnotes. Pre-fix calibration ran before headers/footers/notes were even loaded AND only saw body top-level paragraphs → bookmarks in table cells / headers / etc. caused false-success calibration → `insertBookmark` allocated id 1 → silent collision with source ids.
+
+#### R3-NEW-6 — XML attribute escape closes rStyle injection sink + audit
+
+Added `fileprivate func escapeXMLAttribute(_ s: String) -> String` in Run.swift (5 chars: `& < > " '`). Routed `RunProperties.toXML` rStyle / color / fontName emits through it. Codex P1 catch: `RunProperties.toChangeXML` (parallel emit path inside `<w:rPrChange>`) was emitting `color` unescaped while `fontName` was already escaped — fixed parity. Audit table comment block in `Issue56R3StackTests.swift` enumerates every direct-emit site across Run.swift / Hyperlink.swift / Paragraph.swift / Footer.swift / Revision.swift / DocxWriter.swift, marked ESCAPED or SAFE-BY-CONSTRUCTION. Pre-fix a malicious source `<w:rStyle w:val='x"/><inj/><w:dummy w:val="y'/>` round-tripped as 3 sibling elements → Word schema reject (and a confidentiality vector if attacker could inject revision authors etc.). Future cleanup (out of R3 scope): consolidate the 6 parallel escape helpers into a shared `XMLEscape.swift`.
+
+### Fixed — 1 P1 follow-up
+
+- **D-3** — `parseHyperlink` now also captures `XMLElement.namespaces` (the separate xmlns: declaration collection in Foundation XMLElement) into `rawAttributes` with the `xmlns:` prefix prepended. Pre-fix `<w:hyperlink xmlns:vendor="..." vendor:custom="x">` round-tripped with the prefixed attribute but lost its namespace declaration → Word schema rejected the unbound prefix.
+
+### Breaking changes
+
+- **D-8 / Hyperlink.id format change introduced in v0.19.3 (P1-7)** — `Hyperlink.id` now follows the format `<rId-or-anchor-or-hl>@<position>` (e.g. `rId5@7`) instead of the v0.19.2 format `<rId-or-anchor-or-hl>` (e.g. `rId5`). This change shipped in v0.19.3 to give two hyperlinks sharing one `r:id` distinct ids — a correctness fix for MCP tools that find / edit / delete hyperlinks by id. **Callers that stored pre-v0.19.3 ids and look them up after upgrade will get nil**. Mitigation: re-parse documents under v0.19.4 to refresh the id cache. No alias / backwards-compatibility shim is provided; the v0.19.3 release is < 7 days old at write time so very little production storage exists.
+
+### Tests
+
+- 12 new tests in `Tests/OOXMLSwiftTests/Issue56R3StackTests.swift` covering each P0 / P1 fix
+- Suite total: 582 tests pass / 1 skipped / 0 failures (570 v0.19.3 baseline + 12 new R3 tests, zero regressions)
+- Codex CLI scoped verify ran after each P0 fix; flagged P1s fixed inline before commit (R3-NEW-4 nested w:id substring match, R3-NEW-5 nested-table walker, R3-NEW-6 toChangeXML color escape parity)
+
 ## [0.19.3] - 2026-04-26
 
 ### Fixed — 8 P0 + 3 must-fix P1 from PsychQuant/che-word-mcp#56 round 2 verify
