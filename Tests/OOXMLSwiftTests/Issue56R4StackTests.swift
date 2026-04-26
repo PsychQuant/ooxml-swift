@@ -1449,7 +1449,9 @@ final class Issue56R4StackTests: XCTestCase {
         // header rels — that's part of what this test surfaces. Use the id
         // directly (the hyperlink IS listed by getHyperlinks per R5-CONT P0
         // #7, just without its resolved URL).
-        let listed = doc.getHyperlinks().first { $0.id.hasPrefix("rId99") }
+        // R5-CONT-2 P1 #8: container hyperlink ids now part-scoped (e.g.,
+        // "header1.xml:rId99@1") so check contains() not hasPrefix().
+        let listed = doc.getHyperlinks().first { $0.id.contains("rId99") }
         guard let headerHyperlinkId = listed?.id else {
             return XCTFail("Pre-condition: getHyperlinks SHALL list the header hyperlink (R5-CONT P0 #7); got: \(doc.getHyperlinks())")
         }

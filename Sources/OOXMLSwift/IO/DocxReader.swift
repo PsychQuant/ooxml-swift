@@ -151,6 +151,11 @@ public struct DocxReader {
             var header = Header(id: rel.id, originalFileName: rel.target, rootAttributes: rootAttrs)
             header.bodyChildren = bodyChildren
             header.relationships = headerRels  // store ONLY the container's own rels (not merged)
+            // v0.19.5+ (#56 R5-CONT-2 P1 #8): part-scope hyperlink ids so
+            // cross-part collisions don't return ambiguous results from
+            // getHyperlinks / updateHyperlink / deleteHyperlink. See
+            // parseHyperlink id-format comment.
+            Self.rewriteHyperlinkIdsInBodyChildren(&header.bodyChildren, prefix: rel.target)
             document.headers.append(header)
         }
 
@@ -187,6 +192,7 @@ public struct DocxReader {
             var footer = Footer(id: rel.id, originalFileName: rel.target, rootAttributes: rootAttrs)
             footer.bodyChildren = bodyChildren
             footer.relationships = footerRels
+            Self.rewriteHyperlinkIdsInBodyChildren(&footer.bodyChildren, prefix: rel.target)
             document.footers.append(footer)
         }
 
@@ -230,6 +236,7 @@ public struct DocxReader {
                     let text = paragraphsOnly.map { $0.getText() }.joined(separator: " ")
                     var footnote = Footnote(id: id, text: text, paragraphIndex: 0)
                     footnote.bodyChildren = bodyChildren
+                    Self.rewriteHyperlinkIdsInBodyChildren(&footnote.bodyChildren, prefix: "footnotes.xml")
                     document.footnotes.footnotes.append(footnote)
                 }
             }
@@ -274,6 +281,7 @@ public struct DocxReader {
                     let text = paragraphsOnly.map { $0.getText() }.joined(separator: " ")
                     var endnote = Endnote(id: id, text: text, paragraphIndex: 0)
                     endnote.bodyChildren = bodyChildren
+                    Self.rewriteHyperlinkIdsInBodyChildren(&endnote.bodyChildren, prefix: "endnotes.xml")
                     document.endnotes.endnotes.append(endnote)
                 }
             }
@@ -1328,7 +1336,8 @@ public struct DocxReader {
     internal static func parseHyperlink(
         from element: XMLElement,
         relationships: RelationshipsCollection,
-        position: Int
+        position: Int,
+        partFileName: String? = nil
     ) throws -> Hyperlink {
         // v0.19.3+ (#56 round 2 P0-2): only attributes with a typed `Hyperlink`
         // field belong here. Removed `w:tgtFrame` and `w:docLocation` because
@@ -1411,8 +1420,23 @@ public struct DocxReader {
         // breaking MCP tools that find / edit / delete hyperlinks by id.
         // Format: `<rId-or-anchor-or-hl>@<position>` so the human-readable
         // prefix survives for debugging and the suffix guarantees uniqueness.
+        //
+        // v0.19.5+ (#56 R5-CONT-2 P1 #8): when the hyperlink is parsed from
+        // a container (header / footer / footnote / endnote), prepend the
+        // part fileName so cross-part hyperlinks with the same `rId@position`
+        // get distinct ids. Body hyperlinks keep the original
+        // `rId@position` format for backward compat. After R5-CONT P0 #7
+        // made `getHyperlinks` cross-part, two parts producing same
+        // `rId@position` would otherwise be indistinguishable to MCP
+        // callers (verify R5-CONT P1 #8 / Codex P1 #4).
         let idPrefix = rId ?? anchor ?? "hl"
-        let id = "\(idPrefix)@\(position)"
+        let basicId = "\(idPrefix)@\(position)"
+        let id: String
+        if let partFileName = partFileName {
+            id = "\(partFileName):\(basicId)"
+        } else {
+            id = basicId
+        }
 
         return Hyperlink(
             id: id,
@@ -1748,6 +1772,53 @@ public struct DocxReader {
     /// Table-position fields (`tableRow`, `tableColumn`, `cellParagraphIndex`)
     /// are populated for revisions inside table cells so consumers that want
     /// the structural location can find it without re-walking.
+    /// v0.19.5+ (#56 R5-CONT-2 P1 #8): post-process container bodyChildren
+    /// to part-scope every hyperlink id. Body hyperlinks keep their
+    /// `<rId-or-anchor-or-hl>@<position>` format; container hyperlinks
+    /// get prepended with the container's part fileName so cross-part
+    /// callers can disambiguate. Walks paragraphs / tables (incl. nested
+    /// tables) / contentControl children — same recursion as the other
+    /// walkers in this file.
+    fileprivate static func rewriteHyperlinkIdsInBodyChildren(_ children: inout [BodyChild], prefix: String) {
+        func rewriteParagraph(_ para: inout Paragraph) {
+            for hi in 0..<para.hyperlinks.count {
+                let oldId = para.hyperlinks[hi].id
+                if !oldId.contains(":") {
+                    para.hyperlinks[hi].id = "\(prefix):\(oldId)"
+                }
+            }
+        }
+        func walk(_ child: inout BodyChild) {
+            switch child {
+            case .paragraph(var para):
+                rewriteParagraph(&para)
+                child = .paragraph(para)
+            case .table(var table):
+                for r in 0..<table.rows.count {
+                    for c in 0..<table.rows[r].cells.count {
+                        for p in 0..<table.rows[r].cells[c].paragraphs.count {
+                            rewriteParagraph(&table.rows[r].cells[c].paragraphs[p])
+                        }
+                        for nt in 0..<table.rows[r].cells[c].nestedTables.count {
+                            var nestedChildren: [BodyChild] = [.table(table.rows[r].cells[c].nestedTables[nt])]
+                            rewriteHyperlinkIdsInBodyChildren(&nestedChildren, prefix: prefix)
+                            if case .table(let updated) = nestedChildren[0] {
+                                table.rows[r].cells[c].nestedTables[nt] = updated
+                            }
+                        }
+                    }
+                }
+                child = .table(table)
+            case .contentControl(let metadata, var inner):
+                rewriteHyperlinkIdsInBodyChildren(&inner, prefix: prefix)
+                child = .contentControl(metadata, children: inner)
+            }
+        }
+        for i in 0..<children.count {
+            walk(&children[i])
+        }
+    }
+
     fileprivate static func propagateRevisionsFromBodyChildren(
         _ children: [BodyChild],
         source: RevisionSource = .body,
