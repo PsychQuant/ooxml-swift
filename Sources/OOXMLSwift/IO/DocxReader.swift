@@ -651,6 +651,18 @@ public struct DocxReader {
                     paragraph.unrecognizedChildren.append(
                         UnrecognizedChild(name: "ins", rawXML: childElement.xmlString, position: childPosition)
                     )
+                    // v0.19.4+ (#56 R3-NEW-4): also publish a typed Revision so
+                    // MCP get_revisions / accept_revision / reject_revision tools
+                    // see the wrapper. The flag tells accept/reject to strip /
+                    // unwrap the unrecognizedChildren entry rather than apply
+                    // run-text replacement (which would no-op on raw XML).
+                    var rev = Revision(
+                        id: revId, type: .insertion, author: author,
+                        paragraphIndex: 0, originalText: nil,
+                        newText: nil, date: date
+                    )
+                    rev.isMixedContentWrapper = true
+                    paragraph.revisions.append(rev)
                     break
                 }
 
@@ -692,6 +704,14 @@ public struct DocxReader {
                     paragraph.unrecognizedChildren.append(
                         UnrecognizedChild(name: "del", rawXML: childElement.xmlString, position: childPosition)
                     )
+                    // v0.19.4+ (#56 R3-NEW-4): publish typed Revision (see "ins" case).
+                    var rev = Revision(
+                        id: revId, type: .deletion, author: author,
+                        paragraphIndex: 0, originalText: nil,
+                        newText: nil, date: date
+                    )
+                    rev.isMixedContentWrapper = true
+                    paragraph.revisions.append(rev)
                     break
                 }
 
@@ -727,6 +747,14 @@ public struct DocxReader {
                     paragraph.unrecognizedChildren.append(
                         UnrecognizedChild(name: "moveFrom", rawXML: childElement.xmlString, position: childPosition)
                     )
+                    // v0.19.4+ (#56 R3-NEW-4): publish typed Revision (see "ins" case).
+                    var rev = Revision(
+                        id: revId, type: .moveFrom, author: author,
+                        paragraphIndex: 0, originalText: nil,
+                        newText: nil, date: date
+                    )
+                    rev.isMixedContentWrapper = true
+                    paragraph.revisions.append(rev)
                     break
                 }
 
@@ -757,6 +785,14 @@ public struct DocxReader {
                     paragraph.unrecognizedChildren.append(
                         UnrecognizedChild(name: "moveTo", rawXML: childElement.xmlString, position: childPosition)
                     )
+                    // v0.19.4+ (#56 R3-NEW-4): publish typed Revision (see "ins" case).
+                    var rev = Revision(
+                        id: revId, type: .moveTo, author: author,
+                        paragraphIndex: 0, originalText: nil,
+                        newText: nil, date: date
+                    )
+                    rev.isMixedContentWrapper = true
+                    paragraph.revisions.append(rev)
                     break
                 }
 
