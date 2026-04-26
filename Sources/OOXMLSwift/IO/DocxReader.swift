@@ -1110,8 +1110,14 @@ public struct DocxReader {
         relationships: RelationshipsCollection,
         position: Int
     ) throws -> Hyperlink {
+        // v0.19.3+ (#56 round 2 P0-2): only attributes with a typed `Hyperlink`
+        // field belong here. Removed `w:tgtFrame` and `w:docLocation` because
+        // the model has no typed surface for them and `toXML()` doesn't emit
+        // them — leaving them in `recognizedAttrs` silently dropped vendor /
+        // browser-target attributes on round-trip. They now flow into
+        // `rawAttributes` and the writer emits them via the alphabetical loop.
         let recognizedAttrs: Set<String> = [
-            "r:id", "w:anchor", "w:tooltip", "w:history", "w:tgtFrame", "w:docLocation",
+            "r:id", "w:anchor", "w:tooltip", "w:history",
         ]
 
         let rId = element.attribute(forName: "r:id")?.stringValue
@@ -1127,14 +1133,23 @@ public struct DocxReader {
             rawAttributes[name] = attr.stringValue ?? ""
         }
 
+        // v0.19.3+ (#56 round 2 P0-3): walk children once, building both the
+        // ordered `children` list (source of truth for the writer) AND the
+        // legacy `runs` / `rawChildren` projections (kept for backward-compat
+        // reads from existing callers that still iterate the typed lists).
         var runs: [Run] = []
         var rawChildren: [String] = []
+        var children: [HyperlinkChild] = []
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement else { continue }
             if childElement.localName == "r" {
-                runs.append(try parseRun(from: childElement, relationships: relationships))
+                let run = try parseRun(from: childElement, relationships: relationships)
+                runs.append(run)
+                children.append(.run(run))
             } else {
-                rawChildren.append(childElement.xmlString)
+                let raw = childElement.xmlString
+                rawChildren.append(raw)
+                children.append(.rawXML(raw))
             }
         }
 
@@ -1146,11 +1161,15 @@ public struct DocxReader {
             url = relationships.relationships.first(where: { $0.id == rId })?.target
         }
 
-        // Allocate a stable id from the relationship id when available, else
-        // use a deterministic hash of the source position so duplicates parse
-        // distinctly. The `id` field is internal to the model — Writer paths
-        // do not emit it.
-        let id = rId ?? anchor ?? "hl-\(position)"
+        // v0.19.3+ (#56 round 2 P1-7): allocate a unique id by appending the
+        // source position. Pre-fix `id = rId ?? anchor ?? "hl-\(position)"`
+        // returned the same id when two hyperlinks shared the same `r:id`
+        // (legitimate when two anchors target the same URL via one rels entry),
+        // breaking MCP tools that find / edit / delete hyperlinks by id.
+        // Format: `<rId-or-anchor-or-hl>@<position>` so the human-readable
+        // prefix survives for debugging and the suffix guarantees uniqueness.
+        let idPrefix = rId ?? anchor ?? "hl"
+        let id = "\(idPrefix)@\(position)"
 
         return Hyperlink(
             id: id,
@@ -1162,6 +1181,7 @@ public struct DocxReader {
             history: history,
             rawAttributes: rawAttributes,
             rawChildren: rawChildren,
+            children: children,
             position: position
         )
     }
@@ -1443,6 +1463,15 @@ public struct DocxReader {
 
     private static func parseRunProperties(from element: XMLElement) -> RunProperties {
         var props = RunProperties()
+
+        // v0.19.3+ (#56 round 2 P0-1): rStyle reference (e.g., "Hyperlink"
+        // for hyperlink-styled runs). Source-loaded runs preserve their style
+        // name through round-trip; API-built hyperlinks set this so Word
+        // applies the Hyperlink character style (blue + underline).
+        if let rStyle = element.elements(forName: "w:rStyle").first,
+           let val = rStyle.attribute(forName: "w:val")?.stringValue {
+            props.rStyle = val
+        }
 
         // 粗體
         if element.elements(forName: "w:b").first != nil {

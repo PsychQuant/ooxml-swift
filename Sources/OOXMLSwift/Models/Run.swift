@@ -80,6 +80,13 @@ public struct RunProperties: Equatable {
     public var textEffect: TextEffect?              // 文字效果
     public var rawXML: String?                      // 原始 XML（用於進階功能如 SDT）
 
+    /// v0.19.3+ (#56 round 2 P0-1): style reference name emitted as
+    /// `<w:rStyle w:val="..."/>` — must appear FIRST inside `<w:rPr>` per
+    /// ECMA-376 §17.3.2 ordering (CT_RPr's first child). Hyperlink-styled
+    /// runs use `"Hyperlink"`, footnote refs use `"FootnoteReference"`,
+    /// endnote refs use `"EndnoteReference"`.
+    public var rStyle: String?
+
     public init() {}
 
     public init(bold: Bool = false,
@@ -90,7 +97,8 @@ public struct RunProperties: Equatable {
          fontName: String? = nil,
          color: String? = nil,
          highlight: HighlightColor? = nil,
-         verticalAlign: VerticalAlign? = nil) {
+         verticalAlign: VerticalAlign? = nil,
+         rStyle: String? = nil) {
         self.bold = bold
         self.italic = italic
         self.underline = underline
@@ -100,6 +108,7 @@ public struct RunProperties: Equatable {
         self.color = color
         self.highlight = highlight
         self.verticalAlign = verticalAlign
+        self.rStyle = rStyle
     }
 
     /// 合併格式（覆蓋非 nil 值）
@@ -116,6 +125,7 @@ public struct RunProperties: Equatable {
         if let characterSpacing = other.characterSpacing { self.characterSpacing = characterSpacing }
         if let textEffect = other.textEffect { self.textEffect = textEffect }
         if let rawXML = other.rawXML { self.rawXML = rawXML }
+        if let rStyle = other.rStyle { self.rStyle = rStyle }
     }
 }
 
@@ -222,6 +232,12 @@ extension RunProperties {
     func toXML() -> String {
         var parts: [String] = []
 
+        // v0.19.3+ (#56 round 2 P0-1): rStyle MUST be first inside <w:rPr>
+        // per ECMA-376 §17.3.2 CT_RPr child order. Hyperlinks rely on this
+        // for the "Hyperlink" character style to apply correctly in Word.
+        if let rStyle = rStyle {
+            parts.append("<w:rStyle w:val=\"\(rStyle)\"/>")
+        }
         if bold {
             parts.append("<w:b/>")
         }
