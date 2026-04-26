@@ -849,7 +849,14 @@ public struct DocxWriter {
         xml += "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
         for rel in collection.relationships {
             xml += "<Relationship Id=\"\(escapeXMLAttribute(rel.id))\""
-            xml += " Type=\"\(escapeXMLAttribute(rel.type.rawValue))\""
+            // v0.19.5+ (#56 R5-CONT-2 P1 #6): prefer `rawType` (the literal
+            // source-attribute value) over `type.rawValue`. Unknown vendor
+            // extension types preserve their original Type string instead
+            // of being downgraded to "" via the `.unknown` enum case.
+            // Falls back to `type.rawValue` only when rawType is empty
+            // (defensive — init defaults rawType from type.rawValue).
+            let typeStr = rel.rawType.isEmpty ? rel.type.rawValue : rel.rawType
+            xml += " Type=\"\(escapeXMLAttribute(typeStr))\""
             xml += " Target=\"\(escapeXMLAttribute(rel.target))\""
             if let mode = rel.targetMode {
                 xml += " TargetMode=\"\(escapeXMLAttribute(mode))\""

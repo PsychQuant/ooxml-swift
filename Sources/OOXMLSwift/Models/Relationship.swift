@@ -18,12 +18,26 @@ public struct Relationship: Equatable {
     /// the attribute byte-equivalently for hyperlink rels in
     /// `header*.xml.rels` / `footer*.xml.rels` / etc.
     public var targetMode: String?
+    /// v0.19.5+ (#56 R5-CONT-2 P1 #6): preserve the raw Type attribute
+    /// string so unknown vendor-extension types (VML / OLE / Word
+    /// extension rels) round-trip byte-equivalent. Pre-fix `type` got
+    /// `.unknown` (rawValue "") for any unrecognized type, and the writer
+    /// emitted `Type=""` — invalid OOXML rels (Word strict mode rejects).
+    /// Now: writer prefers `rawType` when non-nil over `type.rawValue`.
+    /// Reader populates this from the source `Type` attribute regardless
+    /// of recognition. Empty string when API-built (writer falls back to
+    /// `type.rawValue`).
+    public var rawType: String
 
-    public init(id: String, type: RelationshipType, target: String, targetMode: String? = nil) {
+    public init(id: String, type: RelationshipType, target: String, targetMode: String? = nil, rawType: String? = nil) {
         self.id = id
         self.type = type
         self.target = target
         self.targetMode = targetMode
+        // Default rawType from the typed enum's rawValue; reader overrides
+        // with the source's literal Type attribute via the explicit
+        // parameter (preserves unknown types verbatim).
+        self.rawType = rawType ?? type.rawValue
     }
 }
 

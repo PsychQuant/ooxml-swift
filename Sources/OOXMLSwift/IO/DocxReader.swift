@@ -454,7 +454,12 @@ public struct DocxReader {
                 id: id,
                 type: RelationshipType(rawValue: typeStr),
                 target: target,
-                targetMode: targetMode
+                targetMode: targetMode,
+                // v0.19.5+ (#56 R5-CONT-2 P1 #6): preserve raw type string
+                // verbatim so unknown vendor extension types round-trip
+                // byte-equivalent. Writer prefers `rawType` over
+                // `type.rawValue`.
+                rawType: typeStr
             )
             collection.relationships.append(relationship)
         }
