@@ -302,48 +302,51 @@ public struct DocxReader {
             }
         }
 
+        // v0.19.5+ (#56 R5-CONT P0 #2 + H1): containers route through
+        // `propagateRevisionsFromBodyChildren` so typed Revisions inside
+        // container tables / nested tables / content-control children are
+        // visible to MCP `accept_revision` / `reject_revision` /
+        // `get_revisions`. Pre-fix the four loops iterated `.paragraphs` (the
+        // R5 P0 #6 flat backward-compat view), missing anything inside
+        // `.table` / `.contentControl` BodyChild cases. The shared helper
+        // also accepts the correct `source` label per container, replacing
+        // the hardcoded `.body` that DA-N H1 flagged.
+
         // Header revisions (source = .header(id:))
         for header in document.headers {
-            for (paraIdx, para) in header.paragraphs.enumerated() {
-                for var revision in para.revisions {
-                    revision.paragraphIndex = paraIdx
-                    revision.source = .header(id: header.id)
-                    document.revisions.revisions.append(revision)
-                }
-            }
+            propagateRevisionsFromBodyChildren(
+                header.bodyChildren,
+                paragraphIndex: 0,
+                source: .header(id: header.id),
+                into: &document
+            )
         }
-
         // Footer revisions (source = .footer(id:))
         for footer in document.footers {
-            for (paraIdx, para) in footer.paragraphs.enumerated() {
-                for var revision in para.revisions {
-                    revision.paragraphIndex = paraIdx
-                    revision.source = .footer(id: footer.id)
-                    document.revisions.revisions.append(revision)
-                }
-            }
+            propagateRevisionsFromBodyChildren(
+                footer.bodyChildren,
+                paragraphIndex: 0,
+                source: .footer(id: footer.id),
+                into: &document
+            )
         }
-
         // Footnote revisions (source = .footnote(id:))
         for footnote in document.footnotes.footnotes {
-            for (paraIdx, para) in footnote.paragraphs.enumerated() {
-                for var revision in para.revisions {
-                    revision.paragraphIndex = paraIdx
-                    revision.source = .footnote(id: footnote.id)
-                    document.revisions.revisions.append(revision)
-                }
-            }
+            propagateRevisionsFromBodyChildren(
+                footnote.bodyChildren,
+                paragraphIndex: 0,
+                source: .footnote(id: footnote.id),
+                into: &document
+            )
         }
-
         // Endnote revisions (source = .endnote(id:))
         for endnote in document.endnotes.endnotes {
-            for (paraIdx, para) in endnote.paragraphs.enumerated() {
-                for var revision in para.revisions {
-                    revision.paragraphIndex = paraIdx
-                    revision.source = .endnote(id: endnote.id)
-                    document.revisions.revisions.append(revision)
-                }
-            }
+            propagateRevisionsFromBodyChildren(
+                endnote.bodyChildren,
+                paragraphIndex: 0,
+                source: .endnote(id: endnote.id),
+                into: &document
+            )
         }
 
         // 11. 讀取 commentsExtended.xml（可選，Word 2012+ 回覆與已解決狀態）
@@ -1679,11 +1682,22 @@ public struct DocxReader {
     /// Called from the body propagation step's `case .contentControl` branch
     /// so SDT-wrapped revisions become visible to MCP `accept_revision` /
     /// `reject_revision`. Match the recursion shape of `walkAllParagraphs`.
-    fileprivate static func propagateRevisionsFromBodyChildren(_ children: [BodyChild], paragraphIndex: Int, into document: inout WordDocument) {
+    /// v0.19.5+ (#56 R5-CONT P0 #2 + H1): parameterized over `source` so
+    /// container call sites (header / footer / footnote / endnote) can reuse
+    /// the same recursion with the correct `Revision.source` label. Pre-fix
+    /// `revision.source = .body` was hardcoded → would mis-tag any revision
+    /// surfaced from a container's nested SDT/table even after R6 extended
+    /// the call sites.
+    fileprivate static func propagateRevisionsFromBodyChildren(
+        _ children: [BodyChild],
+        paragraphIndex: Int,
+        source: RevisionSource = .body,
+        into document: inout WordDocument
+    ) {
         func visit(_ para: Paragraph) {
             for var revision in para.revisions {
                 revision.paragraphIndex = paragraphIndex
-                revision.source = .body
+                revision.source = source
                 document.revisions.revisions.append(revision)
             }
         }
