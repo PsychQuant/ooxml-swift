@@ -1582,15 +1582,50 @@ public struct WordDocument: Equatable {
         // v0.19.5+ (#56 R5 P1 #3): walk every part — same scope expansion as
         // updateHyperlink. Removed hyperlinks living inside headers / footers /
         // footnotes / endnotes / nested tables / SDTs no longer silently miss.
+        //
+        // v0.19.5+ (#56 R5-CONT-2 P0 #2): mirror `updateHyperlink(url:)`'s
+        // R5-CONT P1 #8 per-container rels routing. Pre-fix this method
+        // unconditionally removed from `document.hyperlinkReferences` and
+        // marked `word/_rels/document.xml.rels` dirty regardless of where
+        // the hyperlink lived → for container hyperlinks (whose rels live
+        // in `header*.xml.rels` etc.), the container's rels collection
+        // kept an orphan rel AND document.xml.rels was wrongly dirtied.
+        // Now: route through the owning part's rels, mark only the
+        // affected rels file dirty.
         var capturedRId: String? = nil
         guard let partKey = removeHyperlink(id: hyperlinkId, captureRelationshipId: &capturedRId) else {
             throw WordError.invalidFormat("Hyperlink '\(hyperlinkId)' not found")
         }
-        if let rId = capturedRId {
-            hyperlinkReferences.removeAll { $0.relationshipId == rId }
-        }
         modifiedParts.insert(partKey)
-        modifiedParts.insert("word/_rels/document.xml.rels")
+
+        if let rId = capturedRId {
+            let relsKey = relsPartKey(forBodyPartKey: partKey)
+            removeHyperlinkRelTarget(rId: rId, partKey: partKey)
+            modifiedParts.insert(relsKey)
+        }
+    }
+
+    /// v0.19.5+ (#56 R5-CONT-2 P0 #2): remove the hyperlink relationship
+    /// from the owning part's relationships. Body uses document-scope
+    /// `hyperlinkReferences`; containers use their own `relationships`.
+    /// Mirrors `updateHyperlinkRelTarget` (R5-CONT P1 #8) for the delete
+    /// side.
+    private mutating func removeHyperlinkRelTarget(rId: String, partKey: String) {
+        switch partKey {
+        case "word/document.xml":
+            hyperlinkReferences.removeAll { $0.relationshipId == rId }
+        case "word/footnotes.xml":
+            footnotes.relationships.relationships.removeAll { $0.id == rId }
+        case "word/endnotes.xml":
+            endnotes.relationships.relationships.removeAll { $0.id == rId }
+        default:
+            for hi in 0..<headers.count where DocumentWalker.headerPartKey(for: headers[hi]) == partKey {
+                headers[hi].relationships.relationships.removeAll { $0.id == rId }
+            }
+            for fi in 0..<footers.count where DocumentWalker.footerPartKey(for: footers[fi]) == partKey {
+                footers[fi].relationships.relationships.removeAll { $0.id == rId }
+            }
+        }
     }
 
     // MARK: - §8.3 helpers (v0.19.5+ #56 R5 P1 #3)
