@@ -407,8 +407,12 @@ public struct DocxReader {
         // bookmark id across both `bookmarks` (typed) and `bookmarkMarkers`
         // (raw). Sets nextBookmarkId past the global max so subsequent
         // insertBookmark cannot collide with any source bookmark.
+        // v0.19.5+ (#56 R5-CONT P1 #12): route through the shared
+        // `DocumentWalker.walkAllParagraphs` instead of the private
+        // `Self.walkAllParagraphs` duplicate. Same recursion shape, single
+        // source of truth — verify R5 P2 #13 (DA C4 walker centralization).
         var maxBookmarkId = 0
-        Self.walkAllParagraphs(in: document) { para in
+        DocumentWalker.walkAllParagraphs(in: document) { para, _ in
             for bookmark in para.bookmarks where bookmark.id > maxBookmarkId {
                 maxBookmarkId = bookmark.id
             }
@@ -1773,48 +1777,14 @@ public struct DocxReader {
         for c in children { walk(c) }
     }
 
-    /// v0.19.4+ (#56 R3-NEW-5): visit every Paragraph reachable from the
-    /// document — body (recursing into tables and content controls), headers,
-    /// footers, footnotes, and endnotes. Used by the post-load nextBookmarkId
-    /// calibration to find the global max bookmark id across all parts.
-    private static func walkAllParagraphs(in document: WordDocument, _ visit: (Paragraph) -> Void) {
-        func walkTable(_ table: Table) {
-            for row in table.rows {
-                for cell in row.cells {
-                    for para in cell.paragraphs { visit(para) }
-                    // v0.19.4+ (#56 R3-NEW-5 codex P1): recurse into nested
-                    // tables (depth-limited to 5 by parser per ooxml-swift#49).
-                    for nested in cell.nestedTables { walkTable(nested) }
-                }
-            }
-        }
-        func walkBodyChild(_ child: BodyChild) {
-            switch child {
-            case .paragraph(let para):
-                visit(para)
-            case .table(let table):
-                walkTable(table)
-            case .contentControl(_, let inner):
-                for c in inner { walkBodyChild(c) }
-            }
-        }
-        for child in document.body.children { walkBodyChild(child) }
-        // v0.19.5+ (#56 R5 P0 #6): walk container bodyChildren so paragraphs
-        // inside header/footer/footnote/endnote tables are visible to the
-        // bookmark calibration walker.
-        for header in document.headers {
-            for c in header.bodyChildren { walkBodyChild(c) }
-        }
-        for footer in document.footers {
-            for c in footer.bodyChildren { walkBodyChild(c) }
-        }
-        for footnote in document.footnotes.footnotes {
-            for c in footnote.bodyChildren { walkBodyChild(c) }
-        }
-        for endnote in document.endnotes.endnotes {
-            for c in endnote.bodyChildren { walkBodyChild(c) }
-        }
-    }
+    // v0.19.5+ (#56 R5-CONT P1 #12): the prior `private static func
+    // walkAllParagraphs(in:_:)` duplicate was removed. The single source
+    // of truth is now `DocumentWalker.walkAllParagraphs(in:visit:)` (in
+    // `IO/DocumentWalker.swift`), which the nextBookmarkId calibration
+    // call site (search this file for `DocumentWalker.walkAllParagraphs`)
+    // routes through. Walker centralization closes verify R5 P2 #13
+    // (DA C4 — promised "single walker = no walker asymmetry" per
+    // R5 design).
 
     private static func parseRunProperties(from element: XMLElement) -> RunProperties {
         var props = RunProperties()
