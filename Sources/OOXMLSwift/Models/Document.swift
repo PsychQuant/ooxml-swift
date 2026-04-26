@@ -2329,29 +2329,31 @@ public struct WordDocument: Equatable {
     /// v0.19.4+ (#56 R3-NEW-4): when a Revision was created by the Reader's
     /// hasNonRunChild raw-capture branch, the wrapper lives as a verbatim XML
     /// entry in `paragraph.unrecognizedChildren`. Run-text replacement won't
-    /// touch it. This helper searches body paragraphs (including paragraphs
-    /// nested inside table cells) for the matching entry by name + id and
-    /// either unwraps (accept) or removes (reject) it. Returns true when an
-    /// entry was found and acted on.
+    /// touch it. Walks every part (body incl. nested tables and content-control
+    /// children, headers, footers, footnotes, endnotes) for the matching entry
+    /// by name + id and either unwraps (accept) or removes (reject) it.
+    ///
+    /// Returns the originating part key (e.g. `"word/header1.xml"`,
+    /// `"word/footnotes.xml"`) when a match was acted on, or `nil` when not
+    /// found. Caller marks `partKey` dirty in `modifiedParts` and propagates
+    /// the not-found case to a `RevisionError.notFound` throw rather than
+    /// silently returning success.
     ///
     /// `accept` true → replace the wrapper rawXML with just the inner content
     /// (between the opening tag's `>` and the closing `</w:NAME>`).
     /// `accept` false → remove the entry entirely (drops wrapper AND inner).
-    @discardableResult
     private mutating func handleMixedContentWrapperRevision(
         revisionId: Int,
         wrapperName: String,
         accept: Bool
-    ) -> Bool {
+    ) -> String? {
         let openTagPrefix = "<w:\(wrapperName)"
         let openIdMarker = "w:id=\"\(revisionId)\""
         let closeTag = "</w:\(wrapperName)>"
 
-        // v0.19.4+ (#56 R3-NEW-4 codex P1): match `w:id` ONLY in the opening
-        // tag, not the full rawXML. A nested bookmark / comment / SDT carrying
-        // the same numeric id (e.g. `<w:ins w:id="3"><w:bookmarkStart w:id="5"/></w:ins>`)
-        // would otherwise produce a false hit on the outer wrapper for
-        // revision 5.
+        // Opening-tag-only match: a nested element carrying the same numeric id
+        // (e.g. `<w:ins w:id="3"><w:bookmarkStart w:id="5"/></w:ins>`) must NOT
+        // false-hit the outer wrapper for revision 5.
         func match(_ child: UnrecognizedChild) -> Bool {
             guard child.name == wrapperName,
                   child.rawXML.hasPrefix(openTagPrefix),
@@ -2389,33 +2391,93 @@ public struct WordDocument: Equatable {
             return true
         }
 
-        for i in 0..<body.children.count {
-            switch body.children[i] {
+        // Body — recurse into tables, nested tables, and content-control children.
+        if let partKey = transformInBodyChildren(&body.children, transform: transformParagraph) {
+            return partKey
+        }
+
+        // Headers
+        for hi in 0..<headers.count {
+            let key = DocumentWalker.headerPartKey(for: headers[hi])
+            for pi in 0..<headers[hi].paragraphs.count {
+                if transformParagraph(&headers[hi].paragraphs[pi]) {
+                    return key
+                }
+            }
+        }
+        // Footers
+        for fi in 0..<footers.count {
+            let key = DocumentWalker.footerPartKey(for: footers[fi])
+            for pi in 0..<footers[fi].paragraphs.count {
+                if transformParagraph(&footers[fi].paragraphs[pi]) {
+                    return key
+                }
+            }
+        }
+        // Footnotes
+        for fni in 0..<footnotes.footnotes.count {
+            for pi in 0..<footnotes.footnotes[fni].paragraphs.count {
+                if transformParagraph(&footnotes.footnotes[fni].paragraphs[pi]) {
+                    return DocumentWalker.footnotesPartKey
+                }
+            }
+        }
+        // Endnotes
+        for eni in 0..<endnotes.endnotes.count {
+            for pi in 0..<endnotes.endnotes[eni].paragraphs.count {
+                if transformParagraph(&endnotes.endnotes[eni].paragraphs[pi]) {
+                    return DocumentWalker.endnotesPartKey
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Recursively transforms a `[BodyChild]` slice in-place. Returns the body
+    /// part key (`word/document.xml`) on first hit, or nil. Used by the
+    /// part-spanning wrapper helper to handle paragraphs that live inside
+    /// tables, nested tables, or block-level content-control children.
+    private func transformInBodyChildren(_ children: inout [BodyChild], transform: (inout Paragraph) -> Bool) -> String? {
+        for i in 0..<children.count {
+            switch children[i] {
             case .paragraph(var para):
-                if transformParagraph(&para) {
-                    body.children[i] = .paragraph(para)
-                    return true
+                if transform(&para) {
+                    children[i] = .paragraph(para)
+                    return DocumentWalker.bodyPartKey
                 }
             case .table(var table):
                 var hit = false
                 for r in 0..<table.rows.count {
                     for c in 0..<table.rows[r].cells.count {
                         for p in 0..<table.rows[r].cells[c].paragraphs.count {
-                            if transformParagraph(&table.rows[r].cells[c].paragraphs[p]) {
+                            if transform(&table.rows[r].cells[c].paragraphs[p]) {
+                                hit = true
+                            }
+                        }
+                        // Recurse into nested tables.
+                        for nt in 0..<table.rows[r].cells[c].nestedTables.count {
+                            var nestedChildren: [BodyChild] = [.table(table.rows[r].cells[c].nestedTables[nt])]
+                            if let _ = transformInBodyChildren(&nestedChildren, transform: transform) {
+                                if case .table(let updated) = nestedChildren[0] {
+                                    table.rows[r].cells[c].nestedTables[nt] = updated
+                                }
                                 hit = true
                             }
                         }
                     }
                 }
                 if hit {
-                    body.children[i] = .table(table)
-                    return true
+                    children[i] = .table(table)
+                    return DocumentWalker.bodyPartKey
                 }
-            case .contentControl:
-                continue
+            case .contentControl(let cc, var inner):
+                if let _ = transformInBodyChildren(&inner, transform: transform) {
+                    children[i] = .contentControl(cc, children: inner)
+                    return DocumentWalker.bodyPartKey
+                }
             }
         }
-        return false
+        return nil
     }
 
     /// 接受修訂
@@ -2442,13 +2504,17 @@ public struct WordDocument: Equatable {
             // Accept = keep inner content (typical for insertion / moveTo) or
             // drop both wrapper + inner (typical for deletion / moveFrom).
             let keepInner = (revision.type == .insertion || revision.type == .moveTo)
-            handleMixedContentWrapperRevision(
+            guard let partKey = handleMixedContentWrapperRevision(
                 revisionId: revisionId,
                 wrapperName: wrapperName,
                 accept: keepInner
-            )
+            ) else {
+                // No matching unrecognizedChild entry in any part. Surface the
+                // mismatch instead of silently removing the typed Revision.
+                throw RevisionError.notFound(revisionId)
+            }
             revisions.revisions.remove(at: index)
-            modifiedParts.insert("word/document.xml")
+            modifiedParts.insert(partKey)
             return
         }
 
@@ -2517,13 +2583,15 @@ public struct WordDocument: Equatable {
             // rejected); keep inner for deletion / moveFrom (the deletion is
             // rejected, so the original content is preserved).
             let keepInner = (revision.type == .deletion || revision.type == .moveFrom)
-            handleMixedContentWrapperRevision(
+            guard let partKey = handleMixedContentWrapperRevision(
                 revisionId: revisionId,
                 wrapperName: wrapperName,
                 accept: keepInner
-            )
+            ) else {
+                throw RevisionError.notFound(revisionId)
+            }
             revisions.revisions.remove(at: index)
-            modifiedParts.insert("word/document.xml")
+            modifiedParts.insert(partKey)
             return
         }
 
