@@ -490,28 +490,38 @@ extension Paragraph {
         for ac in alternateContents where ac.position > 0 {
             positioned.append((ac.position, .xml(ac.rawXML)))
         }
-        for marker in bookmarkMarkers {
+        // v0.19.5+ (#56 R5-CONT-2 P0 #4): apply `where position > 0` filter
+        // to the 8 remaining positioned collections, completing the sweep
+        // R5-CONT P0 #6 started for runs / hyperlinks / fieldSimples /
+        // alternateContents. Pre-fix these went into the sort list
+        // unconditionally → API-built marker (constructed with position 0)
+        // sorted BEFORE every source-loaded child (position >= 1) and
+        // landed at paragraph head. Post-content section below emits the
+        // position-0 entries in append position to mirror the
+        // contentControls + runs / hyperlinks / fieldSimples /
+        // alternateContents handling.
+        for marker in bookmarkMarkers where marker.position > 0 {
             positioned.append((marker.position, .xml(Self.emitBookmarkMarker(marker, paragraph: self))))
         }
-        for marker in commentRangeMarkers {
+        for marker in commentRangeMarkers where marker.position > 0 {
             positioned.append((marker.position, .xml(Self.emitCommentRangeMarker(marker))))
         }
-        for marker in permissionRangeMarkers {
+        for marker in permissionRangeMarkers where marker.position > 0 {
             positioned.append((marker.position, .xml(Self.emitPermissionRangeMarker(marker))))
         }
-        for marker in proofErrorMarkers {
+        for marker in proofErrorMarkers where marker.position > 0 {
             positioned.append((marker.position, .xml("<w:proofErr w:type=\"\(marker.type.rawValue)\"/>")))
         }
-        for tag in smartTags {
+        for tag in smartTags where tag.position > 0 {
             positioned.append((tag.position, .xml(tag.rawXML)))
         }
-        for block in customXmlBlocks {
+        for block in customXmlBlocks where block.position > 0 {
             positioned.append((block.position, .xml(block.rawXML)))
         }
-        for block in bidiOverrides {
+        for block in bidiOverrides where block.position > 0 {
             positioned.append((block.position, .xml(block.rawXML)))
         }
-        for child in unrecognizedChildren {
+        for child in unrecognizedChildren where child.position > 0 {
             positioned.append((child.position, .xml(child.rawXML)))
         }
         // v0.19.4+ (#56 R3-NEW-2): paragraph-level <w:sdt> with source position
@@ -595,6 +605,33 @@ extension Paragraph {
         }
         for ac in alternateContents where ac.position == 0 {
             xml += ac.rawXML
+        }
+        // v0.19.5+ (#56 R5-CONT-2 P0 #4): post-content emit for the 8
+        // remaining position-0 collections — completes the sweep
+        // R5-CONT P0 #6 only half-covered. Symmetric with the above.
+        for marker in bookmarkMarkers where marker.position == 0 {
+            xml += Self.emitBookmarkMarker(marker, paragraph: self)
+        }
+        for marker in commentRangeMarkers where marker.position == 0 {
+            xml += Self.emitCommentRangeMarker(marker)
+        }
+        for marker in permissionRangeMarkers where marker.position == 0 {
+            xml += Self.emitPermissionRangeMarker(marker)
+        }
+        for marker in proofErrorMarkers where marker.position == 0 {
+            xml += "<w:proofErr w:type=\"\(marker.type.rawValue)\"/>"
+        }
+        for tag in smartTags where tag.position == 0 {
+            xml += tag.rawXML
+        }
+        for block in customXmlBlocks where block.position == 0 {
+            xml += block.rawXML
+        }
+        for block in bidiOverrides where block.position == 0 {
+            xml += block.rawXML
+        }
+        for child in unrecognizedChildren where child.position == 0 {
+            xml += child.rawXML
         }
         // v0.19.4+ (#56 R3-NEW-3): per-id gate (see pre-content emit above).
         // commentReference is unique to the legacy emit path — it is NOT
