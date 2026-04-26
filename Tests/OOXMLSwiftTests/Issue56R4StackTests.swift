@@ -1822,6 +1822,56 @@ final class Issue56R4StackTests: XCTestCase {
                        "Typed Revision id=77 SHALL be removed after reject")
     }
 
+    // MARK: - §13.4 R5-CONT-2 P0 #4: toXMLSortedByPosition filter sweep covers all 12 positioned collections
+
+    /// v0.19.5+ (#56 R5-CONT-2 P0 #4): R5-CONT verify (DA C4) flagged that
+    /// R5-CONT P0 #6's `position > 0` filter only covered 4 of 12
+    /// positioned collections (runs / hyperlinks / fieldSimples /
+    /// alternateContents). The 8 remaining (`bookmarkMarkers`,
+    /// `commentRangeMarkers`, `permissionRangeMarkers`, `proofErrorMarkers`,
+    /// `smartTags`, `customXmlBlocks`, `bidiOverrides`,
+    /// `unrecognizedChildren`) still went into the sort list
+    /// unconditionally → API-built bookmark in source-loaded paragraph
+    /// landed at paragraph head, not append position. Same bug class as
+    /// R5-CONT P0 #6 was supposed to close.
+    func testInsertBookmarkInSourceLoadedParagraphLandsAtAppendPosition() {
+        // Build a paragraph with two source-loaded runs at positions 1 and 2.
+        var para = Paragraph()
+        var sourceRun1 = Run(text: "[s1]")
+        sourceRun1.position = 1
+        var sourceRun2 = Run(text: "[s2]")
+        sourceRun2.position = 2
+        para.runs = [sourceRun1, sourceRun2]
+
+        // Source bookmark with positive position to route paragraph to
+        // sorted emit (also serves as sanity baseline).
+        let srcBM = Bookmark(id: 99, name: "src-bookmark")
+        para.bookmarks.append(srcBM)
+        para.bookmarkMarkers.append(BookmarkRangeMarker(kind: .start, id: 99, position: 3))
+        para.bookmarkMarkers.append(BookmarkRangeMarker(kind: .end, id: 99, position: 4))
+
+        XCTAssertTrue(para.hasSourcePositionedChildren,
+                      "Sanity: source-positioned children SHALL route to sorted emit")
+
+        // Append API-built bookmarkMarker with explicit position 0 (the
+        // R5-CONT P0 #6 sentinel value for "API-built; emit at append").
+        let apiBM = Bookmark(id: 100, name: "api-bookmark")
+        para.bookmarks.append(apiBM)
+        para.bookmarkMarkers.append(BookmarkRangeMarker(kind: .start, id: 100, position: 0))
+        para.bookmarkMarkers.append(BookmarkRangeMarker(kind: .end, id: 100, position: 0))
+
+        let xml = para.toXML()
+        // The API-built bookmarkStart for id=100 SHALL emit AFTER the
+        // source-loaded runs; pre-fix it sorted before (position 0 < 1)
+        // and landed at paragraph head.
+        guard let s1Pos = xml.range(of: "[s1]")?.lowerBound,
+              let apiBmRange = xml.range(of: "w:id=\"100\"") else {
+            return XCTFail("Output missing markers. Output:\n\(xml)")
+        }
+        XCTAssertGreaterThan(apiBmRange.lowerBound, s1Pos,
+                             "API-built bookmarkMarker (position=0) SHALL emit AFTER source runs (position>=1) — append semantics, not prepend. Output:\n\(xml)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
