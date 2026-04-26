@@ -20,9 +20,18 @@ public struct Footnote: Equatable {
 
 extension Footnote {
     /// 產生 footnotes.xml 中的單一腳註 XML
+    /// v0.19.5+ (#56 R5 P1 #2): when `paragraphs` is non-empty (Reader-loaded
+    /// footnote), emit from the typed paragraph collection so any mutation to
+    /// inner runs / hyperlinks / fieldSimples / revisions survives round-trip.
+    /// Falls back to the legacy single-text-run template only for API-built
+    /// footnotes constructed via `Footnote(id:text:paragraphIndex:)` without
+    /// further paragraph mutation.
     func toXML() -> String {
-        return """
-        <w:footnote w:id="\(id)">
+        let inner: String
+        if !paragraphs.isEmpty {
+            inner = paragraphs.map { $0.toXML() }.joined()
+        } else {
+            inner = """
             <w:p>
                 <w:pPr>
                     <w:pStyle w:val="FootnoteText"/>
@@ -37,6 +46,11 @@ extension Footnote {
                     <w:t xml:space="preserve"> \(escapeXML(text))</w:t>
                 </w:r>
             </w:p>
+            """
+        }
+        return """
+        <w:footnote w:id="\(id)">
+            \(inner)
         </w:footnote>
         """
     }
@@ -143,9 +157,14 @@ public struct Endnote: Equatable {
 
 extension Endnote {
     /// 產生 endnotes.xml 中的單一尾註 XML
+    /// v0.19.5+ (#56 R5 P1 #2): emit from `paragraphs` when populated; same
+    /// rationale as `Footnote.toXML` above.
     func toXML() -> String {
-        return """
-        <w:endnote w:id="\(id)">
+        let inner: String
+        if !paragraphs.isEmpty {
+            inner = paragraphs.map { $0.toXML() }.joined()
+        } else {
+            inner = """
             <w:p>
                 <w:pPr>
                     <w:pStyle w:val="EndnoteText"/>
@@ -160,6 +179,11 @@ extension Endnote {
                     <w:t xml:space="preserve"> \(escapeXML(text))</w:t>
                 </w:r>
             </w:p>
+            """
+        }
+        return """
+        <w:endnote w:id="\(id)">
+            \(inner)
         </w:endnote>
         """
     }

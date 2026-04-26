@@ -426,12 +426,17 @@ public struct WordDocument: Equatable {
         // Headers / footers / footnotes / endnotes — only under .all scope
         guard options.scope == .all else { return count }
 
+        // v0.19.5+ (#56 R5 P0 #5): containers route through
+        // `replaceInParagraphSurfaces` for symmetry with the body path.
+        // Prior behavior walked only `para.runs`, silently dropping edits to
+        // text inside hyperlinks / fieldSimples / alternateContents living in
+        // headers/footers/footnotes/endnotes (DA-N3 from R4 verify).
         for i in 0..<headers.count {
             let beforeCount = count
             for j in 0..<headers[i].paragraphs.count {
                 var para = headers[i].paragraphs[j]
-                count += try TextReplacementEngine.replace(
-                    runs: &para.runs, find: find, with: replacement, options: options
+                count += try Self.replaceInParagraphSurfaces(
+                    &para, find: find, with: replacement, options: options
                 )
                 headers[i].paragraphs[j] = para
             }
@@ -443,8 +448,8 @@ public struct WordDocument: Equatable {
             let beforeCount = count
             for j in 0..<footers[i].paragraphs.count {
                 var para = footers[i].paragraphs[j]
-                count += try TextReplacementEngine.replace(
-                    runs: &para.runs, find: find, with: replacement, options: options
+                count += try Self.replaceInParagraphSurfaces(
+                    &para, find: find, with: replacement, options: options
                 )
                 footers[i].paragraphs[j] = para
             }
@@ -456,8 +461,8 @@ public struct WordDocument: Equatable {
         for i in 0..<footnotes.footnotes.count {
             for j in 0..<footnotes.footnotes[i].paragraphs.count {
                 var para = footnotes.footnotes[i].paragraphs[j]
-                count += try TextReplacementEngine.replace(
-                    runs: &para.runs, find: find, with: replacement, options: options
+                count += try Self.replaceInParagraphSurfaces(
+                    &para, find: find, with: replacement, options: options
                 )
                 footnotes.footnotes[i].paragraphs[j] = para
             }
@@ -469,8 +474,8 @@ public struct WordDocument: Equatable {
         for i in 0..<endnotes.endnotes.count {
             for j in 0..<endnotes.endnotes[i].paragraphs.count {
                 var para = endnotes.endnotes[i].paragraphs[j]
-                count += try TextReplacementEngine.replace(
-                    runs: &para.runs, find: find, with: replacement, options: options
+                count += try Self.replaceInParagraphSurfaces(
+                    &para, find: find, with: replacement, options: options
                 )
                 endnotes.endnotes[i].paragraphs[j] = para
             }
