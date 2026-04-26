@@ -1139,6 +1139,46 @@ final class Issue56R4StackTests: XCTestCase {
                        "Typed Revision id=55 SHALL be removed after accept")
     }
 
+    // MARK: - §11.6 R5-CONTINUATION P0 #6: toXMLSortedByPosition filters API-built runs/hyperlinks
+
+    /// v0.19.5+ (#56 R5-CONT P0 #6): R5 verify (DA C3) flagged that
+    /// `Paragraph.toXMLSortedByPosition` includes ALL runs/hyperlinks/fieldSimples
+    /// /alternateContents in the positioned-emit list without filtering on
+    /// `position > 0`. Only `contentControls` had the filter (per R5 P0 #2).
+    /// API-built runs/hyperlinks default to `position == 0`, so when an MCP
+    /// caller appends a Run to a source-loaded paragraph (e.g.,
+    /// `insertTextAsRevision` at end-of-paragraph), the new Run sorts BEFORE
+    /// every source-loaded child (`position >= 1`) and lands at the head of
+    /// the rendered text, not the intended append position.
+    func testInsertRunIntoSourceLoadedParagraphPersistsAtAppendPosition() throws {
+        // Build a paragraph with two source-loaded runs at positions 1 and 2.
+        var para = Paragraph()
+        var sourceRun1 = Run(text: "[source-1]")
+        sourceRun1.position = 1
+        var sourceRun2 = Run(text: "[source-2]")
+        sourceRun2.position = 2
+        para.runs = [sourceRun1, sourceRun2]
+
+        // Sanity: paragraph routes to the sorted emit path.
+        XCTAssertTrue(para.hasSourcePositionedChildren,
+                      "Sanity: source-positioned runs SHALL route to toXMLSortedByPosition")
+
+        // Append a new API-built Run with default position (0).
+        let appendedRun = Run(text: "[appended]")
+        XCTAssertEqual(appendedRun.position, 0,
+                       "Sanity: API-built Run defaults to position == 0")
+        para.runs.append(appendedRun)
+
+        let xml = para.toXML()
+        // Re-parse and walk runs in source-document order.
+        let wrapped = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>\(xml)</w:body></w:document>"
+        let parsed = try XMLDocument(xmlString: wrapped, options: [])
+        let runNodes = try parsed.nodes(forXPath: "//*[local-name()='r']/*[local-name()='t']")
+        let texts = runNodes.compactMap { $0.stringValue }
+        XCTAssertEqual(texts, ["[source-1]", "[source-2]", "[appended]"],
+                       "Appended API-built Run SHALL emit AFTER source-loaded runs in document order; got: \(texts)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")

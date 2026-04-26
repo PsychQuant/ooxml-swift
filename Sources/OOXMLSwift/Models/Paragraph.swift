@@ -468,16 +468,26 @@ extension Paragraph {
         // i.e., revision history silently wiped on round-trip.
         var positioned: [(position: Int, entry: PositionedEntry)] = []
 
-        for run in runs {
+        // v0.19.5+ (#56 R5-CONT P0 #6): runs / hyperlinks / fieldSimples /
+        // alternateContents now mirror what contentControls (R5 P0 #2) and
+        // bookmarkMarkers / commentRangeMarkers / etc. do — only `position
+        // > 0` (source-loaded) entries join the sorted-emit list. API-built
+        // entries (default `position == 0`) are emitted in the legacy
+        // post-content section so they land AT THE END of paragraph text
+        // rather than sorting BEFORE source-loaded children. Pre-fix an
+        // appended Run with default position 0 sorted before any
+        // `position >= 1` source run → text rendered at paragraph head
+        // instead of the intended append position (verify R5 P0 #6 / DA C3).
+        for run in runs where run.position > 0 {
             positioned.append((run.position, .run(run)))
         }
-        for hyperlink in hyperlinks {
+        for hyperlink in hyperlinks where hyperlink.position > 0 {
             positioned.append((hyperlink.position, .xml(hyperlink.toXML())))
         }
-        for field in fieldSimples {
+        for field in fieldSimples where field.position > 0 {
             positioned.append((field.position, .xml(Self.emitFieldSimple(field))))
         }
-        for ac in alternateContents {
+        for ac in alternateContents where ac.position > 0 {
             positioned.append((ac.position, .xml(ac.rawXML)))
         }
         for marker in bookmarkMarkers {
@@ -565,6 +575,26 @@ extension Paragraph {
         // duplicate the SDT in the output.
         for control in contentControls where control.position == 0 {
             xml += control.toXML()
+        }
+        // v0.19.5+ (#56 R5-CONT P0 #6): symmetric post-content emit for
+        // API-built (position == 0) runs / hyperlinks / fieldSimples /
+        // alternateContents. Pre-fix these defaulted to position 0 in
+        // the positioned-list and sorted BEFORE every source child
+        // (position >= 1), so an MCP `insertText` against a source-loaded
+        // paragraph silently relocated text to the paragraph head. Now they
+        // emit AFTER source-loaded children, matching the append semantics
+        // that contentControls (R5 P0 #2) and the legacy emit path use.
+        for run in runs where run.position == 0 {
+            xml += Self.emitRun(run, asDelText: false, paragraphRevisions: revisions)
+        }
+        for hyperlink in hyperlinks where hyperlink.position == 0 {
+            xml += hyperlink.toXML()
+        }
+        for field in fieldSimples where field.position == 0 {
+            xml += Self.emitFieldSimple(field)
+        }
+        for ac in alternateContents where ac.position == 0 {
+            xml += ac.rawXML
         }
         // v0.19.4+ (#56 R3-NEW-3): per-id gate (see pre-content emit above).
         // commentReference is unique to the legacy emit path — it is NOT

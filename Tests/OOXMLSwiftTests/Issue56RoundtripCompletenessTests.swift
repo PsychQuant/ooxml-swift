@@ -312,23 +312,28 @@ final class Issue56RoundtripCompletenessTests: XCTestCase {
     // MARK: - P0-8: hasSourcePositionedChildren routes hyperlink-only paragraphs
 
     /// Source paragraph `<w:r>A</w:r><w:hyperlink>L</w:hyperlink><w:r>B</w:r>`
-    /// — runs at position 0 and 2, hyperlink at position 1 — must round-trip
+    /// — runs at positions 1 and 3, hyperlink at position 2 — must round-trip
     /// as A → L → B. Pre-v0.19.3 the `hasSourcePositionedChildren` predicate
     /// excluded hyperlinks, so this paragraph went to the legacy path which
     /// emits all runs first then all hyperlinks → A B L (visible text order
     /// changed).
+    /// v0.19.5+ (#56 R5-CONT P0 #6): updated to use realistic source positions
+    /// (1, 2, 3) instead of (0, 1, 2). Per R5 P0 #2, `position == 0` is now
+    /// reserved for the API-built sentinel — runs/hyperlinks with position 0
+    /// emit at end-of-paragraph, not at "logical first". Reader-loaded
+    /// children always start at 1 (DocxReader.parseParagraph childPosition).
     func testParagraphWithInterleavedRunsAndHyperlinkRoutesToSortPath() {
         var runA = Run(text: "A")
-        runA.position = 0
+        runA.position = 1
         var runB = Run(text: "B")
-        runB.position = 2
+        runB.position = 3
         var hl = Hyperlink.external(
             id: "h1",
             text: "L",
             url: "https://example.com",
             relationshipId: "rId1"
         )
-        hl.position = 1
+        hl.position = 2
 
         var para = Paragraph(runs: [runA, runB])
         para.hyperlinks = [hl]
