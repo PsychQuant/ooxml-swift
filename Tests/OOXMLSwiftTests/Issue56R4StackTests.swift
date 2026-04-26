@@ -801,6 +801,66 @@ final class Issue56R4StackTests: XCTestCase {
                       "Orphan revision (id 99) SHALL stay in revisions list when accept throws notFound")
     }
 
+    // MARK: - §11.1 R5-CONTINUATION P0 #1: handleMixedContentWrapperRevision SHALL walk container bodyChildren
+
+    /// v0.19.5+ (#56 R5-CONT P0 #1): R5 verify (Logic L2 + Codex P0 + DA C1
+    /// root cause) flagged that `handleMixedContentWrapperRevision`'s
+    /// container loops walk `headers[hi].paragraphs` (the flat backward-compat
+    /// computed view) instead of `bodyChildren`. A mixed-content `<w:ins>`
+    /// wrapper inside a header table cell paragraph is therefore unreachable
+    /// → `accept_revision` throws notFound even though the revision parsed
+    /// correctly into `document.revisions`. This test pins the contract that
+    /// container `bodyChildren` recursion (mirroring body's
+    /// `transformInBodyChildren`) is mandatory.
+    func testAcceptRevisionOnHeaderTableMixedContentWrapperUnwrapsInHeaderPart() throws {
+        var doc = WordDocument()
+
+        // Inner paragraph with mixed-content <w:ins> wrapper around a hyperlink.
+        var innerPara = Paragraph()
+        let raw = "<w:ins w:id=\"77\" w:author=\"Bob\"><w:hyperlink r:id=\"rId99\"><w:r><w:t>head-table-link</w:t></w:r></w:hyperlink></w:ins>"
+        innerPara.unrecognizedChildren.append(UnrecognizedChild(name: "ins", rawXML: raw, position: 1))
+        var rev = Revision(id: 77, type: .insertion, author: "Bob")
+        rev.newText = "head-table-link"
+        rev.isMixedContentWrapper = true
+        innerPara.revisions.append(rev)
+
+        // Header containing a 1×1 table whose single cell carries innerPara.
+        let cell = TableCell(paragraphs: [innerPara])
+        let row = TableRow(cells: [cell])
+        let table = Table(rows: [row])
+        var header = Header(id: "rId10", paragraphs: [], type: .default,
+                            originalFileName: "header1.xml")
+        header.bodyChildren.append(.table(table))
+        doc.headers = [header]
+
+        // Mirror what DocxReader does: surface the typed Revision to document.revisions.
+        var docRev = rev
+        docRev.source = .header(id: "rId10")
+        doc.revisions.revisions.append(docRev)
+
+        // Pre-fix: throws RevisionError.notFound(77) because the container loop
+        // iterates header.paragraphs (empty — no top-level paragraphs, only the
+        // table) and never reaches the inner paragraph.
+        try doc.acceptRevision(revisionId: 77)
+
+        // Post-fix: revision accepted in header part.
+        XCTAssertTrue(doc.modifiedParts.contains("word/header1.xml"),
+                      "Accept on header table cell wrapper SHALL mark word/header1.xml dirty; got: \(doc.modifiedParts)")
+        XCTAssertFalse(doc.modifiedParts.contains("word/document.xml"),
+                       "Accept on header wrapper SHALL NOT mark word/document.xml dirty; got: \(doc.modifiedParts)")
+        XCTAssertFalse(doc.revisions.revisions.contains(where: { $0.id == 77 }),
+                       "Typed Revision id=77 SHALL be removed after accept")
+
+        // The inner paragraph in the table cell SHALL no longer carry the wrapper.
+        guard case .table(let updatedTable) = doc.headers[0].bodyChildren[0] else {
+            return XCTFail("Expected first header child to remain a table")
+        }
+        let updatedPara = updatedTable.rows[0].cells[0].paragraphs[0]
+        let rawConcat = updatedPara.unrecognizedChildren.map { $0.rawXML }.joined()
+        XCTAssertFalse(rawConcat.contains("<w:ins"),
+                       "Header table cell paragraph SHALL NOT contain <w:ins> wrapper after accept; got: \(rawConcat)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")

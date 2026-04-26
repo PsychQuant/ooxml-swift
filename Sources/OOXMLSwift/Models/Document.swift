@@ -2610,54 +2610,73 @@ public struct WordDocument: Equatable {
             return partKey
         }
 
+        // v0.19.5+ (#56 R5-CONT P0 #1): containers now route through the same
+        // `transformInBodyChildren` recursion so wrappers inside header tables
+        // / footer SDTs / footnote nested tables are reachable. Pre-fix the
+        // four loops iterated `.paragraphs` (the flat backward-compat
+        // computed view), missing anything inside `.table` / `.contentControl`
+        // BodyChild cases.
+
         // Headers
         for hi in 0..<headers.count {
             let key = DocumentWalker.headerPartKey(for: headers[hi])
-            for pi in 0..<headers[hi].paragraphs.count {
-                if transformParagraph(&headers[hi].paragraphs[pi]) {
-                    return key
-                }
+            if let _ = transformInBodyChildren(&headers[hi].bodyChildren, partKey: key, transform: transformParagraph) {
+                return key
             }
         }
         // Footers
         for fi in 0..<footers.count {
             let key = DocumentWalker.footerPartKey(for: footers[fi])
-            for pi in 0..<footers[fi].paragraphs.count {
-                if transformParagraph(&footers[fi].paragraphs[pi]) {
-                    return key
-                }
+            if let _ = transformInBodyChildren(&footers[fi].bodyChildren, partKey: key, transform: transformParagraph) {
+                return key
             }
         }
         // Footnotes
         for fni in 0..<footnotes.footnotes.count {
-            for pi in 0..<footnotes.footnotes[fni].paragraphs.count {
-                if transformParagraph(&footnotes.footnotes[fni].paragraphs[pi]) {
-                    return DocumentWalker.footnotesPartKey
-                }
+            if let _ = transformInBodyChildren(
+                &footnotes.footnotes[fni].bodyChildren,
+                partKey: DocumentWalker.footnotesPartKey,
+                transform: transformParagraph
+            ) {
+                return DocumentWalker.footnotesPartKey
             }
         }
         // Endnotes
         for eni in 0..<endnotes.endnotes.count {
-            for pi in 0..<endnotes.endnotes[eni].paragraphs.count {
-                if transformParagraph(&endnotes.endnotes[eni].paragraphs[pi]) {
-                    return DocumentWalker.endnotesPartKey
-                }
+            if let _ = transformInBodyChildren(
+                &endnotes.endnotes[eni].bodyChildren,
+                partKey: DocumentWalker.endnotesPartKey,
+                transform: transformParagraph
+            ) {
+                return DocumentWalker.endnotesPartKey
             }
         }
         return nil
     }
 
-    /// Recursively transforms a `[BodyChild]` slice in-place. Returns the body
-    /// part key (`word/document.xml`) on first hit, or nil. Used by the
-    /// part-spanning wrapper helper to handle paragraphs that live inside
-    /// tables, nested tables, or block-level content-control children.
-    private func transformInBodyChildren(_ children: inout [BodyChild], transform: (inout Paragraph) -> Bool) -> String? {
+    /// Recursively transforms a `[BodyChild]` slice in-place. Returns the
+    /// supplied `partKey` on first hit, or nil if no paragraph in the slice
+    /// matched. Used by the part-spanning wrapper helper to handle paragraphs
+    /// that live inside tables, nested tables, or block-level content-control
+    /// children.
+    ///
+    /// v0.19.5+ (#56 R5-CONT P0 #1): now parameterized over `partKey` so
+    /// container `bodyChildren` (header / footer / footnote / endnote) can
+    /// reuse the same recursion. Pre-fix the body-only hardcoded
+    /// `DocumentWalker.bodyPartKey` return forced container loops to roll
+    /// their own (incomplete) iteration over `.paragraphs`, missing wrappers
+    /// inside container tables.
+    private func transformInBodyChildren(
+        _ children: inout [BodyChild],
+        partKey: String = DocumentWalker.bodyPartKey,
+        transform: (inout Paragraph) -> Bool
+    ) -> String? {
         for i in 0..<children.count {
             switch children[i] {
             case .paragraph(var para):
                 if transform(&para) {
                     children[i] = .paragraph(para)
-                    return DocumentWalker.bodyPartKey
+                    return partKey
                 }
             case .table(var table):
                 var hit = false
@@ -2671,7 +2690,7 @@ public struct WordDocument: Equatable {
                         // Recurse into nested tables.
                         for nt in 0..<table.rows[r].cells[c].nestedTables.count {
                             var nestedChildren: [BodyChild] = [.table(table.rows[r].cells[c].nestedTables[nt])]
-                            if let _ = transformInBodyChildren(&nestedChildren, transform: transform) {
+                            if let _ = transformInBodyChildren(&nestedChildren, partKey: partKey, transform: transform) {
                                 if case .table(let updated) = nestedChildren[0] {
                                     table.rows[r].cells[c].nestedTables[nt] = updated
                                 }
@@ -2682,12 +2701,12 @@ public struct WordDocument: Equatable {
                 }
                 if hit {
                     children[i] = .table(table)
-                    return DocumentWalker.bodyPartKey
+                    return partKey
                 }
             case .contentControl(let cc, var inner):
-                if let _ = transformInBodyChildren(&inner, transform: transform) {
+                if let _ = transformInBodyChildren(&inner, partKey: partKey, transform: transform) {
                     children[i] = .contentControl(cc, children: inner)
-                    return DocumentWalker.bodyPartKey
+                    return partKey
                 }
             }
         }
