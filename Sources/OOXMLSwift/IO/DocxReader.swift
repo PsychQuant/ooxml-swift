@@ -90,6 +90,27 @@ public struct DocxReader {
         )
         document.images = images
 
+        // v0.19.3+ (#56 round 2 P1-1): calibrate nextBookmarkId past every
+        // bookmark id present in the source so subsequent `insertBookmark`
+        // calls cannot collide with existing source bookmarks. Pre-fix the
+        // counter started at 1 regardless of source content; F2 turned the
+        // resulting collision from a silent drop into a silent overwrite
+        // (Word may schema-reject or treat both bookmarks as one).
+        var maxBookmarkId = 0
+        for child in document.body.children {
+            if case .paragraph(let para) = child {
+                for bookmark in para.bookmarks {
+                    if bookmark.id > maxBookmarkId { maxBookmarkId = bookmark.id }
+                }
+                for marker in para.bookmarkMarkers {
+                    if marker.id > maxBookmarkId { maxBookmarkId = marker.id }
+                }
+            }
+        }
+        if maxBookmarkId > 0 {
+            document.nextBookmarkId = maxBookmarkId + 1
+        }
+
         // 7b. 讀取 headers (Part C of ooxml-swift#1)
         // v0.13.0+: preserve `originalFileName` from rel.target so multi-instance
         // same-type headers (header1.xml..header6.xml) don't collapse to a single fileName.
@@ -619,6 +640,20 @@ public struct DocxReader {
                 let date = childElement.attribute(forName: "w:date")?.stringValue
                     .flatMap { isoFormatter.date(from: $0) } ?? Date()
 
+                // v0.19.3+ (#56 round 2 P0-7): if the wrapper carries any
+                // non-`<w:r>` child (`<w:hyperlink>`, `<w:sdt>`, `<w:fldSimple>`,
+                // `<mc:AlternateContent>`, etc.), capture the whole wrapper
+                // verbatim into `unrecognizedChildren` at this position so the
+                // sort path emits it byte-for-byte. Pre-fix the per-run loop
+                // skipped the non-run children entirely — Track Changes
+                // hyperlink insertions silently lost the hyperlink on round-trip.
+                if Self.hasNonRunChild(childElement) {
+                    paragraph.unrecognizedChildren.append(
+                        UnrecognizedChild(name: "ins", rawXML: childElement.xmlString, position: childPosition)
+                    )
+                    break
+                }
+
                 var insertedText = ""
                 for insRun in childElement.elements(forName: "w:r") {
                     var parsedRun = try parseRun(from: insRun, relationships: relationships)
@@ -633,13 +668,18 @@ public struct DocxReader {
                     insertedText += parsedRun.text
                 }
 
-                if !insertedText.isEmpty {
-                    paragraph.revisions.append(Revision(
-                        id: revId, type: .insertion, author: author,
-                        paragraphIndex: 0, originalText: nil,
-                        newText: insertedText, date: date
-                    ))
-                }
+                // v0.19.3+ (#56 round 2 P0-6): always create the Revision
+                // entry regardless of whether inserted text is empty. Pre-fix
+                // the `!insertedText.isEmpty` guard meant insertions of pure
+                // non-text content (`<w:tab/>`, `<w:br/>`, `<w:drawing>`,
+                // `<w:fldChar>`) parsed runs with `revisionId` but produced
+                // no Revision — the sort-path grouping then fell back to a
+                // naked `<w:r>` and the wrapper silently disappeared.
+                paragraph.revisions.append(Revision(
+                    id: revId, type: .insertion, author: author,
+                    paragraphIndex: 0, originalText: nil,
+                    newText: insertedText, date: date
+                ))
 
             case "del":
                 // 刪除修訂：提取 w:delText 並建立 Revision
@@ -647,6 +687,13 @@ public struct DocxReader {
                 let author = childElement.attribute(forName: "w:author")?.stringValue ?? "Unknown"
                 let date = childElement.attribute(forName: "w:date")?.stringValue
                     .flatMap { isoFormatter.date(from: $0) } ?? Date()
+
+                if Self.hasNonRunChild(childElement) {
+                    paragraph.unrecognizedChildren.append(
+                        UnrecognizedChild(name: "del", rawXML: childElement.xmlString, position: childPosition)
+                    )
+                    break
+                }
 
                 var deletedText = ""
                 for delRun in childElement.elements(forName: "w:r") {
@@ -663,13 +710,11 @@ public struct DocxReader {
                     paragraph.runs.append(parsedRun)
                 }
 
-                if !deletedText.isEmpty {
-                    paragraph.revisions.append(Revision(
-                        id: revId, type: .deletion, author: author,
-                        paragraphIndex: 0, originalText: deletedText,
-                        newText: nil, date: date
-                    ))
-                }
+                paragraph.revisions.append(Revision(
+                    id: revId, type: .deletion, author: author,
+                    paragraphIndex: 0, originalText: deletedText,
+                    newText: nil, date: date
+                ))
 
             case "moveFrom":
                 // 移動來源修訂（mirrors w:del）：抽取 w:r 並建立 Revision
@@ -678,6 +723,13 @@ public struct DocxReader {
                 let date = childElement.attribute(forName: "w:date")?.stringValue
                     .flatMap { isoFormatter.date(from: $0) } ?? Date()
 
+                if Self.hasNonRunChild(childElement) {
+                    paragraph.unrecognizedChildren.append(
+                        UnrecognizedChild(name: "moveFrom", rawXML: childElement.xmlString, position: childPosition)
+                    )
+                    break
+                }
+
                 var movedText = ""
                 for moveRun in childElement.elements(forName: "w:r") {
                     var parsedRun = try parseRun(from: moveRun, relationships: relationships)
@@ -688,13 +740,11 @@ public struct DocxReader {
                     movedText += parsedRun.text
                 }
 
-                if !movedText.isEmpty {
-                    paragraph.revisions.append(Revision(
-                        id: revId, type: .moveFrom, author: author,
-                        paragraphIndex: 0, originalText: movedText,
-                        newText: nil, date: date
-                    ))
-                }
+                paragraph.revisions.append(Revision(
+                    id: revId, type: .moveFrom, author: author,
+                    paragraphIndex: 0, originalText: movedText,
+                    newText: nil, date: date
+                ))
 
             case "moveTo":
                 // 移動目標修訂（mirrors w:ins）：抽取 w:r 並建立 Revision
@@ -703,6 +753,13 @@ public struct DocxReader {
                 let date = childElement.attribute(forName: "w:date")?.stringValue
                     .flatMap { isoFormatter.date(from: $0) } ?? Date()
 
+                if Self.hasNonRunChild(childElement) {
+                    paragraph.unrecognizedChildren.append(
+                        UnrecognizedChild(name: "moveTo", rawXML: childElement.xmlString, position: childPosition)
+                    )
+                    break
+                }
+
                 var movedText = ""
                 for moveRun in childElement.elements(forName: "w:r") {
                     var parsedRun = try parseRun(from: moveRun, relationships: relationships)
@@ -713,13 +770,11 @@ public struct DocxReader {
                     movedText += parsedRun.text
                 }
 
-                if !movedText.isEmpty {
-                    paragraph.revisions.append(Revision(
-                        id: revId, type: .moveTo, author: author,
-                        paragraphIndex: 0, originalText: nil,
-                        newText: movedText, date: date
-                    ))
-                }
+                paragraph.revisions.append(Revision(
+                    id: revId, type: .moveTo, author: author,
+                    paragraphIndex: 0, originalText: nil,
+                    newText: movedText, date: date
+                ))
 
             case "commentRangeStart":
                 if let idStr = childElement.attribute(forName: "w:id")?.stringValue,
@@ -1459,6 +1514,24 @@ public struct DocxReader {
         drawing.anchorPosition = anchorPos
 
         return drawing
+    }
+
+    /// v0.19.3+ (#56 round 2 P0-7): returns true when a revision wrapper
+    /// (`<w:ins>`/`<w:del>`/`<w:moveFrom>`/`<w:moveTo>`) contains any direct
+    /// child whose local name is NOT `w:r`. Such wrappers can hold nested
+    /// `<w:hyperlink>`, `<w:sdt>`, `<w:fldSimple>`, `<mc:AlternateContent>`
+    /// etc. (Word's Track Changes "user inserted a hyperlink" emit shape).
+    /// The parseParagraph caller routes mixed-content wrappers to verbatim
+    /// raw-carrier capture so the wrapper round-trips byte-equivalent
+    /// instead of dropping the non-run children.
+    private static func hasNonRunChild(_ element: XMLElement) -> Bool {
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement else { continue }
+            if childElement.localName != "r" {
+                return true
+            }
+        }
+        return false
     }
 
     private static func parseRunProperties(from element: XMLElement) -> RunProperties {

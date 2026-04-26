@@ -237,11 +237,18 @@ public struct NumberingInfo: Equatable {
 extension Paragraph {
     /// v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 4: detect whether this
     /// paragraph carries source-loaded position-indexed children (markers,
-    /// new typed wrappers, raw-carriers). Hyperlinks alone DO NOT trigger
-    /// sort-emit because the legacy emit path already handles them and many
-    /// API-built paragraphs construct hyperlinks without positions; only the
-    /// new collections introduced in Phases 2–4 are signal of source loading.
-    fileprivate var hasSourcePositionedChildren: Bool {
+    /// new typed wrappers, raw-carriers).
+    ///
+    /// v0.19.3+ (#56 round 2 P0-8): also treat any run or hyperlink with a
+    /// non-zero `position` as a source-loaded signal. Pre-fix, a paragraph
+    /// like `<w:r>A</w:r><w:hyperlink>L</w:hyperlink><w:r>B</w:r>` (no
+    /// markers, no carriers, just runs + hyperlink at positions 0/1/2) went
+    /// to the legacy path, which emits all runs first then all hyperlinks —
+    /// silently re-ordering the visible text to "A B L". Including these
+    /// signals routes the paragraph to `toXMLSortedByPosition`, preserving
+    /// source order. API-built paragraphs leave positions at 0 and stay on
+    /// the legacy path.
+    internal var hasSourcePositionedChildren: Bool {
         return !bookmarkMarkers.isEmpty
             || !fieldSimples.isEmpty
             || !alternateContents.isEmpty
@@ -252,6 +259,8 @@ extension Paragraph {
             || !customXmlBlocks.isEmpty
             || !bidiOverrides.isEmpty
             || !unrecognizedChildren.isEmpty
+            || runs.contains(where: { $0.position > 0 })
+            || hyperlinks.contains(where: { $0.position > 0 })
     }
 
     /// 轉換為 OOXML XML 字串
@@ -379,14 +388,23 @@ extension Paragraph {
     ///
     /// Coexistence with legacy paragraph fields:
     /// - pPr emits first (pre-content per ECMA-376).
-    /// - hasPageBreak / footnoteIds / endnoteIds / contentControls /
-    ///   commentIds (legacy single-list collections without position) keep
-    ///   their position-less semantics — they emit AFTER the sort-by-position
-    ///   children. For source-loaded paragraphs these collections are
-    ///   typically empty (the new typed collections supplant them).
-    /// - bookmarks (legacy id+name list) is NOT re-emitted here because
-    ///   bookmarkMarkers fully drives bookmarkStart / bookmarkEnd emit at
-    ///   their original positions.
+    /// - v0.19.3+ (#56 round 2 P0-4 + P0-5): legacy position-less collections
+    ///   (`hasPageBreak` / `bookmarks` / `commentIds` / `footnoteIds` /
+    ///   `endnoteIds` / `contentControls`) now emit at the legacy positions
+    ///   relative to the sort window — `hasPageBreak` + `bookmarks-start` +
+    ///   `commentRangeStart` BEFORE the sort children, then `contentControls`
+    ///   + `commentRangeEnd` + `commentReference` + `footnoteReference` +
+    ///   `endnoteReference` + `bookmarks-end` AFTER. Pre-fix the doc-comment
+    ///   claimed they would emit AFTER but the code dropped them entirely,
+    ///   so any paragraph with source markers + `insert_comment` /
+    ///   `insert_footnote` / `insert_content_control` silently lost them on
+    ///   save. Sort path is now functionally a superset of the legacy path:
+    ///   anything legacy could emit, sort can too.
+    /// - The position-indexed `bookmarkMarkers` / `commentRangeMarkers` /
+    ///   `permissionRangeMarkers` continue to drive their own
+    ///   `<w:bookmarkStart>` / `<w:bookmarkEnd>` / etc emit through the
+    ///   sort window, so source-loaded paragraphs (which use these instead
+    ///   of the legacy collections) keep byte-equivalent round-trip.
     fileprivate func toXMLSortedByPosition() -> String {
         var xml = "<w:p>"
 
@@ -410,6 +428,26 @@ extension Paragraph {
                 xml += revision.toClosingXML()
             }
             xml += "</w:pPr>"
+        }
+
+        // v0.19.3+ (#56 round 2 P0-5): legacy pre-content collections. Mirrors
+        // legacy `toXMLLegacy` ordering. Skipped per-collection when the
+        // positioned variant is populated to avoid double-emit — Reader keeps
+        // `bookmarks` populated for backward-compat reads while also populating
+        // `bookmarkMarkers`, so emitting both would duplicate every source
+        // bookmark on round-trip.
+        if hasPageBreak {
+            xml += "<w:r><w:br w:type=\"page\"/></w:r>"
+        }
+        if bookmarkMarkers.isEmpty {
+            for bookmark in bookmarks {
+                xml += bookmark.toBookmarkStartXML()
+            }
+        }
+        if commentRangeMarkers.isEmpty {
+            for commentId in commentIds {
+                xml += "<w:commentRangeStart w:id=\"\(commentId)\"/>"
+            }
         }
 
         // Build (position, payload) pairs from every position-indexed collection.
@@ -497,6 +535,32 @@ extension Paragraph {
                     }
                 }
                 i = j
+            }
+        }
+
+        // v0.19.3+ (#56 round 2 P0-4 + P0-5): legacy post-content collections.
+        // Mirrors `toXMLLegacy` ordering so any caller that mutated the legacy
+        // single-list collections on a sort-routed paragraph still gets their
+        // children emitted. For source-loaded paragraphs these collections are
+        // empty (parser populates the positioned variants instead).
+        for control in contentControls {
+            xml += control.toXML()
+        }
+        if commentRangeMarkers.isEmpty {
+            for commentId in commentIds {
+                xml += "<w:commentRangeEnd w:id=\"\(commentId)\"/>"
+                xml += "<w:r><w:commentReference w:id=\"\(commentId)\"/></w:r>"
+            }
+        }
+        for footnoteId in footnoteIds {
+            xml += "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference w:id=\"\(footnoteId)\"/></w:r>"
+        }
+        for endnoteId in endnoteIds {
+            xml += "<w:r><w:rPr><w:rStyle w:val=\"EndnoteReference\"/></w:rPr><w:endnoteReference w:id=\"\(endnoteId)\"/></w:r>"
+        }
+        if bookmarkMarkers.isEmpty {
+            for bookmark in bookmarks {
+                xml += bookmark.toBookmarkEndXML()
             }
         }
 
