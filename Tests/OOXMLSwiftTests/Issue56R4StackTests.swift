@@ -1983,6 +1983,49 @@ final class Issue56R4StackTests: XCTestCase {
                        "modifiedParts SHALL NOT include word/document.xml for orphaned-source rejection; got: \(doc.modifiedParts)")
     }
 
+    // MARK: - §15.4 R5-CONT-3 P1 #5: collision detection + repair for multi-instance same-type containers
+
+    /// v0.19.5+ (#56 R5-CONT-3 P1 #5): R5-CONT-2 verify (DA C5 / R6-NEW-7
+    /// + Logic P1) flagged that direct `document.headers.append(...)`
+    /// without `originalFileName` for two same-type headers produces
+    /// collision. §13.8 deferred the auto-allocation; §15.4 adds a
+    /// public diagnostic + repair helper as the deferred-but-mitigatable
+    /// path.
+    func testTwoApiBuiltDefaultHeadersTriggerCollisionDetection() throws {
+        var doc = WordDocument()
+        // Bypass addHeader API — direct construction + append.
+        let h1 = Header(id: "rId10", paragraphs: [], type: .default)
+        let h2 = Header(id: "rId11", paragraphs: [], type: .default)
+        doc.headers = [h1, h2]
+
+        // Both have the same default fileName.
+        XCTAssertEqual(doc.headers[0].fileName, "header1.xml")
+        XCTAssertEqual(doc.headers[1].fileName, "header1.xml")
+
+        // Diagnostic surfaces the collision.
+        let collisions = doc.containerFileNameCollisions
+        XCTAssertEqual(collisions.count, 1)
+        XCTAssertEqual(collisions[0].scope, "header")
+        XCTAssertEqual(collisions[0].fileName, "header1.xml")
+        XCTAssertEqual(collisions[0].indices, [0, 1])
+
+        // Repair: reassigns the second header's originalFileName.
+        doc.repairContainerFileNames()
+        XCTAssertEqual(doc.headers[0].fileName, "header1.xml",
+                       "First header SHALL keep its fileName")
+        XCTAssertNotEqual(doc.headers[1].fileName, "header1.xml",
+                          "Second header SHALL get a unique fileName")
+        XCTAssertEqual(doc.headers[1].originalFileName, "header2.xml")
+
+        // No more collisions.
+        XCTAssertEqual(doc.containerFileNameCollisions.count, 0,
+                       "Post-repair SHALL have no collisions")
+
+        // Repair marks the renamed part dirty.
+        XCTAssertTrue(doc.modifiedParts.contains("word/header2.xml"),
+                      "modifiedParts SHALL include the renamed header part; got: \(doc.modifiedParts)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
