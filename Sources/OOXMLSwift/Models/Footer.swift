@@ -118,12 +118,11 @@ extension Footer {
     func toXML() -> String {
         var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         xml += ContainerRootTag.render(elementName: "w:ftr", attributes: rootAttributes)
+        // v0.19.5+ (#56 R5-CONT P1 #9): route through shared helper so
+        // .contentControl emits as <w:sdt>...</w:sdt> instead of being
+        // silently dropped — see Header.toXML.
         for child in bodyChildren {
-            switch child {
-            case .paragraph(let p): xml += p.toXML()
-            case .table(let t): xml += t.toXML()
-            case .contentControl: break
-            }
+            xml += DocxWriter.xmlForBodyChild(child)
         }
         if bodyChildren.isEmpty {
             xml += "<w:p/>"

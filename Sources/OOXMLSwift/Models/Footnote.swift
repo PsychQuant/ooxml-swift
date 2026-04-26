@@ -61,12 +61,10 @@ extension Footnote {
         if !bodyChildren.isEmpty {
             // v0.19.5+ (#56 R5 P0 #6): emit from bodyChildren so direct-child
             // tables round-trip in addition to paragraphs.
+            // v0.19.5+ (#56 R5-CONT P1 #9): .contentControl now emits via
+            // shared helper instead of being dropped — verify R5 P1 #9.
             inner = bodyChildren.map { child -> String in
-                switch child {
-                case .paragraph(let p): return p.toXML()
-                case .table(let t): return t.toXML()
-                case .contentControl: return ""
-                }
+                return DocxWriter.xmlForBodyChild(child)
             }.joined()
         } else {
             inner = """
@@ -234,12 +232,10 @@ extension Endnote {
         let inner: String
         if !bodyChildren.isEmpty {
             // v0.19.5+ (#56 R5 P0 #6): emit from bodyChildren — see Footnote.toXML.
+            // v0.19.5+ (#56 R5-CONT P1 #9): .contentControl now emits via
+            // shared helper instead of being dropped — verify R5 P1 #9.
             inner = bodyChildren.map { child -> String in
-                switch child {
-                case .paragraph(let p): return p.toXML()
-                case .table(let t): return t.toXML()
-                case .contentControl: return ""
-                }
+                return DocxWriter.xmlForBodyChild(child)
             }.joined()
         } else {
             inner = """
