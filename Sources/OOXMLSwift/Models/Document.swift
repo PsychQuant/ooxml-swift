@@ -1679,6 +1679,20 @@ public struct WordDocument: Equatable {
                 footers[fi].relationships.relationships.removeAll { $0.id == rId }
             }
         }
+
+        // v0.19.5+ (#56 R5-CONT-3 P1 #4): defensive sweep of legacy
+        // document-scope `hyperlinkReferences` for the rId. Pre-R5-CONT
+        // P1 #8 introduced per-container rels, but documents migrated
+        // from the older single-rels model may still carry the same rId
+        // in document.hyperlinkReferences (legitimate when caller
+        // historically used document-scope before the migration). Without
+        // this sweep, container deletes leave a doc-scope orphan that
+        // never gets cleaned up. Safe because rId scoping is per-part —
+        // an orphan document.hyperlinkReferences entry for an rId that
+        // matches a container's deleted rel is the migration case.
+        if partKey != "word/document.xml" {
+            hyperlinkReferences.removeAll { $0.relationshipId == rId }
+        }
     }
 
     // MARK: - §8.3 helpers (v0.19.5+ #56 R5 P1 #3)

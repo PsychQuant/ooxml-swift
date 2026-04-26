@@ -2026,6 +2026,51 @@ final class Issue56R4StackTests: XCTestCase {
                       "modifiedParts SHALL include the renamed header part; got: \(doc.modifiedParts)")
     }
 
+    // MARK: - §15.5 R5-CONT-3 P1 #4: deleteHyperlink sweeps legacy doc-scope rels
+
+    /// v0.19.5+ (#56 R5-CONT-3 P1 #4): R5-CONT-2 verify (DA R6-NEW-5)
+    /// flagged that `removeHyperlinkRelTarget` for header partKey doesn't
+    /// sweep `document.hyperlinkReferences` for legacy migration cases —
+    /// a docx historically using document-scope rels for a header
+    /// hyperlink could leave an orphan entry after R5-CONT P1 #8's
+    /// per-container rels migration. Now: defensive sweep of
+    /// `hyperlinkReferences` for the rId when partKey is non-body.
+    func testDeleteHyperlinkInHeaderAlsoSweepsLegacyDocumentScopeReference() throws {
+        var doc = WordDocument()
+
+        // Header carries hyperlink with rId99 in header.relationships.
+        var innerPara = Paragraph()
+        let hyper = Hyperlink(id: "h1", text: "to-delete",
+                              url: "https://to-delete.example",
+                              relationshipId: "rId99",
+                              tooltip: nil, history: true)
+        innerPara.hyperlinks.append(hyper)
+        var header = Header(id: "rId10", paragraphs: [innerPara], type: .default,
+                            originalFileName: "header1.xml")
+        header.relationships.relationships.append(
+            Relationship(id: "rId99", type: .hyperlink,
+                         target: "https://to-delete.example", targetMode: "External")
+        )
+        doc.headers.append(header)
+
+        // Legacy migration case: same rId99 ALSO in document.hyperlinkReferences
+        // (e.g., an older docx that hadn't migrated to per-container rels yet).
+        doc.hyperlinkReferences.append(
+            HyperlinkReference(relationshipId: "rId99", url: "https://stale-legacy.example")
+        )
+
+        try doc.deleteHyperlink(hyperlinkId: "h1")
+
+        // Header rels removed (R5-CONT-2 P0 #2 already fixed this).
+        XCTAssertNil(doc.headers[0].relationships.relationships
+                        .first(where: { $0.id == "rId99" }),
+                     "Header relationship rId99 SHALL be removed")
+
+        // Legacy doc-scope reference also swept (R5-CONT-3 P1 #4 new fix).
+        XCTAssertNil(doc.hyperlinkReferences.first { $0.relationshipId == "rId99" },
+                     "Legacy document.hyperlinkReferences entry SHALL be swept defensively")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
