@@ -461,6 +461,50 @@ final class Issue56R4StackTests: XCTestCase {
         try ZipHelper.zip(stagingURL, to: url)
     }
 
+    /// §8.2 helper: minimal .docx that also drops a footnotes part + the
+    /// document → footnotes relationship + footnotes content-type override.
+    private func buildMinimalDocxWithFootnotes(documentXML: String, footnotesXML: String, to url: URL) throws {
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5-p1-2-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+
+        let documentRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>
+        </Relationships>
+        """
+        try documentRels.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+
+        try documentXML.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+        try footnotesXML.write(to: stagingURL.appendingPathComponent("word/footnotes.xml"), atomically: true, encoding: .utf8)
+
+        try ZipHelper.zip(stagingURL, to: url)
+    }
+
     // MARK: - §8.1 P1: Hyperlink mutation detection SHALL use deep Run equality
 
     /// v0.19.5+ (#56 R5 P1 #1): formatting-only mutation (same text, different
@@ -513,6 +557,66 @@ final class Issue56R4StackTests: XCTestCase {
                        "text SHALL be preserved across roundtrip")
         XCTAssertTrue(rPara.hyperlinks[0].runs.first?.properties.bold ?? false,
                       "Property-only hyperlink mutation SHALL persist via deep-equality detection")
+    }
+
+    // MARK: - §8.2 P1: Footnote.toXML SHALL emit from paragraphs (closes DA-N6)
+
+    /// v0.19.5+ (#56 R5 P1 #2): Footnote with multiple source paragraphs and a
+    /// mutation to the second paragraph SHALL persist the mutation through
+    /// roundtrip. Pre-fix `Footnote.toXML` emitted a hardcoded single-text-run
+    /// template ignoring `paragraphs`/`bodyChildren`, so any per-paragraph
+    /// mutation was silently dropped on save. (Code-level fix landed in
+    /// §6 commit; this test pins the contract.)
+    func testFootnoteMultiParagraphMutationSurvivesRoundtrip() throws {
+        // Build a docx whose footnotes.xml carries a footnote with two paragraphs.
+        let footnotesXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>
+          <w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>
+          <w:footnote w:id="1">
+            <w:p><w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr><w:r><w:t>first-para-original</w:t></w:r></w:p>
+            <w:p><w:r><w:t>second-para-original</w:t></w:r></w:p>
+          </w:footnote>
+        </w:footnotes>
+        """
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:body><w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p></w:body>
+        </w:document>
+        """
+        let docxURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5-p1-2-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        try buildMinimalDocxWithFootnotes(documentXML: documentXML, footnotesXML: footnotesXML, to: docxURL)
+
+        var document = try DocxReader.read(from: docxURL)
+        XCTAssertEqual(document.footnotes.footnotes.count, 1)
+        let fn = document.footnotes.footnotes[0]
+        XCTAssertEqual(fn.bodyChildren.count, 2,
+                       "Footnote SHALL preserve both source paragraphs in bodyChildren")
+
+        // Mutate the second paragraph's first run text.
+        var mutated = fn
+        guard case .paragraph(var p2) = mutated.bodyChildren[1] else {
+            return XCTFail("Expected second bodyChild to be a paragraph")
+        }
+        XCTAssertEqual(p2.runs.first?.text, "second-para-original")
+        p2.runs[0].text = "second-para-mutated"
+        mutated.bodyChildren[1] = .paragraph(p2)
+        document.footnotes.footnotes[0] = mutated
+        document.modifiedParts.insert("word/footnotes.xml")
+
+        let reread = try roundtrip(document)
+        XCTAssertEqual(reread.footnotes.footnotes.count, 1)
+        let rfn = reread.footnotes.footnotes[0]
+        XCTAssertEqual(rfn.paragraphs.count, 2,
+                       "Footnote SHALL still have 2 paragraphs post-roundtrip")
+        XCTAssertEqual(rfn.paragraphs[0].runs.first?.text, "first-para-original",
+                       "First paragraph SHALL be preserved verbatim")
+        XCTAssertEqual(rfn.paragraphs[1].runs.first?.text, "second-para-mutated",
+                       "Second-paragraph mutation SHALL persist; toXML must emit from bodyChildren, not the hardcoded single-run template")
     }
 
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
