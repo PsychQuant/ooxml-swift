@@ -3059,41 +3059,46 @@ public struct WordDocument: Equatable {
             return
         }
 
-        // 根據修訂類型處理
+        // v0.19.5+ (#56 R5-CONT-2 P0 #3): mirror R5-CONT P0 #5's
+        // acceptRevision typed `.deletion` source-routing for the reject
+        // side. Pre-fix the typed `.insertion` branch indexed
+        // `body.children` regardless of `revision.source` → for a
+        // container-source revision, `rejectRevision` either silently
+        // no-op'd OR DELETED BODY TEXT matching `newText` (silent
+        // body corruption + revision marker vanished + wrong part
+        // dirty). Strictly worse than the R5 verify P0 #1 / R5-CONT
+        // P0 #5 patterns because the asymmetric behavior was never
+        // documented as a known limitation.
+        var partKeyForDirty = "word/document.xml"
         switch revision.type {
         case .insertion:
-            // 拒絕插入：移除插入的文字
-            let paragraphIndices = body.children.enumerated().compactMap { (i, child) -> Int? in
-                if case .paragraph = child { return i }
-                return nil
-            }
-
-            if revision.paragraphIndex >= 0 && revision.paragraphIndex < paragraphIndices.count {
-                let actualIndex = paragraphIndices[revision.paragraphIndex]
-                if case .paragraph(var para) = body.children[actualIndex] {
-                    // 移除插入的文字
-                    if let newText = revision.newText {
-                        for j in 0..<para.runs.count {
-                            para.runs[j].text = para.runs[j].text.replacingOccurrences(of: newText, with: "")
-                        }
-                    }
-                    body.children[actualIndex] = .paragraph(para)
+            // Reject insertion: remove the inserted text.
+            let newText = revision.newText
+            let removeText: (inout Paragraph) -> Void = { para in
+                guard let txt = newText else { return }
+                for j in 0..<para.runs.count {
+                    para.runs[j].text = para.runs[j].text.replacingOccurrences(of: txt, with: "")
                 }
             }
+            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: removeText) {
+                partKeyForDirty = key
+            } else {
+                throw RevisionError.notFound(revisionId)
+            }
         case .deletion:
-            // 拒絕刪除：恢復被刪除的文字（文字已在標記中，移除標記即可）
-            break
-        case .formatting, .paragraphChange, .formatChange:
-            // 拒絕格式變更：恢復原格式（需要實作格式恢復邏輯）
-            break
-        case .moveFrom, .moveTo:
-            // 拒絕移動：恢復原位置的文字
-            break
+            // Reject deletion: restore the deleted text. The text already
+            // lives in the runs (marked but not removed) — just clear the
+            // marker. Honor source for dirty-tracking.
+            partKeyForDirty = sourceToPartKey(revision.source)
+        case .formatting, .paragraphChange, .formatChange, .moveFrom, .moveTo:
+            // No body-only mutation to apply for these types yet; honor
+            // the source part for dirty-tracking accuracy.
+            partKeyForDirty = sourceToPartKey(revision.source)
         }
 
         // 移除修訂記錄
         revisions.revisions.remove(at: index)
-        modifiedParts.insert("word/document.xml")
+        modifiedParts.insert(partKeyForDirty)
     }
 
     /// 接受所有修訂（legacy non-throwing API; preserved for backward compat)

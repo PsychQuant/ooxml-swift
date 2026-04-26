@@ -1758,6 +1758,70 @@ final class Issue56R4StackTests: XCTestCase {
                        "modifiedParts SHALL NOT include document.xml.rels for header-scope hyperlink delete; got: \(doc.modifiedParts)")
     }
 
+    // MARK: - §13.3 R5-CONT-2 P0 #3: rejectRevision typed .insertion routes by revision.source
+
+    /// v0.19.5+ (#56 R5-CONT-2 P0 #3): R5-CONT verify (DA C2 + Regression F8)
+    /// flagged that `rejectRevision`'s typed `.insertion` branch
+    /// (Document.swift:3064) only walks `body.children`. For a typed
+    /// `.insertion` Revision with `source = .footnote(id:N)`, the branch
+    /// indexes body's `paragraphIndices[revision.paragraphIndex]` and either
+    /// silently no-ops OR DELETES BODY TEXT matching `newText` (silent
+    /// corruption). Same class as R5-CONT P0 #5 (acceptRevision typed
+    /// `.deletion`) but for the reject side — never mirrored.
+    func testRejectInsertionInFootnoteDoesNotMutateBody() throws {
+        var doc = WordDocument()
+
+        // Body has a paragraph carrying a string that COULD match the
+        // footnote revision's newText — verifying that the wrong branch
+        // would corrupt body content.
+        var bodyPara = Paragraph()
+        bodyPara.runs.append(Run(text: "body-must-stay-untouched"))
+        doc.body.children = [.paragraph(bodyPara)]
+
+        // Footnote with paragraph carrying tracked-insert text.
+        var fnPara = Paragraph()
+        fnPara.runs.append(Run(text: "to-keep "))
+        fnPara.runs.append(Run(text: "body-must-stay-untouched"))
+        var fn = Footnote(id: 1, text: "", paragraphIndex: 0)
+        fn.bodyChildren = [.paragraph(fnPara)]
+        doc.footnotes.footnotes = [fn]
+
+        // Typed `.insertion` Revision pointing at footnote paragraph 0
+        // with newText = "body-must-stay-untouched" (which also exists in body).
+        var rev = Revision(id: 77, type: .insertion, author: "Bob")
+        rev.source = .footnote(id: 1)
+        rev.paragraphIndex = 0
+        rev.newText = "body-must-stay-untouched"
+        doc.revisions.revisions.append(rev)
+
+        try doc.rejectRevision(revisionId: 77)
+
+        // Post-fix: body paragraph SHALL be untouched.
+        guard case .paragraph(let bodyAfter) = doc.body.children[0] else {
+            return XCTFail("Body[0] SHALL remain a paragraph")
+        }
+        XCTAssertEqual(bodyAfter.runs.first?.text, "body-must-stay-untouched",
+                       "Body paragraph SHALL be untouched by footnote-source rejection; pre-fix the body branch indexed body[0] and removed `newText` substring → body emptied")
+
+        // Footnote paragraph 0 SHALL have its inserted text removed.
+        let fnAfter = doc.footnotes.footnotes[0].paragraphs[0]
+        let fnText = fnAfter.runs.map { $0.text }.joined()
+        XCTAssertFalse(fnText.contains("body-must-stay-untouched"),
+                       "Footnote paragraph SHALL have inserted text removed; got: \(fnText)")
+        XCTAssertTrue(fnText.contains("to-keep"),
+                      "Footnote paragraph SHALL preserve sibling text; got: \(fnText)")
+
+        // modifiedParts SHALL mark footnotes part, NOT word/document.xml.
+        XCTAssertTrue(doc.modifiedParts.contains("word/footnotes.xml"),
+                      "modifiedParts SHALL include word/footnotes.xml; got: \(doc.modifiedParts)")
+        XCTAssertFalse(doc.modifiedParts.contains("word/document.xml"),
+                       "modifiedParts SHALL NOT include word/document.xml for footnote-source rejection; got: \(doc.modifiedParts)")
+
+        // Typed Revision SHALL be removed.
+        XCTAssertFalse(doc.revisions.revisions.contains(where: { $0.id == 77 }),
+                       "Typed Revision id=77 SHALL be removed after reject")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
