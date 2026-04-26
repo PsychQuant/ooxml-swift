@@ -291,7 +291,11 @@ extension RunProperties {
         if bold == true { xml += "<w:b/>" }
         if italic == true { xml += "<w:i/>" }
         if let underline = underline { xml += "<w:u w:val=\"\(underline.rawValue)\"/>" }
-        if let color = color { xml += "<w:color w:val=\"\(color)\"/>" }
+        // v0.19.4+ (#56 R3-NEW-6 codex P1): toChangeXML is a parallel emit path
+        // (rPrChange's previousFormat) that pre-fix only escaped fontName.
+        // color is a String? — same injection sink as RunProperties.toXML's
+        // color emit. Route through escapeXML for parity.
+        if let color = color { xml += "<w:color w:val=\"\(escapeXML(color))\"/>" }
         if let fontSize = fontSize { xml += "<w:sz w:val=\"\(fontSize * 2)\"/>" }
         if let fontName = fontName {
             xml += "<w:rFonts w:ascii=\"\(escapeXML(fontName))\" w:hAnsi=\"\(escapeXML(fontName))\"/>"
