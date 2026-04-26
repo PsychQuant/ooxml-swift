@@ -1501,51 +1501,260 @@ public struct WordDocument: Equatable {
 
     /// 更新超連結
     public mutating func updateHyperlink(hyperlinkId: String, text: String? = nil, url: String? = nil) throws {
-        for i in 0..<body.children.count {
-            if case .paragraph(var para) = body.children[i] {
-                for j in 0..<para.hyperlinks.count {
-                    if para.hyperlinks[j].id == hyperlinkId {
-                        if let newText = text {
-                            para.hyperlinks[j].text = newText
-                        }
-                        if let newUrl = url {
-                            // 更新 URL 需要同時更新 relationship
-                            if let rId = para.hyperlinks[j].relationshipId {
-                                if let refIndex = hyperlinkReferences.firstIndex(where: { $0.relationshipId == rId }) {
-                                    hyperlinkReferences[refIndex].url = newUrl
-                                }
-                            }
-                            para.hyperlinks[j].url = newUrl
-                        }
-                        body.children[i] = .paragraph(para)
-                        modifiedParts.insert("word/document.xml")
-                        modifiedParts.insert("word/_rels/document.xml.rels")
-                        return
-                    }
-                }
+        // v0.19.5+ (#56 R5 P1 #3): walk every paragraph surface across body
+        // (incl. tables / nested tables / SDT children), headers, footers,
+        // footnotes, endnotes — not just `body.children[i].paragraph`. Pre-fix
+        // any hyperlink living inside a header table cell (or any container
+        // table) raised `invalidFormat("Hyperlink ... not found")` even though
+        // it existed and `list_hyperlinks` could see it. (DA-N4 from R4.)
+        let mutator: (inout Hyperlink) -> Void = { hyperlink in
+            if let newText = text {
+                hyperlink.text = newText
+            }
+            if let newUrl = url {
+                hyperlink.url = newUrl
             }
         }
-        throw WordError.invalidFormat("Hyperlink '\(hyperlinkId)' not found")
+        guard let partKey = applyToHyperlink(id: hyperlinkId, apply: mutator) else {
+            throw WordError.invalidFormat("Hyperlink '\(hyperlinkId)' not found")
+        }
+        // Sync the matching HyperlinkReference URL when caller updated URL.
+        if let newUrl = url,
+           let rId = findRelationshipId(forHyperlinkId: hyperlinkId),
+           let refIndex = hyperlinkReferences.firstIndex(where: { $0.relationshipId == rId }) {
+            hyperlinkReferences[refIndex].url = newUrl
+        }
+        modifiedParts.insert(partKey)
+        modifiedParts.insert("word/_rels/document.xml.rels")
     }
 
     /// 刪除超連結
     public mutating func deleteHyperlink(hyperlinkId: String) throws {
+        // v0.19.5+ (#56 R5 P1 #3): walk every part — same scope expansion as
+        // updateHyperlink. Removed hyperlinks living inside headers / footers /
+        // footnotes / endnotes / nested tables / SDTs no longer silently miss.
+        var capturedRId: String? = nil
+        guard let partKey = removeHyperlink(id: hyperlinkId, captureRelationshipId: &capturedRId) else {
+            throw WordError.invalidFormat("Hyperlink '\(hyperlinkId)' not found")
+        }
+        if let rId = capturedRId {
+            hyperlinkReferences.removeAll { $0.relationshipId == rId }
+        }
+        modifiedParts.insert(partKey)
+        modifiedParts.insert("word/_rels/document.xml.rels")
+    }
+
+    // MARK: - §8.3 helpers (v0.19.5+ #56 R5 P1 #3)
+
+    /// Walks every paragraph surface across all parts, applying `apply` to the
+    /// first hyperlink whose id matches. Returns the part key (`word/document.xml`,
+    /// `word/header*.xml`, etc.) on hit, nil on miss. Body recurses into
+    /// tables (incl. nested) + content-control children. Headers / footers /
+    /// footnotes / endnotes recurse into their `bodyChildren` tables.
+    private mutating func applyToHyperlink(
+        id hyperlinkId: String,
+        apply: (inout Hyperlink) -> Void
+    ) -> String? {
+        // Body
         for i in 0..<body.children.count {
-            if case .paragraph(var para) = body.children[i] {
-                if let index = para.hyperlinks.firstIndex(where: { $0.id == hyperlinkId }) {
-                    // 如果是外部連結，也要刪除 relationship
-                    if let rId = para.hyperlinks[index].relationshipId {
-                        hyperlinkReferences.removeAll { $0.relationshipId == rId }
-                    }
-                    para.hyperlinks.remove(at: index)
-                    body.children[i] = .paragraph(para)
-                    modifiedParts.insert("word/document.xml")
-                    modifiedParts.insert("word/_rels/document.xml.rels")
-                    return
+            if Self.applyHyperlinkInBodyChild(&body.children[i], id: hyperlinkId, apply: apply) {
+                return "word/document.xml"
+            }
+        }
+        // Headers
+        for i in 0..<headers.count {
+            for j in 0..<headers[i].bodyChildren.count {
+                if Self.applyHyperlinkInBodyChild(&headers[i].bodyChildren[j], id: hyperlinkId, apply: apply) {
+                    return "word/\(headers[i].fileName)"
                 }
             }
         }
-        throw WordError.invalidFormat("Hyperlink '\(hyperlinkId)' not found")
+        // Footers
+        for i in 0..<footers.count {
+            for j in 0..<footers[i].bodyChildren.count {
+                if Self.applyHyperlinkInBodyChild(&footers[i].bodyChildren[j], id: hyperlinkId, apply: apply) {
+                    return "word/\(footers[i].fileName)"
+                }
+            }
+        }
+        // Footnotes
+        for i in 0..<footnotes.footnotes.count {
+            for j in 0..<footnotes.footnotes[i].bodyChildren.count {
+                if Self.applyHyperlinkInBodyChild(&footnotes.footnotes[i].bodyChildren[j], id: hyperlinkId, apply: apply) {
+                    return "word/footnotes.xml"
+                }
+            }
+        }
+        // Endnotes
+        for i in 0..<endnotes.endnotes.count {
+            for j in 0..<endnotes.endnotes[i].bodyChildren.count {
+                if Self.applyHyperlinkInBodyChild(&endnotes.endnotes[i].bodyChildren[j], id: hyperlinkId, apply: apply) {
+                    return "word/endnotes.xml"
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func applyHyperlinkInBodyChild(
+        _ child: inout BodyChild,
+        id hyperlinkId: String,
+        apply: (inout Hyperlink) -> Void
+    ) -> Bool {
+        switch child {
+        case .paragraph(var para):
+            if let idx = para.hyperlinks.firstIndex(where: { $0.id == hyperlinkId }) {
+                apply(&para.hyperlinks[idx])
+                child = .paragraph(para)
+                return true
+            }
+            return false
+        case .table(var table):
+            for rowIdx in 0..<table.rows.count {
+                for cellIdx in 0..<table.rows[rowIdx].cells.count {
+                    for paraIdx in 0..<table.rows[rowIdx].cells[cellIdx].paragraphs.count {
+                        var para = table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx]
+                        if let idx = para.hyperlinks.firstIndex(where: { $0.id == hyperlinkId }) {
+                            apply(&para.hyperlinks[idx])
+                            table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx] = para
+                            child = .table(table)
+                            return true
+                        }
+                    }
+                    for nestedIdx in 0..<table.rows[rowIdx].cells[cellIdx].nestedTables.count {
+                        var nested = BodyChild.table(table.rows[rowIdx].cells[cellIdx].nestedTables[nestedIdx])
+                        if Self.applyHyperlinkInBodyChild(&nested, id: hyperlinkId, apply: apply) {
+                            if case .table(let mutatedNested) = nested {
+                                table.rows[rowIdx].cells[cellIdx].nestedTables[nestedIdx] = mutatedNested
+                            }
+                            child = .table(table)
+                            return true
+                        }
+                    }
+                }
+            }
+            return false
+        case .contentControl(let metadata, var inner):
+            for k in 0..<inner.count {
+                if Self.applyHyperlinkInBodyChild(&inner[k], id: hyperlinkId, apply: apply) {
+                    child = .contentControl(metadata, children: inner)
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
+    /// Walks every paragraph surface across all parts; on the first match,
+    /// removes the hyperlink, captures its relationshipId via `inout`, and
+    /// returns the owning part key. Symmetric with `applyToHyperlink`.
+    private mutating func removeHyperlink(
+        id hyperlinkId: String,
+        captureRelationshipId: inout String?
+    ) -> String? {
+        for i in 0..<body.children.count {
+            if Self.removeHyperlinkRecursive(in: &body.children[i], id: hyperlinkId,
+                                             captureRelationshipId: &captureRelationshipId) {
+                return "word/document.xml"
+            }
+        }
+        for i in 0..<headers.count {
+            for j in 0..<headers[i].bodyChildren.count {
+                if Self.removeHyperlinkRecursive(in: &headers[i].bodyChildren[j], id: hyperlinkId,
+                                                 captureRelationshipId: &captureRelationshipId) {
+                    return "word/\(headers[i].fileName)"
+                }
+            }
+        }
+        for i in 0..<footers.count {
+            for j in 0..<footers[i].bodyChildren.count {
+                if Self.removeHyperlinkRecursive(in: &footers[i].bodyChildren[j], id: hyperlinkId,
+                                                 captureRelationshipId: &captureRelationshipId) {
+                    return "word/\(footers[i].fileName)"
+                }
+            }
+        }
+        for i in 0..<footnotes.footnotes.count {
+            for j in 0..<footnotes.footnotes[i].bodyChildren.count {
+                if Self.removeHyperlinkRecursive(in: &footnotes.footnotes[i].bodyChildren[j], id: hyperlinkId,
+                                                 captureRelationshipId: &captureRelationshipId) {
+                    return "word/footnotes.xml"
+                }
+            }
+        }
+        for i in 0..<endnotes.endnotes.count {
+            for j in 0..<endnotes.endnotes[i].bodyChildren.count {
+                if Self.removeHyperlinkRecursive(in: &endnotes.endnotes[i].bodyChildren[j], id: hyperlinkId,
+                                                 captureRelationshipId: &captureRelationshipId) {
+                    return "word/endnotes.xml"
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func removeHyperlinkRecursive(
+        in child: inout BodyChild,
+        id hyperlinkId: String,
+        captureRelationshipId: inout String?
+    ) -> Bool {
+        switch child {
+        case .paragraph(var para):
+            if let idx = para.hyperlinks.firstIndex(where: { $0.id == hyperlinkId }) {
+                captureRelationshipId = para.hyperlinks[idx].relationshipId
+                para.hyperlinks.remove(at: idx)
+                child = .paragraph(para)
+                return true
+            }
+            return false
+        case .table(var table):
+            for rowIdx in 0..<table.rows.count {
+                for cellIdx in 0..<table.rows[rowIdx].cells.count {
+                    for paraIdx in 0..<table.rows[rowIdx].cells[cellIdx].paragraphs.count {
+                        var para = table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx]
+                        if let idx = para.hyperlinks.firstIndex(where: { $0.id == hyperlinkId }) {
+                            captureRelationshipId = para.hyperlinks[idx].relationshipId
+                            para.hyperlinks.remove(at: idx)
+                            table.rows[rowIdx].cells[cellIdx].paragraphs[paraIdx] = para
+                            child = .table(table)
+                            return true
+                        }
+                    }
+                    for nestedIdx in 0..<table.rows[rowIdx].cells[cellIdx].nestedTables.count {
+                        var nested = BodyChild.table(table.rows[rowIdx].cells[cellIdx].nestedTables[nestedIdx])
+                        if removeHyperlinkRecursive(in: &nested, id: hyperlinkId, captureRelationshipId: &captureRelationshipId) {
+                            if case .table(let mutatedNested) = nested {
+                                table.rows[rowIdx].cells[cellIdx].nestedTables[nestedIdx] = mutatedNested
+                            }
+                            child = .table(table)
+                            return true
+                        }
+                    }
+                }
+            }
+            return false
+        case .contentControl(let metadata, var inner):
+            for k in 0..<inner.count {
+                if removeHyperlinkRecursive(in: &inner[k], id: hyperlinkId, captureRelationshipId: &captureRelationshipId) {
+                    child = .contentControl(metadata, children: inner)
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
+    /// Lookup helper for updateHyperlink URL→relationship sync. Returns the
+    /// hyperlink's relationshipId if found in any part, nil otherwise.
+    private func findRelationshipId(forHyperlinkId hyperlinkId: String) -> String? {
+        var match: String? = nil
+        DocumentWalker.walkAllParagraphs(in: self) { para, _ in
+            if match != nil { return }
+            if let h = para.hyperlinks.first(where: { $0.id == hyperlinkId }) {
+                match = h.relationshipId
+            }
+        }
+        return match
     }
 
     /// 列出所有超連結
