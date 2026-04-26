@@ -199,6 +199,60 @@ final class Issue56R4StackTests: XCTestCase {
                          "accept_revision SHALL NOT throw notFound for SDT-wrapped revision")
     }
 
+    // MARK: - §6 P0 #5: Document.replaceText headers/footers/footnotes/endnotes symmetric surface walk
+
+    func testReplaceTextInsideHeaderHyperlinkAppliesAndPersists() throws {
+        // Build doc whose word/header1.xml contains
+        // <w:hyperlink r:id="rId1"><w:r><w:t>old-link</w:t></w:r></w:hyperlink>
+        // Then call document.replaceText("old-link", with: "new-link") and
+        // assert via roundtrip that the re-read header hyperlink contains
+        // "new-link". On main this fails because the header replaceText path
+        // only walks para.runs (skipping hyperlink.runs).
+        var doc = WordDocument()
+        var p = Paragraph()
+        let hl = Hyperlink(id: "rId99", runs: [Run(text: "old-link")])
+        p.hyperlinks = [hl]
+        let header = Header(id: "rId10", paragraphs: [p], type: .default, originalFileName: "header1.xml")
+        doc.headers = [header]
+
+        let count = try doc.replaceText(find: "old-link", with: "new-link", options: ReplaceOptions(scope: .all))
+        XCTAssertGreaterThan(count, 0, "replaceText SHALL find and replace text inside header hyperlink")
+
+        let reread = try roundtrip(doc)
+        let rereadHeader = try XCTUnwrap(reread.headers.first)
+        let rereadPara = try XCTUnwrap(rereadHeader.paragraphs.first)
+        let allText = rereadPara.hyperlinks.flatMap { $0.runs }.map { $0.text }.joined()
+            + rereadPara.runs.map { $0.text }.joined()
+        XCTAssertTrue(allText.contains("new-link"),
+                      "Re-read header SHALL contain replacement text 'new-link'; got: \(allText)")
+        XCTAssertFalse(allText.contains("old-link"),
+                       "Re-read header SHALL NOT contain original text 'old-link'; got: \(allText)")
+    }
+
+    func testReplaceTextInsideFootnoteFieldSimpleAppliesAndPersists() throws {
+        // Footnote with a fieldSimple containing "ANCHOR" text. replaceText
+        // SHALL find and replace it via the symmetric surface walk.
+        var doc = WordDocument()
+        var p = Paragraph()
+        var f = FieldSimple(instr: "REF Bookmark1")
+        f.runs = [Run(text: "ANCHOR")]
+        p.fieldSimples = [f]
+        var fn = Footnote(id: 1, text: "", paragraphIndex: 0)
+        fn.paragraphs = [p]
+        doc.footnotes.footnotes = [fn]
+
+        let count = try doc.replaceText(find: "ANCHOR", with: "TARGET", options: ReplaceOptions(scope: .all))
+        XCTAssertGreaterThan(count, 0, "replaceText SHALL find and replace text inside footnote fieldSimple")
+
+        let reread = try roundtrip(doc)
+        let rereadFn = try XCTUnwrap(reread.footnotes.footnotes.first)
+        let rereadPara = try XCTUnwrap(rereadFn.paragraphs.first)
+        let allText = rereadPara.fieldSimples.flatMap { $0.runs }.map { $0.text }.joined()
+            + rereadPara.runs.map { $0.text }.joined()
+        XCTAssertTrue(allText.contains("TARGET"),
+                      "Re-read footnote SHALL contain replacement text 'TARGET'; got: \(allText)")
+    }
+
     // MARK: - §4 P0 #3: XML attribute escape sweep
 
     func testApplyStyleWithAttackerControlledNameDoesNotInjectOOXML() {
