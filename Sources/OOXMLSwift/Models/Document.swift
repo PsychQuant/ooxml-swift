@@ -2914,21 +2914,59 @@ public struct WordDocument: Equatable {
         // body content and lost their own marker without surfacing — strictly
         // worse than R4's notFound (which at least reported failure).
         // See verify R5 P0 #5 (DA C2 + H2).
+        // v0.19.5+ (#56 R5-CONT-4 P0 #1): mirror R5-CONT-3 §15.1+§15.2's
+        // reject-side clearMarker pattern for ALL accept-side typed
+        // branches. Pre-fix accept removed only document.revisions[id]
+        // — paragraph.revisions[id] / run.revisionId / paraFormatChangeId /
+        // run.formatChangeRevisionId stayed intact → Paragraph.toXML
+        // still wrapped runs in <w:ins>/<w:del>/<w:rPrChange>/<w:pPrChange>
+        // on save. Confirmed silent corruption by R5-CONT-3 verify (DA +
+        // Codex independent confirm). §15.6 matrix-pin's `if operation
+        // == "reject"` guard documented this as expected — R5-CONT-4
+        // also removes that guard (§17.2).
+        let revisionId_ = revision.id
+        let clearAllMarkers: (inout Paragraph) -> Void = { para in
+            para.revisions.removeAll { $0.id == revisionId_ }
+            if para.paragraphFormatChangeRevisionId == revisionId_ {
+                para.paragraphFormatChangeRevisionId = nil
+            }
+            for j in 0..<para.runs.count {
+                if para.runs[j].revisionId == revisionId_ {
+                    para.runs[j].revisionId = nil
+                }
+                if para.runs[j].formatChangeRevisionId == revisionId_ {
+                    para.runs[j].formatChangeRevisionId = nil
+                }
+            }
+        }
+
         var partKeyForDirty = "word/document.xml"
         switch revision.type {
         case .insertion:
-            // 接受插入：移除標記，保留文字（文字已在文件中）
-            partKeyForDirty = try sourceToPartKey(revision.source, revisionId: revisionId)
-        case .deletion:
-            // 接受刪除：實際移除被標記為刪除的文字
-            let originalText = revision.originalText
-            let removeText: (inout Paragraph) -> Void = { para in
-                guard let txt = originalText else { return }
-                for j in 0..<para.runs.count {
-                    para.runs[j].text = para.runs[j].text.replacingOccurrences(of: txt, with: "")
-                }
+            // 接受插入：移除標記，保留文字（文字已在文件中）。
+            // R5-CONT-4 P0 #1: ALSO clear paragraph + run revision-id
+            // refs so Paragraph.toXML stops wrapping runs in <w:ins>.
+            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
+                partKeyForDirty = key
+            } else {
+                // Soft-fail: the typed Revision exists but no matching
+                // paragraph carries the revision-id (legitimate when
+                // the marker was already cleared). Don't throw — the
+                // operation is semantically "no-op cleanup" not "error".
+                partKeyForDirty = try sourceToPartKey(revision.source, revisionId: revisionId)
             }
-            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: removeText) {
+        case .deletion:
+            // 接受刪除：實際移除被標記為刪除的文字 AND clear marker.
+            let originalText = revision.originalText
+            let removeAndClear: (inout Paragraph) -> Void = { para in
+                if let txt = originalText {
+                    for j in 0..<para.runs.count {
+                        para.runs[j].text = para.runs[j].text.replacingOccurrences(of: txt, with: "")
+                    }
+                }
+                clearAllMarkers(&para)
+            }
+            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: removeAndClear) {
                 partKeyForDirty = key
             } else {
                 // No matching paragraph in the source part — surface the
@@ -2936,9 +2974,15 @@ public struct WordDocument: Equatable {
                 throw RevisionError.notFound(revisionId)
             }
         case .formatting, .paragraphChange, .formatChange, .moveFrom, .moveTo:
-            // No body-only mutation to apply for these types yet; honour
-            // the source part for dirty-tracking accuracy regardless.
-            partKeyForDirty = try sourceToPartKey(revision.source, revisionId: revisionId)
+            // R5-CONT-4 P0 #1: clear paragraph/run revision-id refs
+            // (rPrChange / pPrChange / move-from/to wrapper emit) so
+            // toXML stops wrapping. Soft-fail on miss (legitimate
+            // already-cleared state).
+            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
+                partKeyForDirty = key
+            } else {
+                partKeyForDirty = try sourceToPartKey(revision.source, revisionId: revisionId)
+            }
         }
 
         // 移除修訂記錄
