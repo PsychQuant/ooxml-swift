@@ -568,6 +568,43 @@ final class Issue56R4StackTests: XCTestCase {
         try ZipHelper.zip(stagingURL, to: url)
     }
 
+    /// §13.1 helper: footer mirror of `buildMinimalDocxWithHeader`.
+    private func buildMinimalDocxWithFooter(documentXML: String, footerXML: String, footerRId: String, to url: URL) throws {
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5cont2-13.1-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+        let documentRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="\(footerRId)" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+        </Relationships>
+        """
+        try documentRels.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+        try documentXML.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+        try footerXML.write(to: stagingURL.appendingPathComponent("word/footer1.xml"), atomically: true, encoding: .utf8)
+        try ZipHelper.zip(stagingURL, to: url)
+    }
+
     /// §11.2 helper: minimal .docx that also drops a header part + document →
     /// header relationship + header content-type override.
     private func buildMinimalDocxWithHeader(documentXML: String, headerXML: String, headerRId: String, to url: URL) throws {
@@ -1586,6 +1623,97 @@ final class Issue56R4StackTests: XCTestCase {
         let rawConcat = para.unrecognizedChildren.map { $0.rawXML }.joined()
         XCTAssertFalse(rawConcat.contains("<w:ins"),
                        "After accept + roundtrip, SDT inner paragraph SHALL NOT contain <w:ins>; got: \(rawConcat)")
+    }
+
+    // MARK: - §13.1 R5-CONT-2 P0 #1 + #5: paragraphIndex per-paragraph counter
+
+    /// v0.19.5+ (#56 R5-CONT-2 P0 #1+#5): R5-CONT verify
+    /// (Codex / Logic L1+L5 / DA C1) flagged that
+    /// `propagateRevisionsFromBodyChildren` hardcoded `paragraphIndex: 0`
+    /// for ALL container revisions, while `acceptRevision` typed `.deletion`
+    /// uses `applyToFlatParagraph` which counts paragraphs from 0. Multi-
+    /// paragraph container `.deletion` therefore either silently no-ops OR
+    /// deletes from the wrong paragraph.
+    ///
+    /// Same root cause for body case `.contentControl`: propagation wrote
+    /// `paragraphIndex: <body enum index>` but lookup uses flat paragraph
+    /// counter — they diverge whenever body contains tables / SDTs.
+    ///
+    /// Fix: helper uses internal flat-paragraph counter (no external
+    /// `paragraphIndex` parameter). Reader writes the actual flat-paragraph
+    /// position; lookup reads the same position. Single source of truth.
+    func testAcceptDeletionInSecondFooterParagraphTargetsCorrectParagraph() throws {
+        var doc = WordDocument()
+
+        // Footer with TWO paragraphs: p0 carries unrelated text, p1 carries
+        // the text that should be deleted.
+        var p0 = Paragraph()
+        p0.runs.append(Run(text: "alpha-keep"))
+        var p1 = Paragraph()
+        p1.runs.append(Run(text: "to-keep "))
+        p1.runs.append(Run(text: "to-delete-text"))
+        var footer = Footer(id: "rId11", paragraphs: [p0, p1], type: .default,
+                            originalFileName: "footer1.xml")
+        let _ = footer  // silence warning until `var` mutation context
+        doc.footers = [footer]
+
+        // Typed `.deletion` Revision targeting paragraph 1 of the footer.
+        var rev = Revision(id: 99, type: .deletion, author: "Alice")
+        rev.source = .footer(id: "rId11")
+        rev.paragraphIndex = 1
+        rev.originalText = "to-delete-text"
+        doc.revisions.revisions.append(rev)
+
+        try doc.acceptRevision(revisionId: 99)
+
+        // Post-fix: footer paragraph 1 SHALL have its text removed.
+        let updatedFooter = doc.footers[0]
+        let p0Text = updatedFooter.paragraphs[0].runs.map { $0.text }.joined()
+        let p1Text = updatedFooter.paragraphs[1].runs.map { $0.text }.joined()
+        XCTAssertEqual(p0Text, "alpha-keep",
+                       "Footer paragraph 0 SHALL be untouched by paragraph 1's deletion")
+        XCTAssertFalse(p1Text.contains("to-delete-text"),
+                       "Footer paragraph 1 SHALL have 'to-delete-text' removed; got: \(p1Text)")
+        XCTAssertTrue(p1Text.contains("to-keep"),
+                      "Footer paragraph 1 SHALL preserve sibling text; got: \(p1Text)")
+    }
+
+    /// Reader-side mirror: when DocxReader parses a footer with `<w:ins>` in
+    /// the SECOND paragraph, the surfaced typed Revision SHALL carry
+    /// `paragraphIndex == 1`, not 0. Pre-fix the helper hardcoded 0 for
+    /// every container revision regardless of position.
+    func testReaderAssignsCorrectParagraphIndexForFooterRevisions() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:body>
+            <w:p><w:r><w:t>body</w:t></w:r></w:p>
+            <w:sectPr><w:footerReference w:type="default" r:id="rId10"/></w:sectPr>
+          </w:body>
+        </w:document>
+        """
+        let footerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:p><w:r><w:t>first-footer-para</w:t></w:r></w:p>
+          <w:p>
+            <w:ins w:id="42" w:author="Bob">
+              <w:r><w:t>tracked-in-second-para</w:t></w:r>
+            </w:ins>
+          </w:p>
+        </w:ftr>
+        """
+        let docxURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("r5cont2-13.1-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: docxURL) }
+        try buildMinimalDocxWithFooter(documentXML: documentXML, footerXML: footerXML,
+                                       footerRId: "rId10", to: docxURL)
+
+        let doc = try DocxReader.read(from: docxURL)
+        let rev = doc.revisions.revisions.first { $0.id == 42 }
+        XCTAssertNotNil(rev, "Footer p1 revision SHALL surface in document.revisions")
+        XCTAssertEqual(rev?.paragraphIndex, 1,
+                       "Footer p1 revision SHALL carry paragraphIndex=1 (not hardcoded 0); got: \(rev?.paragraphIndex ?? -999)")
     }
 
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {

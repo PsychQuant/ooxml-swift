@@ -307,42 +307,14 @@ public struct DocxReader {
         }
 
         // 10. 收集段落內的修訂記錄到 document.revisions
-        // Body revisions (source = .body)
-        for (index, child) in document.body.children.enumerated() {
-            switch child {
-            case .paragraph(let para):
-                for var revision in para.revisions {
-                    revision.paragraphIndex = index
-                    revision.source = .body
-                    document.revisions.revisions.append(revision)
-                }
-            case .table(let table):
-                for (rowIdx, row) in table.rows.enumerated() {
-                    for (colIdx, cell) in row.cells.enumerated() {
-                        for (cellParaIdx, para) in cell.paragraphs.enumerated() {
-                            for var revision in para.revisions {
-                                revision.paragraphIndex = index
-                                revision.source = .body
-                                revision.tableRow = rowIdx
-                                revision.tableColumn = colIdx
-                                revision.cellParagraphIndex = cellParaIdx
-                                document.revisions.revisions.append(revision)
-                            }
-                        }
-                    }
-                }
-            case .contentControl(_, let inner):
-                // v0.19.5+ (#56 R5 P0 #4): recurse into block-level SDT
-                // children to propagate typed Revisions to document.revisions.
-                // R3-NEW-4 mixed-content revision wrappers nested inside an
-                // SDT remain on the inner paragraph's `revisions` array but
-                // were previously invisible to MCP `accept_revision` because
-                // the propagation step skipped contentControl. Match the
-                // table recursion pattern: walk every paragraph (including
-                // those inside nested tables and nested content controls).
-                propagateRevisionsFromBodyChildren(inner, paragraphIndex: index, into: &document)
-            }
-        }
+        // v0.19.5+ (#56 R5-CONT-2 P0 #1+#5): single call to the shared
+        // helper which now uses an internal flat-paragraph counter. Pre-fix
+        // the body switch wrote `paragraphIndex = body.children enum index`
+        // (incl. .table and .contentControl cases) but `applyToFlatParagraph`
+        // counts paragraphs only — the two semantics diverged whenever
+        // body contained tables or SDTs, causing typed `.deletion` accept
+        // to land in the wrong paragraph.
+        propagateRevisionsFromBodyChildren(document.body.children, source: .body, into: &document)
 
         // v0.19.5+ (#56 R5-CONT P0 #2 + H1): containers route through
         // `propagateRevisionsFromBodyChildren` so typed Revisions inside
@@ -354,11 +326,16 @@ public struct DocxReader {
         // also accepts the correct `source` label per container, replacing
         // the hardcoded `.body` that DA-N H1 flagged.
 
+        // v0.19.5+ (#56 R5-CONT-2 P0 #1): container call sites no longer
+        // hardcode `paragraphIndex: 0`. The shared helper's internal
+        // flat-paragraph counter writes the correct per-paragraph index
+        // (0, 1, 2, ...) so multi-paragraph container `.deletion` accept
+        // lands on the right paragraph.
+
         // Header revisions (source = .header(id:))
         for header in document.headers {
             propagateRevisionsFromBodyChildren(
                 header.bodyChildren,
-                paragraphIndex: 0,
                 source: .header(id: header.id),
                 into: &document
             )
@@ -367,7 +344,6 @@ public struct DocxReader {
         for footer in document.footers {
             propagateRevisionsFromBodyChildren(
                 footer.bodyChildren,
-                paragraphIndex: 0,
                 source: .footer(id: footer.id),
                 into: &document
             )
@@ -376,7 +352,6 @@ public struct DocxReader {
         for footnote in document.footnotes.footnotes {
             propagateRevisionsFromBodyChildren(
                 footnote.bodyChildren,
-                paragraphIndex: 0,
                 source: .footnote(id: footnote.id),
                 into: &document
             )
@@ -385,7 +360,6 @@ public struct DocxReader {
         for endnote in document.endnotes.endnotes {
             propagateRevisionsFromBodyChildren(
                 endnote.bodyChildren,
-                paragraphIndex: 0,
                 source: .endnote(id: endnote.id),
                 into: &document
             )
@@ -1745,30 +1719,53 @@ public struct DocxReader {
     /// `revision.source = .body` was hardcoded → would mis-tag any revision
     /// surfaced from a container's nested SDT/table even after R6 extended
     /// the call sites.
+    /// v0.19.5+ (#56 R5-CONT-2 P0 #1+#5): now uses an internal flat-paragraph
+    /// counter (no external `paragraphIndex` parameter). For every visited
+    /// paragraph (including those inside tables / nested tables / SDT inner
+    /// children), the helper writes `revision.paragraphIndex = counter` and
+    /// then increments. This matches the lookup semantics of
+    /// `Document.applyToFlatParagraph(at:in:)` which counts paragraphs flat
+    /// across the same recursion. Pre-fix the helper hardcoded the supplied
+    /// `paragraphIndex` for every visit → multi-paragraph container
+    /// `.deletion` either silently no-op'd or deleted from the wrong
+    /// paragraph (verify R5-CONT P0 #1 + #5).
+    ///
+    /// Table-position fields (`tableRow`, `tableColumn`, `cellParagraphIndex`)
+    /// are populated for revisions inside table cells so consumers that want
+    /// the structural location can find it without re-walking.
     fileprivate static func propagateRevisionsFromBodyChildren(
         _ children: [BodyChild],
-        paragraphIndex: Int,
         source: RevisionSource = .body,
         into document: inout WordDocument
     ) {
-        func visit(_ para: Paragraph) {
+        var counter = 0
+        func visitPara(_ para: Paragraph, tableRow: Int? = nil, tableColumn: Int? = nil, cellParagraphIndex: Int? = nil) {
             for var revision in para.revisions {
-                revision.paragraphIndex = paragraphIndex
+                revision.paragraphIndex = counter
                 revision.source = source
+                if let r = tableRow { revision.tableRow = r }
+                if let c = tableColumn { revision.tableColumn = c }
+                if let cpi = cellParagraphIndex { revision.cellParagraphIndex = cpi }
                 document.revisions.revisions.append(revision)
             }
+            counter += 1
         }
         func walkTable(_ table: Table) {
-            for row in table.rows {
-                for cell in row.cells {
-                    for para in cell.paragraphs { visit(para) }
+            for (rowIdx, row) in table.rows.enumerated() {
+                for (colIdx, cell) in row.cells.enumerated() {
+                    for (cellParaIdx, para) in cell.paragraphs.enumerated() {
+                        visitPara(para,
+                                  tableRow: rowIdx,
+                                  tableColumn: colIdx,
+                                  cellParagraphIndex: cellParaIdx)
+                    }
                     for nested in cell.nestedTables { walkTable(nested) }
                 }
             }
         }
         func walk(_ child: BodyChild) {
             switch child {
-            case .paragraph(let para): visit(para)
+            case .paragraph(let para): visitPara(para)
             case .table(let t): walkTable(t)
             case .contentControl(_, let inner):
                 for c in inner { walk(c) }
