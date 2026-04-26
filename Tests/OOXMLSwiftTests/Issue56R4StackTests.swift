@@ -2145,24 +2145,75 @@ final class Issue56R4StackTests: XCTestCase {
                     return XCTFail("Expected paragraph at body[0] post-\(operation)")
                 }
 
-                // Note: §11.5 acceptRevision .deletion deletes text but doesn't
-                // (yet) clear paragraph.revisions. §15.1 rejectRevision .deletion
-                // does clear it. So accept-side may keep the paragraph.revisions
-                // entry while reject-side clears it — both are consistent with
-                // their CURRENT contracts. The matrix tests we ASSERT here are
-                // the ones explicitly fixed by §15.1+§15.2 (reject side).
-                if operation == "reject" {
-                    XCTAssertFalse(postP.revisions.contains { $0.id == 1000 },
-                                   "[reject/\(type)] paragraph.revisions SHALL NOT contain id 1000 — §15.1+§15.2 contract")
-                    XCTAssertNil(postP.runs.first?.revisionId == 1000 ? 1000 : nil,
-                                 "[reject/\(type)] run.revisionId SHALL NOT reference 1000")
-                    XCTAssertNil(postP.runs.first?.formatChangeRevisionId == 1000 ? 1000 : nil,
-                                 "[reject/\(type)] run.formatChangeRevisionId SHALL NOT reference 1000")
-                    XCTAssertNotEqual(postP.paragraphFormatChangeRevisionId, 1000,
-                                      "[reject/\(type)] paragraphFormatChangeRevisionId SHALL NOT reference 1000")
-                }
+                // v0.19.5+ (#56 R5-CONT-4 §17.2 + §17.3):
+                // - §17.2: removed the `if operation == "reject"` guard.
+                //   Matrix-pin asserts cleanup invariants for BOTH sides
+                //   (accept + reject) per the §17.1 R5-CONT-4 P0 #1 fix.
+                // - §17.3: replaced the ternary `XCTAssertNil(<bool> ? 1000
+                //   : nil)` anti-pattern with `XCTAssertNotEqual` — the
+                //   ternary form FALSE-PASSED on regression where revisionId
+                //   becomes 2000 instead of nil (DA R6-NEW-3).
+                XCTAssertFalse(postP.revisions.contains { $0.id == 1000 },
+                               "[\(operation)/\(type)] paragraph.revisions SHALL NOT contain id 1000 — §15.1+§15.2+§17.1 contract")
+                XCTAssertNotEqual(postP.runs.first?.revisionId, 1000,
+                                  "[\(operation)/\(type)] run.revisionId SHALL NOT reference 1000")
+                XCTAssertNotEqual(postP.runs.first?.formatChangeRevisionId, 1000,
+                                  "[\(operation)/\(type)] run.formatChangeRevisionId SHALL NOT reference 1000")
+                XCTAssertNotEqual(postP.paragraphFormatChangeRevisionId, 1000,
+                                  "[\(operation)/\(type)] paragraphFormatChangeRevisionId SHALL NOT reference 1000")
             }
         }
+    }
+
+    // MARK: - §17.1 R5-CONT-4 P0 #1: acceptRevision typed cases clear paragraph + run revision state
+
+    /// v0.19.5+ (#56 R5-CONT-4 P0 #1): R5-CONT-3 6-AI verify (DA + Codex
+    /// independently confirm) flagged that `acceptRevision` typed cases
+    /// all leave paragraph/run markers — `Paragraph.toXML()` re-emits
+    /// `<w:ins>` / `<w:del>` / `<w:rPrChange>` / `<w:pPrChange>` wrappers
+    /// on save. API claims "accepted" but file persistence still has
+    /// the wrapper. Same class as R5-CONT-2 P0 #1 (which §15.1 fixed
+    /// for reject .deletion) but for ACCEPT side and ALL 7 types.
+    /// §15.6 matrix-pin EXPLICITLY excluded accept-side via `if operation
+    /// == "reject"` guard, documenting the bug as "consistent with CURRENT
+    /// contracts".
+    func testAcceptInsertionClearsParagraphLevelRevisionAndRunFlag() throws {
+        var doc = WordDocument()
+
+        var p = Paragraph()
+        var run = Run(text: "tracked-insert-text")
+        run.revisionId = 44
+        p.runs.append(run)
+        var rev = Revision(id: 44, type: .insertion, author: "Eve")
+        rev.source = .body
+        rev.paragraphIndex = 0
+        rev.newText = "tracked-insert-text"
+        p.revisions.append(rev)
+        doc.body.children.append(.paragraph(p))
+        doc.revisions.revisions.append(rev)
+
+        try doc.acceptRevision(revisionId: 44)
+
+        // Post-fix expectations:
+        XCTAssertFalse(doc.revisions.revisions.contains { $0.id == 44 },
+                       "document.revisions SHALL no longer contain Revision id 44 after accept")
+
+        guard case .paragraph(let postP) = doc.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-accept")
+        }
+        XCTAssertFalse(postP.revisions.contains { $0.id == 44 },
+                       "paragraph.revisions SHALL no longer contain Revision id 44 — file/API state convergence")
+        XCTAssertNil(postP.runs.first?.revisionId,
+                     "run.revisionId SHALL be nil after accept — pre-fix this kept referencing 44 → writer re-emitted <w:ins>")
+
+        // Roundtrip — file state matches API state.
+        let reread = try roundtrip(doc)
+        guard case .paragraph(let rP) = reread.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-roundtrip")
+        }
+        let xml = rP.toXML()
+        XCTAssertFalse(xml.contains("<w:ins"),
+                       "After accept + roundtrip, paragraph XML SHALL NOT contain <w:ins> wrapper. Output:\n\(xml)")
     }
 
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
