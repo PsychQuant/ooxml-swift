@@ -141,7 +141,12 @@ public struct MathAccent: MathComponent {
     }
 
     public func toOMML() -> String {
-        let chrEscaped = escapeMathXML(accentChar)
+        // v0.19.5+ (#56 R5 P0 #3 codex catch): accentChar is interpolated into
+        // an attribute value (m:val="..."). escapeMathXML only covers & < >
+        // (sufficient for element text), so a `"` in accentChar would close
+        // the attribute. Use escapeXMLAttribute (covers & < > " ') for
+        // attribute-safe escape.
+        let chrEscaped = escapeXMLAttribute(accentChar)
         return "<m:acc><m:accPr><m:chr m:val=\"\(chrEscaped)\"/></m:accPr><m:e>\(combine(base))</m:e></m:acc>"
     }
 }
@@ -236,10 +241,12 @@ public struct MathDelimiter: MathComponent {
     public func toOMML() -> String {
         var xml = "<m:d>"
         xml += "<m:dPr>"
-        xml += "<m:begChr m:val=\"\(open)\"/>"
-        xml += "<m:endChr m:val=\"\(close)\"/>"
+        // v0.19.5+ (#56 R5 P0 #3): caller-controlled MathDelimiter open/close/
+        // separator routed through escapeXMLAttribute (MCP `insert_equation`).
+        xml += "<m:begChr m:val=\"\(escapeXMLAttribute(open))\"/>"
+        xml += "<m:endChr m:val=\"\(escapeXMLAttribute(close))\"/>"
         if !separator.isEmpty {
-            xml += "<m:sepChr m:val=\"\(separator)\"/>"
+            xml += "<m:sepChr m:val=\"\(escapeXMLAttribute(separator))\"/>"
         }
         xml += "</m:dPr>"
         for element in elements {

@@ -434,20 +434,22 @@ extension ParagraphBorder {
     func toXML() -> String {
         var xml = "<w:pBdr>"
 
+        // v0.19.5+ (#56 R5 P0 #3): caller-controlled border colors routed
+        // through escapeXMLAttribute (MCP `set_paragraph_border`).
         if let top = top {
-            xml += "<w:top w:val=\"\(top.type.rawValue)\" w:sz=\"\(top.size)\" w:space=\"\(top.space)\" w:color=\"\(top.color)\"/>"
+            xml += "<w:top w:val=\"\(top.type.rawValue)\" w:sz=\"\(top.size)\" w:space=\"\(top.space)\" w:color=\"\(escapeXMLAttribute(top.color))\"/>"
         }
         if let bottom = bottom {
-            xml += "<w:bottom w:val=\"\(bottom.type.rawValue)\" w:sz=\"\(bottom.size)\" w:space=\"\(bottom.space)\" w:color=\"\(bottom.color)\"/>"
+            xml += "<w:bottom w:val=\"\(bottom.type.rawValue)\" w:sz=\"\(bottom.size)\" w:space=\"\(bottom.space)\" w:color=\"\(escapeXMLAttribute(bottom.color))\"/>"
         }
         if let left = left {
-            xml += "<w:left w:val=\"\(left.type.rawValue)\" w:sz=\"\(left.size)\" w:space=\"\(left.space)\" w:color=\"\(left.color)\"/>"
+            xml += "<w:left w:val=\"\(left.type.rawValue)\" w:sz=\"\(left.size)\" w:space=\"\(left.space)\" w:color=\"\(escapeXMLAttribute(left.color))\"/>"
         }
         if let right = right {
-            xml += "<w:right w:val=\"\(right.type.rawValue)\" w:sz=\"\(right.size)\" w:space=\"\(right.space)\" w:color=\"\(right.color)\"/>"
+            xml += "<w:right w:val=\"\(right.type.rawValue)\" w:sz=\"\(right.size)\" w:space=\"\(right.space)\" w:color=\"\(escapeXMLAttribute(right.color))\"/>"
         }
         if let between = between {
-            xml += "<w:between w:val=\"\(between.type.rawValue)\" w:sz=\"\(between.size)\" w:space=\"\(between.space)\" w:color=\"\(between.color)\"/>"
+            xml += "<w:between w:val=\"\(between.type.rawValue)\" w:sz=\"\(between.size)\" w:space=\"\(between.space)\" w:color=\"\(escapeXMLAttribute(between.color))\"/>"
         }
 
         xml += "</w:pBdr>"

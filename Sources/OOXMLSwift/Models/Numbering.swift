@@ -217,7 +217,9 @@ extension Level {
 
         xml += "<w:start w:val=\"\(start)\"/>"
         xml += "<w:numFmt w:val=\"\(numFmt.rawValue)\"/>"
-        xml += "<w:lvlText w:val=\"\(lvlText)\"/>"
+        // v0.19.5+ (#56 R5 P0 #3): caller-controlled `lvlText` and `fontName`
+        // routed through escapeXMLAttribute (MCP `create_numbering_definition`).
+        xml += "<w:lvlText w:val=\"\(escapeXMLAttribute(lvlText))\"/>"
         xml += "<w:lvlJc w:val=\"left\"/>"
 
         // 縮排設定
@@ -227,7 +229,7 @@ extension Level {
 
         // 項目符號的字型設定
         if numFmt == .bullet {
-            let font = fontName ?? "Symbol"
+            let font = escapeXMLAttribute(fontName ?? "Symbol")
             xml += "<w:rPr>"
             xml += "<w:rFonts w:ascii=\"\(font)\" w:hAnsi=\"\(font)\" w:hint=\"default\"/>"
             xml += "</w:rPr>"

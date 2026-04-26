@@ -283,31 +283,34 @@ extension Style {
         var parts: [String] = []
 
         // Style 開始標籤
-        var attrs = "w:type=\"\(type.rawValue)\" w:styleId=\"\(id)\""
+        // v0.19.5+ (#56 R5 P0 #3): caller-controlled `id` routed through
+        // `escapeXMLAttribute` (shared module). MCP `create_style` /
+        // `update_style` accept arbitrary user input here.
+        var attrs = "w:type=\"\(type.rawValue)\" w:styleId=\"\(escapeXMLAttribute(id))\""
         if isDefault {
             attrs += " w:default=\"1\""
         }
         parts.append("<w:style \(attrs)>")
 
         // 名稱（含 v0.16.0+ 本地化別名）
-        parts.append("<w:name w:val=\"\(name)\"/>")
+        parts.append("<w:name w:val=\"\(escapeXMLAttribute(name))\"/>")
         for alias in aliases {
-            parts.append("<w:name w:val=\"\(alias.name)\" xml:lang=\"\(alias.lang)\"/>")
+            parts.append("<w:name w:val=\"\(escapeXMLAttribute(alias.name))\" xml:lang=\"\(escapeXMLAttribute(alias.lang))\"/>")
         }
 
         // 基於
         if let basedOn = basedOn {
-            parts.append("<w:basedOn w:val=\"\(basedOn)\"/>")
+            parts.append("<w:basedOn w:val=\"\(escapeXMLAttribute(basedOn))\"/>")
         }
 
         // 下一段樣式
         if let nextStyle = nextStyle {
-            parts.append("<w:next w:val=\"\(nextStyle)\"/>")
+            parts.append("<w:next w:val=\"\(escapeXMLAttribute(nextStyle))\"/>")
         }
 
         // v0.16.0+ (#44 §8): linked paragraph↔character style
         if let linkedStyleId = linkedStyleId {
-            parts.append("<w:link w:val=\"\(linkedStyleId)\"/>")
+            parts.append("<w:link w:val=\"\(escapeXMLAttribute(linkedStyleId))\"/>")
         }
 
         // v0.16.0+ (#44 §8): visibility

@@ -338,7 +338,7 @@ public struct MoveTracking: Equatable {
     /// 產生移動來源範圍 XML
     func toMoveFromRangeXML() -> String {
         return """
-        <w:moveFromRangeStart w:id="\(fromRevision.id)" w:name="\(moveId)"/>
+        <w:moveFromRangeStart w:id="\(fromRevision.id)" w:name="\(escapeXMLAttribute(moveId))"/>
         """
     }
 
@@ -351,7 +351,7 @@ public struct MoveTracking: Equatable {
     /// 產生移動目標範圍 XML
     func toMoveToRangeXML() -> String {
         return """
-        <w:moveToRangeStart w:id="\(toRevision.id)" w:name="\(moveId)"/>
+        <w:moveToRangeStart w:id="\(toRevision.id)" w:name="\(escapeXMLAttribute(moveId))"/>
         """
     }
 

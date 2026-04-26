@@ -260,27 +260,29 @@ extension SectionProperties {
         var xml = "<w:sectPr>"
 
         // v0.16.0+ (#44 §4): per-type header refs first, then default if no per-type set
+        // v0.19.5+ (#56 R5 P0 #3): rId values are caller-controllable via
+        // `set_section_header_footer_references`, route through escape.
         if let h = headerReferences.defaultRef {
-            xml += "<w:headerReference w:type=\"default\" r:id=\"\(h)\"/>"
+            xml += "<w:headerReference w:type=\"default\" r:id=\"\(escapeXMLAttribute(h))\"/>"
         } else if let h = headerReference {
-            xml += "<w:headerReference w:type=\"default\" r:id=\"\(h)\"/>"
+            xml += "<w:headerReference w:type=\"default\" r:id=\"\(escapeXMLAttribute(h))\"/>"
         }
         if let h = headerReferences.firstRef {
-            xml += "<w:headerReference w:type=\"first\" r:id=\"\(h)\"/>"
+            xml += "<w:headerReference w:type=\"first\" r:id=\"\(escapeXMLAttribute(h))\"/>"
         }
         if let h = headerReferences.evenRef {
-            xml += "<w:headerReference w:type=\"even\" r:id=\"\(h)\"/>"
+            xml += "<w:headerReference w:type=\"even\" r:id=\"\(escapeXMLAttribute(h))\"/>"
         }
         if let f = footerReferences.defaultRef {
-            xml += "<w:footerReference w:type=\"default\" r:id=\"\(f)\"/>"
+            xml += "<w:footerReference w:type=\"default\" r:id=\"\(escapeXMLAttribute(f))\"/>"
         } else if let f = footerReference {
-            xml += "<w:footerReference w:type=\"default\" r:id=\"\(f)\"/>"
+            xml += "<w:footerReference w:type=\"default\" r:id=\"\(escapeXMLAttribute(f))\"/>"
         }
         if let f = footerReferences.firstRef {
-            xml += "<w:footerReference w:type=\"first\" r:id=\"\(f)\"/>"
+            xml += "<w:footerReference w:type=\"first\" r:id=\"\(escapeXMLAttribute(f))\"/>"
         }
         if let f = footerReferences.evenRef {
-            xml += "<w:footerReference w:type=\"even\" r:id=\"\(f)\"/>"
+            xml += "<w:footerReference w:type=\"even\" r:id=\"\(escapeXMLAttribute(f))\"/>"
         }
 
         // v0.16.0+ (#44 §4): section break type, page number format, line numbers, vAlign, titlePg

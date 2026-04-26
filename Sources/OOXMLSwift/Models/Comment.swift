@@ -58,9 +58,11 @@ extension Comment {
         let dateString = dateFormatter.string(from: date)
 
         // 段落屬性（包含 paraId）
+        // v0.19.5+ (#56 R5 P0 #3): paraId is a public mutable String; route
+        // through escape (textId is generated hex, no injection surface).
         var pPrAttrs = ""
         if let paraId = paraId {
-            pPrAttrs = " w14:paraId=\"\(paraId)\" w14:textId=\"\(String(format: "%08X", UInt32.random(in: 0...UInt32.max)))\""
+            pPrAttrs = " w14:paraId=\"\(escapeXMLAttribute(paraId))\" w14:textId=\"\(String(format: "%08X", UInt32.random(in: 0...UInt32.max)))\""
         }
 
         return """
@@ -175,13 +177,13 @@ public struct CommentsCollection: Equatable {
         """
 
         for comment in comments {
-            var attrs: [String] = ["w15:paraId=\"\(comment.paraId ?? "00000000")\""]
+            var attrs: [String] = ["w15:paraId=\"\(escapeXMLAttribute(comment.paraId ?? "00000000"))\""]
 
             // 如果是回覆，找到父註解的 paraId
             if let parentId = comment.parentId,
                let parentComment = comments.first(where: { $0.id == parentId }),
                let parentParaId = parentComment.paraId {
-                attrs.append("w15:paraIdParent=\"\(parentParaId)\"")
+                attrs.append("w15:paraIdParent=\"\(escapeXMLAttribute(parentParaId))\"")
             }
 
             // 如果已解決
