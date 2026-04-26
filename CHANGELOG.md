@@ -8,7 +8,7 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [0.19.5] - 2026-04-26
 
-### Fixed — 6 P0 + 5 P1 + R5-CONT 7 P0 + 5 P1 + R5-CONT-2 5 P0 + 4 P1 from PsychQuant/che-word-mcp#56 rounds 4 + 5 + 6 verify
+### Fixed — 6 P0 + 5 P1 + R5-CONT 7 P0 + 5 P1 + R5-CONT-2 5 P0 + 4 P1 + R5-CONT-3 1 P0 + 4 P1 from PsychQuant/che-word-mcp#56 rounds 4 + 5 + 6 + 7 verify
 
 The R3 stack landed in commits dated 2026-04-26 but the round-4 6-AI verify (Agent Team × 5 + Codex) returned BLOCK with 6 P0 + 7 P1 findings spanning walker asymmetry, sentinel collision, attribute-escape gaps, block-level SDT propagation, container-symmetric `replaceText`, and container `<w:tbl>` capture. The R5 stack closed those (see "R5 stack" sub-block below). The round-5 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321866434) then returned BLOCK with 7 NEW P0 findings rooted in a single structural pattern: R5 P0 #6 promoted `bodyChildren` to canonical container storage with `paragraphs` as a flat backward-compat computed view, but several call sites still iterated `.paragraphs`, silently dropping anything inside container tables / contentControls. The R5-CONTINUATION sub-block (§11) closes those + 5 adjacent P1 findings via the same per-task verify gate discipline, in the same release. v0.19.5 ships both stacks as a single coordinated tag.
 
@@ -110,6 +110,52 @@ R5-CONT-2 documents the limitation: callers building multiple same-type containe
 
 - `Relationship.rawType: String` (new field with default = `type.rawValue`); `Relationship.init(...)` gains optional `rawType: String? = nil` parameter
 - Container hyperlink id format change is technically observable but follows the same backward-compat path as the R3-stack `<rId>@<position>` change: callers who cached pre-R5-CONT-2 ids and look them up after upgrade will get nil; mitigation is to re-parse documents
+
+### R5-CONT-3 sub-block — 1 P0 + 4 P1 + matrix-completeness pin from R5-CONT-2 6-AI verify (round-7 cycle convergence)
+
+The R5-CONT-2 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4322505227) returned BLOCK with 1 P0 + 4 P1 from devil's advocate (other 4 reviewers PASS). The P0: `rejectRevision` typed `.deletion` was a silent no-op at the file level — comment claimed "just clear the marker" but ONLY removed `document.revisions[id]`. `paragraph.revisions` still contained the Revision id; `run.revisionId` still referenced it; `Paragraph.toXML()` still wrapped the runs in `<w:del>` on save. Same class as the R5/R5-CONT/R5-CONT-2 cycle's repeated finding: per-task gate covered SPECIFIC cases (insertion accept/reject mirror) but missed SYMMETRIC siblings (the rest of the typed Revision matrix). R5-CONT-3 closes the P0 + 4 P1 + adds an explicit cross-cutting symmetry test pin to break the convergence cycle.
+
+#### R5-CONT-3 P0 #1 + P1 #2 — `rejectRevision` typed cases clear paragraph + run revision state
+
+`rejectRevision` typed `.deletion` branch (and `.formatting` / `.paragraphChange` / `.formatChange` / `.moveFrom` / `.moveTo`) now route through `applyToParagraph(in: revision.source)` with a `clearMarker` closure that:
+- removes the typed Revision from `paragraph.revisions[id]`
+- clears `run.revisionId` for any matching run
+- clears `paragraph.paragraphFormatChangeRevisionId` (for pPrChange)
+- clears `run.formatChangeRevisionId` (for rPrChange)
+
+§15.6's matrix test caught a related gap on first run: §13.3's `rejectRevision` typed `.insertion` (R5-CONT-2) only ran `removeText` but didn't clear paragraph/run state. Same closure pattern extended there (`removeAndClear` replaces the prior `removeText`-only closure).
+
+#### R5-CONT-3 P1 #3 — `sourceToPartKey` throws on orphan container source
+
+Pre-fix the helper silently fell back to `"word/document.xml"` when source `.header(id:X)` / `.footer(id:X)` named a non-existent container. Wrong-part dirty masked orphan-revision logic bugs. Now: throws `RevisionError.notFound(revisionId)`. Signature changes from `(_ source: RevisionSource) -> String` to `(_ source: RevisionSource, revisionId: Int) throws -> String`. All 3 call sites updated with `try` + revisionId argument.
+
+#### R5-CONT-3 P1 #4 — `deleteHyperlink` sweeps legacy doc-scope rels
+
+`removeHyperlinkRelTarget` now defensively sweeps `document.hyperlinkReferences` for the rId when partKey is non-body. R5-CONT P1 #8 introduced per-container rels but documents migrated from the older single-rels model could still carry the same rId in document-scope (legitimate when caller historically used document-scope before the migration). Without this sweep, container deletes leave a doc-scope orphan that never cleans up.
+
+#### R5-CONT-3 P1 #5 — public collision detection + repair for multi-instance same-type containers
+
+R5-CONT-2 §13.8 deferred this — the auto-allocation in `Header` init referencing parent Document state was invasive (Header doesn't know its parent), and writer-side rename introduced in-memory != on-disk non-determinism. R5-CONT-3 closes the deferral with a public diagnostic + opt-in repair helper:
+
+- `Document.containerFileNameCollisions: [(scope: String, fileName: String, indices: [Int])]` — empty when clean, surfaces all collisions for MCP / diagnostic tools to warn before save
+- `Document.repairContainerFileNames()` — auto-reassigns `originalFileName` on the SECOND+ instances using the same `allocateHeaderFileName` / `allocateFooterFileName` helper the public `addHeader` / `addFooter` API uses; first instance keeps its existing fileName; marks every reassigned container's part dirty; idempotent
+
+Caller pattern: call `repairContainerFileNames()` just before save when constructing containers via direct `headers.append(...)` rather than `addHeader`. The public API path (addHeader/addFooter) auto-handles, so the helper is only needed for direct-construction flows.
+
+#### R5-CONT-3 cross-cutting symmetry pin — revision type matrix completeness
+
+`testRevisionTypeMatrixAcceptRejectCompleteness` exercises 14 cases (7 typed Revision types × accept + reject). Each case asserts: (1) operation succeeds or throws documented error; (2) `document.revisions` cleared; (3) `paragraph.revisions` cleared (file-state convergence); (4) no silent partial state on revision-id refs. This pin closes the convergence cycle: per-task gate alone discovers SPECIFIC bugs; matrix-pin catches SYMMETRIC siblings before the next 6-AI verify round flags them.
+
+### Tests — R5-CONT-3 stack
+
+- 5 new tests in `Tests/OOXMLSwiftTests/Issue56R4StackTests.swift` (one per §15.1+§15.2 / §15.3 / §15.4 / §15.5 / §15.6)
+- Suite total: 650 tests pass / 1 skipped / 0 failures (645 R5-CONT-2 baseline + 5 R5-CONT-3 new)
+
+### API additions (R5-CONT-3, additive — no breaking change vs. R5-CONT-2 contract)
+
+- `Document.containerFileNameCollisions: [(scope: String, fileName: String, indices: [Int])]` — public diagnostic
+- `Document.repairContainerFileNames()` — public mutator (idempotent)
+- `sourceToPartKey` is private — internal change, no API impact
 
 ### R5 stack — original 6 P0 + 5 P1 (preserved verbatim from initial v0.19.5 draft)
 
