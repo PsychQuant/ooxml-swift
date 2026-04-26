@@ -2,6 +2,47 @@
 
 All notable changes to ooxml-swift will be documented in this file.
 
+## [0.19.3] - 2026-04-26
+
+### Fixed — 8 P0 + 3 must-fix P1 from PsychQuant/che-word-mcp#56 round 2 verify
+
+The v3.13.2 release shipped on top of v0.19.2 and went through a second 6-AI cross-verification round (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4320157395). Five of six reviewers (codex / logic / regression / security / devil's advocate) returned BLOCK; the requirements reviewer's PASS was overturned on every F1–F4 with concrete refutations. v0.19.3 closes the 8 P0 + 3 must-fix P1 in four batches.
+
+#### Batch A — Hyperlink suite
+
+- **P0-1** — `Hyperlink.external` / `.internal` produce hyperlink-styled runs again. v0.19.2 walked `runs` directly without applying the legacy hardcoded `<w:rStyle Hyperlink>` / `0563C1` color / single underline → all 5 MCP `insert_*hyperlink` tools rendered without visual styling. New `RunProperties.rStyle` field carries the style reference; `Hyperlink.makeStyledRun(text:)` builds runs with the Hyperlink character style + blue + underline.
+- **P0-2** — `parseHyperlink` no longer lists `w:tgtFrame` / `w:docLocation` as recognized attributes. They had no typed `Hyperlink` field and the writer never emitted them, so v0.19.2 silently dropped vendor / browser-target attributes on round-trip. They now flow into `rawAttributes` and emit via the alphabetical loop.
+- **P0-3** — New `HyperlinkChild` enum + `Hyperlink.children: [HyperlinkChild]` preserve source-document order between `<w:r>` and non-run children. `<w:hyperlink><w:r>A</w:r><w:sdt>X</w:sdt><w:r>B</w:r></w:hyperlink>` now round-trips A → SDT → B (was A → B → SDT). Reader populates `children` while keeping `runs` / `rawChildren` for backward-compat reads.
+- **P1-7** — `Hyperlink.id` is now `<rId-or-anchor-or-hl>@<position>` so two hyperlinks sharing a single relationship id (legitimate when two anchors target the same URL) parse with distinct ids. MCP tools that find / edit / delete hyperlinks by id again hit the right hyperlink.
+
+#### Batch B — Sort path completeness
+
+- **P0-4** — `Paragraph.toXMLSortedByPosition` now emits `contentControls` after the position-indexed children. Source paragraphs with `<w:sdt>` + any positioned child no longer drop the SDT on save.
+- **P0-5** — Sort path also emits the legacy `commentIds` / `footnoteIds` / `endnoteIds` / `hasPageBreak` / legacy `bookmarks` collections. The pre-fix doc-comment claimed they would emit AFTER but the code dropped them entirely — `insert_comment` / `insert_footnote` on a bookmarked source paragraph silently lost the comment / footnote. Each legacy collection is skipped only when its positioned variant is non-empty (Reader keeps both populated; emitting both would double the markers).
+- **P0-8** — `hasSourcePositionedChildren` now also treats any run or hyperlink with `position > 0` as a source-loaded signal. Pre-fix a source paragraph with `<w:r>A</w:r><w:hyperlink>L</w:hyperlink><w:r>B</w:r>` (no other markers) routed to legacy → "A B L" output. Now routes to sort.
+
+#### Batch C — Revision wrapper coverage
+
+- **P0-6** — Reader always appends a `Revision` entry on `<w:ins>` / `<w:del>` / `<w:moveFrom>` / `<w:moveTo>` regardless of whether the inner concatenated text is empty. Pre-fix the `if !insertedText.isEmpty` guard meant insertions of pure non-text content (`<w:tab/>`, `<w:br/>`, `<w:drawing>`, `<w:fldChar>`) yielded no revision, the sort-path grouping fell back to a naked `<w:r>`, and the wrapper silently disappeared (regression vs the v3.12.0 #45 Track Changes feature).
+- **P0-7** — When a revision wrapper contains any non-`<w:r>` direct child (`<w:hyperlink>`, `<w:sdt>`, `<w:fldSimple>`, `<mc:AlternateContent>`), Reader now captures the whole wrapper verbatim into `unrecognizedChildren` at the wrapper's position. The sort path emits it byte-for-byte. Track Changes flow "user inserted a hyperlink while review mode was on" now round-trips with the hyperlink intact. Trade-off: wrappers with mixed content lose the per-run typed editable surface; pure-run wrappers retain full typed editing as before. Helper: new private `DocxReader.hasNonRunChild(_:)`.
+
+#### Batch D — Bookmark hardening
+
+- **P1-1** — `DocxReader.read(from:)` scans `paragraph.bookmarks` and `paragraph.bookmarkMarkers` after parsing the body, computes the max source bookmark id, and bumps `WordDocument.nextBookmarkId` past it. Pre-fix the counter started at 1 regardless of source content; F2's marker sync turned the previously-latent collision (silent drop) into an active bug (silent overwrite, possible Word schema-reject). `nextBookmarkId` is now `internal`.
+- **P1-4** — `appendBookmarkSyncingMarkers` only appends to `bookmarkMarkers` when the paragraph already routes to sort path (`hasSourcePositionedChildren == true`). Pure API-built paragraphs keep `bookmarks`-only emit, restoring the v3.12.0 wrap-around semantic where `addBookmark("foo")` spans the existing run text. F2 had blindly added markers everywhere, downgrading API-path bookmarks to zero-width point bookmarks at paragraph end. `Paragraph.hasSourcePositionedChildren` is now `internal`.
+
+### Test coverage
+
+570 tests pass (557 from v0.19.2 + 13 new in `Issue56RoundtripCompletenessTests`), 1 skipped, 0 failures. New tests are end-to-end Reader → Writer round-trip cases (vs v0.19.2's API-only construction) so the Reader-side filter bugs (P0-2 / P0-7) are now exercised.
+
+### No breaking changes for downstream
+
+All new fields default to empty (`children: []`, `rStyle: nil`, etc.). API-built objects produce byte-equivalent pre-fix output for round-trip-safe paths; the only intentional behavior changes (P0-1 styling, P1-4 bookmark semantics) restore v3.12.0 contracts that v0.19.2 had silently broken. Existing 218+ MCP tools in che-word-mcp are unchanged.
+
+### Follow-up items deferred
+
+The round 2 verify also surfaced 5 non-must-fix P1, 9 P2, and 8 P3 items (devil's advocate NEW-A through NEW-G plus security defense-in-depth and pre-existing non-blocking items). These will be filed as separate follow-up issues for staged remediation; v0.19.3 ships only the must-fix subset to land #56's lossless round-trip contract on the v3.13.x release line.
+
 ## [0.19.2] - 2026-04-26
 
 ### Fixed — 4 blocking findings from PsychQuant/che-word-mcp#56 verification (F1–F4)
