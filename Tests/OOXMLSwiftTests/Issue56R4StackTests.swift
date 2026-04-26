@@ -1874,6 +1874,70 @@ final class Issue56R4StackTests: XCTestCase {
                              "API-built bookmarkMarker (position=0) SHALL emit AFTER source runs (position>=1) — append semantics, not prepend. Output:\n\(xml)")
     }
 
+    // MARK: - §15.1 R5-CONT-3 P0 #1: rejectRevision typed .deletion clears paragraph + run revision state
+
+    /// v0.19.5+ (#56 R5-CONT-3 P0 #1): R5-CONT-2 verify (DA C1) flagged
+    /// that `rejectRevision`'s typed `.deletion` branch (Document.swift:3088)
+    /// only runs `revisions.revisions.remove(at: index)` (document-scope).
+    /// `paragraph.revisions` still contains the Revision id; `run.revisionId`
+    /// still references it; `Paragraph.toXML()` still groups runs by
+    /// revisionId and wraps them in `<w:del>...</w:del>`. API state says
+    /// "rejected" but file persistence still has the wrapper → silent
+    /// inconsistency between API and disk. This test pins file-state
+    /// convergence with API state.
+    func testRejectDeletionRemovesParagraphLevelRevisionAndRunFlag() throws {
+        var doc = WordDocument()
+
+        // Paragraph with a typed .deletion wrapping a run.
+        var p = Paragraph()
+        var run = Run(text: "to-delete-text")
+        run.revisionId = 33
+        p.runs.append(run)
+        var rev = Revision(id: 33, type: .deletion, author: "Carol")
+        rev.source = .body
+        rev.paragraphIndex = 0
+        rev.originalText = "to-delete-text"
+        p.revisions.append(rev)
+        doc.body.children.append(.paragraph(p))
+        doc.revisions.revisions.append(rev)
+
+        // Sanity: in-memory pre-fix state has the typed Revision wrapper info.
+        guard case .paragraph(let preP) = doc.body.children[0] else {
+            return XCTFail("Expected first body child to be a paragraph")
+        }
+        XCTAssertTrue(preP.revisions.contains { $0.id == 33 },
+                      "Pre-condition: paragraph.revisions SHALL contain Revision id 33")
+        XCTAssertEqual(preP.runs.first?.revisionId, 33,
+                       "Pre-condition: run.revisionId SHALL reference 33")
+
+        try doc.rejectRevision(revisionId: 33)
+
+        // Post-fix expectations (file-state convergence with API state):
+        // 1. document.revisions removed
+        XCTAssertFalse(doc.revisions.revisions.contains { $0.id == 33 },
+                       "document.revisions SHALL no longer contain Revision id 33 after reject")
+
+        // 2. paragraph.revisions cleared
+        guard case .paragraph(let postP) = doc.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-reject")
+        }
+        XCTAssertFalse(postP.revisions.contains { $0.id == 33 },
+                       "paragraph.revisions SHALL no longer contain Revision id 33 after reject — pre-fix this was the silent-corruption surface")
+
+        // 3. run.revisionId cleared (no longer references the Revision)
+        XCTAssertNil(postP.runs.first?.revisionId,
+                     "run.revisionId SHALL be nil after reject — pre-fix this kept referencing 33 → writer re-emitted <w:del>")
+
+        // 4. Roundtrip: file state matches API state (no <w:del> wrapper).
+        let reread = try roundtrip(doc)
+        guard case .paragraph(let rP) = reread.body.children[0] else {
+            return XCTFail("Expected paragraph at body[0] post-roundtrip")
+        }
+        let xml = rP.toXML()
+        XCTAssertFalse(xml.contains("<w:del"),
+                       "After reject + roundtrip, paragraph XML SHALL NOT contain <w:del> wrapper. Output:\n\(xml)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")

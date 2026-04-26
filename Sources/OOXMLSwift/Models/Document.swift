@@ -3086,14 +3086,69 @@ public struct WordDocument: Equatable {
                 throw RevisionError.notFound(revisionId)
             }
         case .deletion:
-            // Reject deletion: restore the deleted text. The text already
-            // lives in the runs (marked but not removed) — just clear the
-            // marker. Honor source for dirty-tracking.
-            partKeyForDirty = sourceToPartKey(revision.source)
+            // Reject deletion: restore the deleted text by clearing the
+            // typed Revision marker on the paragraph + run level. The text
+            // already lives in the runs (marked but not removed); the
+            // wrapper emit is driven by paragraph.revisions + run.revisionId,
+            // so we MUST clear both for the file to converge with the API
+            // state. Honor source for dirty-tracking.
+            //
+            // v0.19.5+ (#56 R5-CONT-3 P0 #1): pre-fix this branch only set
+            // partKeyForDirty and let `revisions.revisions.remove(at: index)`
+            // clean the document-scope list. paragraph.revisions still
+            // contained the Revision id; run.revisionId still referenced it;
+            // Paragraph.toXML() (Paragraph.swift:330-345) still grouped
+            // matching runs into <w:del> wrappers on save → silent
+            // inconsistency between API state ("rejected") and file state
+            // (still wrapped). DA C1 / R5-CONT-2 verify P0.
+            let revisionId = revision.id
+            let clearMarker: (inout Paragraph) -> Void = { para in
+                para.revisions.removeAll { $0.id == revisionId }
+                for j in 0..<para.runs.count {
+                    if para.runs[j].revisionId == revisionId {
+                        para.runs[j].revisionId = nil
+                    }
+                }
+            }
+            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearMarker) {
+                partKeyForDirty = key
+            } else {
+                throw RevisionError.notFound(revisionId)
+            }
         case .formatting, .paragraphChange, .formatChange, .moveFrom, .moveTo:
-            // No body-only mutation to apply for these types yet; honor
-            // the source part for dirty-tracking accuracy.
-            partKeyForDirty = sourceToPartKey(revision.source)
+            // v0.19.5+ (#56 R5-CONT-3 P1 #2): mirror P0 #1's clear-marker
+            // pattern. These types don't have body-text mutation to undo,
+            // but the marker DOES need to be cleared to converge file
+            // state with API state (otherwise the writer keeps emitting
+            // the wrapper). pPrChange uses paragraph.paragraphFormatChangeRevisionId;
+            // rPrChange uses run.formatChangeRevisionId; moveFrom/moveTo
+            // share the run.revisionId pattern with insertion/deletion.
+            let revisionId = revision.id
+            let clearAllMarkers: (inout Paragraph) -> Void = { para in
+                para.revisions.removeAll { $0.id == revisionId }
+                if para.paragraphFormatChangeRevisionId == revisionId {
+                    para.paragraphFormatChangeRevisionId = nil
+                }
+                for j in 0..<para.runs.count {
+                    if para.runs[j].revisionId == revisionId {
+                        para.runs[j].revisionId = nil
+                    }
+                    if para.runs[j].formatChangeRevisionId == revisionId {
+                        para.runs[j].formatChangeRevisionId = nil
+                    }
+                }
+            }
+            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
+                partKeyForDirty = key
+            } else {
+                // For format/move types where the typed Revision exists but
+                // no matching paragraph carries any revision-id reference
+                // (legitimate when the marker was already cleared), honor
+                // source for dirty-tracking and fall through to the
+                // remove-from-document-revisions step. Don't throw notFound
+                // because the operation is semantically "no-op" not "error".
+                partKeyForDirty = sourceToPartKey(revision.source)
+            }
         }
 
         // 移除修訂記錄
