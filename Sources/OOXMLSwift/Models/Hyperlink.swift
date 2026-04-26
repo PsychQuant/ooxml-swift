@@ -41,6 +41,14 @@ public struct Hyperlink: Equatable {
     /// so unknown content survives a round-trip without typed modeling.
     public var rawChildren: [String] = []
 
+    /// v0.19.3+ (#56 round 2 P0-3): unified ordered children list preserving
+    /// source-document order between `<w:r>` and non-run children. Reader
+    /// populates this from source XML (so e.g. `<w:r>A</w:r><w:sdt>X</w:sdt><w:r>B</w:r>`
+    /// round-trips A→SDT→B, not A→B→SDT). Writer prefers `children` if
+    /// non-empty; falls back to legacy `runs` then `rawChildren` ordering for
+    /// API-built hyperlinks (which never populate `children`).
+    public var children: [HyperlinkChild] = []
+
     /// v0.19.0+ (#56): source-document order index for Phase 4 sort-by-position
     /// emit. Default 0 for hyperlinks created via initializers (those rely on
     /// the existing `Paragraph.toXML()` paths until Phase 4 lands).
@@ -67,7 +75,7 @@ public struct Hyperlink: Equatable {
 
     public init(id: String, text: String, url: String, relationshipId: String, tooltip: String? = nil, history: Bool = true) {
         self.id = id
-        self.runs = [Run(text: text)]
+        self.runs = [Hyperlink.makeStyledRun(text: text)]
         self.url = url
         self.relationshipId = relationshipId
         self.anchor = nil
@@ -77,7 +85,7 @@ public struct Hyperlink: Equatable {
 
     public init(id: String, text: String, anchor: String, tooltip: String? = nil, history: Bool = true) {
         self.id = id
-        self.runs = [Run(text: text)]
+        self.runs = [Hyperlink.makeStyledRun(text: text)]
         self.anchor = anchor
         self.relationshipId = nil
         self.url = nil
@@ -97,6 +105,7 @@ public struct Hyperlink: Equatable {
         history: Bool = true,
         rawAttributes: [String: String] = [:],
         rawChildren: [String] = [],
+        children: [HyperlinkChild] = [],
         position: Int = 0
     ) {
         self.id = id
@@ -108,7 +117,23 @@ public struct Hyperlink: Equatable {
         self.history = history
         self.rawAttributes = rawAttributes
         self.rawChildren = rawChildren
+        self.children = children
         self.position = position
+    }
+
+    /// v0.19.3+ (#56 round 2 P0-1): build a Hyperlink-styled Run for the API
+    /// path. Centralizes the visual style (Hyperlink character style + 0563C1
+    /// blue + single underline) so all API-constructed hyperlinks render
+    /// consistently in Word, matching the v0.19.1 hardcoded template.
+    fileprivate static func makeStyledRun(text: String) -> Run {
+        return Run(
+            text: text,
+            properties: RunProperties(
+                underline: .single,
+                color: "0563C1",
+                rStyle: "Hyperlink"
+            )
+        )
     }
 
     /// 建立外部連結
@@ -123,6 +148,13 @@ public struct Hyperlink: Equatable {
 
     /// Relationship 類型（用於 .rels 檔案）
     public static let relationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+}
+
+/// v0.19.3+ (#56 round 2 P0-3): tagged child entry preserving source-document
+/// order between `<w:r>` and non-run children inside `<w:hyperlink>`.
+public enum HyperlinkChild: Equatable {
+    case run(Run)
+    case rawXML(String)
 }
 
 /// 超連結類型
@@ -197,12 +229,23 @@ extension Hyperlink {
 
         xml += ">"
 
-        // Content: prefer typed runs (preserves RunProperties for source-loaded
-        // hyperlinks via Run.toXML()). Only fall back to the hardcoded styled
-        // run when runs is empty — this happens for API-built hyperlinks whose
-        // caller cleared runs, never for source-loaded hyperlinks (Reader
-        // always populates runs).
-        if runs.isEmpty {
+        // v0.19.3+ (#56 round 2 P0-3): if Reader populated `children`, walk it
+        // in source-document order so `<w:r>A</w:r><w:sdt>X</w:sdt><w:r>B</w:r>`
+        // round-trips A→SDT→B (not A→B→SDT). API-built hyperlinks leave
+        // `children` empty and fall through to the legacy runs+rawChildren
+        // path, which preserves the v0.19.2 ordering for unchanged callers.
+        if !children.isEmpty {
+            for child in children {
+                switch child {
+                case .run(let run):
+                    xml += run.toXML()
+                case .rawXML(let raw):
+                    xml += raw
+                }
+            }
+        } else if runs.isEmpty && rawChildren.isEmpty {
+            // Empty fallback: emit the hardcoded Hyperlink-styled run so the
+            // wrapper stays valid OOXML even when the caller cleared content.
             xml += """
             <w:r><w:rPr><w:rStyle w:val="Hyperlink"/><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr><w:t xml:space="preserve"></w:t></w:r>
             """
@@ -210,12 +253,9 @@ extension Hyperlink {
             for run in runs {
                 xml += run.toXML()
             }
-        }
-
-        // v0.19.2+ (#56 F1): non-Run direct children (e.g., nested SDT inside
-        // a hyperlink, vendor extensions). Stored as verbatim XML by Reader.
-        for raw in rawChildren {
-            xml += raw
+            for raw in rawChildren {
+                xml += raw
+            }
         }
 
         xml += "</w:hyperlink>"

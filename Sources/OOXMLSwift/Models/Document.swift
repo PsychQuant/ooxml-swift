@@ -15,7 +15,7 @@ public struct WordDocument: Equatable {
     public var revisions: RevisionsCollection = RevisionsCollection() // 修訂集合
     public var footnotes: FootnotesCollection = FootnotesCollection() // 腳註集合
     public var endnotes: EndnotesCollection = EndnotesCollection()    // 尾註集合
-    private var nextBookmarkId: Int = 1       // 書籤 ID 計數器
+    internal var nextBookmarkId: Int = 1       // 書籤 ID 計數器
     private var nextHyperlinkId: Int = 1      // 超連結 ID 計數器
 
     /// Source archive wrapper, set by `DocxReader.read(from:)` for
@@ -1665,11 +1665,27 @@ public struct WordDocument: Equatable {
     /// `addBookmark` doesn't accept a span argument. Callers needing a
     /// span-bookmark across specific runs should construct
     /// `BookmarkRangeMarker` explicitly via the typed model.
+    ///
+    /// v0.19.3+ (#56 round 2 P1-4): the marker pair is ONLY appended when
+    /// the paragraph already routes to the sort-by-position emit path
+    /// (`hasSourcePositionedChildren == true`). For pure API-built paragraphs
+    /// the legacy `bookmarks`-only emit path runs a wrap-around pattern
+    /// (`<w:bookmarkStart/><w:r>text</w:r><w:bookmarkEnd/>`), preserving the
+    /// v3.12.0 semantic that `addBookmark` spans the existing run text. F2
+    /// blindly added markers everywhere, downgrading API-path bookmarks to
+    /// zero-width point bookmarks at paragraph end — silent behavioral change
+    /// for callers expecting span semantics.
     private static func appendBookmarkSyncingMarkers(
         to paragraph: inout Paragraph,
         bookmark: Bookmark
     ) {
         paragraph.bookmarks.append(bookmark)
+
+        // P1-4 routing: only sync markers when the paragraph is already on
+        // the sort-by-position path. Pure API paragraphs (no markers / no
+        // raw-carriers / no positioned runs/hyperlinks) keep the legacy
+        // wrap-around bookmark emit shape via `bookmarks` alone.
+        guard paragraph.hasSourcePositionedChildren else { return }
 
         // Compute the next free position after every existing positioned child.
         // Mirrors the collections enumerated by `Paragraph.toXMLSortedByPosition`.
