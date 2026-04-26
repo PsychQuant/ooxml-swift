@@ -36,10 +36,19 @@ internal enum SDTParser {
         var children: [ContentControl] = []
 
         if let sdtContent = element.elements(forName: "w:sdtContent").first {
+            // v0.19.5+ (#56 R5 P1 #4): nested SDTs SHALL receive a positive
+            // source position (matches `position == 0` API-built sentinel
+            // semantics introduced by R5 §3 / R4-NEW-1). Counter increments
+            // each time we encounter a sibling `<w:sdt>` inside this
+            // sdtContent, starting at 1, so two nested SDTs at the same
+            // level get distinct positions and the parent's own position
+            // sentinel is unaffected. Closes DA-N8.
+            var childPosition = 1
             for child in sdtContent.children ?? [] {
                 guard let childEl = child as? XMLElement else { continue }
                 if childEl.localName == "sdt" {
-                    children.append(parseSDT(from: childEl, parentSdtId: sdt.id))
+                    children.append(parseSDT(from: childEl, parentSdtId: sdt.id, position: childPosition))
+                    childPosition += 1
                 } else {
                     contentXML += childEl.xmlString
                 }

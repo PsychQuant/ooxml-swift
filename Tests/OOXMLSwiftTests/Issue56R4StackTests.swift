@@ -675,6 +675,87 @@ final class Issue56R4StackTests: XCTestCase {
                       "modifiedParts SHALL include the header part containing the mutated hyperlink, got: \(document.modifiedParts)")
     }
 
+    // MARK: - §8.4 P1: SDTParser.parseSDT recursive call SHALL pass position
+
+    /// v0.19.5+ (#56 R5 P1 #4): nested SDT (an `<w:sdt>` inside another
+    /// `<w:sdtContent>`) SHALL carry a positive `position` after parsing,
+    /// not the API-built `position == 0` sentinel. Pre-fix the recursive
+    /// `parseSDT(from: childEl, parentSdtId: sdt.id)` call dropped position,
+    /// so every nested SDT was indistinguishable from an in-memory built
+    /// ContentControl and the `Paragraph.toXMLSortedByPosition` emit path
+    /// could collide it with sibling source children. Closes DA-N8.
+    func testNestedSDTReceivesPositiveChildPosition() throws {
+        // Doc with a paragraph-level SDT that contains a paragraph; that
+        // inner paragraph carries a nested SDT.
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:body>
+            <w:p>
+              <w:sdt>
+                <w:sdtPr><w:id w:val="100"/><w:tag w:val="outer"/></w:sdtPr>
+                <w:sdtContent>
+                  <w:sdt>
+                    <w:sdtPr><w:id w:val="101"/><w:tag w:val="inner"/></w:sdtPr>
+                    <w:sdtContent><w:r><w:t>nested</w:t></w:r></w:sdtContent>
+                  </w:sdt>
+                </w:sdtContent>
+              </w:sdt>
+            </w:p>
+          </w:body>
+        </w:document>
+        """
+        let document = try parseDocXMLToWordDocument(documentXML)
+        guard case .paragraph(let para) = document.body.children[0] else {
+            return XCTFail("Expected first body child to be a paragraph")
+        }
+        XCTAssertEqual(para.contentControls.count, 1, "Outer SDT SHALL be parsed")
+        let outer = para.contentControls[0]
+        XCTAssertGreaterThanOrEqual(outer.position, 1,
+                                    "Outer SDT (source-loaded) SHALL have position >= 1, got \(outer.position)")
+        XCTAssertEqual(outer.children.count, 1, "Outer SDT SHALL have one nested ContentControl child")
+        let inner = outer.children[0]
+        XCTAssertGreaterThanOrEqual(inner.position, 1,
+                                    "Nested SDT SHALL have position >= 1 (not the API-built 0 sentinel), got \(inner.position)")
+    }
+
+    func testNestedSiblingSDTsReceiveOneBasedSiblingPositions() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:body>
+            <w:p>
+              <w:sdt>
+                <w:sdtPr><w:id w:val="200"/><w:tag w:val="outer"/></w:sdtPr>
+                <w:sdtContent>
+                  <w:r><w:t>before</w:t></w:r>
+                  <w:sdt>
+                    <w:sdtPr><w:id w:val="201"/><w:tag w:val="inner_1"/></w:sdtPr>
+                    <w:sdtContent><w:r><w:t>one</w:t></w:r></w:sdtContent>
+                  </w:sdt>
+                  <w:r><w:t>between</w:t></w:r>
+                  <w:sdt>
+                    <w:sdtPr><w:id w:val="202"/><w:tag w:val="inner_2"/></w:sdtPr>
+                    <w:sdtContent><w:r><w:t>two</w:t></w:r></w:sdtContent>
+                  </w:sdt>
+                </w:sdtContent>
+              </w:sdt>
+            </w:p>
+          </w:body>
+        </w:document>
+        """
+
+        let document = try parseDocXMLToWordDocument(documentXML)
+        guard case .paragraph(let para) = document.body.children[0] else {
+            return XCTFail("Expected first body child to be a paragraph")
+        }
+        let outer = try XCTUnwrap(para.contentControls.first, "Outer SDT SHALL be parsed")
+
+        XCTAssertEqual(outer.children.map(\.sdt.tag), ["inner_1", "inner_2"])
+        XCTAssertEqual(outer.children.map(\.position), [1, 2],
+                       "Nested sibling SDTs SHALL receive one-based sibling positions")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
