@@ -798,11 +798,17 @@ public struct DocxWriter {
         // (`word/_rels/<header>.xml.rels`) when the header carries any
         // relationships. Pre-fix the writer never emitted these → URL
         // updates against container hyperlinks silently failed to persist.
+        // v0.19.5+ (#56 R5-CONT-2 P1 #10): also remove stale rels file
+        // when the collection has been emptied (e.g., last hyperlink in
+        // the header was deleted via Document.deleteHyperlink). Without
+        // this branch, overlay-mode preserves the prior rels file from
+        // the source archive — Word and other validators would warn
+        // about unused relationships referencing a non-existent target.
+        let headerRelsURL = baseURL.appendingPathComponent("word/_rels/\(header.fileName).rels")
         if !header.relationships.relationships.isEmpty {
-            try writeRelationshipsCollection(
-                header.relationships,
-                to: baseURL.appendingPathComponent("word/_rels/\(header.fileName).rels")
-            )
+            try writeRelationshipsCollection(header.relationships, to: headerRelsURL)
+        } else if FileManager.default.fileExists(atPath: headerRelsURL.path) {
+            try? FileManager.default.removeItem(at: headerRelsURL)
         }
     }
 
@@ -830,11 +836,13 @@ public struct DocxWriter {
         try xml.write(to: url, atomically: true, encoding: .utf8)
 
         // v0.19.5+ (#56 R5-CONT P1 #8): emit per-container rels — see writeHeader.
+        // v0.19.5+ (#56 R5-CONT-2 P1 #10): see writeHeader's stale-rels
+        // removal — same rationale applies to footers.
+        let footerRelsURL = baseURL.appendingPathComponent("word/_rels/\(footer.fileName).rels")
         if !footer.relationships.relationships.isEmpty {
-            try writeRelationshipsCollection(
-                footer.relationships,
-                to: baseURL.appendingPathComponent("word/_rels/\(footer.fileName).rels")
-            )
+            try writeRelationshipsCollection(footer.relationships, to: footerRelsURL)
+        } else if FileManager.default.fileExists(atPath: footerRelsURL.path) {
+            try? FileManager.default.removeItem(at: footerRelsURL)
         }
     }
 
@@ -1014,11 +1022,12 @@ public struct DocxWriter {
         try xml.write(to: url, atomically: true, encoding: .utf8)
 
         // v0.19.5+ (#56 R5-CONT P1 #8): emit per-collection rels.
+        // v0.19.5+ (#56 R5-CONT-2 P1 #10): stale rels removal — see writeHeader.
+        let footnotesRelsURL = baseURL.appendingPathComponent("word/_rels/footnotes.xml.rels")
         if !footnotes.relationships.relationships.isEmpty {
-            try writeRelationshipsCollection(
-                footnotes.relationships,
-                to: baseURL.appendingPathComponent("word/_rels/footnotes.xml.rels")
-            )
+            try writeRelationshipsCollection(footnotes.relationships, to: footnotesRelsURL)
+        } else if FileManager.default.fileExists(atPath: footnotesRelsURL.path) {
+            try? FileManager.default.removeItem(at: footnotesRelsURL)
         }
     }
 
@@ -1030,11 +1039,12 @@ public struct DocxWriter {
         try xml.write(to: url, atomically: true, encoding: .utf8)
 
         // v0.19.5+ (#56 R5-CONT P1 #8): emit per-collection rels.
+        // v0.19.5+ (#56 R5-CONT-2 P1 #10): stale rels removal — see writeHeader.
+        let endnotesRelsURL = baseURL.appendingPathComponent("word/_rels/endnotes.xml.rels")
         if !endnotes.relationships.relationships.isEmpty {
-            try writeRelationshipsCollection(
-                endnotes.relationships,
-                to: baseURL.appendingPathComponent("word/_rels/endnotes.xml.rels")
-            )
+            try writeRelationshipsCollection(endnotes.relationships, to: endnotesRelsURL)
+        } else if FileManager.default.fileExists(atPath: endnotesRelsURL.path) {
+            try? FileManager.default.removeItem(at: endnotesRelsURL)
         }
     }
 
