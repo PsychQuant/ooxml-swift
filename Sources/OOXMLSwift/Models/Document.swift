@@ -3148,15 +3148,31 @@ public struct WordDocument: Equatable {
         var partKeyForDirty = "word/document.xml"
         switch revision.type {
         case .insertion:
-            // Reject insertion: remove the inserted text.
+            // Reject insertion: remove the inserted text AND clear typed
+            // Revision marker on paragraph + run level so the writer
+            // doesn't re-emit the <w:ins> wrapper around now-empty runs.
+            //
+            // v0.19.5+ (#56 R5-CONT-3 §15.6 matrix-pin caught): pre-fix
+            // R5-CONT-2 §13.3 only ran removeText but left
+            // paragraph.revisions[id] + run.revisionId intact. The
+            // wrapper would re-emit on save with empty text — silent
+            // file-state inconsistency. Extends §15.1's clearMarker
+            // pattern to the insertion-reject path.
             let newText = revision.newText
-            let removeText: (inout Paragraph) -> Void = { para in
-                guard let txt = newText else { return }
+            let removeAndClear: (inout Paragraph) -> Void = { para in
+                if let txt = newText {
+                    for j in 0..<para.runs.count {
+                        para.runs[j].text = para.runs[j].text.replacingOccurrences(of: txt, with: "")
+                    }
+                }
+                para.revisions.removeAll { $0.id == revisionId }
                 for j in 0..<para.runs.count {
-                    para.runs[j].text = para.runs[j].text.replacingOccurrences(of: txt, with: "")
+                    if para.runs[j].revisionId == revisionId {
+                        para.runs[j].revisionId = nil
+                    }
                 }
             }
-            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: removeText) {
+            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: removeAndClear) {
                 partKeyForDirty = key
             } else {
                 throw RevisionError.notFound(revisionId)
