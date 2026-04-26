@@ -8,7 +8,7 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [0.19.5] - 2026-04-26
 
-### Fixed — 6 P0 + 5 P1 + R5-CONTINUATION 7 P0 + 5 P1 from PsychQuant/che-word-mcp#56 rounds 4 + 5 verify
+### Fixed — 6 P0 + 5 P1 + R5-CONT 7 P0 + 5 P1 + R5-CONT-2 5 P0 + 4 P1 from PsychQuant/che-word-mcp#56 rounds 4 + 5 + 6 verify
 
 The R3 stack landed in commits dated 2026-04-26 but the round-4 6-AI verify (Agent Team × 5 + Codex) returned BLOCK with 6 P0 + 7 P1 findings spanning walker asymmetry, sentinel collision, attribute-escape gaps, block-level SDT propagation, container-symmetric `replaceText`, and container `<w:tbl>` capture. The R5 stack closed those (see "R5 stack" sub-block below). The round-5 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321866434) then returned BLOCK with 7 NEW P0 findings rooted in a single structural pattern: R5 P0 #6 promoted `bodyChildren` to canonical container storage with `paragraphs` as a flat backward-compat computed view, but several call sites still iterated `.paragraphs`, silently dropping anything inside container tables / contentControls. The R5-CONTINUATION sub-block (§11) closes those + 5 adjacent P1 findings via the same per-task verify gate discipline, in the same release. v0.19.5 ships both stacks as a single coordinated tag.
 
@@ -63,6 +63,53 @@ Public `Document.getHyperlinks()` routes through `DocumentWalker.walkAllParagrap
 - `RelationshipsCollection` now `Equatable`.
 - `DocxReader.parseRelationshipsFile(at:)` — new internal generic per-file rels parser used for per-container rels.
 - `DocxWriter.xmlForBodyChild(_:)` — promoted from `private static` to `internal static` so container `toXML()` can reuse the SDT serialization.
+
+### R5-CONT-2 sub-block — 5 P0 + 4 P1 from R5-CONT 6-AI verify (round-6 cross-cutting completion)
+
+The R5-CONT 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4322314964) returned BLOCK with 5 NEW P0 silent-corruption surfaces. Per-task gates closed each NARROW R5 verify finding but missed cross-fix asymmetries: accept↔reject mirror, update↔delete mirror, partial filter coverage, and cross-helper invariants (writer's `paragraphIndex` semantic vs lookup helper's flat-counter semantic). R5-CONT-2 closes the 5 P0 + 4 of 5 P1 (1 P1 deferred — see Caveats below) via the same per-task gate.
+
+#### R5-CONT-2 P0 #1 + #5 — paragraphIndex per-paragraph counter
+
+`propagateRevisionsFromBodyChildren` previously took an external `paragraphIndex` parameter. Container call sites passed `0` for ALL revisions; body case `.contentControl` passed body-children enum index. Both diverged from `applyToParagraph`'s flat-paragraph counter lookup. Fix: helper now uses an internal `var counter = 0` that increments per visited paragraph (recursing into tables / nested tables / SDT inner). Body propagation collapses to a single helper call (the per-case body switch is removed). Container call sites drop the `paragraphIndex: 0` argument. Single source of truth for paragraph-position semantics.
+
+#### R5-CONT-2 P0 #2 — `deleteHyperlink` targets owning part rels
+
+`Document.deleteHyperlink` only updated `document.hyperlinkReferences` and unconditionally marked `word/_rels/document.xml.rels` dirty. Container hyperlinks deleted left orphan rels in `header*.xml.rels` AND wrongly dirtied document rels. Mirror of R5-CONT P1 #8 `updateHyperlink(url:)` fix — new `removeHyperlinkRelTarget(rId:partKey:)` routes via the owning part's relationships; correct rels file marked dirty.
+
+#### R5-CONT-2 P0 #3 — `rejectRevision` typed `.insertion` routes by `revision.source`
+
+`rejectRevision`'s typed `.insertion` branch was body-only — same class as the R5-CONT P0 #5 `acceptRevision` typed `.deletion` bug, but for the reject side and never mirrored. A container-source `.insertion` rejected via `rejectRevision` would silently no-op OR (worse) DELETE BODY TEXT matching `newText` substring. Fix: typed `.insertion` now routes by `revision.source` via the same `applyToParagraph` + `sourceToPartKey` helpers `acceptRevision` already uses. Throws `RevisionError.notFound` on miss instead of silent corruption.
+
+#### R5-CONT-2 P0 #4 — `toXMLSortedByPosition` filter sweep covers all 12 positioned collections
+
+R5-CONT P0 #6 added the `where position > 0` filter to runs / hyperlinks / fieldSimples / alternateContents (4 of 12 positioned collections). The 8 remaining (`bookmarkMarkers`, `commentRangeMarkers`, `permissionRangeMarkers`, `proofErrorMarkers`, `smartTags`, `customXmlBlocks`, `bidiOverrides`, `unrecognizedChildren`) still went into the sort list unconditionally → API-built marker (constructed with explicit `position == 0`) sorted BEFORE every source-loaded child and landed at paragraph head. Fix: filter applied to all 8 remaining collections; symmetric post-content emit added for the position-0 entries.
+
+### R5-CONT-2 P1 follow-ups
+
+- **R5-CONT-2 P1 #6** — `Relationship.rawType: String` preserves the literal source `Type` attribute string. `parseRelationshipsFile` populates it from the source attribute regardless of typed-enum recognition. `writeRelationshipsCollection` prefers `rel.rawType` over `rel.type.rawValue`. Unknown vendor extension types (VML / OLE / Word extension rels) round-trip byte-equivalent instead of being downgraded to `Type=""` (which is invalid OOXML rels).
+- **R5-CONT-2 P1 #7** — Hyperlink rels lookup in `parseHyperlink` adds `&& $0.type == .hyperlink` filter to `first(where:)`. Pre-fix the id-only match could resolve a header hyperlink's rId1 to a document-scope rels entry of type `header` (Type=header Target=header1.xml) — wrong-type silent resolution to a part path string. Fix combines with R5-CONT P1 #8's container-first merge order to fully close the cross-part rId resolution surface.
+- **R5-CONT-2 P1 #8** — Hyperlink id format includes part scope. Body hyperlinks keep `<rId-or-anchor-or-hl>@<position>`; container hyperlinks (header / footer / footnote / endnote) get prepended with the container part fileName (e.g., `header1.xml:rId1@0`). New `rewriteHyperlinkIdsInBodyChildren` post-processes parsed container bodyChildren to part-scope every hyperlink id (idempotent; only prefixes ids that don't already contain `:`). After R5-CONT P0 #7 made `getHyperlinks` cross-part, two parts producing same `rId@position` were indistinguishable to MCP callers — now disambiguated.
+- **R5-CONT-2 P1 #10** — Stale rels file removal. `writeHeader` / `writeFooter` / `writeFootnotes` / `writeEndnotes` add `else if FileManager.default.fileExists(atPath: relsURL.path) { try? FileManager.default.removeItem(at: relsURL) }` so emptying a container's relationships collection (e.g., via `Document.deleteHyperlink`) actually removes the stale `word/_rels/<container>.xml.rels` file from disk on save. Pre-fix overlay-mode preserved the stale file — Word and validators warn about unused relationships.
+
+### Caveats — R5-CONT-2 P1 #9 deferred
+
+R5-CONT verify DA C5 flagged a fileName-collision risk for two API-built `.default` headers without `originalFileName` set (both produce `header1.xml`, leading to `updateHyperlinkRelTarget` partKey-loop matching both). Investigation showed:
+
+1. The public `Document.addHeader(text:type:)` API already routes through `allocateHeaderFileName(for:)` which auto-suffixes — collision only arises when callers SKIP this API and directly construct `Header(id:type:)` then append to `document.headers` raw.
+2. A complete fix requires either auto-allocation in `Header` init referencing parent Document state (invasive — Header doesn't know its parent), OR writer-side collision detection + rename (introduces in-memory != on-disk non-determinism).
+
+R5-CONT-2 documents the limitation: callers building multiple same-type containers SHALL use the public `addHeader` / `addFooter` API rather than direct construction. A follow-up issue is tracked for full auto-allocation.
+
+### Tests — R5-CONT-2 stack
+
+- 5 new tests in `Tests/OOXMLSwiftTests/Issue56R4StackTests.swift` (one per P0 #1+#5, P0 #2, P0 #3, P0 #4 — the P1s are validated by the per-fix Codex scoped review and the running suite)
+- 1 pre-existing test (`testUpdateHyperlinkUrlInsideHeaderTargetsHeaderRels` §11.8) updated to use `id.contains("rId99")` instead of `id.hasPrefix("rId99")` to accommodate the new container-id format
+- Suite total: 645 tests pass / 1 skipped / 0 failures (640 R5-CONT baseline + 5 R5-CONT-2 new tests)
+
+### API additions (R5-CONT-2, additive — no breaking change vs. R5-CONT contract)
+
+- `Relationship.rawType: String` (new field with default = `type.rawValue`); `Relationship.init(...)` gains optional `rawType: String? = nil` parameter
+- Container hyperlink id format change is technically observable but follows the same backward-compat path as the R3-stack `<rId>@<position>` change: callers who cached pre-R5-CONT-2 ids and look them up after upgrade will get nil; mitigation is to re-parse documents
 
 ### R5 stack — original 6 P0 + 5 P1 (preserved verbatim from initial v0.19.5 draft)
 
