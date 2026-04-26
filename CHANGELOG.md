@@ -8,9 +8,63 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [0.19.5] - 2026-04-26
 
-### Fixed — 6 P0 + 5 P1 from PsychQuant/che-word-mcp#56 round 4 verify (R5 stack-completion)
+### Fixed — 6 P0 + 5 P1 + R5-CONTINUATION 7 P0 + 5 P1 from PsychQuant/che-word-mcp#56 rounds 4 + 5 verify
 
-The R3 stack landed in commits dated 2026-04-26 but the round-4 6-AI verify (Agent Team × 5 + Codex) returned BLOCK with 6 P0 + 7 P1 findings spanning walker asymmetry, sentinel collision, attribute-escape gaps, block-level SDT propagation, container-symmetric `replaceText`, and container `<w:tbl>` capture. v0.19.5 closes those P0 + 5 P1 via the spectra change `che-word-mcp-issue-56-r4-stack-completion`. Each fix shipped as an independent commit with its own failing-test → implement → green → suite check → scoped Codex verify gate, continuing the R3-established discipline that breaks the bundle-and-regress cycle.
+The R3 stack landed in commits dated 2026-04-26 but the round-4 6-AI verify (Agent Team × 5 + Codex) returned BLOCK with 6 P0 + 7 P1 findings spanning walker asymmetry, sentinel collision, attribute-escape gaps, block-level SDT propagation, container-symmetric `replaceText`, and container `<w:tbl>` capture. The R5 stack closed those (see "R5 stack" sub-block below). The round-5 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321866434) then returned BLOCK with 7 NEW P0 findings rooted in a single structural pattern: R5 P0 #6 promoted `bodyChildren` to canonical container storage with `paragraphs` as a flat backward-compat computed view, but several call sites still iterated `.paragraphs`, silently dropping anything inside container tables / contentControls. The R5-CONTINUATION sub-block (§11) closes those + 5 adjacent P1 findings via the same per-task verify gate discipline, in the same release. v0.19.5 ships both stacks as a single coordinated tag.
+
+### R5-CONTINUATION sub-block — 7 P0 + 5 P1 from R5 verify (round-5 stack-completion)
+
+#### R5-CONT P0 #1 — handleMixedContentWrapperRevision walks container bodyChildren
+
+The four container loops in `Document.handleMixedContentWrapperRevision` were iterating `headers[hi].paragraphs` (flat computed view), missing wrappers inside container tables / SDTs. `transformInBodyChildren` is now parameterized over `partKey` and the four container loops route through it on `bodyChildren`. Body branch unchanged. Closes verify R5 P0 #1 + Logic L2 + DA C1.
+
+#### R5-CONT P0 #2 — DocxReader per-container revision propagation walks bodyChildren
+
+`propagateRevisionsFromBodyChildren` parameterized over `source: RevisionSource = .body`. The four per-container revision propagation loops in `DocxReader.read` collapse to single calls of the helper with the correct source label, walking each container's `bodyChildren` (not `.paragraphs` flat view). Typed Revisions inside container tables / nested tables / contentControls now reach `document.revisions.revisions`. Also closes DA-N H1 (hardcoded `.body` source label).
+
+#### R5-CONT P0 #3 — replaceText(.all) recurses into container bodyChildren
+
+The four container loops in `Document.replaceText(scope: .all)` now route through the existing `replaceTextInBodyChildren` recursion, walking `bodyChildren` (incl. tables, nested tables, contentControl). Local-var copy pattern (`var children = container.bodyChildren` → mutate → write back) avoids Swift exclusivity violations from `mutating self` recursive calls. Closes verify R5 P0 #3 + Codex P1 + Regression F1 + DA C1.
+
+#### R5-CONT P0 #4 — partKey unification between DocumentWalker and Header/Footer.fileName
+
+`DocumentWalker.headerPartKey(for:)` and `footerPartKey(for:)` now delegate to `header.fileName` / `footer.fileName` — the same accessor `DocxWriter` uses for dirty-gate checks. Pre-fix the walker's private `defaultHeaderFileName` switch (returned `header2.xml` for `.even`) disagreed with the model's `headerEven.xml` for every (HeaderFooterType, originalFileName=nil) combination, producing silent loss-on-save for API-built containers. Closes verify R5 P0 #4 + Logic L1.
+
+#### R5-CONT P0 #5 — acceptRevision typed .deletion routes by revision.source
+
+New `sourceToPartKey(_ source: RevisionSource) -> String` and `applyToParagraph(at:in:mutate:) -> String?` helpers. The typed `.deletion` branch now consults `revision.source` to find the right paragraph slot (across body, headers, footers, footnotes, endnotes — incl. nested tables / contentControl). Throws `RevisionError.notFound` on miss instead of silent no-op. `modifiedParts` marked with the actual mutated part. Closes verify R5 P0 #5 + DA C2 (silent corruption: container .deletion silently no-op'd OR deleted the wrong body paragraph) + DA H2 (block-level SDT internal .deletion).
+
+#### R5-CONT P0 #6 — toXMLSortedByPosition filters API-built runs/hyperlinks symmetric with contentControls
+
+The four positioned-list builder loops for runs / hyperlinks / fieldSimples / alternateContents now apply the `where position > 0` filter (matching what contentControls already had). The `position == 0` API-built entries emit in the legacy post-content section so they land at end-of-paragraph rather than sorting BEFORE source-loaded children. Closes verify R5 P0 #6 + DA C3 (asymmetric sentinel handling: source-loaded paragraph + `insertText` previously placed text at paragraph head).
+
+#### R5-CONT P0 #7 — getHyperlinks walks all parts
+
+Public `Document.getHyperlinks()` routes through `DocumentWalker.walkAllParagraphs(in: self)` so the returned id/text/url/anchor/type tuple list covers every part (incl. tables / SDT children inside body / headers / footers / footnotes / endnotes). Pre-fix only body top-level paragraphs were listed → the listed-id set was a strict subset of what `updateHyperlink` / `deleteHyperlink` could find. Closes verify R5 P0 #7 + DA C5.
+
+### R5-CONTINUATION P1 follow-ups
+
+- **R5-CONT P1 #8** — `updateHyperlink(url:)` URL sync targets the OWNING part's rels file (`word/_rels/header*.xml.rels`, `footer*.xml.rels`, `footnotes.xml.rels`, `endnotes.xml.rels`) instead of always document-scope. New per-container `relationships: RelationshipsCollection` fields on `Header` / `Footer` / `FootnotesCollection` / `EndnotesCollection`. `Relationship` now Equatable with mutable `target` + optional `targetMode`. New `parseRelationshipsFile(at:)` generic parser; new `writeRelationshipsCollection(_:to:)` writer helper. Codex caught a per-part rId scoping edge case during scoped verify: the merged-rels lookup must search container rels FIRST so colliding ids resolve against the correct part — fixed via `mergedRels = containerRels + documentRels` order with a dedicated regression test. Closes verify R5 P1 #8 + Logic L4 + Codex P1 #4.
+- **R5-CONT P1 #9** — Container `toXML()` for Header/Footer/Footnote/Endnote routes through `DocxWriter.xmlForBodyChild` (promoted from private to internal). The `.contentControl` arm now emits `<w:sdt>...</w:sdt>` instead of being silently dropped. Closes verify R5 P1 #9 + Logic L6 + Codex P2.
+- **R5-CONT P1 #10** — XML escape sweep audit table tightened to reflect byte-equivalence reality. Investigation found all 20+ remaining local `escapeXML(_:)` helpers across `Hyperlink.swift`, `Footer.swift`, `Comment.swift`, `Image.swift`, `Revision.swift`, and the 10 `Field.swift` instances escape ALL FIVE attribute-significant chars (`& < > " '`) — the prior R3-stack note that "only `'` is missed" was stale. DocxWriter's `escapeAttr` is intentional 4-char (single-quote allowed unescaped inside double-quoted attributes per XML spec). True consolidation onto a single helper is a code-hygiene follow-up; no security impact remains. Closes verify R5 P1 #10 + DA H3.
+- **R5-CONT P1 #11** — Roundtrip variant added for `testBlockLevelSDTWrappedRevisionAcceptPersistsThroughRoundtrip` (the highest-risk in-memory mutation test DA H5 explicitly called out). Pure-emit and API-throw tests intentionally remain in-memory because the writer-side check is on the toXML/parser path itself; adding mechanical variants would not catch additional regressions per category. Closes verify R5 P1 #11 + DA H5.
+- **R5-CONT P1 #12** — `DocxReader.walkAllParagraphs` private duplicate removed. `nextBookmarkId` calibration now routes through the shared `DocumentWalker.walkAllParagraphs`. Remaining `for header in document.headers` loops in production code are intentional (DocumentWalker primitive itself + per-container revision propagation that needs per-iteration source labels). Closes verify R5 P2 #13 + DA C4 (the "single walker = no walker asymmetry" promise).
+
+### Tests — R5-CONTINUATION
+
+- 11 new tests in `Tests/OOXMLSwiftTests/Issue56R4StackTests.swift` (one per P0 + P1 finding, plus the Codex-caught rId collision regression and the §11.11 SDT-revision roundtrip variant)
+- 1 pre-existing test (testUpdateHyperlinkInsideHeaderTableSucceeds, §8.3) updated to use the new `header.relationships` field instead of the pre-R5-CONT `document.hyperlinkReferences` workaround
+- Suite total: 640 tests pass / 1 skipped / 0 failures (628 R5 baseline + 12 R5-CONTINUATION new tests)
+
+### API additions (R5-CONTINUATION, additive — no breaking change vs. R5 stack contract)
+
+- `Header.relationships`, `Footer.relationships`, `FootnotesCollection.relationships`, `EndnotesCollection.relationships` — new `var relationships: RelationshipsCollection` fields for per-container rels storage. Empty for API-built containers; populated by DocxReader; emitted by DocxWriter when non-empty.
+- `Relationship` now `Equatable`. `target` is mutable; new optional `targetMode: String?` for hyperlink rels (`TargetMode="External"` round-trip).
+- `RelationshipsCollection` now `Equatable`.
+- `DocxReader.parseRelationshipsFile(at:)` — new internal generic per-file rels parser used for per-container rels.
+- `DocxWriter.xmlForBodyChild(_:)` — promoted from `private static` to `internal static` so container `toXML()` can reuse the SDT serialization.
+
+### R5 stack — original 6 P0 + 5 P1 (preserved verbatim from initial v0.19.5 draft)
 
 #### R5 P0 #1 — Mixed-content revision wrapper walker SHALL find wrappers in every part
 
