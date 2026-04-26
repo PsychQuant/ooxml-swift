@@ -336,6 +336,97 @@ final class Issue56R3StackTests: XCTestCase {
         )
     }
 
+    // MARK: - R3-NEW-6: Direct-emit XML attribute values SHALL be escaped to prevent injection
+
+    /// Spec scenario "rStyle value with embedded quote round-trips without injection":
+    /// rStyle value `x"/><injected/><w:dummy w:val="y` must round-trip through
+    /// toXML() and re-parse as a single attribute value, NOT as additional
+    /// sibling elements.
+    func testRStyle_WithEmbeddedQuoteAndAngleBracket_DoesNotInjectSiblings() throws {
+        let maliciousRStyle = "x\"/><injected/><w:dummy w:val=\"y"
+        var props = RunProperties()
+        props.rStyle = maliciousRStyle
+
+        let xml = props.toXML()
+
+        // Re-parse the emitted XML. Wrap in a synthetic root so XMLDocument
+        // accepts the fragment.
+        let wrapped = "<w:rPr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(xml)</w:rPr>"
+        let parsed = try XMLDocument(xmlString: wrapped, options: [])
+
+        // Bug: pre-fix the unescaped quote+angle-bracket payload becomes
+        // additional sibling elements <injected/> and <w:dummy>.
+        let injectedNodes = try parsed.nodes(forXPath: "//*[local-name()='injected']")
+        XCTAssertTrue(
+            injectedNodes.isEmpty,
+            "Re-parsed XML must NOT contain <injected/> sibling. rStyle escape failed. Output:\n\(xml)"
+        )
+        let dummyNodes = try parsed.nodes(forXPath: "//*[local-name()='dummy']")
+        XCTAssertTrue(
+            dummyNodes.isEmpty,
+            "Re-parsed XML must NOT contain <w:dummy> sibling. rStyle escape failed. Output:\n\(xml)"
+        )
+
+        // Positive check: the rStyle attribute must contain the original
+        // (decoded) malicious string verbatim.
+        let rStyleNodes = try parsed.nodes(forXPath: "//*[local-name()='rStyle']")
+        XCTAssertEqual(rStyleNodes.count, 1, "Expected exactly one <w:rStyle> element")
+        if let rStyleEl = rStyleNodes.first as? XMLElement,
+           let valAttr = rStyleEl.attribute(forName: "w:val") {
+            XCTAssertEqual(
+                valAttr.stringValue, maliciousRStyle,
+                "Round-tripped w:val must equal original rStyle string verbatim."
+            )
+        } else {
+            XCTFail("rStyle node has no w:val attribute. Output:\n\(xml)")
+        }
+    }
+
+    /// Audit corner cases for color / fontName per R3-NEW-6 task 7.5.
+    /// Each row of the spec scenario's escape table is exercised: ampersand,
+    /// apostrophe, less-than, greater-than. Validates round-trip equality.
+    func testRunPropertyAttributes_EscapeAcrossAuditedSites() throws {
+        let cases: [(rStyle: String?, color: String?, fontName: String?, label: String)] = [
+            ("Heading1", nil, nil, "normal rStyle, no escape needed"),
+            ("A & B", nil, nil, "ampersand in rStyle"),
+            ("O'Connor", nil, nil, "apostrophe in rStyle"),
+            (nil, "FF0000", nil, "normal hex color"),
+            (nil, "x\"/><evil/>", nil, "quote-injection in color"),
+            (nil, nil, "Arial & Black", "ampersand in fontName"),
+            (nil, nil, "Bad\"<font", "quote+angle in fontName"),
+        ]
+        for c in cases {
+            var props = RunProperties()
+            props.rStyle = c.rStyle
+            props.color = c.color
+            props.fontName = c.fontName
+            let xml = props.toXML()
+            // Re-parse and verify exact round-trip on each populated attribute.
+            let wrapped = "<w:rPr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(xml)</w:rPr>"
+            let parsed = try XMLDocument(xmlString: wrapped, options: [])
+            if let rs = c.rStyle {
+                let val = (try parsed.nodes(forXPath: "//*[local-name()='rStyle']").first as? XMLElement)?
+                    .attribute(forName: "w:val")?.stringValue
+                XCTAssertEqual(val, rs, "Case '\(c.label)' rStyle round-trip failed. xml=\(xml)")
+            }
+            if let col = c.color {
+                let val = (try parsed.nodes(forXPath: "//*[local-name()='color']").first as? XMLElement)?
+                    .attribute(forName: "w:val")?.stringValue
+                XCTAssertEqual(val, col, "Case '\(c.label)' color round-trip failed. xml=\(xml)")
+            }
+            if let fn = c.fontName {
+                let val = (try parsed.nodes(forXPath: "//*[local-name()='rFonts']").first as? XMLElement)?
+                    .attribute(forName: "w:ascii")?.stringValue
+                XCTAssertEqual(val, fn, "Case '\(c.label)' fontName round-trip failed. xml=\(xml)")
+            }
+            // No injected/evil sibling elements regardless of input.
+            XCTAssertTrue(
+                try parsed.nodes(forXPath: "//*[local-name()='evil']").isEmpty,
+                "Case '\(c.label)' produced <evil/> sibling — escape failed. xml=\(xml)"
+            )
+        }
+    }
+
     // MARK: - Fixture builders
 
     /// Builds a minimal valid `.docx` whose body contains exactly one paragraph
@@ -788,3 +879,36 @@ final class Issue56R3StackTests: XCTestCase {
         return docxURL
     }
 }
+
+// MARK: - R3-NEW-6 Audit Table (task 7.4)
+//
+// Audit of every direct-emit attribute site that interpolates an unbounded
+// `String` value into XML attribute via Swift `\"\(value)\"` interpolation.
+// Each row is either ESCAPED (now routed through the local
+// `escapeXMLAttribute` helper) or SAFE-BY-CONSTRUCTION (the value comes from
+// a Swift enum / Int / known-finite pattern).
+//
+// | File / Line                                            | Attribute             | Status               | Notes |
+// |--------------------------------------------------------|-----------------------|----------------------|-------|
+// | Run.swift RunProperties.toXML  rStyle                  | w:rStyle/@w:val       | ESCAPED              | R3-NEW-6 fix |
+// | Run.swift RunProperties.toXML  fontName                | w:rFonts/@w:ascii etc | ESCAPED              | R3-NEW-6 audit |
+// | Run.swift RunProperties.toXML  color                   | w:color/@w:val        | ESCAPED              | R3-NEW-6 audit |
+// | Run.swift RunProperties.toXML  underline.rawValue      | w:u/@w:val            | SAFE-BY-CONSTRUCTION | enum |
+// | Run.swift RunProperties.toXML  fontSize (Int)          | w:sz/@w:val           | SAFE-BY-CONSTRUCTION | Int |
+// | Run.swift RunProperties.toXML  highlight.rawValue      | w:highlight/@w:val    | SAFE-BY-CONSTRUCTION | enum |
+// | Run.swift RunProperties.toXML  verticalAlign.rawValue  | w:vertAlign/@w:val    | SAFE-BY-CONSTRUCTION | enum |
+// | Hyperlink.swift toXML  rId / anchor / tooltip          | r:id / w:anchor / w:tooltip | ESCAPED        | pre-existing local escapeXML helper |
+// | Hyperlink.swift toXML  rawAttributes loop              | various               | ESCAPED              | pre-existing local escapeXML helper |
+// | Paragraph.swift bookmarkStart name                     | w:bookmarkStart/@w:name | ESCAPED            | pre-existing escapeXMLAttribute |
+// | Paragraph.swift permissionRangeMarker emit             | w:permStart/@*        | ESCAPED              | pre-existing escapeXMLAttribute |
+// | Paragraph.swift fldSimple instr                        | w:fldSimple/@w:instr  | ESCAPED              | pre-existing escapeXMLAttribute |
+// | Footer.swift / DocxWriter.swift escape                 | various               | ESCAPED              | each file has its own local helper |
+// | Revision.swift toChangeXML  color                      | w:color/@w:val        | ESCAPED              | R3-NEW-6 codex P1 fix (parallel emit path inside rPrChange) |
+// | Revision.swift toChangeXML  fontName                   | w:rFonts/@w:ascii etc | ESCAPED              | pre-existing escapeXML in toChangeXML |
+//
+// Future cleanup (out of R3 scope): consolidate the four parallel
+// `escapeXML` / `escapeXMLAttribute` helpers (Run.swift, Paragraph.swift,
+// Hyperlink.swift, Revision.swift, Footer.swift, DocxWriter.swift) into a
+// shared `XMLEscape.swift` once a follow-up change scopes the cross-cutting
+// refactor. For now keeping local copies preserves zero-coupling between
+// Models/ and IO/.

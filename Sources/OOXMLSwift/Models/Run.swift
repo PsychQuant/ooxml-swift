@@ -236,7 +236,10 @@ extension RunProperties {
         // per ECMA-376 §17.3.2 CT_RPr child order. Hyperlinks rely on this
         // for the "Hyperlink" character style to apply correctly in Word.
         if let rStyle = rStyle {
-            parts.append("<w:rStyle w:val=\"\(rStyle)\"/>")
+            // v0.19.4+ (#56 R3-NEW-6): escape source-string before attribute
+            // interpolation so a malicious `x"/><inj/>` payload cannot inject
+            // sibling elements at write time.
+            parts.append("<w:rStyle w:val=\"\(escapeXMLAttribute(rStyle))\"/>")
         }
         if bold {
             parts.append("<w:b/>")
@@ -256,10 +259,15 @@ extension RunProperties {
             parts.append("<w:szCs w:val=\"\(fontSize)\"/>")  // 複雜文字大小
         }
         if let fontName = fontName {
-            parts.append("<w:rFonts w:ascii=\"\(fontName)\" w:hAnsi=\"\(fontName)\" w:eastAsia=\"\(fontName)\" w:cs=\"\(fontName)\"/>")
+            // v0.19.4+ (#56 R3-NEW-6 audit): fontName flows into 4 attributes;
+            // escape once to avoid same injection sink as rStyle.
+            let n = escapeXMLAttribute(fontName)
+            parts.append("<w:rFonts w:ascii=\"\(n)\" w:hAnsi=\"\(n)\" w:eastAsia=\"\(n)\" w:cs=\"\(n)\"/>")
         }
         if let color = color {
-            parts.append("<w:color w:val=\"\(color)\"/>")
+            // v0.19.4+ (#56 R3-NEW-6 audit): color is a hex string in normal
+            // use but the field is `String?` so escape defensively.
+            parts.append("<w:color w:val=\"\(escapeXMLAttribute(color))\"/>")
         }
         if let highlight = highlight {
             parts.append("<w:highlight w:val=\"\(highlight.rawValue)\"/>")
@@ -276,4 +284,26 @@ extension RunProperties {
 
         return parts.joined()
     }
+}
+
+/// v0.19.4+ (#56 R3-NEW-6): minimal XML attribute escape used by
+/// `RunProperties.toXML`. Replaces the 5 XML-significant characters with
+/// their entities. Mirrors `Paragraph.escapeXMLAttribute` and
+/// `DocxWriter.escapeXML`; not deduplicated yet to avoid a cross-file
+/// shared helper module just for this fix — see the audit table in
+/// `Issue56R3StackTests.swift`'s file-trailer comment block.
+fileprivate func escapeXMLAttribute(_ s: String) -> String {
+    var result = ""
+    result.reserveCapacity(s.count)
+    for c in s {
+        switch c {
+        case "&": result += "&amp;"
+        case "<": result += "&lt;"
+        case ">": result += "&gt;"
+        case "\"": result += "&quot;"
+        case "'": result += "&#39;"
+        default: result.append(c)
+        }
+    }
+    return result
 }
