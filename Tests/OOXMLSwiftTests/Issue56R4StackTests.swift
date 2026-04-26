@@ -619,6 +619,62 @@ final class Issue56R4StackTests: XCTestCase {
                        "Second-paragraph mutation SHALL persist; toXML must emit from bodyChildren, not the hardcoded single-run template")
     }
 
+    // MARK: - §8.3 P1: updateHyperlink/deleteHyperlink SHALL walk all parts
+
+    /// v0.19.5+ (#56 R5 P1 #3): `updateHyperlink` SHALL find a hyperlink that
+    /// lives inside a header table cell (or inside footers / footnotes /
+    /// endnotes / body tables / SDTs). Pre-fix it only walked
+    /// `body.children[i].paragraph` directly and threw notFound for any
+    /// nested location, silently breaking MCP `update_hyperlink` against
+    /// realistic templates. Closes R4 P1 DA-N4.
+    func testUpdateHyperlinkInsideHeaderTableSucceeds() throws {
+        // Build a doc with a hyperlink inside a header → table → cell.
+        var document = WordDocument()
+
+        // Inner paragraph carrying the hyperlink (id = "h1", url placeholder).
+        var innerPara = Paragraph()
+        var hyper = Hyperlink(id: "h1", text: "old-link", url: "https://old.example",
+                              relationshipId: "rId99", tooltip: nil, history: true)
+        hyper.position = 0  // legacy emit path is fine for this in-memory build
+        innerPara.hyperlinks.append(hyper)
+
+        // 1×1 header table containing innerPara.
+        let cell = TableCell(paragraphs: [innerPara])
+        let row = TableRow(cells: [cell])
+        let table = Table(rows: [row])
+
+        var header = Header(id: "rId10", paragraphs: [], type: .default,
+                            originalFileName: "header1.xml")
+        header.bodyChildren.append(.table(table))
+        document.headers.append(header)
+        document.hyperlinkReferences.append(
+            HyperlinkReference(relationshipId: "rId99", url: "https://old.example")
+        )
+
+        // Pre-fix this throws "Hyperlink 'h1' not found".
+        try document.updateHyperlink(hyperlinkId: "h1",
+                                     text: "new-link",
+                                     url: "https://new.example")
+
+        // Verify in-memory mutation.
+        guard case .table(let updated) = document.headers[0].bodyChildren[0] else {
+            return XCTFail("Expected first header child to be a table")
+        }
+        let mutated = updated.rows[0].cells[0].paragraphs[0].hyperlinks[0]
+        XCTAssertEqual(mutated.text, "new-link",
+                       "Hyperlink inside header table SHALL be updated by updateHyperlink")
+        XCTAssertEqual(mutated.url, "https://new.example",
+                       "Hyperlink URL inside header table SHALL be updated")
+
+        // Verify hyperlinkReferences URL was synced.
+        let ref = document.hyperlinkReferences.first { $0.relationshipId == "rId99" }
+        XCTAssertEqual(ref?.url, "https://new.example")
+
+        // Verify modifiedParts now includes the header file (not just document.xml).
+        XCTAssertTrue(document.modifiedParts.contains("word/header1.xml"),
+                      "modifiedParts SHALL include the header part containing the mutated hyperlink, got: \(document.modifiedParts)")
+    }
+
     func testAcceptRevisionOnMissingWrapperRaisesNotFound() {
         var doc = WordDocument()
         var rev = Revision(id: 99, type: .insertion, author: "Phantom")
