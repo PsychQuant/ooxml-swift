@@ -277,13 +277,16 @@ public struct DocxReader {
                         }
                     }
                 }
-            case .contentControl:
-                // #44 task 3.4: revision tracking inside block-level SDTs
-                // is deferred — these wrappers don't carry their own
-                // revisions, and child paragraph revisions are already
-                // attached when each paragraph is parsed. A future task
-                // would index revisions through the SDT children too.
-                break
+            case .contentControl(_, let inner):
+                // v0.19.5+ (#56 R5 P0 #4): recurse into block-level SDT
+                // children to propagate typed Revisions to document.revisions.
+                // R3-NEW-4 mixed-content revision wrappers nested inside an
+                // SDT remain on the inner paragraph's `revisions` array but
+                // were previously invisible to MCP `accept_revision` because
+                // the propagation step skipped contentControl. Match the
+                // table recursion pattern: walk every paragraph (including
+                // those inside nested tables and nested content controls).
+                propagateRevisionsFromBodyChildren(inner, paragraphIndex: index, into: &document)
             }
         }
 
@@ -332,6 +335,8 @@ public struct DocxReader {
         }
 
         // 11. 讀取 commentsExtended.xml（可選，Word 2012+ 回覆與已解決狀態）
+
+        // (helper inlined below in fileprivate section — see propagateRevisionsFromBodyChildren)
         let commentsExtURL = tempDir.appendingPathComponent("word/commentsExtended.xml")
         if FileManager.default.fileExists(atPath: commentsExtURL.path) {
             let extData = try Data(contentsOf: commentsExtURL)
@@ -1607,6 +1612,39 @@ public struct DocxReader {
             }
         }
         return false
+    }
+
+    /// v0.19.5+ (#56 R5 P0 #4): propagate per-paragraph typed Revisions from
+    /// every paragraph reachable inside a `BodyChild` slice (handles nested
+    /// tables and nested content controls) into `document.revisions.revisions`.
+    /// Called from the body propagation step's `case .contentControl` branch
+    /// so SDT-wrapped revisions become visible to MCP `accept_revision` /
+    /// `reject_revision`. Match the recursion shape of `walkAllParagraphs`.
+    fileprivate static func propagateRevisionsFromBodyChildren(_ children: [BodyChild], paragraphIndex: Int, into document: inout WordDocument) {
+        func visit(_ para: Paragraph) {
+            for var revision in para.revisions {
+                revision.paragraphIndex = paragraphIndex
+                revision.source = .body
+                document.revisions.revisions.append(revision)
+            }
+        }
+        func walkTable(_ table: Table) {
+            for row in table.rows {
+                for cell in row.cells {
+                    for para in cell.paragraphs { visit(para) }
+                    for nested in cell.nestedTables { walkTable(nested) }
+                }
+            }
+        }
+        func walk(_ child: BodyChild) {
+            switch child {
+            case .paragraph(let para): visit(para)
+            case .table(let t): walkTable(t)
+            case .contentControl(_, let inner):
+                for c in inner { walk(c) }
+            }
+        }
+        for c in children { walk(c) }
     }
 
     /// v0.19.4+ (#56 R3-NEW-5): visit every Paragraph reachable from the

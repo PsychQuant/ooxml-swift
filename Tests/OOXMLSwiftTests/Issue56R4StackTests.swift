@@ -160,6 +160,45 @@ final class Issue56R4StackTests: XCTestCase {
                              "API-built (position 0) SDT SHALL be emitted AFTER source-positioned runs (legacy post-content path); got: \(emit)")
     }
 
+    // MARK: - §5 P0 #4: DocxReader SHALL propagate typed Revisions from block-level SDT children into document.revisions.revisions
+
+    func testBlockLevelSDTWrappedRevisionSurfacesInDocumentRevisions() throws {
+        // Source XML: block-level <w:sdt> wrapping a paragraph that contains
+        // a mixed-content <w:ins> wrapper (insertion of a hyperlink).
+        // R3-NEW-4 propagates typed Revisions to document.revisions.revisions
+        // for body paragraphs and table cells, but case .contentControl in
+        // DocxReader.swift was a `break` — so MCP accept_revision throws
+        // notFound for SDT-wrapped revisions. R5 fix: recurse into children.
+        let sourceXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <w:body>
+        <w:sdt>
+        <w:sdtPr><w:tag w:val="T"/><w:alias w:val="Block"/></w:sdtPr>
+        <w:sdtContent>
+        <w:p>
+        <w:ins w:id="13" w:author="Alice"><w:hyperlink r:id="rId1"><w:r><w:t>x</w:t></w:r></w:hyperlink></w:ins>
+        </w:p>
+        </w:sdtContent>
+        </w:sdt>
+        </w:body>
+        </w:document>
+        """
+        let doc = try parseDocXMLToWordDocument(sourceXML)
+
+        XCTAssertTrue(doc.revisions.revisions.contains(where: { $0.id == 13 }),
+                      "Block-level SDT-wrapped Revision SHALL surface in document.revisions.revisions; got: \(doc.revisions.revisions.map { $0.id })")
+
+        let rev = try XCTUnwrap(doc.revisions.revisions.first(where: { $0.id == 13 }))
+        XCTAssertEqual(rev.type, .insertion)
+        XCTAssertTrue(rev.isMixedContentWrapper, "Revision SHALL be marked as mixed-content wrapper")
+
+        // accept_revision must NOT throw notFound — the lookup must succeed.
+        var mut = doc
+        XCTAssertNoThrow(try mut.acceptRevision(revisionId: 13),
+                         "accept_revision SHALL NOT throw notFound for SDT-wrapped revision")
+    }
+
     // MARK: - §4 P0 #3: XML attribute escape sweep
 
     func testApplyStyleWithAttackerControlledNameDoesNotInjectOOXML() {
