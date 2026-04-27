@@ -22,6 +22,10 @@ public struct DocxReader {
     internal final class WhitespaceParseContext {
         let overlay: WhitespaceOverlay
         var counter: Int = 0
+        /// v0.19.11+ (#59 B-CONT P1, R5 finding): independent counter for
+        /// `<w:delText>` elements (DOM walks them via separate `forName: "w:delText"`
+        /// query, not interleaved with `<w:t>`).
+        var delTextCounter: Int = 0
         init(overlay: WhitespaceOverlay) { self.overlay = overlay }
     }
 
@@ -43,6 +47,29 @@ public struct DocxReader {
         currentWhitespaceContext = context
         defer { currentWhitespaceContext = prev }
         return try block()
+    }
+
+    /// v0.19.11+ (#59 B-CONT P0-B): advance the active whitespace counter
+    /// by the number of `<w:t>` elements in a raw-XML subtree the parser is
+    /// about to skip (raw-capture). Keeps the `WhitespaceOverlay` source-order
+    /// counter in sync with the parser's actual `parseRun` visit count.
+    ///
+    /// No-op when no context is active (e.g., parts not wrapped with
+    /// `withWhitespaceContext`, hand-driven parser-only tests).
+    ///
+    /// Called from raw-capture sites:
+    ///   - `parseBodyChildren` `.rawBlockElement` capture (sub-stack A path)
+    ///   - `parseInsRevisionWrapper` non-run-child paths (`<w:ins>`, `<w:del>`,
+    ///     `<w:moveFrom>`, `<w:moveTo>`)
+    ///   - `parseAlternateContent` `<mc:Choice>` skip
+    ///   - `parseParagraph` unrecognized-child catch-all (line ~1200)
+    internal static func advanceWhitespaceCounter(forSkippedXML xml: String) {
+        guard let ctx = currentWhitespaceContext else { return }
+        ctx.counter += WhitespaceOverlay.countWtElements(in: xml)
+        // v0.19.11+ (#59 B-CONT P1): also advance delText counter — raw-captured
+        // wrappers can contain `<w:delText>` elements (e.g., `<w:del>` with
+        // non-run children). Same desync class as `<w:t>`.
+        ctx.delTextCounter += WhitespaceOverlay.countDelTextElements(in: xml)
     }
 
     /// 讀取 .docx 檔案並解析為 WordDocument
@@ -764,6 +791,11 @@ public struct DocxReader {
                 children.append(.rawBlockElement(
                     RawElement(name: el.localName ?? "unknown", xml: el.xmlString)
                 ))
+                // v0.19.11+ (#59 B-CONT P0-B): scanner counted any `<w:t>`
+                // inside this raw-captured body-level element during pre-scan,
+                // but parseRun won't visit them (we never descend into raw
+                // block elements). Advance counter to keep parser+scanner in sync.
+                Self.advanceWhitespaceCounter(forSkippedXML: el.xmlString)
             }
         }
         return children
@@ -869,6 +901,11 @@ public struct DocxReader {
                     paragraph.unrecognizedChildren.append(
                         UnrecognizedChild(name: "ins", rawXML: childElement.xmlString, position: childPosition)
                     )
+                    // v0.19.11+ (#59 B-CONT P0-B): scanner counted any `<w:t>`
+                    // inside this raw-captured wrapper during pre-scan, but
+                    // parseRun won't visit them. Advance counter so the next
+                    // real `parseRun` query stays in sync with scanner index.
+                    Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
                     // v0.19.4+ (#56 R3-NEW-4): also publish a typed Revision so
                     // MCP get_revisions / accept_revision / reject_revision tools
                     // see the wrapper. The flag tells accept/reject to strip /
@@ -922,6 +959,8 @@ public struct DocxReader {
                     paragraph.unrecognizedChildren.append(
                         UnrecognizedChild(name: "del", rawXML: childElement.xmlString, position: childPosition)
                     )
+                    // v0.19.11+ (#59 B-CONT P0-B): see "ins" case for rationale.
+                    Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
                     // v0.19.4+ (#56 R3-NEW-4): publish typed Revision (see "ins" case).
                     var rev = Revision(
                         id: revId, type: .deletion, author: author,
@@ -936,7 +975,21 @@ public struct DocxReader {
                 var deletedText = ""
                 for delRun in childElement.elements(forName: "w:r") {
                     for delText in delRun.elements(forName: "w:delText") {
-                        deletedText += delText.stringValue ?? ""
+                        // v0.19.11+ (#59 B-CONT P1, R5 finding): consult
+                        // WhitespaceOverlay for `<w:delText>` whitespace
+                        // (Foundation strips it identically to `<w:t>`).
+                        let observed = delText.stringValue ?? ""
+                        if let ctx = Self.currentWhitespaceContext {
+                            if observed.isEmpty,
+                               let recovered = ctx.overlay.delText(forElementSequenceIndex: ctx.delTextCounter) {
+                                deletedText += recovered
+                            } else {
+                                deletedText += observed
+                            }
+                            ctx.delTextCounter += 1
+                        } else {
+                            deletedText += observed
+                        }
                     }
                     // v0.19.2+ (#56 F3): persist run with position + revisionId
                     // so sort-by-position emit can re-wrap with <w:del>. Without
@@ -965,6 +1018,8 @@ public struct DocxReader {
                     paragraph.unrecognizedChildren.append(
                         UnrecognizedChild(name: "moveFrom", rawXML: childElement.xmlString, position: childPosition)
                     )
+                    // v0.19.11+ (#59 B-CONT P0-B): see "ins" case for rationale.
+                    Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
                     // v0.19.4+ (#56 R3-NEW-4): publish typed Revision (see "ins" case).
                     var rev = Revision(
                         id: revId, type: .moveFrom, author: author,
@@ -1003,6 +1058,8 @@ public struct DocxReader {
                     paragraph.unrecognizedChildren.append(
                         UnrecognizedChild(name: "moveTo", rawXML: childElement.xmlString, position: childPosition)
                     )
+                    // v0.19.11+ (#59 B-CONT P0-B): see "ins" case for rationale.
+                    Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
                     // v0.19.4+ (#56 R3-NEW-4): publish typed Revision (see "ins" case).
                     var rev = Revision(
                         id: revId, type: .moveTo, author: author,
@@ -1196,6 +1253,10 @@ public struct DocxReader {
                         position: childPosition
                     )
                 )
+                // v0.19.11+ (#59 B-CONT P0-B): scanner counted any `<w:t>`
+                // inside this raw-captured paragraph child during pre-scan,
+                // but parseRun won't visit them. Advance counter accordingly.
+                Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
                 if DocxReader.debugLoggingEnabled {
                     let line = "DocxReader.parseParagraph: captured unmodeled element \(name) at position \(childPosition)\n"
                     if let data = line.data(using: .utf8) {
@@ -1701,6 +1762,16 @@ public struct DocxReader {
         let rawXML = element.xmlString
 
         // Walk children to find <mc:Fallback> and extract its <w:r> children.
+        // v0.19.11+ (#59 B-CONT P0-B): also count `<w:t>` in <mc:Choice> branches
+        // (which we DO NOT descend into) so we can advance the WhitespaceOverlay
+        // counter accordingly. Pre-fix, scanner counted Choice's `<w:t>` during
+        // pre-scan but parseRun never visited them → counter desyncs by N for
+        // each AlternateContent block, breaking every subsequent whitespace
+        // recovery in the document. Triple-confirmed by sub-stack B 6-AI verify
+        // (R2 + Codex). The xmlString of the <mc:Choice> subtree is the safe
+        // unit to count — Fallback's own `<w:t>` are advanced via the parseRun
+        // calls below (each parseRun call iterates `<w:t>` elements via the
+        // shared context).
         var fallbackRuns: [Run] = []
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement else { continue }
@@ -1711,6 +1782,10 @@ public struct DocxReader {
                         fallbackRuns.append(try parseRun(from: runElement, relationships: relationships))
                     }
                 }
+            } else if childElement.localName == "Choice" {
+                // Skip Choice subtree but compensate the counter for any
+                // `<w:t>` elements scanner pre-scanned inside it.
+                Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
             }
         }
 
@@ -1780,6 +1855,13 @@ public struct DocxReader {
             collectedRawElements.append(
                 RawElement(name: localName, xml: childElement.xmlString)
             )
+            // v0.19.11+ (#59 B-CONT P0-B): scanner counted any `<w:t>` inside
+            // this raw-captured `<w:r>` direct child during pre-scan, but
+            // parseRun won't descend (unknown element kind). Common case: a
+            // nested `<mc:AlternateContent>` whose `<w:t>` elements scanner
+            // counts but the parser only typed-handles when AC is a paragraph
+            // direct child. Advance counter accordingly.
+            Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
         }
         if !collectedRawElements.isEmpty {
             run.rawElements = collectedRawElements
@@ -2912,10 +2994,19 @@ public struct DocxReader {
             // 建立 Comment 物件
             // 注意：從 comments.xml 讀取時，paragraphIndex 需要從文件中的 commentRangeStart 來確定
             // 這裡先設為 -1，表示需要從文件內容對應
+            //
+            // v0.19.11+ (#59 B-CONT P1, Codex finding): preserve whitespace
+            // verbatim. Pre-fix `text.trimmingCharacters(in: .whitespacesAndNewlines)`
+            // destroyed the WhitespaceOverlay-recovered text for any
+            // whitespace-only comment (and silently stripped meaningful
+            // leading/trailing whitespace from regular comments). The XPath
+            // walk above already only reads `<w:t>` inner content, which never
+            // includes incidental XML pretty-printing whitespace between
+            // sibling tags — so the trim was lossy without being load-bearing.
             var comment = Comment(
                 id: id,
                 author: author,
-                text: text.trimmingCharacters(in: .whitespacesAndNewlines),
+                text: text,
                 paragraphIndex: -1,
                 date: date,
                 initials: initials

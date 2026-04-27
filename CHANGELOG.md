@@ -6,6 +6,99 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.19.11] - 2026-04-27
+
+### Fixed — Sub-stack B-CONT of #58/#59/#60: close 4 P0 + 3 P1 from sub-stack B 6-AI verify
+
+The sub-stack B 6-AI verify ([#59 comment 4323956207](https://github.com/PsychQuant/che-word-mcp/issues/59#issuecomment-4323956207)) returned BLOCK with 4-reviewer convergence on a P0 counter-desync class (R2 Logic + R5 Devil's Advocate + Codex). Two root causes converge to the same observable bug (recovered whitespace lands on wrong element OR is silently lost):
+
+#### B-CONT P0 root cause A — prefix-match collision (R2 + R5 + Codex)
+
+`WhitespaceOverlay.swift:54`'s `xml.range(of: "<w:t", ...)` was a prefix match. It also fired on `<w:tab>`, `<w:tabs>`, `<w:tbl>`, `<w:tblPr>`, `<w:tblGrid>`, `<w:tblW>`, `<w:tc>`, `<w:tcPr>`, `<w:tcW>`, `<w:tr>`, `<w:trPr>`, `<w:trHeight>`, `<w:tblBorders>`, `<w:tcBorders>`, `<w:tblCellMar>`, `<w:tblLayout>`, `<w:tblLook>`, `<w:tblStyle>`, etc. The DOM walker `element.elements(forName: "w:t")` is exact-match. Counter desynced immediately in any document with tables or tabs (basically every real Word file, including the thesis fixture).
+
+R5's empirical probe: `<w:tab/> + <w:t xml:space="preserve">     </w:t> + <w:t>after</w:t>` → overlay records whitespace at index 2; parseRun queries index 1 (DOM doesn't see `<w:tab/>` as `<w:t>`) → nil → whitespace LOST.
+
+**Fix**: tag-name boundary check after matching `<w:t` — only count when next char is `>`, ` `, `\t`, `\n`, `\r`, or `/`. Same boundary check applied to the new `countWtElements` and `countDelTextElements` helpers.
+
+#### B-CONT P0 root cause B — skipped raw subtrees (Codex + R2)
+
+When a parsed structure is stored as raw XML (parser doesn't descend into it), the byte scanner still counts `<w:t>` elements inside but `parseRun` never visits them — counter desyncs per skipped subtree. Affected raw-capture sites:
+
+- `parseAlternateContent` skips `<mc:Choice>` branch (`<mc:Fallback>` is the only branch parsed)
+- `parseInsRevisionWrapper` raw-captures `<w:ins>/<w:del>/<w:moveFrom>/<w:moveTo>` wrappers with non-run children (via `hasNonRunChild` check)
+- `parseBodyChildren` `.rawBlockElement` capture (sub-stack A's catch-all)
+- `parseParagraph` unrecognized-child catch-all
+- `parseRun` `rawElements` capture for unknown direct `<w:r>` children (e.g., nested `<mc:AlternateContent>`)
+
+**Fix**: parser-side counter advance via new `DocxReader.advanceWhitespaceCounter(forSkippedXML:)` helper. At each raw-capture site, count `<w:t>` (and `<w:delText>`) elements in the skipped subtree's xmlString and advance both counters accordingly. Keeps scanner's source-order index in sync with parser's actual visit count.
+
+#### B-CONT P0 secondary — pathological skip-over (R2 + R5)
+
+Pre-fix: when prefix-match falsely fired on `<w:tbl>`, scanner searched forward for `</w:t>` and consumed the next legitimate one, swallowing real `<w:t>` elements between false-match and consumed-close. Disappears automatically once boundary check (root-cause-A fix) lands.
+
+#### B-CONT P1 — §2.7 matrix-pin landing (R1 + Codex)
+
+The `<w:t>` total-character parity assertion in `testDocumentContentEqualityInvariant` was a placeholder comment in sub-stack B (tasks.md §2.7 was checked done despite the assertion never landing — surfaced by R1 + Codex). New helper `sumWtElementCharCount(in:)` walks `<w:t>` elements with same boundary check as scanner, sums inner-text length. Matrix-pin now asserts equality against thesis fixture — catches future overlay regressions before 6-AI verify.
+
+#### B-CONT P1 — `<w:delText>` overlay coverage (R5)
+
+`<w:delText xml:space="preserve">[whitespace]</w:delText>` was permanently lost on read because (a) overlay only scanned `<w:t`, (b) parseRun's delText loop at `DocxReader.swift:970` read `delText.stringValue` directly with no overlay consult.
+
+**Fix**: extended `WhitespaceOverlay` with second scanner pass for `<w:delText` (mirror of `<w:t>` scan with same boundary + xml:space + decoded-whitespace logic). Added `delTextWhitespaceByIndex` map + `delText(forElementSequenceIndex:)` accessor. Added `WhitespaceParseContext.delTextCounter`. Updated parseRun's delText loop to consult overlay when stringValue.isEmpty. Extended `advanceWhitespaceCounter(forSkippedXML:)` to also advance delTextCounter.
+
+#### B-CONT P1 — comments trimming destroyed recovered whitespace (Codex)
+
+`parseComments` at `DocxReader.swift:2978` called `text.trimmingCharacters(in: .whitespacesAndNewlines)` — destroyed recovered overlay text for any whitespace-only comment AND silently stripped meaningful leading/trailing whitespace from regular comments.
+
+**Fix**: removed the trim. Safe because the XPath walk only reads `<w:t>` inner content; never includes incidental XML pretty-printing whitespace between sibling tags.
+
+#### B-CONT P1 — entity-encoded whitespace not recognized (R5)
+
+Scanner's `inner.allSatisfy({ $0.isWhitespace })` ran on RAW XML bytes — `&#x09;&#x09;` (two tabs) sees `&`, `#`, `x`, `0`, `9` which aren't `Character.isWhitespace`, so the element wasn't stored. Foundation later decoded the entities then stripped → permanent loss.
+
+**Fix**: new `WhitespaceOverlay.decodeXMLEntities(in:)` helper handling numeric decimal (`&#9;`), hex (`&#x09;`, `&#xA0;`), and named (`&nbsp;`) entities. Modified main + delText scanners to decode `innerText` before whitespace check. Stored value is the decoded text — parseRun consult returns proper characters.
+
+### Tests
+
+7 new tests in `Tests/OOXMLSwiftTests/Issue58_60ContentPreservationTests.swift`:
+
+- `testWhitespaceOverlayPrefixMatchTabDoesNotDesyncCounter` (B-CONT P0 root-cause-A — `<w:tab/>` adjacent)
+- `testWhitespaceOverlayPrefixMatchTableDoesNotDesyncCounter` (B-CONT P0 root-cause-A — empty-cell table; covers pathological skip-over too)
+- `testWhitespaceOverlayMcAlternateContentDoesNotDesyncCounter` (B-CONT P0 root-cause-B — Choice/Fallback both counted but only Fallback parsed)
+- `testWhitespaceOverlayInsRevisionWrapperDoesNotDesyncCounter` (B-CONT P0 root-cause-B — raw-captured `<w:ins>` with `<w:bookmarkStart>`)
+- `testWhitespaceOnlyCommentPreservedNotTrimmed` (B-CONT P1 Codex — comment trim fix)
+- `testEntityEncodedWhitespacePreserved` (B-CONT P1 R5 — `&#x09;&#x09;` decode)
+- `testDeleteTextWhitespaceRoundTrips` (B-CONT P1 R5 — `<w:delText>` overlay coverage)
+
+Plus `testDocumentContentEqualityInvariant` extended with §2.23 `<w:t>` total-character parity matrix-pin.
+
+Suite total: 673 tests pass / 1 skipped / 0 failures (666 sub-stack B baseline + 7 B-CONT new tests).
+
+### Methodology lesson
+
+Sub-stack A taught: matrix-pin needs symmetric assertions baked in from design (across container variants). Sub-stack B taught: matrix-pin baked in from design ≠ matrix-pin fixtures with real content (sterile fixtures hid every P0). Sub-stack B-CONT confirms: real-world OOXML content classes (tables, alternate-content, revision wrappers, entity-encoded characters) must be IN the fixtures, not separate test files. Each sub-cycle compresses the prior cycle's blind spot into a tighter design discipline.
+
+### Deferred (B-CONT MAY-tier — P1/P2 not closed)
+
+- Static state concurrency hazard (R5 + Codex P1) — `currentWhitespaceContext` is unsynchronized process-wide state. Documented constraint; works only because DocxReader is single-threaded by convention. Larger refactor (~30-line change) to thread context as parameter through 11 parseRun call sites. Tracked for follow-up SDD.
+- Single-quoted `xml:space='preserve'` (R5 P2) — not emitted by Word's serializer; documented as accepted limitation.
+- Performance gate (Codex P2) — no fixture benchmark for byte-scan cost. Tracked.
+
+### API additions (v0.19.11, additive — no breaking change vs v0.19.10)
+
+All `internal`. No public API surface change.
+
+- `WhitespaceOverlay.delText(forElementSequenceIndex:)`
+- `WhitespaceOverlay.countWtElements(in:)`
+- `WhitespaceOverlay.countDelTextElements(in:)`
+- `WhitespaceOverlay.decodeXMLEntities(in:)`
+- `DocxReader.advanceWhitespaceCounter(forSkippedXML:)`
+- `DocxReader.WhitespaceParseContext.delTextCounter`
+
+### Spectra change
+
+This release ships sub-stack B-CONT of `che-word-mcp-issue-58-59-60-document-content-preservation`. Sub-stack C (#60 RunProperties audit) ships next as v0.20.0 + v3.14.0.
+
 ## [0.19.10] - 2026-04-27
 
 ### Fixed — Sub-stack B of #58/#59/#60: WhitespaceOverlay for Foundation XMLDocument parser limitation
