@@ -149,21 +149,73 @@ extension WordDocument {
     }
 
     /// Return the index in `body.children` of the `nthInstance`-th paragraph
-    /// whose flattened text (concatenation of run texts) contains `needle`.
-    /// `nthInstance` is 1-based (1 = first match). Returns `nil` if fewer than
-    /// `nthInstance` paragraphs contain the text.
+    /// whose flattened display text contains `needle`. `nthInstance` is 1-based
+    /// (1 = first match). Returns `nil` if fewer than `nthInstance` paragraphs
+    /// contain the text.
+    ///
+    /// PsychQuant/che-word-mcp#63 follow-up (verify F1): pre-fix only inspected
+    /// `para.runs`, so `insert_image_from_path(after_text: ...)` against an
+    /// anchor wrapped in `<w:sdt>` / `<w:hyperlink>` / `<w:fldSimple>` /
+    /// `<mc:AlternateContent>` silently threw `textNotFound`. Now mirrors the
+    /// surface coverage of `Document.replaceInParagraphSurfaces` so the LOOKUP
+    /// path matches the REPLACE path.
     private func findBodyChildContainingText(_ needle: String, nthInstance: Int) -> Int? {
         guard nthInstance >= 1 else { return nil }
         var seen = 0
         for (i, child) in body.children.enumerated() {
             if case .paragraph(let para) = child {
-                let flat = para.runs.map { $0.text }.joined()
-                if flat.contains(needle) {
+                if para.flattenedDisplayText().contains(needle) {
                     seen += 1
                     if seen == nthInstance { return i }
                 }
             }
         }
         return nil
+    }
+}
+
+// MARK: - Paragraph display-text extension
+
+extension Paragraph {
+    /// Concatenate all displayed text across every editable surface this
+    /// paragraph carries, in document order: top-level `runs` + `hyperlinks` +
+    /// `fieldSimples` + `alternateContents.fallbackRuns` + `contentControls`
+    /// (inline `<w:sdt>` content, walked via `TextReplacementEngine`'s read-only
+    /// XML helper). Mirrors the surface coverage of
+    /// `Document.replaceInParagraphSurfaces` so reading and writing operate on
+    /// the same text universe.
+    ///
+    /// PsychQuant/che-word-mcp#63 follow-up (verify F1 P1).
+    public func flattenedDisplayText() -> String {
+        var parts: [String] = []
+        parts.append(runs.map { $0.text }.joined())
+        for h in hyperlinks {
+            parts.append(h.runs.map { $0.text }.joined())
+        }
+        for f in fieldSimples {
+            parts.append(f.runs.map { $0.text }.joined())
+        }
+        for ac in alternateContents {
+            parts.append(ac.fallbackRuns.map { $0.text }.joined())
+        }
+        for cc in contentControls {
+            parts.append(flattenContentControlText(cc))
+        }
+        return parts.joined()
+    }
+
+    /// Recursively walk a ContentControl + its nested children, returning the
+    /// concatenated display text of every `<w:t>` descendant inside
+    /// `cc.content` plus children. Mirrors `Document.replaceInContentControl`'s
+    /// recursion so LOOKUP and REPLACE see identical text.
+    private func flattenContentControlText(_ cc: ContentControl) -> String {
+        var parts: [String] = []
+        if !cc.content.isEmpty {
+            parts.append(TextReplacementEngine.flatTextOfContentXML(cc.content))
+        }
+        for child in cc.children {
+            parts.append(flattenContentControlText(child))
+        }
+        return parts.joined()
     }
 }
