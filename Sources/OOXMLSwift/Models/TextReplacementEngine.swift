@@ -246,6 +246,23 @@ public enum TextReplacementEngine {
         return ContentXMLReplaceResult(xml: rebuilt, replacements: ranges.count)
     }
 
+    /// Read-only flat text of an inline `<w:sdt>` content blob — `<w:t>`
+    /// descendants joined in document order, mirroring the same flattening
+    /// rules as `replaceInContentXML` (skips `<w:delText>` / `<w:instrText>` /
+    /// nested `<w:sdt>` subtrees). Used by `findBodyChildContainingText` so
+    /// the LOOKUP path matches the REPLACE path's surface coverage.
+    /// PsychQuant/che-word-mcp#63 follow-up (verify F1).
+    public static func flatTextOfContentXML(_ contentXML: String) -> String {
+        guard !contentXML.isEmpty, contentXML.contains("<w:t") else { return "" }
+        let wrapped = "<__sdtcontent xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
+            + contentXML + "</__sdtcontent>"
+        guard let xmlDoc = try? XMLDocument(xmlString: wrapped, options: [.nodePreserveAll]),
+              let root = xmlDoc.rootElement() else { return "" }
+        var elements: [XMLElement] = []
+        collectFlattenableTextElements(in: root, into: &elements)
+        return elements.compactMap { $0.stringValue }.joined()
+    }
+
     /// Recursively gather `<w:t>` descendants that count as flattenable text,
     /// preserving document order. Skips `<w:delText>` / `<w:instrText>` and
     /// any subtree rooted at a nested `<w:sdt>` (handled by outer recursion).
