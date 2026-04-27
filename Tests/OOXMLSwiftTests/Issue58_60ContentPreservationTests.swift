@@ -631,13 +631,15 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         let outBytes = outDocXML.utf8.count
         let sizeLossRatio = Double(srcBytes - outBytes) / Double(srcBytes)
         XCTAssertLessThanOrEqual(
-            sizeLossRatio, 0.19,
-            "thesis fixture round-trip size SHALL stay within 19% of source — "
-            + "the post-sub-stack-C baseline (#60 §3.11). src=\(srcBytes) bytes, "
-            + "out=\(outBytes) bytes, loss=\(sizeLossRatio * 100)%. Pre-fix had 32% loss; "
-            + "sub-stack C reduced to ~17.75% by recovering typed + raw rPr children. "
-            + "A regression above 19% indicates new rPr-children loss; the remaining ~17.75% "
-            + "is paragraph-mark rPr + w14:paraId/textId drops (separate follow-up SDD)."
+            sizeLossRatio, 0.175,
+            "thesis fixture round-trip size SHALL stay within 17.5% of source — "
+            + "the post-sub-stack-C-CONT baseline (#60 §3.11 + R2/R5/Codex hotfix). "
+            + "src=\(srcBytes) bytes, out=\(outBytes) bytes, loss=\(sizeLossRatio * 100)%. "
+            + "Progression: pre-fix v0.19.x 32% loss → sub-stack C v0.20.0 17.75% → "
+            + "sub-stack C-CONT v0.20.1 16.66% (recognizedRprChildren trim closed silent "
+            + "drop of <w:caps>/<w:smallCaps>/<w:spacing>/<w:position>/<w:shd>/<w:bdr>/<w:em>/etc). "
+            + "Remaining ~16.66% is paragraph-mark rPr + w14:paraId/textId drops "
+            + "(separate follow-up SDD)."
         )
     }
 

@@ -6,6 +6,65 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.20.1] - 2026-04-27
+
+### Fixed — Sub-stack C-CONT of #58/#59/#60: trim `recognizedRprChildren` to actually-extracted set
+
+The sub-stack C 6-AI verify (run on v0.20.0) returned mixed verdicts:
+- R1 PASS (no warnings)
+- R2 PASS-WITH-WARNINGS (P2 same finding)
+- R5 PASS-WITH-WARNINGS but escalated finding to P0
+- Codex BLOCK on the same P0 + 3 NEW P1
+
+**Triple-confirmed P0** (R2 + R5 + Codex independently): `recognizedRprChildren` Set in `parseRunProperties` listed ~16+ rPr child kinds as "recognized" but parseRunProperties had NO extraction for them. Result: silent drop on read because they neither become typed fields NOR get captured into `rawChildren`.
+
+**Affected elements** (all very common in real-world Word documents):
+- `<w:spacing>` (character spacing — typeset documents)
+- `<w:caps>` / `<w:smallCaps>` (small-caps formatting)
+- `<w:position>` (vertical position offset)
+- `<w:shd>` (run-level shading / highlighting)
+- `<w:bdr>` (run-level border)
+- `<w:em>` (CJK emphasis marks)
+- `<w:effect>` (text effects: shimmer, blink, etc.)
+- `<w:vanish>` / `<w:specVanish>` / `<w:webHidden>` (visibility flags)
+- `<w:outline>` / `<w:shadow>` / `<w:emboss>` / `<w:imprint>` (legacy text effects)
+- `<w:snapToGrid>` / `<w:fitText>` (layout flags)
+- `<w:rtl>` (right-to-left direction)
+- `<w:bCs>` / `<w:iCs>` / `<w:dstrike>` (complex-script + double-strikethrough variants)
+
+#### Fix
+
+Trimmed `recognizedRprChildren` to ONLY actually-typed-extracted-or-emitted kinds: `rStyle, b, i, u, strike, sz, szCs, rFonts, color, highlight, vertAlign, noProof, kern, lang, rPrChange`. Everything else falls through to `rawChildren` and round-trips byte-equivalent via the writer's rawChildren replay.
+
+`szCs` retained in set because the writer typed-emits it via `fontSize` (Run.swift:259) — including in rawChildren would cause double emission. `rPrChange` retained because typed-handled at the run level (parseRPrChangeFromRunInline at DocxReader.swift:1532+).
+
+#### Round-trip size impact (additional improvement)
+
+Thesis fixture `document.xml`:
+- Pre-fix v0.19.x: 32% loss
+- Sub-stack C v0.20.0: 17.75% loss (improvement of 14.25 pp from typed-rPr extraction)
+- **Sub-stack C-CONT v0.20.1: 16.66% loss** (additional 1.09 pp from rawChildren capture of previously-silent-dropped elements)
+
+Matrix-pin `testDocumentContentEqualityInvariant` floor tightened from 0.19 → 0.175 to reflect new baseline. Future paragraph-mark rPr fix (out-of-scope) should drop loss to < 5%.
+
+### Deferred (sub-stack C-CONT MAY-tier — Codex P1, separate follow-up SDD)
+
+- **Schema-order rawChildren tail-append** (Codex P1) — `rawChildren` are tail-appended after typed children, but ECMA-376 CT_RPr has schema-order constraints. `<w:b/><w14:textOutline/><w:i/>` becomes `<w:b/><w:i/>...<w14:textOutline/>`. Word tolerates; schema-strict validators may flag. Requires bigger refactor (preserve child-event list with source order). Tracked.
+- **`characterSpacing` / `textEffect` parser-side gap** — typed fields exist on `RunProperties` (Run.swift:115-116) and are typed-emitted by toXML, but parseRunProperties has NO extraction. Source `<w:spacing>` / `<w:effect>` now correctly fall through to rawChildren (post-trim), but the typed setters are no-ops for source-loaded docs. Add typed extraction OR remove the typed fields. Tracked.
+- **`eastAsianLayout` / `oMath`** in rawChildren — fall through correctly post-trim. Schema-order concern same as above.
+- **Static `recognizedRprChildren` Set** (Codex P2) — currently constructed per parseRunProperties call; converting to `static let` would eliminate hot-path allocation. Performance optimization, no correctness impact.
+- **Ratio-floor maintenance** (Codex P1) — current matrix-pin floors are calibrated to baseline; future ratchets need explicit follow-up. Add a `// TODO: ratchet floor when paragraph-mark rPr lands` comment per floor + spec follow-up SDD.
+
+### Methodology lesson (6th refinement)
+
+R2 found this as P2 ("inline comment is false; pre-existing parity gap, not regression"). R5 escalated to P0 by recognizing the affected elements are common (`<w:caps>`, `<w:spacing>`, etc.). Codex confirmed the P0 with code trace + identified 3 additional P1 concerns.
+
+The methodology pattern: **a P2-graded finding from one reviewer can become P0 when another reviewer applies real-world impact lens**. Severity-grading is a function of (a) bug presence + (b) blast radius. Use 6-AI verify's diversity to surface the maximum blast radius for each bug class.
+
+### Spectra change
+
+Ships sub-stack C-CONT of `che-word-mcp-issue-58-59-60-document-content-preservation`. After this hotfix, sub-stack C's #60 closure is verified clean for the ACTUAL field-loss audit scope. Out-of-scope items (paragraph-mark rPr + w14:paraId/textId + Codex P1s) tracked as separate follow-up SDD.
+
 ## [0.20.0] - 2026-04-27
 
 ### Added — Sub-stack C of #58/#59/#60 (closes #60 RunProperties field-loss audit)
