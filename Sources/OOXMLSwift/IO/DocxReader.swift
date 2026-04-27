@@ -63,13 +63,20 @@ public struct DocxReader {
     ///     `<w:moveFrom>`, `<w:moveTo>`)
     ///   - `parseAlternateContent` `<mc:Choice>` skip
     ///   - `parseParagraph` unrecognized-child catch-all (line ~1200)
-    internal static func advanceWhitespaceCounter(forSkippedXML xml: String) {
+    internal static func advanceWhitespaceCounter(forSkippedXML xml: String, includeDelText: Bool = true) {
         guard let ctx = currentWhitespaceContext else { return }
         ctx.counter += WhitespaceOverlay.countWtElements(in: xml)
         // v0.19.11+ (#59 B-CONT P1): also advance delText counter — raw-captured
         // wrappers can contain `<w:delText>` elements (e.g., `<w:del>` with
         // non-run children). Same desync class as `<w:t>`.
-        ctx.delTextCounter += WhitespaceOverlay.countDelTextElements(in: xml)
+        // v0.19.13+ (#59 B-CONT-2-CONT, R2 finding): the `includeDelText: false`
+        // mode is used by parseRun's rawElements path when capturing a `<w:delText>`
+        // direct child of `<w:r>` — the explicit `<w:del>` loop at line ~970-993
+        // already advances delTextCounter. Without this opt-out, advancing again
+        // here would double-count.
+        if includeDelText {
+            ctx.delTextCounter += WhitespaceOverlay.countDelTextElements(in: xml)
+        }
     }
 
     /// 讀取 .docx 檔案並解析為 WordDocument
@@ -1872,19 +1879,18 @@ public struct DocxReader {
         // into typed fields above. Source-document order is preserved by
         // walking children sequentially.
         //
-        // v0.19.12+ (#59 B-CONT-2 P0): "delText" must be in this set. When
-        // parseRun is called for a `<w:r>` inside `<w:del>` (DocxReader.swift
-        // line ~998), the explicit delText loop at line ~970-993 already
-        // consumes the `<w:delText>` element via the WhitespaceOverlay
-        // delTextCounter and assembles deletedText. Without "delText" in
-        // recognizedRunChildren, the rawElements loop below ALSO sees the
-        // delText, captures it into Run.rawElements, AND advances delTextCounter
-        // again — counter desyncs by N per <w:del> with N delText elements.
-        // Sub-stack B-CONT 6-AI verify (R5 finding, confirmed by §2.34 test).
-        // Note: writer-side duplicate emission is prevented by Paragraph.swift:787
-        // gate (`!run.text.isEmpty || (run.rawElements?.isEmpty ?? true)`) which
-        // skips explicit `<w:delText>` when rawElements covers it.
-        let recognizedRunChildren: Set<String> = ["rPr", "t", "delText", "drawing", "oMath", "oMathPara"]
+        // v0.19.13+ (#59 B-CONT-2-CONT, R2 + R5 verify finding): `<w:delText>` is
+        // intentionally NOT in this set despite the v0.19.12 attempt to add it.
+        // Reasoning: the explicit `<w:del>` loop at DocxReader.swift:970-993 reads
+        // delText.stringValue (with overlay-consult) for `Revision.originalText`,
+        // but the ROUND-TRIP path needs delText to ALSO be in `Run.rawElements`
+        // so the writer (Paragraph.swift:787) emits the delText bytes verbatim
+        // via the rawElements loop. Adding "delText" to this set caused an
+        // empty `<w:delText></w:delText>` to be emitted (gate fired the synthetic
+        // emission with empty run.text). The double-counter-advance issue is
+        // instead resolved by passing `includeDelText: false` to
+        // `advanceWhitespaceCounter` below — the explicit loop already handles it.
+        let recognizedRunChildren: Set<String> = ["rPr", "t", "drawing", "oMath", "oMathPara"]
         var collectedRawElements: [RawElement] = []
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement,
@@ -1901,7 +1907,20 @@ public struct DocxReader {
             // nested `<mc:AlternateContent>` whose `<w:t>` elements scanner
             // counts but the parser only typed-handles when AC is a paragraph
             // direct child. Advance counter accordingly.
-            Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
+            //
+            // v0.19.13+ (#59 B-CONT-2-CONT, R2 + R5 verify): for `<w:delText>`
+            // direct children, pass `includeDelText: false` because the
+            // explicit `<w:del>` loop at DocxReader.swift:970-993 already
+            // advances delTextCounter for each delText element. Without this
+            // opt-out, advancing again here would double-count and break
+            // multi-`<w:del>` whitespace recovery (sub-stack B-CONT P0-1).
+            // Note: delText DOES need to stay in rawElements (NOT in the
+            // recognizedRunChildren skip-set above) so the writer emits it
+            // verbatim via the rawElements loop — without this, writer's
+            // synthetic emission would produce empty `<w:delText></w:delText>`
+            // because run.text is "" (parseRun's `<w:t>` loop never sees delText).
+            let isDelText = (localName == "delText")
+            Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString, includeDelText: !isDelText)
         }
         if !collectedRawElements.isEmpty {
             run.rawElements = collectedRawElements

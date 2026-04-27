@@ -6,6 +6,51 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.19.13] - 2026-04-27
+
+### CRITICAL HOTFIX — Sub-stack B-CONT-2-CONT: revert TIER-0 over-fix that broke `<w:del>` round-trip
+
+The sub-stack B-CONT-2 6-AI verify (run on v0.19.12) returned BLOCK with **R2 + R5 INDEPENDENTLY confirming** a critical content-loss bug introduced by v0.19.12's TIER-0 fix. v0.19.12 silently strips `<w:del>` deleted-text content on every round-trip — affects ALL tracked-change documents with deletions.
+
+#### Bug analysis
+
+v0.19.12 added `"delText"` to `parseRun`'s `recognizedRunChildren` Set to fix R5's prior P0-1 (delTextCounter desync via 2x advance). This was mechanically correct for the counter desync but broke a load-bearing invariant in the writer:
+
+- Pre-v0.19.12: parseRun captured `<w:delText>` into `Run.rawElements`. Writer's gate at `Paragraph.swift:787` (`!run.text.isEmpty || (run.rawElements?.isEmpty ?? true)`) evaluated `false || false` → SKIP synthetic emission. Then `for raw in rawElements { xml += raw.xml }` emitted `<w:delText>content</w:delText>` verbatim. ONE emission, content preserved. (R5's prior P0-2 was correctly falsified for this state.)
+- v0.19.12 (BROKEN): added "delText" to recognizedRunChildren → rawElements stayed empty. Writer's gate evaluated `false || true` → TRUE → emit synthetic `<w:delText xml:space="preserve">{run.text}</w:delText>` where run.text="" (parseRun's `<w:t>` loop never sees delText). Output: empty `<w:delText></w:delText>` with content destroyed.
+
+The §2.33 test only counted opening tags (1=1 pre/post), and §2.34 only checked in-memory `Revision.originalText` (populated by the explicit `<w:del>` loop, independent of run.text). Both passed falsely.
+
+#### Fix
+
+Reverted "delText" from `recognizedRunChildren` (back to `["rPr", "t", "drawing", "oMath", "oMathPara"]`). Added `includeDelText: Bool = true` parameter to `advanceWhitespaceCounter(forSkippedXML:)`. parseRun's rawElements loop passes `includeDelText: false` when `localName == "delText"` — the explicit `<w:del>` loop already advances delTextCounter for each delText, so this prevents the double-advance without removing delText from rawElements (which the writer needs).
+
+#### Methodology lesson (5th refinement)
+
+Sub-stack A: matrix-pin needs symmetric assertions across container variants.
+Sub-stack B: design ≠ fixtures with real content.
+Sub-stack B-CONT: real-world OOXML content classes must be IN fixtures.
+Sub-stack B-CONT-2: when adding a counter-advance helper at "all" raw-capture sites, audit ALL `xmlString` references INCLUDING parseRun's own `rawElements` path.
+**Sub-stack B-CONT-2-CONT (now)**: when fixing a counter-desync via "skip the element from raw-capture path", verify the WRITER still has access to the element's content via SOMEWHERE — load-bearing invariants in protective gates can be silently broken by upstream changes. Tests must assert end-to-end content preservation, not opening-tag counts or in-memory state.
+
+The §2.33 test was retained from B-CONT-2 as a regression guard for the writer-gate invariant — it should have caught the regression but missed it because the assertion was too narrow. New test `testDelTextContentPreservedThroughRoundTrip` (B-CONT-2-CONT) asserts the actual deleted-text content survives round-trip.
+
+### Tests
+
+1 new test in `Tests/OOXMLSwiftTests/Issue58_60ContentPreservationTests.swift`:
+
+- `testDelTextContentPreservedThroughRoundTrip` (B-CONT-2-CONT — content-preservation guard, not just opening-tag count)
+
+Suite total: 679 tests pass / 1 skipped / 0 failures (678 sub-stack B-CONT-2 baseline + 1 new content guard).
+
+### Severity
+
+**v0.19.12 must NOT be used in production**. Affects all `<w:del>` round-trips. v0.19.13 closes the regression.
+
+### Spectra change
+
+Ships sub-stack B-CONT-2-CONT of `che-word-mcp-issue-58-59-60-document-content-preservation`. Sub-stack C (#60 RunProperties audit) ships next as v0.20.0 + v3.14.0.
+
 ## [0.19.12] - 2026-04-27
 
 ### Fixed — Sub-stack B-CONT-2 of #58/#59/#60: close delText counter desync + 5 missed raw-capture sites
