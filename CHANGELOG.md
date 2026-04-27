@@ -6,6 +6,51 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.19.10] - 2026-04-27
+
+### Fixed — Sub-stack B of #58/#59/#60: WhitespaceOverlay for Foundation XMLDocument parser limitation
+
+Closes [PsychQuant/che-word-mcp#59](https://github.com/PsychQuant/che-word-mcp/issues/59) — Foundation `XMLDocument` strips whitespace-only `<w:t xml:space="preserve">[whitespace]</w:t>` text node `stringValue` to "" regardless of the `xml:space` attribute AND regardless of `XMLNode.Options.nodePreserveWhitespace` parse option. This is a structural limitation of Foundation's libxml2-backed parser on macOS, not a configuration bug — verified by isolated probe in [#59 diagnosis](https://github.com/PsychQuant/che-word-mcp/issues/59).
+
+The probe on the thesis fixture confirmed: source has 346 whitespace-only `<w:t>` elements (683 chars total); pre-fix Reader recovered 190 (349 chars). 334 chars silently lost on read alone — exactly matching the issue's reported round-trip loss.
+
+#### Architectural approach: pre-parse byte-stream overlay (NOT parser swap)
+
+`WhitespaceOverlay` (new type at `Sources/OOXMLSwift/IO/WhitespaceOverlay.swift`) does a pre-parse byte-stream scan over raw OOXML XML bytes. For each `<w:t xml:space="preserve">[whitespace]</w:t>` element encountered in DOM document order, it records the whitespace content keyed by element sequence index. `parseRun` (and `parseComments`) consult the overlay when `t.stringValue.isEmpty` to recover the lost whitespace bytes.
+
+**Why not switch parsers**: 1-2 weeks of work + new dependency + affects all 10 `XMLDocument(data:)` call sites in DocxReader.swift. Whitespace overlay is contained, surgical, and follows the same architectural pattern as `WordDocument.modifiedParts` overlay (the v0.13.0 byte-preservation architecture).
+
+#### Per-part WhitespaceParseContext
+
+Each of the 6 `<w:t>`-bearing parts (`document.xml`, `header*.xml`, `footer*.xml`, `footnotes.xml`, `endnotes.xml`, `comments.xml`) gets its own `WhitespaceParseContext` (overlay + monotonic per-`<w:t>` counter). `DocxReader.withWhitespaceContext(_:_:)` sets the active context for the duration of a part-parse via static state + defer-cleanup. This avoids threading `inout` parameters through 8 `parseRun` call sites.
+
+`parseRun` consults the active context for each `<w:t>` element. If the context is non-nil and `t.stringValue` is empty, the overlay's recovered text replaces it; if non-empty, the original is used; counter advances either way. `parseComments` does its own XPath walk over `<w:t>` nodes (doesn't go through `parseRun`), so it has the same overlay-consult logic inline.
+
+#### Methodology lesson — comprehensive matrix-pin from design
+
+Sub-stack A's 4 sub-cycles (A → A-CONT → A-CONT-2 → A-CONT-3) demonstrated that matrix-pins added reactively to verify findings always lag the bug by one round. Sub-stack B's matrix-pin test (`testWhitespacePreservedAcrossAllSixPartTypes`) exercises ALL 6 part types in a single fixture from the start — body + header1 + footer1 + footnotes + endnotes + comments — so the convergence cycle is shorter from design.
+
+Pre-implementation: 6 RED assertions in 1 fixture. Post-implementation: 6 GREEN assertions. The next-round verify can't surface symmetric-sibling regressions because all 6 are exercised by the same test.
+
+### Tests
+
+- 2 new tests in `Tests/OOXMLSwiftTests/Issue58_60ContentPreservationTests.swift`:
+  - `testWhitespaceOnlyTextRunsRoundTripInBody` (#59 P0 — body-level whitespace recovery isolated)
+  - `testWhitespacePreservedAcrossAllSixPartTypes` (#59 cross-part matrix-pin — all 6 part types in one fixture)
+- Suite total: 666 tests pass / 1 skipped / 0 failures (664 sub-stack A baseline + 2 sub-stack B new tests)
+
+### API additions (v0.19.10, additive — no breaking change vs v0.19.9 contract)
+
+- `internal struct WhitespaceOverlay` (new file `Sources/OOXMLSwift/IO/WhitespaceOverlay.swift`)
+- `internal final class DocxReader.WhitespaceParseContext`
+- `internal static var DocxReader.currentWhitespaceContext: WhitespaceParseContext?`
+- `internal static func DocxReader.withWhitespaceContext<T>(_:_:)`
+- All `internal` — no public API surface change.
+
+### Spectra change
+
+This release ships sub-stack B of `che-word-mcp-issue-58-59-60-document-content-preservation`. Sub-stack C (#60 RunProperties audit) ships next as v0.20.0 + v3.14.0. Sub-stack A's deferred A-CONT-4 follow-ups (paragraph-level container delete state-inconsistency + body SDT recursion asymmetry + insertBookmark perf) are tracked but out of scope for sub-stack B/C.
+
 ## [0.19.9] - 2026-04-27
 
 ### Fixed — Sub-stack A-CONT-3 of #58 (correctness regression + API symmetry from A-CONT-2 verify)
