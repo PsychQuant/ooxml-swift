@@ -6,6 +6,85 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.20.0] - 2026-04-27
+
+### Added — Sub-stack C of #58/#59/#60 (closes #60 RunProperties field-loss audit)
+
+Sub-stack C is the architectural completion of the "if not typed, preserve as raw" principle that started in sub-stack A (#58 BodyChild) and continued in sub-stack B (#59 WhitespaceOverlay). This release adds typed RunProperties fields for rFonts (4-axis), noProof, kern, and lang — plus a generic `rawChildren` passthrough for unrecognized direct rPr children (e.g., `<w14:textOutline>`, `<w14:textFill>`, `<w14:glow>`). The matrix-pin gains preservation-class-3 assertions making it LOAD-BEARING for any future RunProperties regression.
+
+#### #60 root cause
+
+`RunProperties.fontName: String?` collapsed the 4-axis `<w:rFonts w:ascii=".." w:hAnsi=".." w:eastAsia=".." w:cs="..">` into a single value. ECMA-376 §17.3.2 RPrBase distinguishes Latin (`w:ascii`), High-ANSI (`w:hAnsi`), East-Asian (`w:eastAsia`), and Complex Script (`w:cs`) font assignments because different scripts may need different fonts (e.g., Times New Roman for Latin + DFKai-SB for traditional Chinese eastAsia + Mangal for Devanagari cs). Pre-fix: parser captured ascii into fontName; writer emitted all 4 axes with that single value. Round-trip silently replaced eastAsia/cs fonts with the ascii value.
+
+Plus `<w:noProof/>`, `<w:kern w:val="32"/>`, `<w:lang w:val="..">` (3-axis), and w14:* effects (`<w14:textOutline>`, `<w14:textFill>`, `<w14:glow>`, etc.) were silently dropped on read because parseRunProperties had no extraction case for them.
+
+#### Fix
+
+**New typed structs** in `Run.swift`:
+- `RFontsProperties` — 4 axes (ascii / hAnsi / eastAsia / cs) + hint
+- `LanguageProperties` — 3 axes (val / eastAsia / bidi)
+
+**RunProperties extensions**:
+- `var rFonts: RFontsProperties?` — when set, takes precedence over legacy `fontName`
+- `var noProof: Bool = false`
+- `var kern: Int?`
+- `var lang: LanguageProperties?`
+- `var rawChildren: [RawElement]?` — unrecognized direct rPr children (matches `Run.rawElements` pattern from v0.14.0/#52)
+
+**Backward compatibility**: legacy `fontName: String?` retained. When `rFonts` is nil and `fontName` is set, writer emits 4-axis with same value (current behavior). When `rFonts` is set, writer emits per-axis values. parseRunProperties mirrors `rFonts.ascii → fontName` for legacy callers.
+
+**parseRunProperties** in `DocxReader.swift:2228` extended with extraction for the new fields plus a `recognizedRprChildren` Set covering 30+ typed rPr kinds; collects unrecognized direct rPr children into `rawChildren`.
+
+**RunProperties.toXML()** emits new typed fields in ECMA-376 source order, then replays `rawChildren` after typed children but before closing `</w:rPr>`.
+
+#### Matrix-pin extension (§3.9 — LOAD-BEARING)
+
+`testDocumentContentEqualityInvariant` extended with preservation-class-3 ratio-floor assertions for `<w:rFonts>` (0.85), `<w:noProof>` (0.90), `<w:lang>` (0.45), `<w:kern>` (0.80), `w14:*` (0.04). Floors calibrated to current measured baseline; ANY regression in run-level rPr preservation trips the matrix-pin.
+
+#### Out-of-scope (revealed by matrix-pin, separate follow-up)
+
+The matrix-pin uncovered two pre-existing bugs that are NOT in #60 scope:
+
+1. **`ParagraphProperties` lacks `markRunProperties` field** — the `<w:pPr><w:rPr>...</w:rPr></w:pPr>` (paragraph-mark formatting controlling pilcrow appearance) is silently dropped at parse time. Accounts for ~50% of `<w:lang>` loss in thesis fixture round-trip.
+2. **`Paragraph` parser doesn't preserve `w14:paraId`/`w14:textId`** attributes on `<w:p>` (Word's revision-tracking GUIDs). Accounts for ~95% of w14:* token loss (2214 of 2359 tokens are these two attributes).
+
+Both tracked as follow-up SDD. The ratio-floor assertions stay load-bearing for sub-stack C scope while not blocking on these out-of-scope drops.
+
+#### Round-trip size impact
+
+Thesis fixture `document.xml`:
+- Pre-fix (v0.19.x): 1473896 → 1006805 bytes (32% loss)
+- Post-sub-stack-C: 1473896 → 1212279 bytes (17.75% loss — improvement of 14.25 percentage points)
+- Future paragraph-mark rPr fix (out-of-scope) should drop loss to < 5%
+
+### Tests
+
+3 new tests in `Tests/OOXMLSwiftTests/Issue58_60ContentPreservationTests.swift`:
+
+- `testRFontsFourAxisPreservedThroughRoundtrip` (§3.1 — 4-axis preservation)
+- `testNoProofAndKernPreservedThroughRoundtrip` (§3.2 — typed extraction for noProof + kern)
+- `testW14NamespaceEffectsPreservedAsRawChildren` (§3.3 — w14:* via rawChildren passthrough)
+
+Plus `testDocumentContentEqualityInvariant` matrix-pin extended with §3.9 + §3.11 (preservation-class-3 ratio floors + size sanity check).
+
+Suite total: 682 tests pass / 1 skipped / 0 failures (679 sub-stack B-CONT-2-CONT baseline + 3 new sub-stack C tests).
+
+### API additions (v0.20.0, additive — no breaking change vs v0.19.13)
+
+- `public struct RFontsProperties: Equatable` (4 axes + hint)
+- `public struct LanguageProperties: Equatable` (3 axes)
+- `public var RunProperties.rFonts: RFontsProperties?`
+- `public var RunProperties.noProof: Bool`
+- `public var RunProperties.kern: Int?`
+- `public var RunProperties.lang: LanguageProperties?`
+- `public var RunProperties.rawChildren: [RawElement]?`
+
+Legacy `RunProperties.fontName: String?` kept and behavior preserved for callers that don't use the new `rFonts` field.
+
+### Spectra change
+
+This release ships sub-stack C of `che-word-mcp-issue-58-59-60-document-content-preservation`. Closes #60 (RunProperties field-loss audit) and the cross-cutting matrix-pin (`testDocumentContentEqualityInvariant`). The architectural completion of the "if not typed, preserve as raw" principle.
+
 ## [0.19.13] - 2026-04-27
 
 ### CRITICAL HOTFIX — Sub-stack B-CONT-2-CONT: revert TIER-0 over-fix that broke `<w:del>` round-trip
