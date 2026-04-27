@@ -13,6 +13,38 @@ public struct DocxReader {
     /// test setup / teardown, not during document parsing.
     public static var debugLoggingEnabled: Bool = false
 
+    // MARK: - Whitespace overlay context (#59 sub-stack B, v0.19.10+)
+
+    /// Per-part whitespace recovery context. Class (not struct) so the counter
+    /// mutates through a static `let` reference without `inout` plumbing through
+    /// 8 `parseRun` call sites. Single-threaded use only — DocxReader is serial
+    /// post-#41 fix.
+    internal final class WhitespaceParseContext {
+        let overlay: WhitespaceOverlay
+        var counter: Int = 0
+        init(overlay: WhitespaceOverlay) { self.overlay = overlay }
+    }
+
+    /// Active whitespace context for the part being parsed. Set by
+    /// `withWhitespaceContext` at part-parse boundaries, consulted by `parseRun`
+    /// for each `<w:t>` element. nil when no whitespace recovery is needed
+    /// (e.g., during `parseStyles`, where whitespace-significance doesn't apply).
+    internal static var currentWhitespaceContext: WhitespaceParseContext?
+
+    /// Set the whitespace context for the duration of `block`, then restore
+    /// the previous context. Use at part-parse boundaries (one per
+    /// `XMLDocument(data:)` for `<w:t>`-bearing parts: document, header*, footer*,
+    /// footnotes, endnotes, comments).
+    internal static func withWhitespaceContext<T>(
+        _ context: WhitespaceParseContext?,
+        _ block: () throws -> T
+    ) rethrows -> T {
+        let prev = currentWhitespaceContext
+        currentWhitespaceContext = context
+        defer { currentWhitespaceContext = prev }
+        return try block()
+    }
+
     /// 讀取 .docx 檔案並解析為 WordDocument
     public static func read(from url: URL) throws -> WordDocument {
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -82,12 +114,18 @@ public struct DocxReader {
         }
 
         // 7. 解析文件內容（傳入 styles 和 numbering 用於語義標註）
-        document.body = try parseBody(
-            from: documentXML,
-            relationships: relationships,
-            styles: document.styles,
-            numbering: document.numbering
-        )
+        // v0.19.10+ (#59 sub-stack B): wrap body parse in WhitespaceContext so
+        // parseRun can recover whitespace-only `<w:t>` content that Foundation's
+        // XMLDocument silently strips at parse time.
+        let bodyWhitespaceContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: documentData))
+        document.body = try Self.withWhitespaceContext(bodyWhitespaceContext) {
+            try parseBody(
+                from: documentXML,
+                relationships: relationships,
+                styles: document.styles,
+                numbering: document.numbering
+            )
+        }
         document.images = images
 
         // v0.19.4+ (#56 R3-NEW-5): nextBookmarkId calibration moved AFTER
@@ -138,10 +176,14 @@ public struct DocxReader {
             // v0.19.5+ (#56 R5 P0 #6): use parseContainerBody to capture both
             // <w:p> and <w:tbl> direct children in source order. Pre-R5
             // parseContainerParagraphs silently dropped tables.
-            let bodyChildren = try parseContainerBody(
-                from: headerXML,
-                relationships: mergedRels, styles: document.styles, numbering: document.numbering
-            )
+            // v0.19.10+ (#59 sub-stack B): per-header whitespace context.
+            let headerWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: headerData))
+            let bodyChildren = try Self.withWhitespaceContext(headerWsContext) {
+                try parseContainerBody(
+                    from: headerXML,
+                    relationships: mergedRels, styles: document.styles, numbering: document.numbering
+                )
+            }
             // v0.19.2+ (#56 follow-up F4): preserve `<w:hdr>` root attributes
             // (xmlns:* + mc:Ignorable + vendor) so VML watermark prefixes
             // round-trip beyond the hardcoded 5-namespace template.
@@ -181,10 +223,14 @@ public struct DocxReader {
             var mergedRels = RelationshipsCollection()
             mergedRels.relationships = footerRels.relationships + relationships.relationships
             // v0.19.5+ (#56 R5 P0 #6): see header parse comment.
-            let bodyChildren = try parseContainerBody(
-                from: footerXML,
-                relationships: mergedRels, styles: document.styles, numbering: document.numbering
-            )
+            // v0.19.10+ (#59 sub-stack B): per-footer whitespace context.
+            let footerWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: footerData))
+            let bodyChildren = try Self.withWhitespaceContext(footerWsContext) {
+                try parseContainerBody(
+                    from: footerXML,
+                    relationships: mergedRels, styles: document.styles, numbering: document.numbering
+                )
+            }
             // v0.19.2+ (#56 follow-up F4): preserve `<w:ftr>` root attributes.
             let rootAttrs = Self.parseContainerRootAttributes(
                 from: footerData, rootElementOpenPrefix: "<w:ftr"
@@ -214,6 +260,13 @@ public struct DocxReader {
             document.footnotes.rootAttributes = Self.parseContainerRootAttributes(
                 from: footnotesData, rootElementOpenPrefix: "<w:footnotes"
             )
+            // v0.19.10+ (#59 sub-stack B): footnotes-part-wide whitespace context.
+            // ALL footnote entries share the same overlay because they live in
+            // the same XML part — the byte-stream scan covers all `<w:t>` tags
+            // in footnotes.xml, and the per-`<w:t>` sequence counter advances
+            // monotonically across all `<w:footnote>` children.
+            let footnotesWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: footnotesData))
+            try Self.withWhitespaceContext(footnotesWsContext) {
             if let root = footnotesXML.rootElement() {
                 for child in root.children ?? [] {
                     guard
@@ -240,6 +293,7 @@ public struct DocxReader {
                     document.footnotes.footnotes.append(footnote)
                 }
             }
+            }  // end withWhitespaceContext (footnotes — #59 sub-stack B)
         }
 
         // 7e. 讀取 endnotes
@@ -259,6 +313,9 @@ public struct DocxReader {
             document.endnotes.rootAttributes = Self.parseContainerRootAttributes(
                 from: endnotesData, rootElementOpenPrefix: "<w:endnotes"
             )
+            // v0.19.10+ (#59 sub-stack B): endnotes-part-wide whitespace context.
+            let endnotesWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: endnotesData))
+            try Self.withWhitespaceContext(endnotesWsContext) {
             if let root = endnotesXML.rootElement() {
                 for child in root.children ?? [] {
                     guard
@@ -285,6 +342,7 @@ public struct DocxReader {
                     document.endnotes.endnotes.append(endnote)
                 }
             }
+            }  // end withWhitespaceContext (endnotes — #59 sub-stack B)
         }
 
         // 8. 讀取 core.xml（可選）
@@ -296,11 +354,15 @@ public struct DocxReader {
         }
 
         // 8. 讀取 comments.xml（可選）
+        // v0.19.10+ (#59 sub-stack B): comments-part-wide whitespace context.
         let commentsURL = tempDir.appendingPathComponent("word/comments.xml")
         if FileManager.default.fileExists(atPath: commentsURL.path) {
             let commentsData = try Data(contentsOf: commentsURL)
             let commentsXML = try XMLDocument(data: commentsData)
-            document.comments = try parseComments(from: commentsXML)
+            let commentsWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: commentsData))
+            document.comments = try Self.withWhitespaceContext(commentsWsContext) {
+                try parseComments(from: commentsXML)
+            }
         }
 
         // 9. Link comment paragraphIndex from paragraph commentIds
@@ -1666,8 +1728,26 @@ public struct DocxReader {
         }
 
         // 解析文字
+        // v0.19.10+ (#59 sub-stack B): consult WhitespaceParseContext for each
+        // <w:t> element. Foundation `XMLDocument` strips whitespace-only
+        // <w:t xml:space="preserve">[ws]</w:t> stringValue to "" regardless of
+        // xml:space attribute and `.nodePreserveWhitespace` option (see
+        // WhitespaceOverlay.swift docs). The overlay's pre-parse byte-stream
+        // scan recovers those bytes; we consult by sequence index in DOM
+        // document order.
         for t in element.elements(forName: "w:t") {
-            run.text += t.stringValue ?? ""
+            let observed = t.stringValue ?? ""
+            if let ctx = Self.currentWhitespaceContext {
+                if observed.isEmpty,
+                   let recovered = ctx.overlay.text(forElementSequenceIndex: ctx.counter) {
+                    run.text += recovered
+                } else {
+                    run.text += observed
+                }
+                ctx.counter += 1
+            } else {
+                run.text += observed
+            }
         }
 
         // 解析圖片 (w:drawing)
@@ -2807,10 +2887,26 @@ public struct DocxReader {
             }
 
             // 解析註解文字（從 w:p/w:r/w:t 取得）
+            // v0.19.10+ (#59 sub-stack B): consult WhitespaceParseContext for
+            // each w:t — Foundation strips whitespace stringValue regardless of
+            // xml:space attribute. parseComments doesn't go through parseRun
+            // (it does its own XPath walk over `<w:t>` nodes), so it needs the
+            // same overlay-consult pattern that parseRun uses.
             var text = ""
             let textNodes = try element.nodes(forXPath: ".//*[local-name()='t']")
             for textNode in textNodes {
-                text += textNode.stringValue ?? ""
+                let observed = textNode.stringValue ?? ""
+                if let ctx = Self.currentWhitespaceContext {
+                    if observed.isEmpty,
+                       let recovered = ctx.overlay.text(forElementSequenceIndex: ctx.counter) {
+                        text += recovered
+                    } else {
+                        text += observed
+                    }
+                    ctx.counter += 1
+                } else {
+                    text += observed
+                }
             }
 
             // 建立 Comment 物件

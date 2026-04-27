@@ -601,6 +601,150 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         }
     }
 
+    // MARK: - Sub-stack B: Whitespace overlay (#59)
+    //
+    // Methodology lesson from sub-stack A's 4 sub-cycles: matrix-pin needs
+    // SYMMETRIC ASSERTIONS BAKED IN FROM DESIGN, not added reactively in
+    // response to verify findings. So sub-stack B's tests exercise ALL 6
+    // part types upfront — body, header1, footer1, footnotes, endnotes,
+    // comments — so the convergence cycle is shorter from the start.
+
+    /// §2.1 — Body `<w:t>` whitespace SHALL survive Reader-side parser limitations.
+    /// Foundation `XMLDocument` strips whitespace-only text nodes regardless of
+    /// `xml:space="preserve"` AND regardless of `.nodePreserveWhitespace` option
+    /// (verified by isolated probe in #59 diagnosis). The fix is a pre-parse
+    /// scan over raw XML bytes that captures `<w:t xml:space="preserve">[ws]</w:t>`
+    /// content and is consulted by `parseRun` when `t.stringValue.isEmpty`.
+    func testWhitespaceOnlyTextRunsRoundTripInBody() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p>
+        <w:r><w:t>before</w:t></w:r>
+        <w:r><w:t xml:space="preserve">     </w:t></w:r>
+        <w:r><w:t>after</w:t></w:r>
+        </w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-body-ws-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        guard case .paragraph(let para) = doc.body.children.first else {
+            XCTFail("expected one paragraph in body")
+            return
+        }
+        XCTAssertEqual(para.runs.count, 3, "expected 3 runs (before / 5-space / after)")
+        XCTAssertEqual(
+            para.runs[1].text, "     ",
+            "5-char whitespace run SHALL survive Reader (sub-stack B P0 — Foundation XMLDocument strips whitespace-only <w:t> stringValue regardless of xml:space=preserve); got \"\(para.runs[1].text)\""
+        )
+    }
+
+    /// §2.9 — Comprehensive matrix-pin test exercising whitespace preservation
+    /// across ALL 6 part types in a single fixture. Pre-implementation: this
+    /// test fails on body + header + footer + footnotes + endnotes + comments
+    /// (Foundation parser limitation is parser-wide). Post-implementation: all
+    /// 6 part types preserve whitespace via WhitespaceOverlay.
+    ///
+    /// The test design follows the methodology lesson from sub-stack A's
+    /// 4 sub-cycles: assert ALL part types from the start, not just one.
+    func testWhitespacePreservedAcrossAllSixPartTypes() throws {
+        // Build a docx with whitespace-only <w:t> in:
+        //   - word/document.xml      (body)
+        //   - word/header1.xml       (header)
+        //   - word/footer1.xml       (footer)
+        //   - word/footnotes.xml     (footnotes)
+        //   - word/endnotes.xml      (endnotes)
+        //   - word/comments.xml      (comments)
+        // Each contains a 5-character whitespace `<w:t xml:space="preserve">     </w:t>`
+        // wrapped in non-whitespace runs so the joined-text assertion catches
+        // dropped whitespace.
+        //
+        // For sub-stack B P0: §2.1 covers body in isolation; this test extends
+        // coverage to all 6 part types so the convergence cycle catches every
+        // symmetric-sibling regression from the START rather than after each
+        // verify round.
+        //
+        // Fixture builder added in §2.9-helpers below.
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-allparts-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try Self.buildAllPartsWhitespaceFixture(to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+
+        // Helper: scan a part's bodyChildren array for the 5-char whitespace run.
+        func partContainsFiveSpaceRun(in children: [BodyChild], partName: String) -> (found: Bool, message: String) {
+            var found = false
+            var observedTexts: [String] = []
+            for child in children {
+                if case .paragraph(let para) = child {
+                    for run in para.runs {
+                        observedTexts.append(run.text)
+                        if run.text == "     " {
+                            found = true
+                        }
+                    }
+                }
+            }
+            return (found, "Part \(partName) — runs observed: \(observedTexts)")
+        }
+
+        // Body
+        let bodyResult = partContainsFiveSpaceRun(in: doc.body.children, partName: "body")
+        XCTAssertTrue(bodyResult.found, "BODY whitespace SHALL survive (sub-stack B). \(bodyResult.message)")
+
+        // Header (use first header)
+        if let header = doc.headers.first {
+            let r = partContainsFiveSpaceRun(in: header.bodyChildren, partName: "header1")
+            XCTAssertTrue(r.found, "HEADER whitespace SHALL survive (sub-stack B). \(r.message)")
+        } else {
+            XCTFail("expected at least one header parsed")
+        }
+
+        // Footer (use first footer)
+        if let footer = doc.footers.first {
+            let r = partContainsFiveSpaceRun(in: footer.bodyChildren, partName: "footer1")
+            XCTAssertTrue(r.found, "FOOTER whitespace SHALL survive (sub-stack B). \(r.message)")
+        } else {
+            XCTFail("expected at least one footer parsed")
+        }
+
+        // Footnotes
+        if let footnote = doc.footnotes.footnotes.first {
+            let r = partContainsFiveSpaceRun(in: footnote.bodyChildren, partName: "footnotes")
+            XCTAssertTrue(r.found, "FOOTNOTES whitespace SHALL survive (sub-stack B). \(r.message)")
+        } else {
+            XCTFail("expected at least one footnote parsed")
+        }
+
+        // Endnotes
+        if let endnote = doc.endnotes.endnotes.first {
+            let r = partContainsFiveSpaceRun(in: endnote.bodyChildren, partName: "endnotes")
+            XCTAssertTrue(r.found, "ENDNOTES whitespace SHALL survive (sub-stack B). \(r.message)")
+        } else {
+            XCTFail("expected at least one endnote parsed")
+        }
+
+        // Comments — comments are in a separate model. Probe via getComments().
+        let comments = doc.comments.comments
+        if let comment = comments.first {
+            // Comment text is a flat string; check it contains 5 spaces.
+            XCTAssertTrue(
+                comment.text.contains("     "),
+                "COMMENTS whitespace SHALL survive (sub-stack B). Comment text: \"\(comment.text)\""
+            )
+        } else {
+            XCTFail("expected at least one comment parsed")
+        }
+    }
+
     // MARK: - Helpers
 
     /// Build a minimal valid `.docx` with the given `document.xml` content.
@@ -661,6 +805,149 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         defer { ZipHelper.cleanup(unzipped) }
         let url = unzipped.appendingPathComponent(partPath)
         return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    /// §2.9 helper: build a comprehensive .docx with whitespace-only `<w:t>` in
+    /// ALL 6 part types — body, header1, footer1, footnotes, endnotes, comments.
+    /// Used by `testWhitespacePreservedAcrossAllSixPartTypes` to exercise the
+    /// full WhitespaceOverlay surface in one fixture so the convergence cycle
+    /// catches symmetric-sibling regressions from the START.
+    static func buildAllPartsWhitespaceFixture(to url: URL) throws {
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-allparts-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+        <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
+        <Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>
+        <Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>
+        <Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+
+        let documentRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+        <Relationship Id="rId11" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+        <Relationship Id="rId12" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>
+        <Relationship Id="rId13" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/>
+        <Relationship Id="rId14" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>
+        </Relationships>
+        """
+        try documentRels.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+
+        // body
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p>
+        <w:r><w:t>body-before</w:t></w:r>
+        <w:r><w:t xml:space="preserve">     </w:t></w:r>
+        <w:r><w:t>body-after</w:t></w:r>
+        </w:p>
+        <w:sectPr><w:headerReference r:id="rId10" w:type="default" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/><w:footerReference r:id="rId11" w:type="default" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></w:sectPr>
+        </w:body>
+        </w:document>
+        """
+        try documentXML.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+
+        // header1
+        let headerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:p>
+        <w:r><w:t>hdr-before</w:t></w:r>
+        <w:r><w:t xml:space="preserve">     </w:t></w:r>
+        <w:r><w:t>hdr-after</w:t></w:r>
+        </w:p>
+        </w:hdr>
+        """
+        try headerXML.write(to: stagingURL.appendingPathComponent("word/header1.xml"), atomically: true, encoding: .utf8)
+
+        // footer1
+        let footerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:p>
+        <w:r><w:t>ftr-before</w:t></w:r>
+        <w:r><w:t xml:space="preserve">     </w:t></w:r>
+        <w:r><w:t>ftr-after</w:t></w:r>
+        </w:p>
+        </w:ftr>
+        """
+        try footerXML.write(to: stagingURL.appendingPathComponent("word/footer1.xml"), atomically: true, encoding: .utf8)
+
+        // footnotes (must include separator entries with id=-1, 0)
+        let footnotesXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>
+        <w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>
+        <w:footnote w:id="1">
+        <w:p>
+        <w:r><w:t>fn-before</w:t></w:r>
+        <w:r><w:t xml:space="preserve">     </w:t></w:r>
+        <w:r><w:t>fn-after</w:t></w:r>
+        </w:p>
+        </w:footnote>
+        </w:footnotes>
+        """
+        try footnotesXML.write(to: stagingURL.appendingPathComponent("word/footnotes.xml"), atomically: true, encoding: .utf8)
+
+        // endnotes
+        let endnotesXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>
+        <w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote>
+        <w:endnote w:id="1">
+        <w:p>
+        <w:r><w:t>en-before</w:t></w:r>
+        <w:r><w:t xml:space="preserve">     </w:t></w:r>
+        <w:r><w:t>en-after</w:t></w:r>
+        </w:p>
+        </w:endnote>
+        </w:endnotes>
+        """
+        try endnotesXML.write(to: stagingURL.appendingPathComponent("word/endnotes.xml"), atomically: true, encoding: .utf8)
+
+        // comments
+        let commentsXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:comment w:id="1" w:author="tester" w:date="2026-04-27T00:00:00Z" w:initials="t">
+        <w:p>
+        <w:r><w:t>cm-before</w:t></w:r>
+        <w:r><w:t xml:space="preserve">     </w:t></w:r>
+        <w:r><w:t>cm-after</w:t></w:r>
+        </w:p>
+        </w:comment>
+        </w:comments>
+        """
+        try commentsXML.write(to: stagingURL.appendingPathComponent("word/comments.xml"), atomically: true, encoding: .utf8)
+
+        try ZipHelper.zip(stagingURL, to: url)
     }
 
     /// Build a minimal valid `.docx` that includes a header part. Same shape as
