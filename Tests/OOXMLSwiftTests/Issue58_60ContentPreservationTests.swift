@@ -552,12 +552,66 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         try Self.assertContainerBookmarkStartParity(srcURL: srcURL, outURL: outURL)
 
         // Preservation class 2 of 3 (#59): <w:t> total character content parity.
-        // Lands with §2.7 (sub-stack B). Until then, this assertion is documented
-        // but skipped to keep the matrix-pin green for sub-stack A.
+        // §2.23 (B-CONT): the §2.7 placeholder is replaced with a real
+        // assertion. Sums the inner-text length of every `<w:t>` element in
+        // both source and output `document.xml`, asserts equality. Catches
+        // any whitespace-overlay regression — the very class of bug that
+        // sub-stack B's BLOCK verify identified (counter desync silently
+        // dropping whitespace in tables / mc:Choice / raw-captured wrappers).
+        let srcWtCharSum = Self.sumWtElementCharCount(in: srcDocXML)
+        let outWtCharSum = Self.sumWtElementCharCount(in: outDocXML)
+        XCTAssertEqual(
+            outWtCharSum, srcWtCharSum,
+            "<w:t> total character content SHALL be preserved across round-trip "
+            + "(B-CONT — preservation class 2 of 3 / #59); src=\(srcWtCharSum), out=\(outWtCharSum). "
+            + "A mismatch indicates the WhitespaceOverlay counter desynced from parseRun's "
+            + "visit order (likely a new prefix-collision class or unhandled raw-capture site)."
+        )
 
         // Preservation class 3 of 3 (#60): <w:rFonts>/<w:noProof>/<w:lang>/<w:kern>/w14 counts.
         // Lands with §3.9 (sub-stack C). Until then, this assertion is documented
-        // but skipped to keep the matrix-pin green for sub-stack A.
+        // but skipped to keep the matrix-pin green for sub-stack A/B.
+    }
+
+    /// §2.23 (B-CONT) helper: sum the inner-text character count across every
+    /// `<w:t>` element in the given XML. Used by the matrix-pin to detect
+    /// whitespace-overlay regressions — any silent loss of `<w:t>` content
+    /// during round-trip shows up as a delta.
+    ///
+    /// Applies the same tag-name boundary check as `WhitespaceOverlay.scanning`
+    /// (rejects prefix collisions like `<w:tab>`, `<w:tbl>`).
+    static func sumWtElementCharCount(in xml: String) -> Int {
+        var sum = 0
+        var searchStart = xml.startIndex
+        while let openRange = xml.range(of: "<w:t", range: searchStart..<xml.endIndex) {
+            let afterToken = openRange.upperBound
+            guard afterToken < xml.endIndex else { break }
+            let boundary = xml[afterToken]
+            guard boundary == ">" || boundary == " " || boundary == "\t"
+                  || boundary == "\n" || boundary == "\r" || boundary == "/" else {
+                searchStart = afterToken
+                continue
+            }
+            // Find tag close (handle attributes, self-close).
+            guard let tagClose = xml.range(of: ">", range: afterToken..<xml.endIndex) else {
+                searchStart = afterToken
+                continue
+            }
+            let tagAttrs = String(xml[afterToken..<tagClose.lowerBound])
+            // Self-close `<w:t/>` has no inner content.
+            if tagAttrs.hasSuffix("/") {
+                searchStart = tagClose.upperBound
+                continue
+            }
+            guard let closeRange = xml.range(of: "</w:t>", range: tagClose.upperBound..<xml.endIndex) else {
+                searchStart = tagClose.upperBound
+                continue
+            }
+            let inner = xml[tagClose.upperBound..<closeRange.lowerBound]
+            sum += inner.count
+            searchStart = closeRange.upperBound
+        }
+        return sum
     }
 
     /// Count `<w:bookmarkStart` elements in raw XML via simple substring scan.
@@ -743,6 +797,419 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         } else {
             XCTFail("expected at least one comment parsed")
         }
+    }
+
+    // MARK: - Sub-stack B-CONT: WhitespaceOverlay counter-desync regressions
+    //
+    // The sub-stack B 6-AI verify (#59 issuecomment-4323956207) returned BLOCK
+    // with 4-reviewer convergence on a P0 counter-desync class. Two root causes:
+    //
+    // - Root cause A — prefix-match collision in `WhitespaceOverlay.swift:54`:
+    //   `xml.range(of: "<w:t", ...)` is a prefix match that also fires on
+    //   `<w:tab>`, `<w:tbl>`, `<w:tc>`, `<w:tr>`, `<w:tblPr>`, etc. The DOM
+    //   walker `element.elements(forName: "w:t")` is exact-match. Counter
+    //   desyncs immediately in any document with tables or tabs.
+    //
+    // - Root cause B — skipped raw subtrees: `parseAlternateContent` skips
+    //   `<mc:Choice>`; `parseInsRevisionWrapper` raw-captures wrappers with
+    //   non-run children as `unrecognizedChildren` (see DocxReader §868 path).
+    //   Scanner counts `<w:t>` inside skipped/raw-captured ranges; parseRun
+    //   never visits them. Counter desyncs per skipped subtree.
+    //
+    // The 4 tests below exercise each root cause with the exact OOXML pattern
+    // from the verify report. Each SHALL fail pre-B-CONT-fix.
+
+    /// §2.16 (B-CONT) — `<w:tab/>` adjacent to whitespace `<w:t>` does not
+    /// desync the WhitespaceOverlay counter.
+    ///
+    /// Pre-fix: scanner's prefix match `<w:t` fires on `<w:tab/>`, increments
+    /// `index` to 1; whitespace `<w:t>` then maps to index 2 instead of 1.
+    /// parseRun walks DOM (which doesn't see `<w:tab/>` as `<w:t>`) and queries
+    /// index 1 → nil → falls back to Foundation's stripped "" → whitespace LOST.
+    func testWhitespaceOverlayPrefixMatchTabDoesNotDesyncCounter() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p>
+        <w:r><w:tab/></w:r>
+        <w:r><w:t xml:space="preserve">     </w:t></w:r>
+        <w:r><w:t>after</w:t></w:r>
+        </w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont-tab-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        guard case .paragraph(let para) = doc.body.children.first else {
+            XCTFail("expected one paragraph in body")
+            return
+        }
+        // Find the run that should contain 5 spaces (it's the run between the
+        // tab run and the "after" run).
+        let whitespaceRun = para.runs.first(where: { $0.text == "     " })
+        XCTAssertNotNil(
+            whitespaceRun,
+            "5-char whitespace run SHALL survive even when preceded by <w:tab/> "
+            + "(B-CONT P0 root-cause-A — prefix-match collision in WhitespaceOverlay scanner). "
+            + "Observed runs: \(para.runs.map { "\"\($0.text)\"" })"
+        )
+    }
+
+    /// §2.17 (B-CONT) — `<w:tbl>` between paragraphs does not desync the
+    /// WhitespaceOverlay counter or pathologically consume the next `</w:t>`.
+    ///
+    /// Pre-fix: tables contain `<w:tblPr>`, `<w:tblGrid>`, `<w:tr>`, `<w:trPr>`,
+    /// `<w:tc>`, `<w:tcPr>` — all of which prefix-match `<w:t`. Scanner counter
+    /// desyncs by 6+ per table. AND for `<w:tbl>` itself, scanner searches
+    /// forward for `</w:t>` (not `</w:tbl>`) and consumes the next legitimate
+    /// `</w:t>` closer, swallowing real whitespace `<w:t>` elements between.
+    /// R5's empirical probe confirmed permanent loss.
+    func testWhitespaceOverlayPrefixMatchTableDoesNotDesyncCounter() throws {
+        // Empty-cell table forces the bug to be visible: the pathological
+        // skip-over (scanner false-matches `<w:tbl>`, searches forward for
+        // `</w:t>`) lands on the whitespace `</w:t>` itself (no other `<w:t>`
+        // between table-open and the whitespace one), absorbs it. Map ends
+        // empty; parseRun queries overlay[N] → nil → whitespace LOST.
+        // (A table with non-empty cells like `<w:t>cell</w:t>` masks the bug
+        // because parseRun's cell-text visit aligns counters by accident.)
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p><w:r><w:t>before</w:t></w:r></w:p>
+        <w:tbl>
+        <w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr>
+        <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+        <w:tr>
+        <w:trPr><w:trHeight w:val="240"/></w:trPr>
+        <w:tc>
+        <w:tcPr><w:tcW w:w="5000" w:type="pct"/></w:tcPr>
+        <w:p/>
+        </w:tc>
+        </w:tr>
+        </w:tbl>
+        <w:p><w:r><w:t xml:space="preserve">     </w:t></w:r></w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont-table-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        // The post-table paragraph SHALL contain a run with 5 spaces.
+        // Body children: [.paragraph(before), .table(_), .paragraph(whitespace)]
+        var foundWhitespaceRun = false
+        var observedTexts: [String] = []
+        for child in doc.body.children {
+            if case .paragraph(let para) = child {
+                for run in para.runs {
+                    observedTexts.append(run.text)
+                    if run.text == "     " {
+                        foundWhitespaceRun = true
+                    }
+                }
+            }
+        }
+        XCTAssertTrue(
+            foundWhitespaceRun,
+            "5-char whitespace run after table SHALL survive (B-CONT P0 root-cause-A — "
+            + "<w:tbl>/<w:tblPr>/<w:tr>/<w:trPr>/<w:tc>/<w:tcPr> all prefix-match `<w:t`, "
+            + "and pathological skip-over consumes wrong </w:t>). Observed text runs: \(observedTexts)"
+        )
+    }
+
+    /// §2.18 (B-CONT) — `<mc:AlternateContent>` with `<w:t>` in BOTH Choice
+    /// and Fallback branches does not desync counter.
+    ///
+    /// Pre-fix: `parseAlternateContent` only walks `<mc:Fallback>` runs;
+    /// `<mc:Choice>` runs are skipped (raw-stored). But the byte scanner
+    /// counts `<w:t>` from BOTH branches → DOM walk visits fewer than scanner
+    /// counts → subsequent recoveries shifted by N positions.
+    func testWhitespaceOverlayMcAlternateContentDoesNotDesyncCounter() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" \
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" \
+        xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" \
+        xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" \
+        mc:Ignorable="w14">
+        <w:body>
+        <w:p>
+        <w:r>
+        <mc:AlternateContent>
+        <mc:Choice Requires="w14"><w:r><w:t>choice-text</w:t></w:r></mc:Choice>
+        <mc:Fallback><w:r><w:t>fallback-text</w:t></w:r></mc:Fallback>
+        </mc:AlternateContent>
+        </w:r>
+        </w:p>
+        <w:p><w:r><w:t xml:space="preserve">     </w:t></w:r></w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont-mc-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        var foundWhitespaceRun = false
+        var observedTexts: [String] = []
+        for child in doc.body.children {
+            if case .paragraph(let para) = child {
+                for run in para.runs {
+                    observedTexts.append(run.text)
+                    if run.text == "     " {
+                        foundWhitespaceRun = true
+                    }
+                }
+            }
+        }
+        XCTAssertTrue(
+            foundWhitespaceRun,
+            "5-char whitespace run after mc:AlternateContent SHALL survive (B-CONT P0 root-cause-B — "
+            + "scanner counts <w:t> in both <mc:Choice> AND <mc:Fallback>, parseAlternateContent only "
+            + "walks Fallback). Observed text runs: \(observedTexts)"
+        )
+    }
+
+    /// §2.19 (B-CONT) — `<w:ins>` wrapper with non-run children (forces raw
+    /// capture via `hasNonRunChild` path) does not desync counter.
+    ///
+    /// Pre-fix: when `<w:ins>` has any non-run child (e.g., `<w:bookmarkStart>`),
+    /// `parseInsRevisionWrapper` stores the entire wrapper as raw XML in
+    /// `unrecognizedChildren` and parseRun is NEVER called for the wrapper's
+    /// `<w:t>` elements. But scanner still counts them. Same desync class.
+    /// §2.25 (B-CONT P1) — comments containing ONLY whitespace are preserved,
+    /// not trimmed away.
+    ///
+    /// Pre-fix: `parseComments` calls `text.trimmingCharacters(in: .whitespacesAndNewlines)`
+    /// at DocxReader.swift:2978, which destroys the recovered overlay text for
+    /// any whitespace-only comment. Codex P1 surfaced this — overlay correctly
+    /// recovers the whitespace bytes, then trim throws them away.
+    ///
+    /// Real-world scenario: a Word user inserts a comment containing only
+    /// indentation/spacing as a "look-here" annotation. Round-trip silently
+    /// changes the comment to empty.
+    func testWhitespaceOnlyCommentPreservedNotTrimmed() throws {
+        // Build a fixture with a comment whose entire text is "     " (5 spaces)
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont-wsonlycomment-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+
+        let rootRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rootRels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+
+        let docRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>
+        </Relationships>
+        """
+        try docRels.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body><w:p><w:r><w:t>body</w:t></w:r></w:p></w:body>
+        </w:document>
+        """
+        try documentXML.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+
+        // Comment with ONLY whitespace text (5 spaces). Pre-fix: parseComments'
+        // trim turns this into "".
+        let commentsXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:comment w:id="1" w:author="tester" w:date="2026-04-27T00:00:00Z" w:initials="t">
+        <w:p><w:r><w:t xml:space="preserve">     </w:t></w:r></w:p>
+        </w:comment>
+        </w:comments>
+        """
+        try commentsXML.write(to: stagingURL.appendingPathComponent("word/comments.xml"), atomically: true, encoding: .utf8)
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont-wsonlycomment-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try ZipHelper.zip(stagingURL, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        guard let comment = doc.comments.comments.first else {
+            XCTFail("expected one comment parsed")
+            return
+        }
+        XCTAssertEqual(
+            comment.text, "     ",
+            "Whitespace-only comment text SHALL be preserved exactly (B-CONT P1 — "
+            + "Codex finding: parseComments' trimmingCharacters(in: .whitespacesAndNewlines) "
+            + "destroys recovered overlay text for whitespace-only comments). got \"\(comment.text)\""
+        )
+    }
+
+    /// §2.24 (B-CONT P1) — `<w:delText xml:space="preserve">[whitespace]</w:delText>`
+    /// (tracked-deletion of whitespace) is preserved through round-trip.
+    ///
+    /// Pre-fix: WhitespaceOverlay only scans `<w:t`, parseRun's delText loop
+    /// (DocxReader.swift:970) only reads `delText.stringValue ?? ""` —
+    /// Foundation strips whitespace `<w:delText>` stringValue same way as
+    /// `<w:t>`. The recovered Revision.originalText loses the deleted
+    /// whitespace bytes. R5 finding.
+    ///
+    /// Real-world scenario: a Word user deletes leading indentation under
+    /// track-changes. `accept_revision` would commit the deletion correctly
+    /// but `reject_revision` couldn't restore the deleted whitespace.
+    func testDeleteTextWhitespaceRoundTrips() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p>
+        <w:r><w:t>kept-before</w:t></w:r>
+        <w:del w:id="1" w:author="tester" w:date="2026-04-27T00:00:00Z">
+        <w:r><w:delText xml:space="preserve">     </w:delText></w:r>
+        </w:del>
+        <w:r><w:t>kept-after</w:t></w:r>
+        </w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont-deltext-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        guard case .paragraph(let para) = doc.body.children.first else {
+            XCTFail("expected one paragraph in body")
+            return
+        }
+        // The deletion's original text should be the 5-space whitespace.
+        let deletionRev = para.revisions.first(where: { $0.type == .deletion })
+        XCTAssertNotNil(deletionRev, "expected one .deletion Revision")
+        XCTAssertEqual(
+            deletionRev?.originalText, "     ",
+            "Whitespace `<w:delText xml:space=\"preserve\">` SHALL preserve through "
+            + "round-trip (B-CONT P1 — R5 finding: WhitespaceOverlay only scans `<w:t`, "
+            + "parseRun delText loop reads stringValue which Foundation strips). "
+            + "Got: \"\(deletionRev?.originalText ?? "<nil>")\""
+        )
+    }
+
+    /// §2.26 (B-CONT P1) — entity-encoded whitespace `&#x09;` (tab),
+    /// `&#x20;` (space), `&#x0A;` (newline) is recognized as whitespace by
+    /// the overlay and recovered correctly.
+    ///
+    /// Pre-fix: `WhitespaceOverlay.swift:87` runs `inner.allSatisfy({ $0.isWhitespace })`
+    /// over RAW XML bytes — `&`, `#`, `x`, `0`, `9` aren't `Character.isWhitespace`,
+    /// so entity-encoded whitespace fails the check and isn't stored in the
+    /// map. Foundation later decodes the entities but then strips the
+    /// resulting whitespace stringValue → permanent loss. R5 finding.
+    func testEntityEncodedWhitespacePreserved() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p>
+        <w:r><w:t>before</w:t></w:r>
+        <w:r><w:t xml:space="preserve">&#x09;&#x09;</w:t></w:r>
+        <w:r><w:t>after</w:t></w:r>
+        </w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont-entity-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        guard case .paragraph(let para) = doc.body.children.first else {
+            XCTFail("expected one paragraph in body")
+            return
+        }
+        // Entity-encoded `&#x09;&#x09;` decodes to two tab characters (\t\t).
+        let middleRun = para.runs.first(where: { $0.text == "\t\t" })
+        XCTAssertNotNil(
+            middleRun,
+            "Entity-encoded `&#x09;&#x09;` SHALL decode + preserve as two tabs (B-CONT P1 — "
+            + "R5 finding: scanner whitespace check ran on raw bytes including `&`, `#`, `x` "
+            + "which aren't Character.isWhitespace; Foundation decodes then strips → loss). "
+            + "Observed runs: \(para.runs.map { "\"\($0.text)\"" })"
+        )
+    }
+
+    func testWhitespaceOverlayInsRevisionWrapperDoesNotDesyncCounter() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p>
+        <w:ins w:id="1" w:author="test" w:date="2026-04-27T00:00:00Z">
+        <w:bookmarkStart w:id="0" w:name="insAnchor"/>
+        <w:r><w:t>inserted</w:t></w:r>
+        <w:bookmarkEnd w:id="0"/>
+        </w:ins>
+        </w:p>
+        <w:p><w:r><w:t xml:space="preserve">     </w:t></w:r></w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont-ins-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        var foundWhitespaceRun = false
+        var observedTexts: [String] = []
+        for child in doc.body.children {
+            if case .paragraph(let para) = child {
+                for run in para.runs {
+                    observedTexts.append(run.text)
+                    if run.text == "     " {
+                        foundWhitespaceRun = true
+                    }
+                }
+            }
+        }
+        XCTAssertTrue(
+            foundWhitespaceRun,
+            "5-char whitespace run after raw-captured <w:ins> wrapper SHALL survive (B-CONT P0 "
+            + "root-cause-B — wrapper raw-captured because of <w:bookmarkStart> non-run child; "
+            + "scanner still counts inner <w:t>, parseRun never visits). Observed text runs: \(observedTexts)"
+        )
     }
 
     // MARK: - Helpers
