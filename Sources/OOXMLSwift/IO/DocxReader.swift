@@ -2264,10 +2264,24 @@ public struct DocxReader {
             props.fontSize = Int(val)
         }
 
-        // 字型
-        if let rFonts = element.elements(forName: "w:rFonts").first,
-           let ascii = rFonts.attribute(forName: "w:ascii")?.stringValue {
-            props.fontName = ascii
+        // 字型 — v0.20.0+ (#60): 4-axis preservation. Parse `<w:rFonts>` into
+        // typed `RFontsProperties` capturing all 4 axes + hint independently.
+        // Mirror `ascii` to legacy `fontName` field for backward compat with
+        // any caller still reading it.
+        if let rFontsEl = element.elements(forName: "w:rFonts").first {
+            let rFonts = RFontsProperties(
+                ascii: rFontsEl.attribute(forName: "w:ascii")?.stringValue,
+                hAnsi: rFontsEl.attribute(forName: "w:hAnsi")?.stringValue,
+                eastAsia: rFontsEl.attribute(forName: "w:eastAsia")?.stringValue,
+                cs: rFontsEl.attribute(forName: "w:cs")?.stringValue,
+                hint: rFontsEl.attribute(forName: "w:hint")?.stringValue
+            )
+            props.rFonts = rFonts
+            // Legacy mirror — pre-#60 callers reading fontName still work
+            // when the source emits a single ascii value.
+            if let ascii = rFonts.ascii {
+                props.fontName = ascii
+            }
         }
 
         // 顏色
@@ -2286,6 +2300,57 @@ public struct DocxReader {
         if let vertAlign = element.elements(forName: "w:vertAlign").first,
            let val = vertAlign.attribute(forName: "w:val")?.stringValue {
             props.verticalAlign = VerticalAlign(rawValue: val)
+        }
+
+        // v0.20.0+ (#60): noProof — suppress spell/grammar check.
+        if element.elements(forName: "w:noProof").first != nil {
+            props.noProof = true
+        }
+
+        // v0.20.0+ (#60): kern — minimum kerning threshold (half-points).
+        if let kernEl = element.elements(forName: "w:kern").first,
+           let val = kernEl.attribute(forName: "w:val")?.stringValue,
+           let intVal = Int(val) {
+            props.kern = intVal
+        }
+
+        // v0.20.0+ (#60): lang — 3-axis language tags.
+        if let langEl = element.elements(forName: "w:lang").first {
+            let lang = LanguageProperties(
+                val: langEl.attribute(forName: "w:val")?.stringValue,
+                eastAsia: langEl.attribute(forName: "w:eastAsia")?.stringValue,
+                bidi: langEl.attribute(forName: "w:bidi")?.stringValue
+            )
+            props.lang = lang
+        }
+
+        // v0.20.0+ (#60): collect unrecognized direct rPr children into
+        // rawChildren for byte-equivalent emission. Includes `<w14:textOutline>`,
+        // `<w14:textFill>`, `<w14:glow>`, `<w14:shadow>`, `<w14:reflection>`,
+        // `<w14:scene3d>`, `<w14:props3d>`, `<w14:ligatures>`, and any other
+        // element that isn't in our typed set. Same pattern as `Run.rawElements`.
+        let recognizedRprChildren: Set<String> = [
+            "rStyle", "b", "bCs", "i", "iCs", "u", "strike", "dstrike", "sz", "szCs",
+            "rFonts", "color", "highlight", "vertAlign", "spacing", "w", "kern",
+            "noProof", "lang", "rPrChange",
+            // characterSpacing typed-handled — covered below if present
+            "shd", "position", "outline", "shadow", "emboss", "imprint", "vanish",
+            "specVanish", "webHidden", "em", "fitText", "rtl", "cs", "snapToGrid",
+            "caps", "smallCaps", "effect", "bdr"
+        ]
+        var collectedRpr: [RawElement] = []
+        for child in element.children ?? [] {
+            guard let childEl = child as? XMLElement,
+                  let localName = childEl.localName,
+                  !recognizedRprChildren.contains(localName) else {
+                continue
+            }
+            collectedRpr.append(
+                RawElement(name: localName, xml: childEl.xmlString)
+            )
+        }
+        if !collectedRpr.isEmpty {
+            props.rawChildren = collectedRpr
         }
 
         return props

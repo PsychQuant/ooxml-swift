@@ -65,6 +65,42 @@ public struct Run: Equatable {
 
 // MARK: - Run Properties
 
+/// v0.20.0+ (#60): 4-axis `<w:rFonts>` properties. ECMA-376 §17.3.2 RPrBase
+/// distinguishes Latin (`w:ascii`), High-ANSI (`w:hAnsi`), East-Asian
+/// (`w:eastAsia`), and Complex Script (`w:cs`) font assignments because
+/// different scripts may need different fonts (e.g., Times New Roman for
+/// Latin + DFKai-SB for traditional Chinese eastAsia + Mangal for Devanagari
+/// cs). Pre-v0.20.0 `RunProperties.fontName: String?` collapsed all 4 into
+/// one value; this struct restores the distinction. `fontName` field kept
+/// for backward compat — when both are set, `rFonts` wins.
+public struct RFontsProperties: Equatable {
+    public var ascii: String?
+    public var hAnsi: String?
+    public var eastAsia: String?
+    public var cs: String?
+    /// `w:hint` controls which axis is used when text crosses script boundaries
+    /// without explicit per-character font. Common values: `default`, `eastAsia`, `cs`.
+    public var hint: String?
+
+    public init(ascii: String? = nil, hAnsi: String? = nil,
+                eastAsia: String? = nil, cs: String? = nil, hint: String? = nil) {
+        self.ascii = ascii; self.hAnsi = hAnsi
+        self.eastAsia = eastAsia; self.cs = cs; self.hint = hint
+    }
+}
+
+/// v0.20.0+ (#60): 3-axis `<w:lang>` properties. ECMA-376 §17.3.2 separates
+/// Latin language tag (`w:val`), East-Asian (`w:eastAsia`), and Bidi (`w:bidi`).
+public struct LanguageProperties: Equatable {
+    public var val: String?
+    public var eastAsia: String?
+    public var bidi: String?
+
+    public init(val: String? = nil, eastAsia: String? = nil, bidi: String? = nil) {
+        self.val = val; self.eastAsia = eastAsia; self.bidi = bidi
+    }
+}
+
 /// Run 格式屬性
 public struct RunProperties: Equatable {
     public var bold: Bool = false
@@ -72,7 +108,7 @@ public struct RunProperties: Equatable {
     public var underline: UnderlineType?
     public var strikethrough: Bool = false
     public var fontSize: Int?              // 半點 (24 = 12pt)
-    public var fontName: String?
+    public var fontName: String?           // legacy single-axis; mirrors rFonts.ascii. Use rFonts for 4-axis preservation.
     public var color: String?              // RGB hex (e.g., "FF0000")
     public var highlight: HighlightColor?
     public var verticalAlign: VerticalAlign?
@@ -86,6 +122,30 @@ public struct RunProperties: Equatable {
     /// runs use `"Hyperlink"`, footnote refs use `"FootnoteReference"`,
     /// endnote refs use `"EndnoteReference"`.
     public var rStyle: String?
+
+    /// v0.20.0+ (#60): 4-axis `<w:rFonts>` (ascii / hAnsi / eastAsia / cs).
+    /// When set, takes precedence over `fontName`. When `fontName` is set
+    /// and `rFonts` is nil, writer emits all 4 axes with the same value
+    /// (legacy behavior). See `RFontsProperties` doc comment.
+    public var rFonts: RFontsProperties?
+
+    /// v0.20.0+ (#60): `<w:noProof/>` — suppress spell/grammar check on this run.
+    public var noProof: Bool = false
+
+    /// v0.20.0+ (#60): `<w:kern w:val="N"/>` — minimum font size threshold for kerning.
+    /// OOXML uses half-points (e.g., kern=32 means kern only at 16pt+).
+    public var kern: Int?
+
+    /// v0.20.0+ (#60): 3-axis `<w:lang>` (val / eastAsia / bidi).
+    public var lang: LanguageProperties?
+
+    /// v0.20.0+ (#60): unrecognized direct children of `<w:rPr>`. Captured
+    /// verbatim for byte-equivalent emission. Common content: `<w14:textOutline>`,
+    /// `<w14:textFill>`, `<w14:glow>`, `<w14:shadow>`, `<w14:reflection>`,
+    /// `<w14:scene3d>`, `<w14:props3d>`, `<w14:ligatures>`, `<w14:numForm>`,
+    /// `<w14:numSpacing>`, `<w14:stylisticSets>`, `<w14:cntxtAlts>`. Same
+    /// architectural pattern as `Run.rawElements` (v0.14.0+, #52).
+    public var rawChildren: [RawElement]?
 
     public init() {}
 
@@ -126,6 +186,14 @@ public struct RunProperties: Equatable {
         if let textEffect = other.textEffect { self.textEffect = textEffect }
         if let rawXML = other.rawXML { self.rawXML = rawXML }
         if let rStyle = other.rStyle { self.rStyle = rStyle }
+        // v0.20.0+ (#60): merge new typed fields. `rFonts` overrides whole struct
+        // when set (per-axis merge would silently mask source values from the
+        // base properties — safer to overwrite atomically).
+        if let rFonts = other.rFonts { self.rFonts = rFonts }
+        if other.noProof { self.noProof = true }
+        if let kern = other.kern { self.kern = kern }
+        if let lang = other.lang { self.lang = lang }
+        if let rawChildren = other.rawChildren { self.rawChildren = rawChildren }
     }
 }
 
@@ -258,7 +326,20 @@ extension RunProperties {
             parts.append("<w:sz w:val=\"\(fontSize)\"/>")
             parts.append("<w:szCs w:val=\"\(fontSize)\"/>")  // 複雜文字大小
         }
-        if let fontName = fontName {
+        // v0.20.0+ (#60): emit `<w:rFonts>` with 4-axis preservation when
+        // `rFonts` struct is set; fall back to legacy `fontName` (single value
+        // mirrored to all 4 axes) when only the legacy field is set.
+        if let rFonts = rFonts {
+            var attrs: [String] = []
+            if let ascii = rFonts.ascii { attrs.append("w:ascii=\"\(escapeXMLAttribute(ascii))\"") }
+            if let hAnsi = rFonts.hAnsi { attrs.append("w:hAnsi=\"\(escapeXMLAttribute(hAnsi))\"") }
+            if let eastAsia = rFonts.eastAsia { attrs.append("w:eastAsia=\"\(escapeXMLAttribute(eastAsia))\"") }
+            if let cs = rFonts.cs { attrs.append("w:cs=\"\(escapeXMLAttribute(cs))\"") }
+            if let hint = rFonts.hint { attrs.append("w:hint=\"\(escapeXMLAttribute(hint))\"") }
+            if !attrs.isEmpty {
+                parts.append("<w:rFonts \(attrs.joined(separator: " "))/>")
+            }
+        } else if let fontName = fontName {
             // v0.19.4+ (#56 R3-NEW-6 audit): fontName flows into 4 attributes;
             // escape once to avoid same injection sink as rStyle.
             let n = escapeXMLAttribute(fontName)
@@ -280,6 +361,32 @@ extension RunProperties {
         }
         if let textEffect = textEffect {
             parts.append(textEffect.toXML())
+        }
+
+        // v0.20.0+ (#60): emit new typed fields.
+        if noProof {
+            parts.append("<w:noProof/>")
+        }
+        if let kern = kern {
+            parts.append("<w:kern w:val=\"\(kern)\"/>")
+        }
+        if let lang = lang {
+            var attrs: [String] = []
+            if let val = lang.val { attrs.append("w:val=\"\(escapeXMLAttribute(val))\"") }
+            if let eastAsia = lang.eastAsia { attrs.append("w:eastAsia=\"\(escapeXMLAttribute(eastAsia))\"") }
+            if let bidi = lang.bidi { attrs.append("w:bidi=\"\(escapeXMLAttribute(bidi))\"") }
+            if !attrs.isEmpty {
+                parts.append("<w:lang \(attrs.joined(separator: " "))/>")
+            }
+        }
+
+        // v0.20.0+ (#60): replay rawChildren in source-document order, AFTER
+        // typed children but BEFORE closing `</w:rPr>`. Matches `Run.rawElements`
+        // architectural pattern (v0.14.0+, #52).
+        if let rawChildren = rawChildren {
+            for raw in rawChildren {
+                parts.append(raw.xml)
+            }
         }
 
         return parts.joined()
