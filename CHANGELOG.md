@@ -6,6 +6,59 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.19.9] - 2026-04-27
+
+### Fixed — Sub-stack A-CONT-3 of #58 (correctness regression + API symmetry from A-CONT-2 verify)
+
+The sub-stack A-CONT-2 6-AI verify ([report](https://github.com/PsychQuant/che-word-mcp/issues/58#issuecomment-4323715199)) returned BLOCK with 3 P0 + 2 P1 + 4 P2 (3 of 4 reviewers concur — R2 Logic + R5 Devil's Advocate + Codex; R1 Requirements PASS). Maintainer authorized MUST + SHOULD tier scope (3 P0); P1 + P2 deferred.
+
+This is sub-cycle 4 for #58 (A → A-CONT → A-CONT-2 → A-CONT-3). Same trajectory as R5 → R5-CONT-4 (5 sub-cycles for #56).
+
+#### A-CONT-3 P0 #1 — `deleteBookmark` dirty-key path mismatch (silent correctness regression)
+
+`Document.swift:2067, 2073` did `modifiedParts.insert(headers[i].fileName)` — inserting BASENAME (`"header1.xml"`). `Header.fileName` returns BASENAME per `Header.swift:193`. The writer's overlay-mode dirty-gate at `DocxWriter.swift:141` checks `dirty.contains("word/\(header.fileName)")` — looks for FULL PATH (`"word/header1.xml"`). **The format mismatch meant the writer's overlay-mode SKIPPED re-emitting the modified header — the deletion succeeded in-memory but never persisted to disk.** Same bug for footers. Footnotes/endnotes paths used the correct `"word/footnotes.xml"` / `"word/endnotes.xml"` constants.
+
+Triple-confirmed by R2 + R5 + Codex. R2 grep confirmed every other Document.swift callsite uses the correct `"word/\(headers[i].fileName)"` form (lines 464, 475, 1116, 1125, 1192, 1212, 1228, 1245, 1264, 1280) — A-CONT-2's new code was the lone exception.
+
+Fix: 2-line change to use `"word/\(headers[i].fileName)"` and `"word/\(footers[i].fileName)"`. Test `testDeleteBookmarkInHeaderPersistsToDisk` proves the deletion now reaches disk after roundtrip.
+
+#### A-CONT-3 P0 #2 — `getBookmarks()` skipped paragraph-level container bookmarks (UX regression)
+
+A-CONT-2's `collectBodyLevelBookmarkNamesRecursive` deliberately skipped `.paragraph` cases (its job was body-level markers). For container parts, only that helper was called — paragraph-level bookmarks inside container paragraphs (`Paragraph.bookmarks`) were never surfaced to MCP `list_bookmarks`. Identical UX bug to original #58. Paragraph-level bookmarks in headers are MORE common than body-level — the A-CONT-2 closure delivered the LESS common case.
+
+Fix: new `collectAllBookmarksFromContainer` helper handles both `.paragraph(let para)` (walking `para.bookmarks`) AND `.bookmarkMarker` AND recurses into `.contentControl(_, let inner)`. Replaces `collectBodyLevelBookmarkNamesRecursive` for container paths in `getBookmarks()`. Body iteration still uses the prior structure for paragraph-index semantics. Test `testGetBookmarksSurfacesContainerParagraphLevelBookmarks` proves coverage.
+
+#### A-CONT-3 P0 #3 — `insertBookmark` cross-part duplicate detection
+
+`Document.insertBookmark` at `Document.swift:1977-1994` only walked `body.children` for duplicate detection. After A-CONT-2, a TOC anchor named `_Toc12345` living in a header survived `insertBookmark(name: "_Toc12345")` because the scan missed it — silently produced a duplicate-named bookmark, breaking the global-name uniqueness invariant.
+
+Fix: replace the body-only loop with `Set(getBookmarks().map { $0.name })` lookup. Reuses the now-comprehensive `getBookmarks()` walker from P0 #2 — symmetric scope across getBookmarks/deleteBookmark/insertBookmark. Test `testInsertBookmarkDuplicateNameInContainerThrows` proves the symmetry.
+
+### Tests
+
+- 3 new tests in `Tests/OOXMLSwiftTests/Issue58_60ContentPreservationTests.swift`:
+  - `testDeleteBookmarkInHeaderPersistsToDisk` (A-CONT-3 P0 #1 — proves deletion reaches disk)
+  - `testGetBookmarksSurfacesContainerParagraphLevelBookmarks` (A-CONT-3 P0 #2)
+  - `testInsertBookmarkDuplicateNameInContainerThrows` (A-CONT-3 P0 #3)
+- Suite total: 664 tests pass / 1 skipped / 0 failures (661 A-CONT-2 baseline + 3 A-CONT-3 new tests)
+
+### Deferred (out of A-CONT-3 scope)
+
+Per maintainer scope decision:
+- A-CONT-2 P1 #4: comments.xml coverage in getBookmarks
+- A-CONT-2 P1 #5: matrix-pin negative-arm test (proves no false-pass)
+- A-CONT-2 P2 #6: cross-part bookmark span end-marker orphan
+- A-CONT-2 P2 #7: `paragraphIndex = -1` sentinel doc note
+- A-CONT-2 P2 #9: dedicated tests for new deleteBookmark container paths
+
+### API additions (v0.19.9, additive — no breaking change vs v0.19.8 contract)
+
+- No new public types or signatures. `getBookmarks()` and `insertBookmark()` keep their existing call signatures; the new behavior is strictly additive (returns more, throws more on duplicates).
+
+### Spectra change
+
+This release ships sub-stack A-CONT-3 mini-cycle. Re-numbers planned sub-stack B → v0.19.10 + v3.13.10 (sub-stack C unchanged at v0.20.0 + v3.14.0). Sub-stack A took 4 sub-cycles (A + A-CONT + A-CONT-2 + A-CONT-3) to drain #58 — same trajectory shape as R5 → R5-CONT-4 needing 5 sub-cycles to drain #56. Each round catches what the prior matrix-pin couldn't see — methodology working as designed.
+
 ## [0.19.8] - 2026-04-27
 
 ### Fixed — Sub-stack A-CONT-2 of #58 (API-layer + SDT-recursion + matrix-pin-fixture mini-mini-cycle from A-CONT verify)

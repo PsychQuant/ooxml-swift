@@ -1984,13 +1984,14 @@ public struct WordDocument: Equatable {
             throw BookmarkError.invalidName(name)
         }
 
-        // 檢查是否已存在同名書籤
-        for child in body.children {
-            if case .paragraph(let para) = child {
-                if para.bookmarks.contains(where: { $0.name == normalizedName }) {
-                    throw BookmarkError.duplicateName(normalizedName)
-                }
-            }
+        // 檢查是否已存在同名書籤 (cross-part scope as of v0.19.9+ / #58 A-CONT-3 P0 #3).
+        // Pre-A-CONT-3 only walked body — TOC anchors in headers / footers /
+        // footnotes / endnotes survived `insertBookmark(name: ...)` and produced
+        // silent name collisions. Now walks all 5 part types via the same
+        // collector helper used by getBookmarks().
+        let allExistingNames = Set(getBookmarks().map { $0.name })
+        if allExistingNames.contains(normalizedName) {
+            throw BookmarkError.duplicateName(normalizedName)
         }
 
         let bookmarkId = nextBookmarkId
@@ -2064,13 +2065,19 @@ public struct WordDocument: Equatable {
         }
         for i in 0..<headers.count {
             if Self.tryDeleteBodyLevelBookmark(name: name, from: &headers[i].bodyChildren) {
-                modifiedParts.insert(headers[i].fileName)
+                // v0.19.9+ (#58 A-CONT-3 P0 #1): writer's overlay-mode dirty-gate
+                // (DocxWriter.swift:141) checks `dirty.contains("word/\(header.fileName)")`,
+                // so we must insert the FULL PATH not the basename. Pre-A-CONT-3
+                // this inserted `headers[i].fileName` (basename `"header1.xml"`)
+                // which silently failed the dirty-gate → deletion lost on disk.
+                modifiedParts.insert("word/\(headers[i].fileName)")
                 return
             }
         }
         for i in 0..<footers.count {
             if Self.tryDeleteBodyLevelBookmark(name: name, from: &footers[i].bodyChildren) {
-                modifiedParts.insert(footers[i].fileName)
+                // v0.19.9+ (#58 A-CONT-3 P0 #1): same correctness fix as headers.
+                modifiedParts.insert("word/\(footers[i].fileName)")
                 return
             }
         }
@@ -2233,20 +2240,54 @@ public struct WordDocument: Equatable {
         // preserved on disk but invisible to MCP `list_bookmarks`. Container
         // markers carry no paragraph index in the body-document sense, so
         // they share the `paragraphIndex = -1` sentinel.
+        // v0.19.9+ (#58 A-CONT-3 P0 #2): extended to ALSO walk paragraph-level
+        // bookmarks inside container paragraphs. Pre-A-CONT-3 only body-level
+        // container markers were surfaced; paragraph-level markers (the more
+        // common case in real-world Word docs) were silently skipped.
         for header in headers {
-            Self.collectBodyLevelBookmarkNamesRecursive(in: header.bodyChildren, into: &result)
+            Self.collectAllBookmarksFromContainer(in: header.bodyChildren, into: &result)
         }
         for footer in footers {
-            Self.collectBodyLevelBookmarkNamesRecursive(in: footer.bodyChildren, into: &result)
+            Self.collectAllBookmarksFromContainer(in: footer.bodyChildren, into: &result)
         }
         for footnote in footnotes.footnotes {
-            Self.collectBodyLevelBookmarkNamesRecursive(in: footnote.bodyChildren, into: &result)
+            Self.collectAllBookmarksFromContainer(in: footnote.bodyChildren, into: &result)
         }
         for endnote in endnotes.endnotes {
-            Self.collectBodyLevelBookmarkNamesRecursive(in: endnote.bodyChildren, into: &result)
+            Self.collectAllBookmarksFromContainer(in: endnote.bodyChildren, into: &result)
         }
 
         return result
+    }
+
+    /// v0.19.9+ (#58 A-CONT-3 P0 #2): unified container walker that surfaces
+    /// BOTH paragraph-level bookmarks (`Paragraph.bookmarks`) AND body-level
+    /// `.bookmarkMarker` entries. Recurses into block-level `.contentControl`.
+    /// All container bookmarks share `paragraphIndex = -1` because the
+    /// body-document paragraph index doesn't apply across part boundaries.
+    private static func collectAllBookmarksFromContainer(
+        in children: [BodyChild],
+        into result: inout [(id: Int, name: String, paragraphIndex: Int)]
+    ) {
+        for child in children {
+            switch child {
+            case .paragraph(let para):
+                for bookmark in para.bookmarks {
+                    result.append((id: bookmark.id, name: bookmark.name, paragraphIndex: -1))
+                }
+            case .bookmarkMarker(let marker):
+                if marker.kind == .start, let name = marker.name {
+                    result.append((id: marker.id, name: name, paragraphIndex: -1))
+                }
+            case .contentControl(_, let inner):
+                collectAllBookmarksFromContainer(in: inner, into: &result)
+            case .table, .rawBlockElement:
+                // Tables in containers theoretically contain paragraphs with
+                // bookmarks, but that nesting is uncommon and out of A-CONT-3
+                // scope. Raw block elements are opaque XML by design.
+                continue
+            }
+        }
     }
 
     /// v0.19.8+ (#58 A-CONT-2): recursive helper for body-level bookmark name
