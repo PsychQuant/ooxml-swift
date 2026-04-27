@@ -114,6 +114,221 @@ public enum TextReplacementEngine {
         }
     }
 
+    // MARK: Replace inside ContentControl.content (inline <w:sdt>)
+
+    /// Result of `replaceInContentXML`: the rewritten XML fragment and the
+    /// number of replacements applied.
+    public struct ContentXMLReplaceResult: Equatable {
+        public var xml: String
+        public var replacements: Int
+    }
+
+    /// Replace `find` with `replacement` in an inline-XML fragment that holds
+    /// `<w:r><w:t>...</w:t></w:r>` (possibly mixed with `<w:hyperlink>`,
+    /// `<w:fldSimple>`, etc) — i.e. the verbatim `content` blob of an inline
+    /// `<w:sdt>` content control parsed by `SDTParser.parseSDT`.
+    ///
+    /// Algorithm mirrors `replace(runs:find:with:options:)`:
+    /// 1. Wrap `contentXML` in a synthetic root with `xmlns:w` so Foundation
+    ///    `XMLDocument` can parse mixed `<w:r>`/`<w:hyperlink>` etc fragments.
+    /// 2. Walk all `<w:t>` text-element descendants in document order, building
+    ///    a flat string + offset map (`(elementIdx, charOffset)`).
+    ///    Skip `<w:delText>` (TC deletion text — not displayed),
+    ///    `<w:instrText>` (field instruction code — not display),
+    ///    and any `<w:t>` nested inside a child `<w:sdt>` subtree (those are
+    ///    represented as typed `ContentControl.children` by the caller and
+    ///    handled via outer recursion — visiting them here would duplicate).
+    /// 3. Find matches on flat string with the same regex/literal/case rules
+    ///    as the run-level engine.
+    /// 4. For each match (reversed to keep earlier offsets valid), splice the
+    ///    replacement into the affected `<w:t>` element strings.
+    /// 5. Re-serialize the wrapper's children, omitting the wrapper tag.
+    ///
+    /// Round-trip discipline: only `<w:t>` element string content is mutated.
+    /// `xml:space="preserve"` and any other attributes survive verbatim because
+    /// we never touch the elements' attribute set.
+    public static func replaceInContentXML(
+        _ contentXML: String,
+        find: String,
+        with replacement: String,
+        options: ReplaceOptions = ReplaceOptions()
+    ) throws -> ContentXMLReplaceResult {
+        guard !find.isEmpty, !contentXML.isEmpty else {
+            return ContentXMLReplaceResult(xml: contentXML, replacements: 0)
+        }
+
+        // Wrap the fragment so XMLDocument has a single root + namespace decl.
+        let wrapped = "<__sdtcontent xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
+            + contentXML + "</__sdtcontent>"
+        let xmlDoc: XMLDocument
+        do {
+            xmlDoc = try XMLDocument(xmlString: wrapped, options: [.nodePreserveAll])
+        } catch {
+            // Malformed inner XML — bail out without modification rather than
+            // throw, so a broken SDT doesn't break the whole replaceText call.
+            return ContentXMLReplaceResult(xml: contentXML, replacements: 0)
+        }
+        guard let root = xmlDoc.rootElement() else {
+            return ContentXMLReplaceResult(xml: contentXML, replacements: 0)
+        }
+
+        // Collect flattenable <w:t> elements in document order.
+        var textElements: [XMLElement] = []
+        collectFlattenableTextElements(in: root, into: &textElements)
+        guard !textElements.isEmpty else {
+            return ContentXMLReplaceResult(xml: contentXML, replacements: 0)
+        }
+
+        // Build flat string + offset map.
+        var flat = ""
+        var map: [(elemIdx: Int, offset: Int)] = []
+        for (idx, el) in textElements.enumerated() {
+            let text = el.stringValue ?? ""
+            for (charIdx, char) in text.enumerated() {
+                map.append((idx, charIdx))
+                flat.append(char)
+            }
+        }
+        guard !flat.isEmpty else {
+            return ContentXMLReplaceResult(xml: contentXML, replacements: 0)
+        }
+
+        // Find matches using same rules as the run-level engine.
+        var ranges: [Range<String.Index>] = []
+        if options.regex {
+            let regexOptions: NSRegularExpression.Options = options.matchCase ? [] : [.caseInsensitive]
+            let re: NSRegularExpression
+            do {
+                re = try NSRegularExpression(pattern: find, options: regexOptions)
+            } catch {
+                throw ReplaceError.invalidRegex(find)
+            }
+            let fullNSRange = NSRange(flat.startIndex..., in: flat)
+            let matches = re.matches(in: flat, options: [], range: fullNSRange)
+            // Note: regex with $1..$N expansion needs the match's groups.
+            // We splice using the engine's `replacementString(for:in:offset:template:)`.
+            for match in matches.reversed() {
+                guard let swiftRange = Range(match.range, in: flat) else { continue }
+                let expanded = re.replacementString(
+                    for: match, in: flat, offset: 0, template: replacement
+                )
+                applyOneXMLReplacement(
+                    textElements: textElements, flat: flat, map: map,
+                    matchRange: swiftRange, replacement: expanded
+                )
+            }
+            ranges = matches.compactMap { Range($0.range, in: flat) }
+        } else {
+            let cmpOptions: String.CompareOptions = options.matchCase ? [] : [.caseInsensitive]
+            var searchStart = flat.startIndex
+            while searchStart < flat.endIndex,
+                  let range = flat.range(of: find, options: cmpOptions, range: searchStart..<flat.endIndex) {
+                ranges.append(range)
+                searchStart = range.upperBound
+            }
+            for range in ranges.reversed() {
+                applyOneXMLReplacement(
+                    textElements: textElements, flat: flat, map: map,
+                    matchRange: range, replacement: replacement
+                )
+            }
+        }
+
+        guard !ranges.isEmpty else {
+            return ContentXMLReplaceResult(xml: contentXML, replacements: 0)
+        }
+
+        // Re-serialize the wrapper's children, dropping the wrapper element.
+        var rebuilt = ""
+        for child in root.children ?? [] {
+            rebuilt += child.xmlString
+        }
+        return ContentXMLReplaceResult(xml: rebuilt, replacements: ranges.count)
+    }
+
+    /// Recursively gather `<w:t>` descendants that count as flattenable text,
+    /// preserving document order. Skips `<w:delText>` / `<w:instrText>` and
+    /// any subtree rooted at a nested `<w:sdt>` (handled by outer recursion).
+    private static func collectFlattenableTextElements(
+        in element: XMLElement,
+        into out: inout [XMLElement]
+    ) {
+        for child in element.children ?? [] {
+            guard let el = child as? XMLElement else { continue }
+            let local = el.localName ?? ""
+            if local == "sdt" {
+                // Nested SDT — its `<w:t>` descendants are owned by the inner
+                // ContentControl and visited by outer `replaceInContentControl`
+                // recursion. Skipping prevents double-replacement.
+                continue
+            }
+            if local == "t" {
+                out.append(el)
+                continue
+            }
+            // delText / instrText carry non-displayed text — never touch them.
+            if local == "delText" || local == "instrText" {
+                continue
+            }
+            collectFlattenableTextElements(in: el, into: &out)
+        }
+    }
+
+    /// Splice one match into the underlying `<w:t>` element string contents.
+    /// Mirrors the multi-element path of `applyOneReplacement` but operates on
+    /// XML elements: the start element receives `prefix + replacement`, the
+    /// end element gets trimmed to its suffix, and any wholly-consumed text
+    /// elements between them are emptied (not removed — removing the element
+    /// would bring `<w:r>` parents out of sync). Single-element matches collapse
+    /// before+replacement+after into the start element.
+    private static func applyOneXMLReplacement(
+        textElements: [XMLElement],
+        flat: String,
+        map: [(elemIdx: Int, offset: Int)],
+        matchRange: Range<String.Index>,
+        replacement: String
+    ) {
+        let startCharIdx = flat.distance(from: flat.startIndex, to: matchRange.lowerBound)
+        let endCharIdx = flat.distance(from: flat.startIndex, to: matchRange.upperBound)
+
+        guard startCharIdx < map.count else { return }
+        let (sIdx, sOffset) = map[startCharIdx]
+
+        let eIdx: Int
+        let eOffsetExclusive: Int
+        if endCharIdx < map.count {
+            let (i, o) = map[endCharIdx]
+            eIdx = i
+            eOffsetExclusive = o
+        } else {
+            eIdx = textElements.count - 1
+            eOffsetExclusive = (textElements[eIdx].stringValue ?? "").count
+        }
+
+        if sIdx == eIdx {
+            let text = textElements[sIdx].stringValue ?? ""
+            let before = String(text.prefix(sOffset))
+            let after = String(text.suffix(text.count - eOffsetExclusive))
+            textElements[sIdx].stringValue = before + replacement + after
+        } else {
+            let startText = textElements[sIdx].stringValue ?? ""
+            let beforePrefix = String(startText.prefix(sOffset))
+            textElements[sIdx].stringValue = beforePrefix + replacement
+            let endText = textElements[eIdx].stringValue ?? ""
+            let afterSuffix = String(endText.suffix(endText.count - eOffsetExclusive))
+            textElements[eIdx].stringValue = afterSuffix
+            // Empty out wholly-consumed `<w:t>` elements between start and end.
+            // We don't remove the element — its `<w:r>` parent (and any
+            // intervening structural wrappers) survives so source-order is
+            // preserved.
+            if eIdx - sIdx > 1 {
+                for midIdx in (sIdx + 1)..<eIdx {
+                    textElements[midIdx].stringValue = ""
+                }
+            }
+        }
+    }
+
     // MARK: Private
 
     private static func isTextRun(_ run: Run) -> Bool {
