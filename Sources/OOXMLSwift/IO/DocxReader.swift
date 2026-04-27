@@ -824,6 +824,21 @@ public struct DocxReader {
         var paragraph = Paragraph()
         let isoFormatter = ISO8601DateFormatter()
 
+        // v0.20.3+ (#66 sub-stack E): extract w14:paraId / w14:textId on the
+        // <w:p> opening tag — Word's revision-tracking GUIDs (8-char hex,
+        // NOT RFC 4122 UUIDs). Same XMLElement.attribute lookup pattern
+        // already used by parseComments at line 3177 for comment threading.
+        // Independent fields (Word may emit either alone). Empty-string
+        // values are treated as absent: w14:paraId="" is schema-invalid per
+        // ECMA-376 ST_LongHexNumber; storing "" would re-emit the invalid
+        // attribute and Word's repair path would silently drop it.
+        if let paraIdAttr = element.attribute(forName: "w14:paraId")?.stringValue, !paraIdAttr.isEmpty {
+            paragraph.w14ParaId = paraIdAttr
+        }
+        if let textIdAttr = element.attribute(forName: "w14:textId")?.stringValue, !textIdAttr.isEmpty {
+            paragraph.w14TextId = textIdAttr
+        }
+
         // 解析段落屬性
         if let pPr = element.elements(forName: "w:pPr").first {
             paragraph.properties = parseParagraphProperties(from: pPr)

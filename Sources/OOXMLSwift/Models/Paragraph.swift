@@ -83,6 +83,19 @@ public struct Paragraph: Equatable {
     /// schema as the completeness checklist").
     public var unrecognizedChildren: [UnrecognizedChild] = []
 
+    /// v0.20.3+ (#66 sub-stack E): `w14:paraId` attribute on `<w:p>` opening
+    /// tag — Word's revision-tracking GUID anchoring paragraph identity for
+    /// collaborative editing and comment threading. 8-character hex token
+    /// (NOT RFC 4122 UUID); preserved as opaque String to avoid format
+    /// rejection. Pre-fix accounted for ~95% of w14:* token loss in the
+    /// NTPU thesis fixture.
+    public var w14ParaId: String?
+
+    /// v0.20.3+ (#66 sub-stack E): `w14:textId` attribute on `<w:p>` opening
+    /// tag — Word's text-content revision GUID. Independent of `w14ParaId`
+    /// (Word can emit either alone). Same opaque-String preservation rules.
+    public var w14TextId: String?
+
     public init(runs: [Run] = [], properties: ParagraphProperties = ParagraphProperties()) {
         self.runs = runs
         self.properties = properties
@@ -287,11 +300,31 @@ extension Paragraph {
         return toXMLLegacy()
     }
 
+    /// v0.20.3+ (#66 sub-stack E): build the `<w:p>` opening tag with optional
+    /// w14:paraId / w14:textId attributes. Shared by both emit paths.
+    /// Independent attributes — Word can emit either alone. Values are
+    /// escaped via `escapeXMLAttribute` (mirrors every other attribute emit
+    /// in this file, e.g., ParagraphProperties.toXML() pStyle handling) to
+    /// prevent XML injection if a caller sets an unsanitized GUID value.
+    private func openingPTag() -> String {
+        var attrs: [String] = []
+        if let paraId = w14ParaId {
+            attrs.append("w14:paraId=\"\(escapeXMLAttribute(paraId))\"")
+        }
+        if let textId = w14TextId {
+            attrs.append("w14:textId=\"\(escapeXMLAttribute(textId))\"")
+        }
+        if attrs.isEmpty {
+            return "<w:p>"
+        }
+        return "<w:p \(attrs.joined(separator: " "))>"
+    }
+
     /// Legacy emit path used by API-built paragraphs (no source-loaded markers).
     /// Mirrors v3.12.0 behavior: bookmarks / commentRanges / runs / SDTs /
     /// hyperlinks / footnoteRefs / endnoteRefs / bookmark-end in fixed order.
     fileprivate func toXMLLegacy() -> String {
-        var xml = "<w:p>"
+        var xml = openingPTag()
 
         // Paragraph Properties
         let propsXML = properties.toXML()
@@ -422,7 +455,7 @@ extension Paragraph {
     ///   sort window, so source-loaded paragraphs (which use these instead
     ///   of the legacy collections) keep byte-equivalent round-trip.
     fileprivate func toXMLSortedByPosition() -> String {
-        var xml = "<w:p>"
+        var xml = openingPTag()
 
         // Paragraph Properties (mirrors legacy path).
         let propsXML = properties.toXML()

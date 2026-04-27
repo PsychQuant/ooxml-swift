@@ -6,6 +6,75 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.20.3] - 2026-04-27
+
+### Added — Sub-stack E of paragraph-level content-equality (closes #66)
+
+`Paragraph` now extracts and round-trips `w14:paraId` and `w14:textId` attributes on the `<w:p>` opening tag — Word's revision-tracking GUIDs that anchor paragraph identity for collaborative editing and comment threading.
+
+#### What was lost pre-fix
+
+`parseParagraph` extracted `<w:p>` opening-tag attributes via discrete known-name lookups but never iterated the `w14:` namespace. Both attributes silently dropped at parse time → ~95% of w14:* token loss in NTPU thesis fixture (2214 of 2359 lost tokens were these two attrs).
+
+#### How it's fixed
+
+Plain attribute passthrough — same `XMLElement.attribute(forName:)` pattern already used by `parseComments` for comment threading (DocxReader.swift:3177). Two new optional `String` fields on `Paragraph`:
+
+```swift
+// Models/Paragraph.swift
+public var w14ParaId: String?
+public var w14TextId: String?
+
+// IO/DocxReader.swift parseParagraph (with empty-as-absent guard)
+if let paraIdAttr = element.attribute(forName: "w14:paraId")?.stringValue,
+   !paraIdAttr.isEmpty {
+    paragraph.w14ParaId = paraIdAttr
+}
+
+// Writer emits via shared openingPTag() helper with XML attribute escaping
+// (mirrors every other attribute emit in Paragraph.swift)
+```
+
+#### Measured impact (NTPU thesis fixture, post-E)
+
+| Preservation class | Pre-D | Post-D | Post-E | Total |
+|---|---|---|---|---|
+| `<w:lang>` retention | 50% | 98.89% | 98.89% | (D) +48.89 pp |
+| `<w:rFonts>` retention | 88% | 98.77% | 98.77% | (D) +10.77 pp |
+| `<w:noProof>` retention | 92% | 100% | 100% | (D) +8 pp |
+| `<w:kern>` retention | 84% | 99.93% | 99.93% | (D) +15.93 pp |
+| `w14:` retention | 5% | 10.55% | **93.98%** | (E) +83.43 pp |
+| `document.xml` size loss | 16.66% | 10.95% | **8.02%** | (D+E) -8.64 pp |
+
+#### Matrix-pin floor ratchets
+
+- `w14:` floor: 0.04 → **0.90** (measured 93.98%, rounded down to nearest 0.05)
+- `sizeLossRatio` ceiling: 0.12 → **0.10** (measured 8.02% with ~0.02 slack)
+
+#### Tests added (4)
+
+- `testParagraphW14AttributesPreservedThroughRoundtrip` — payload-parity for both attrs simultaneously
+- `testParagraphW14ParaIdOnlyRoundTrips` — asymmetric (paraId only, no textId) — proves the two fields are independent (not a shared struct)
+- `testParagraphWithoutW14AttributesEmitsNone` — negative test: no synthetic emit when source omits attrs
+- `testHeaderParagraphW14AttributesPreservedThroughRoundtrip` — uniform application across body parts (header / footer / footnote / endnote share parseParagraph code path)
+
+Suite: 686 → 690 tests pass / 0 failures / 1 skipped.
+
+#### Defensive design (R2 review fixes)
+
+- **XML attribute escaping**: `openingPTag()` helper routes both attribute values through `escapeXMLAttribute` even though Word's GUIDs are constrained to 8-char hex — matches the established escape discipline used by every other attribute emit in Paragraph.swift (e.g., pStyle).
+- **Empty-string-as-absent guard**: `parseParagraph` rejects `w14:paraId=""` / `w14:textId=""` source attrs — these are schema-invalid per ECMA-376 ST_LongHexNumber and Word's repair path silently drops them. Treating empty as absent prevents round-trip from re-emitting invalid markup.
+
+#### Architecture context
+
+Sub-stack E of the `che-word-mcp-paragraph-level-content-equality` Spectra change. Completes the bundle: sub-stack D (#65 paragraph-mark rPr) + sub-stack E (#66 paragraph w14 attrs) bring `document.xml` round-trip loss from 16.66% → **8.02%**. Combined with sub-stack C (#60 run-level RunProperties), the matrix-pin `testDocumentContentEqualityInvariant` is now LOAD-BEARING across **5 preservation classes spanning run-level + paragraph-level + paragraph-mark scope** — any future regression in any class fails CI.
+
+The remaining 8% loss is dominated by other w14:* attribute classes (e.g., w14:* on `<w:r>`) and minor canonicalization gaps — tracked as separate follow-up SDD to push toward the strong demo target「edit 一個字 → document.xml shrinks <1%」.
+
+#### Backward compatibility
+
+Both fields are optional (default nil). All pre-existing callers continue to work — paragraphs without source w14:* attrs emit no synthetic attributes thanks to the openingPTag's `if attrs.isEmpty` gate.
+
 ## [0.20.2] - 2026-04-27
 
 ### Added — Sub-stack D of paragraph-level content-equality (closes #65)
