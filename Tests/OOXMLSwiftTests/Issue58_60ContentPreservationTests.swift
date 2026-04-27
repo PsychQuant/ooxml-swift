@@ -1075,6 +1075,293 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         )
     }
 
+    // MARK: - Sub-stack B-CONT-2: parseRun rawElements double-emit + missed raw-capture sites
+    //
+    // Sub-stack B-CONT 6-AI verify (#59 comment 4324076688) found 6 P0 + 3 P1.
+    // CRITICAL: parseRun's recognizedRunChildren = ["rPr", "t", "drawing",
+    // "oMath", "oMathPara"] doesn't include "delText". So `<w:delText>` falls
+    // through the rawElements path, causing:
+    //   1. delTextCounter advances 2x per delText (explicit loop + rawElements)
+    //   2. Writer emits delText TWICE on save (once for run.text, once from
+    //      rawElements iteration via Run.toXML)
+    // v3.13.11 in production silently corrupts every <w:del> round-trip.
+
+    /// §2.33 (B-CONT-2 TIER-0) — `<w:delText>` is emitted EXACTLY ONCE per
+    /// source element after round-trip. Pre-fix the rawElements re-emission
+    /// path duplicates it.
+    func testDelTextEmittedExactlyOncePerSourceElement() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p>
+        <w:r><w:t>before</w:t></w:r>
+        <w:del w:id="1" w:author="tester" w:date="2026-04-27T00:00:00Z">
+        <w:r><w:delText>deleted-text</w:delText></w:r>
+        </w:del>
+        <w:r><w:t>after</w:t></w:r>
+        </w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont2-deldup-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        var doc = try DocxReader.read(from: inURL)
+        // Force re-serialize so writer emits document.xml.
+        doc.modifiedParts.insert("word/document.xml")
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont2-deldup-out-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: outURL) }
+        try DocxWriter.write(doc, to: outURL)
+
+        let outDocXML = try Self.readDocumentXMLString(from: outURL)
+        // Count <w:delText> opening tags in source vs output. Source has 1.
+        let srcCount = Self.countDelTextElements(in: documentXML)
+        let outCount = Self.countDelTextElements(in: outDocXML)
+        XCTAssertEqual(srcCount, 1, "fixture sanity: source has exactly 1 <w:delText>")
+        XCTAssertEqual(
+            outCount, srcCount,
+            "<w:delText> count SHALL be preserved across round-trip "
+            + "(B-CONT-2 TIER-0 P0 — parseRun's recognizedRunChildren missed 'delText', "
+            + "rawElements path causes writer duplicate emission). "
+            + "src=\(srcCount), out=\(outCount). Output XML:\n\(outDocXML)"
+        )
+    }
+
+    /// §2.34 (B-CONT-2 TIER-0) — multiple `<w:del>` blocks each containing
+    /// whitespace `<w:delText>` round-trip without counter desync.
+    func testDeleteTextCounterStaysSyncedAcrossMultipleDels() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p>
+        <w:del w:id="1" w:author="tester" w:date="2026-04-27T00:00:00Z">
+        <w:r><w:delText xml:space="preserve">     </w:delText></w:r>
+        </w:del>
+        <w:r><w:t>middle</w:t></w:r>
+        <w:del w:id="2" w:author="tester" w:date="2026-04-27T00:00:00Z">
+        <w:r><w:delText xml:space="preserve">     </w:delText></w:r>
+        </w:del>
+        </w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont2-multidel-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        guard case .paragraph(let para) = doc.body.children.first else {
+            XCTFail("expected one paragraph in body")
+            return
+        }
+        let deletionRevs = para.revisions.filter { $0.type == .deletion }
+        XCTAssertEqual(deletionRevs.count, 2, "expected 2 .deletion Revisions")
+        for (i, rev) in deletionRevs.enumerated() {
+            XCTAssertEqual(
+                rev.originalText, "     ",
+                "Deletion #\(i+1) originalText SHALL be 5 spaces "
+                + "(B-CONT-2 TIER-0 P0 — delTextCounter desync from 2x advance). "
+                + "Got: \"\(rev.originalText ?? "<nil>")\""
+            )
+        }
+    }
+
+    /// §2.36 (B-CONT-2 TIER-1) — `parseContainerChildBodyChildren` raw fallback
+    /// (DocxReader.swift:1494) doesn't desync the whitespace counter.
+    func testWhitespaceOverlayContainerRawFallbackDoesNotDesyncCounter() throws {
+        // Build a fixture with header containing an unrecognized body-level
+        // child element with `<w:t>` inside, before a paragraph with whitespace.
+        let stagingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont2-containerraw-staging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("_rels"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stagingURL.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+        </Types>
+        """
+        try contentTypes.write(to: stagingURL.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
+
+        let rootRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>
+        """
+        try rootRels.write(to: stagingURL.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
+
+        let docRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+        </Relationships>
+        """
+        try docRels.write(to: stagingURL.appendingPathComponent("word/_rels/document.xml.rels"), atomically: true, encoding: .utf8)
+
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <w:body>
+        <w:p><w:r><w:t>body</w:t></w:r></w:p>
+        <w:sectPr><w:headerReference w:type="default" r:id="rId10"/></w:sectPr>
+        </w:body>
+        </w:document>
+        """
+        try documentXML.write(to: stagingURL.appendingPathComponent("word/document.xml"), atomically: true, encoding: .utf8)
+
+        // Header with unrecognized body-level child element containing `<w:t>`,
+        // before a paragraph with whitespace `<w:t>`. The unknown element triggers
+        // parseContainerChildBodyChildren raw fallback (DocxReader.swift:1494).
+        // Without counter advance for the raw subtree, scanner counts the inner
+        // `<w:t>` but parseRun never visits it → counter desync → whitespace lost.
+        // Use a custom namespace element to ensure unrecognized.
+        let header1XML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:vendor="urn:test-vendor">
+        <vendor:custom><w:r><w:t>vendor-content</w:t></w:r></vendor:custom>
+        <w:p><w:r><w:t xml:space="preserve">     </w:t></w:r></w:p>
+        </w:hdr>
+        """
+        try header1XML.write(to: stagingURL.appendingPathComponent("word/header1.xml"), atomically: true, encoding: .utf8)
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont2-containerraw-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try ZipHelper.zip(stagingURL, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        guard let header = doc.headers.first else {
+            XCTFail("expected one header parsed")
+            return
+        }
+        var foundWhitespaceRun = false
+        var observedTexts: [String] = []
+        for child in header.bodyChildren {
+            if case .paragraph(let para) = child {
+                for run in para.runs {
+                    observedTexts.append(run.text)
+                    if run.text == "     " {
+                        foundWhitespaceRun = true
+                    }
+                }
+            }
+        }
+        XCTAssertTrue(
+            foundWhitespaceRun,
+            "Header whitespace `<w:t>` after raw-fallback body-child SHALL survive (B-CONT-2 TIER-1 P0 — "
+            + "Codex finding: parseContainerChildBodyChildren raw fallback at DocxReader.swift:1494 "
+            + "missed advanceWhitespaceCounter call). Observed: \(observedTexts)"
+        )
+    }
+
+    /// §2.37 (B-CONT-2 TIER-1) — `parseHyperlink` rawChildren branch
+    /// (DocxReader.swift:1644) doesn't desync the whitespace counter.
+    func testWhitespaceOverlayHyperlinkRawChildrenDoesNotDesyncCounter() throws {
+        // Hyperlink containing nested `<w:fldSimple>` (a non-`<w:r>` child)
+        // forces the parseHyperlink rawChildren branch. Without counter advance,
+        // post-hyperlink whitespace `<w:t>` is lost.
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <w:body>
+        <w:p>
+        <w:hyperlink r:id="rId99">
+        <w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>
+        </w:hyperlink>
+        <w:r><w:t xml:space="preserve">     </w:t></w:r>
+        </w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont2-hyperlink-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        guard case .paragraph(let para) = doc.body.children.first else {
+            XCTFail("expected one paragraph in body")
+            return
+        }
+        let whitespaceRun = para.runs.first(where: { $0.text == "     " })
+        XCTAssertNotNil(
+            whitespaceRun,
+            "Whitespace `<w:t>` after hyperlink-with-rawChildren SHALL survive (B-CONT-2 TIER-1 P0 — "
+            + "R2 finding: parseHyperlink rawChildren branch missed advanceWhitespaceCounter). "
+            + "Observed: \(para.runs.map { "\"\($0.text)\"" })"
+        )
+    }
+
+    /// §2.38 (B-CONT-2 TIER-1) — `parseParagraph` smartTag/customXml/dir/bdo
+    /// raw-carrier blocks don't desync the whitespace counter.
+    func testWhitespaceOverlaySmartTagDoesNotDesyncCounter() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p>
+        <w:smartTag w:uri="urn:test" w:element="Test">
+        <w:r><w:t>tagged</w:t></w:r>
+        </w:smartTag>
+        <w:r><w:t xml:space="preserve">     </w:t></w:r>
+        </w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont2-smarttag-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        guard case .paragraph(let para) = doc.body.children.first else {
+            XCTFail("expected one paragraph in body")
+            return
+        }
+        let whitespaceRun = para.runs.first(where: { $0.text == "     " })
+        XCTAssertNotNil(
+            whitespaceRun,
+            "Whitespace `<w:t>` after smartTag SHALL survive (B-CONT-2 TIER-1 P0 — "
+            + "R2 finding: parseParagraph smartTag/customXml/dir/bdo cases missed advanceWhitespaceCounter). "
+            + "Observed: \(para.runs.map { "\"\($0.text)\"" })"
+        )
+    }
+
+    /// Helper: count `<w:delText>` opening tags in raw XML.
+    static func countDelTextElements(in xml: String) -> Int {
+        var count = 0
+        var searchStart = xml.startIndex
+        while let openRange = xml.range(of: "<w:delText", range: searchStart..<xml.endIndex) {
+            let afterToken = openRange.upperBound
+            guard afterToken < xml.endIndex else { break }
+            let boundary = xml[afterToken]
+            if boundary == ">" || boundary == " " || boundary == "\t"
+                || boundary == "\n" || boundary == "\r" || boundary == "/" {
+                count += 1
+            }
+            searchStart = afterToken
+        }
+        return count
+    }
+
     /// §2.24 (B-CONT P1) — `<w:delText xml:space="preserve">[whitespace]</w:delText>`
     /// (tracked-deletion of whitespace) is preserved through round-trip.
     ///

@@ -6,6 +6,70 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.19.12] - 2026-04-27
+
+### Fixed — Sub-stack B-CONT-2 of #58/#59/#60: close delText counter desync + 5 missed raw-capture sites
+
+The sub-stack B-CONT 6-AI verify ([#59 comment 4324076688](https://github.com/PsychQuant/che-word-mcp/issues/59#issuecomment-4324076688)) returned BLOCK with 4-reviewer convergence on:
+
+#### B-CONT-2 TIER-0 — `<w:delText>` counter desync (R5 finding, partial)
+
+**R5's prediction (P0-1 confirmed)**: parseRun's `recognizedRunChildren = ["rPr", "t", "drawing", "oMath", "oMathPara"]` did NOT include `"delText"`. When parseRun was called for a `<w:r>` inside `<w:del>`:
+1. Explicit delText loop at `DocxReader.swift:970-993` advanced `delTextCounter` by 1 per delText
+2. parseRun's rawElements loop at line 1849-1865 ALSO captured delText into `Run.rawElements`, AND called `advanceWhitespaceCounter` → advanced `delTextCounter` AGAIN
+
+Result: `delTextCounter = 2N` instead of `N`. Every subsequent whitespace `<w:delText>` query landed at wrong index → silent loss for documents with multiple `<w:del>` blocks.
+
+**R5's prediction (P0-2 falsified by code trace)**: R5 also predicted writer-side duplicate emission (`<w:del>` containing `"abc"` → writer producing `<w:delText>abc</w:delText><w:delText>abc</w:delText>`). Test §2.33 confirmed this DOESN'T happen — writer's gate at `Paragraph.swift:787` (`!run.text.isEmpty || (run.rawElements?.isEmpty ?? true)`) skips the explicit `<w:delText>` emission when rawElements covers it. Devil's Advocate found a real bug (P0-1) but mis-graded the severity (P0-2 was false). Test §2.33 retained as regression guard for the writer-gate invariant.
+
+**Fix**: added `"delText"` to `recognizedRunChildren` Set at `DocxReader.swift:1847`. parseRun's rawElements loop now skips delText (already captured by explicit loop). Test §2.34 (`testDeleteTextCounterStaysSyncedAcrossMultipleDels`) GREEN.
+
+#### B-CONT-2 TIER-1 — 5+ missed raw-capture counter-desync sites
+
+B-CONT instrumented 7 raw-capture sites; sub-stack B-CONT verify (R2 + Codex) found 5 missed siblings:
+
+- `parseContainerChildBodyChildren` raw fallback (Codex P0): unrecognized container body-level children with inner `<w:t>` desynced counter
+- `parseHyperlink` rawChildren branch (R2 P0): hyperlinks with nested non-`<w:r>` children (e.g., `<w:fldSimple>`)
+- `parseFieldSimple` non-`<w:r>` silent skip (R2 P0): also independent content-loss bug; minimum fix: counter advance
+- `parseParagraph` `case "smartTag"` / `"customXml"` / `"dir"` / `"bdo"` raw-carriers (R2 P0): all four typed raw-carrier blocks
+
+**Fix**: added `Self.advanceWhitespaceCounter(forSkippedXML: ...)` call at each missed site (5 sites covering 8 cases counting the 4 paragraph raw-carrier branches). 3 representative tests (§2.36-§2.38) cover container-raw-fallback + hyperlink-raw-children + smartTag classes.
+
+### Tests
+
+5 new tests in `Tests/OOXMLSwiftTests/Issue58_60ContentPreservationTests.swift`:
+
+- `testDelTextEmittedExactlyOncePerSourceElement` (B-CONT-2 TIER-0 — R5 P0-2 regression guard for writer-gate)
+- `testDeleteTextCounterStaysSyncedAcrossMultipleDels` (B-CONT-2 TIER-0 — R5 P0-1 actual bug)
+- `testWhitespaceOverlayContainerRawFallbackDoesNotDesyncCounter` (B-CONT-2 TIER-1 — Codex P0)
+- `testWhitespaceOverlayHyperlinkRawChildrenDoesNotDesyncCounter` (B-CONT-2 TIER-1 — R2 P0)
+- `testWhitespaceOverlaySmartTagDoesNotDesyncCounter` (B-CONT-2 TIER-1 — R2 P0, representative)
+
+Plus helper `countDelTextElements(in:)` for §2.33's writer-output verification.
+
+Suite total: 678 tests pass / 1 skipped / 0 failures (673 sub-stack B-CONT baseline + 5 B-CONT-2 new tests).
+
+### Methodology lesson (4th refinement, partially confirmed)
+
+R5's "Devil's Advocate worst-case" prediction was 50% accurate on this round: P0-1 (counter desync) was a real bug; P0-2 (writer-side duplicate emission) was a false alarm caught by the writer-gate invariant. **Methodology refinement**: adversarial reviewers can correctly identify a bug class but mis-grade severity by missing protective gates elsewhere in the codebase. Verify-cycle response should TEST predictions (not assume them) — this saved us from a misframed BLOCK and added a regression guard for the writer-gate behavior.
+
+The actual recurring pattern remains: each sub-cycle compresses the prior cycle's blind spot. B-CONT instrumented 7 raw-capture sites; B-CONT-2 found 5+ siblings of the same class. Long-term fix is the central raw-capture helper (§2.43, deferred) but matrix-pin fixture upgrades (§2.44, deferred) and sub-stack C content-equality matrix-pin extensions (§2.45/§2.46, deferred to sub-stack C scope) should catch future regressions of this class.
+
+### Deferred (B-CONT-2 TIER-2, MAY-tier)
+
+- §2.43 Central raw-capture helper refactor — high-value but adds touchpoint risk; future additions still require manual call. Tracked.
+- §2.44 `buildAllPartsWhitespaceFixture` upgrade with real-world content classes — sterile fixture remains; per-test class coverage suffices. Long-term consolidation tracked.
+- §2.45 / §2.46 Container-part + delText parity in matrix-pin — sub-stack C scope addition.
+- Sub-stack B-CONT MAY-tier: static state concurrency hazard (R5 + Codex P1, deferred), single-quoted `xml:space='preserve'` (R5 P2, Word doesn't emit), perf gate (Codex P2, tracked).
+
+### API additions (v0.19.12, additive — no breaking change vs v0.19.11)
+
+No new public API. Only internal change: `recognizedRunChildren` includes `"delText"`.
+
+### Spectra change
+
+Ships sub-stack B-CONT-2 of `che-word-mcp-issue-58-59-60-document-content-preservation`. Sub-stack C (#60 RunProperties audit) ships next as v0.20.0 + v3.14.0.
+
 ## [0.19.11] - 2026-04-27
 
 ### Fixed — Sub-stack B-CONT of #58/#59/#60: close 4 P0 + 3 P1 from sub-stack B 6-AI verify
