@@ -6,6 +6,54 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.19.8] - 2026-04-27
+
+### Fixed — Sub-stack A-CONT-2 of #58 (API-layer + SDT-recursion + matrix-pin-fixture mini-mini-cycle from A-CONT verify)
+
+The sub-stack A-CONT 6-AI verify ([report](https://github.com/PsychQuant/che-word-mcp/issues/58#issuecomment-4323658377)) returned BLOCK with 2 P0 + 1 P1 + 1 P2 (3 of 4 reviewers concur — R2 Logic + R5 Devil's Advocate + Codex; R1 Requirements PASS). All three BLOCKs converged on the same 2 findings; R2 alone caught a third (matrix-pin regression-blindness on chosen fixture).
+
+This is sub-cycle 3 for #58 (A → A-CONT → A-CONT-2). R5-CONT-4 took 5 sub-cycles to drain #56; same convergence-cycle pattern at work. Each round catches what the prior matrix-pin couldn't see — the methodology working as designed.
+
+#### A-CONT-2 P0 #1 — `Document.getBookmarks()` walks container `bodyChildren`
+
+Pre-A-CONT-2 `getBookmarks()` ([Document.swift:2122-2153](https://github.com/PsychQuant/ooxml-swift/blob/v0.19.8/Sources/OOXMLSwift/Models/Document.swift#L2122)) iterated only `for child in body.children`. Headers, footers, footnotes, endnotes were never traversed despite the A-CONT CHANGELOG claim of "body + headers + footers + footnotes + endnotes" coverage. A thesis-style document with TOC anchor `<w:bookmarkStart w:name="_Toc12345"/>` at body level inside `header1.xml` round-tripped preserved on disk (A-CONT P0 #1 fix) but was invisible to MCP `list_bookmarks` — same observable symptom as the original #58 P0, just in containers instead of body.
+
+A-CONT-2 extends `getBookmarks()` to walk container `bodyChildren` across headers + footers + footnotes + endnotes. New `collectBodyLevelBookmarkNamesRecursive` helper recurses into block-level `.contentControl(_, let inner)` so SDT-nested markers are also surfaced. Container markers carry `paragraphIndex = -1` sentinel (no paragraph index in body-document sense). Removed the stale comment referencing a `getAllBookmarks()` follow-up helper that didn't exist anywhere in the codebase.
+
+#### A-CONT-2 P0 #2 — `parseContainerChildBodyChildren` SDT recursion
+
+Pre-A-CONT-2 the container parser handled 5 cases (`p`, `tbl`, `sectPr`, `bookmarkStart`, `bookmarkEnd`) + raw default. `parseBodyChildren` had 6 (added `sdt`). The missing `case "sdt":` in the container parser meant block-level SDTs in headers / footers / footnotes / endnotes fell through to `.rawBlockElement` — XML byte-preserved for round-trip ✓ but: (a) bookmarks inside the SDT were NOT surfaced as typed BodyChild entries; (b) `nextBookmarkId` calibration walker explicitly skipped `.rawBlockElement` so SDT-nested bookmark ids were invisible → potential id collision; (c) tables/paragraphs inside the SDT were invisible to typed-model walkers.
+
+A-CONT-2 adds the `case "sdt":` branch mirroring `parseBodyChildren:644-679`: parses SDT metadata via `SDTParser.parseSdtPr`, recursively calls `parseContainerChildBodyChildren` for `<w:sdtContent>` children, appends `.contentControl(metadata, children: sdtChildren)`. The existing `collectBodyLevelBookmarkIds` calibration walker (DocxReader.swift:409-420) already recursed through `.contentControl(_, let inner)` from sub-stack A — so once the parser surfaces the typed `.contentControl`, calibration picks up nested ids correctly.
+
+#### A-CONT-2 P0 #3 — Matrix-pin synthetic-fixture coverage
+
+Pre-A-CONT-2 the `assertContainerBookmarkStartParity` matrix-pin extension was regression-blind on the thesis fixture: R2 Logic verified all 12 container parts (`word/header1.xml` through `header6.xml`, `word/footer1.xml` through `footer4.xml`, `word/footnotes.xml`, `word/endnotes.xml`) have **zero** `<w:bookmarkStart>` elements. The pin asserted `0=0` across every iteration — would PASS even if the A-CONT parser fix were reverted. Same shape as the R5-CONT-4 ternary anti-pattern (`XCTAssertNil(<bool> ? 1000 : nil)`): test framework that LOOKS rigorous but lacks regression sensitivity.
+
+A-CONT-2 adds `testMatrixPinCatchesContainerBookmarkRegression` which builds a synthetic fixture with `<w:hdr>` containing 2 body-level `<w:bookmarkStart>` + matching `<w:bookmarkEnd>`, runs the same matrix-pin assertion path, asserts non-trivial parity (2=2 not 0=0). Catches future parser-asymmetry regressions for real.
+
+#### A-CONT-2 P1 — `deleteBookmark` symmetry with `getBookmarks`
+
+Pre-A-CONT-2 `deleteBookmark(name:)` ([Document.swift:2038-2056](https://github.com/PsychQuant/ooxml-swift/blob/v0.19.8/Sources/OOXMLSwift/Models/Document.swift#L2038)) only matched `.paragraph(...).bookmarks` — couldn't delete body-level `.bookmarkMarker` entries (or container body-level markers). After A-CONT-2 P0 #1, `getBookmarks()` lists names that the prior `deleteBookmark` would throw `BookmarkError.notFound` on — state inconsistency widened by A-CONT.
+
+A-CONT-2 extends `deleteBookmark` with a `tryDeleteBodyLevelBookmark` helper that scans body-level `.bookmarkMarker` entries (matching by name on `.start` markers, removing matching `.end` by id), recurses into `.contentControl`, and applies across body + 4 container types. `modifiedParts` is correctly marked for the owning part (body / specific header / specific footer / footnotes / endnotes). `getBookmarks()` and `deleteBookmark()` are now fully symmetric.
+
+### Tests
+
+- 3 new tests in `Tests/OOXMLSwiftTests/Issue58_60ContentPreservationTests.swift`:
+  - `testGetBookmarksSurfacesContainerBodyLevelMarkers` (A-CONT-2 P0 #1)
+  - `testParseContainerSDTRecursionPreservesNestedBookmark` (A-CONT-2 P0 #2)
+  - `testMatrixPinCatchesContainerBookmarkRegression` (A-CONT-2 P0 #3)
+- Suite total: 661 tests pass / 1 skipped / 0 failures (658 A-CONT baseline + 3 A-CONT-2 new tests)
+
+### API additions (v0.19.8, additive — no breaking change vs v0.19.7 contract)
+
+- No new public types or signatures. `getBookmarks()` and `deleteBookmark()` keep their existing call signatures; the new behavior is strictly additive (returns more / accepts more without breaking existing callers).
+
+### Spectra change
+
+This release ships sub-stack A-CONT-2 mini-mini-cycle. Re-numbers planned sub-stack B → v0.19.9 / v3.13.9 (sub-stack C unchanged at v0.20.0 / v3.14.0). Sub-stack A took 3 sub-cycles (A + A-CONT + A-CONT-2) to drain #58 — same trajectory shape as R5 → R5-CONT-4 needing 5 sub-cycles to drain #56.
+
 ## [0.19.7] - 2026-04-27
 
 ### Fixed — Sub-stack A-CONT of #58 (parser asymmetry mini-cycle from sub-stack A 6-AI verify)

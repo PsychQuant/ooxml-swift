@@ -1326,6 +1326,27 @@ public struct DocxReader {
                 // doesn't capture it as a `.rawBlockElement`. Same handling as
                 // `parseBodyChildren`.
                 continue
+            case "sdt":
+                // v0.19.8+ (#58 A-CONT-2): block-level `<w:sdt>` recursion in
+                // container parts. Pre-A-CONT-2 this hit `default:` and was
+                // captured as `.rawBlockElement` — XML byte-preserved but the
+                // typed model lost SDT structural access AND nested bookmark
+                // ids inside the SDT were invisible to `nextBookmarkId`
+                // calibration. Mirrors `parseBodyChildren`'s `case "sdt"` branch.
+                let metadata = ContentControl(
+                    sdt: SDTParser.parseSdtPr(from: childElement),
+                    content: ""
+                )
+                var sdtChildren: [BodyChild] = []
+                if let sdtContent = childElement.elements(forName: "w:sdtContent").first {
+                    sdtChildren = try parseContainerChildBodyChildren(
+                        in: sdtContent,
+                        relationships: relationships,
+                        styles: styles,
+                        numbering: numbering
+                    )
+                }
+                children.append(.contentControl(metadata, children: sdtChildren))
             case "bookmarkStart":
                 // v0.19.7+ (#58 A-CONT): mirror the parseBodyChildren branch
                 // into the container parser entry point. Pre-A-CONT this hit

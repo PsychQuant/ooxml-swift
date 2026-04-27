@@ -2036,6 +2036,7 @@ public struct WordDocument: Equatable {
 
     /// 刪除書籤
     public mutating func deleteBookmark(name: String) throws {
+        // Body — paragraph-level bookmarks first.
         for i in 0..<body.children.count {
             if case .paragraph(var para) = body.children[i] {
                 if let index = para.bookmarks.firstIndex(where: { $0.name == name }) {
@@ -2052,7 +2053,79 @@ public struct WordDocument: Equatable {
                 }
             }
         }
+
+        // v0.19.8+ (#58 A-CONT-2): try body-level `.bookmarkMarker` entries +
+        // container body-level markers (headers / footers / footnotes / endnotes).
+        // Pre-A-CONT-2 `getBookmarks()` could list these names but `deleteBookmark`
+        // couldn't delete them (always threw `notFound`). Now they're symmetric.
+        if Self.tryDeleteBodyLevelBookmark(name: name, from: &body.children) {
+            modifiedParts.insert("word/document.xml")
+            return
+        }
+        for i in 0..<headers.count {
+            if Self.tryDeleteBodyLevelBookmark(name: name, from: &headers[i].bodyChildren) {
+                modifiedParts.insert(headers[i].fileName)
+                return
+            }
+        }
+        for i in 0..<footers.count {
+            if Self.tryDeleteBodyLevelBookmark(name: name, from: &footers[i].bodyChildren) {
+                modifiedParts.insert(footers[i].fileName)
+                return
+            }
+        }
+        for i in 0..<footnotes.footnotes.count {
+            if Self.tryDeleteBodyLevelBookmark(name: name, from: &footnotes.footnotes[i].bodyChildren) {
+                modifiedParts.insert("word/footnotes.xml")
+                return
+            }
+        }
+        for i in 0..<endnotes.endnotes.count {
+            if Self.tryDeleteBodyLevelBookmark(name: name, from: &endnotes.endnotes[i].bodyChildren) {
+                modifiedParts.insert("word/endnotes.xml")
+                return
+            }
+        }
+
         throw BookmarkError.notFound(name)
+    }
+
+    /// v0.19.8+ (#58 A-CONT-2): helper for `deleteBookmark`. Scans body-level
+    /// `.bookmarkMarker` entries (and recurses into block-level `.contentControl`)
+    /// for a `.start` marker matching the given name. On hit, removes both the
+    /// `.start` marker and any matching `.end` marker (paired by id) from the
+    /// children array. Returns true on hit, false otherwise.
+    private static func tryDeleteBodyLevelBookmark(name: String, from children: inout [BodyChild]) -> Bool {
+        // First pass — find the matching .start to learn its id.
+        var matchedId: Int?
+        for i in 0..<children.count {
+            if case .bookmarkMarker(let marker) = children[i],
+               marker.kind == .start,
+               marker.name == name {
+                matchedId = marker.id
+                break
+            }
+        }
+        if let id = matchedId {
+            // Remove BOTH .start (by name+id) and any .end (by id only).
+            children.removeAll { child in
+                if case .bookmarkMarker(let marker) = child, marker.id == id {
+                    return true
+                }
+                return false
+            }
+            return true
+        }
+        // Recurse into block-level SDTs.
+        for i in 0..<children.count {
+            if case .contentControl(let meta, var inner) = children[i] {
+                if tryDeleteBodyLevelBookmark(name: name, from: &inner) {
+                    children[i] = .contentControl(meta, children: inner)
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// v0.19.2+ (#56 follow-up F2): central helper for adding a `Bookmark`
@@ -2123,6 +2196,7 @@ public struct WordDocument: Equatable {
         var result: [(id: Int, name: String, paragraphIndex: Int)] = []
         var paragraphCount = 0
 
+        // Body — paragraph-level + body-level markers (with paragraph index).
         for child in body.children {
             switch child {
             case .paragraph(let para):
@@ -2140,16 +2214,64 @@ public struct WordDocument: Equatable {
                 if marker.kind == .start, let name = marker.name {
                     result.append((id: marker.id, name: name, paragraphIndex: -1))
                 }
-            case .table, .contentControl, .rawBlockElement:
-                // Tables / content controls / raw block elements are walked
-                // for bookmark coverage by `getAllBookmarks()` (which also
-                // descends into headers / footers / footnotes / endnotes).
-                // The legacy `getBookmarks()` path keeps body-level scope only.
+            case .contentControl(_, let inner):
+                // v0.19.8+ (#58 A-CONT-2): recurse into block-level SDT to
+                // surface body-level markers nested inside content controls.
+                Self.collectBodyLevelBookmarkNamesRecursive(in: inner, into: &result)
+            case .table, .rawBlockElement:
+                // Tables and raw block elements don't carry typed bookmarks
+                // visible to the API. (Bookmarks inside table cells are picked
+                // up via the per-paragraph walker on `cell.paragraphs[].bookmarks`
+                // — but that lives in the paragraph-level path, not here.
+                // Raw block elements are opaque XML by design.)
                 break
             }
         }
 
+        // v0.19.8+ (#58 A-CONT-2): walk body-level markers in container parts
+        // (headers / footers / footnotes / endnotes). Pre-A-CONT-2 these were
+        // preserved on disk but invisible to MCP `list_bookmarks`. Container
+        // markers carry no paragraph index in the body-document sense, so
+        // they share the `paragraphIndex = -1` sentinel.
+        for header in headers {
+            Self.collectBodyLevelBookmarkNamesRecursive(in: header.bodyChildren, into: &result)
+        }
+        for footer in footers {
+            Self.collectBodyLevelBookmarkNamesRecursive(in: footer.bodyChildren, into: &result)
+        }
+        for footnote in footnotes.footnotes {
+            Self.collectBodyLevelBookmarkNamesRecursive(in: footnote.bodyChildren, into: &result)
+        }
+        for endnote in endnotes.endnotes {
+            Self.collectBodyLevelBookmarkNamesRecursive(in: endnote.bodyChildren, into: &result)
+        }
+
         return result
+    }
+
+    /// v0.19.8+ (#58 A-CONT-2): recursive helper for body-level bookmark name
+    /// extraction. Used by `getBookmarks()` and `deleteBookmark(name:)` to walk
+    /// body-level markers across body + container parts uniformly. Recurses
+    /// into block-level `.contentControl(_, let inner)` children so SDT-nested
+    /// markers are surfaced. paragraph-level bookmarks (inside `.paragraph(...)`)
+    /// are intentionally NOT collected here — they live in `Paragraph.bookmarks`
+    /// and use a different paragraph-index semantic.
+    private static func collectBodyLevelBookmarkNamesRecursive(
+        in children: [BodyChild],
+        into result: inout [(id: Int, name: String, paragraphIndex: Int)]
+    ) {
+        for child in children {
+            switch child {
+            case .bookmarkMarker(let marker):
+                if marker.kind == .start, let name = marker.name {
+                    result.append((id: marker.id, name: name, paragraphIndex: -1))
+                }
+            case .contentControl(_, let inner):
+                collectBodyLevelBookmarkNamesRecursive(in: inner, into: &result)
+            case .paragraph, .table, .rawBlockElement:
+                continue
+            }
+        }
     }
 
     // MARK: - Comment Operations

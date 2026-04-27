@@ -222,6 +222,164 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
             "body-level bookmark SHALL ALSO be returned post-A-CONT; got \(names)")
     }
 
+    // MARK: - Sub-stack A-CONT-2: API-layer container coverage + SDT recursion + matrix-pin fixture
+
+    /// §1.26 — `Document.getBookmarks()` SHALL surface body-level `.bookmarkMarker`
+    /// entries from container parts (headers / footers / footnotes / endnotes),
+    /// not just `body.children`. A-CONT closed the WRITE-side parser asymmetry but
+    /// `getBookmarks()` only iterated `body.children`, so header body-level
+    /// bookmarks preserved on disk were invisible to MCP `list_bookmarks`.
+    func testGetBookmarksSurfacesContainerBodyLevelMarkers() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p><w:r><w:t>body</w:t></w:r></w:p>
+        </w:body>
+        </w:document>
+        """
+        let headerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:bookmarkStart w:id="100" w:name="hdrBookmark"/>
+        <w:p><w:r><w:t>header text</w:t></w:r></w:p>
+        <w:bookmarkEnd w:id="100"/>
+        </w:hdr>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont2-getbm-hdr-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocxWithHeader(documentXML: documentXML, headerXML: headerXML, headerRId: "rId10", to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        let bookmarks = doc.getBookmarks()
+        let names = bookmarks.map { $0.name }
+        XCTAssertTrue(names.contains("hdrBookmark"),
+            "header body-level bookmark SHALL be surfaced by getBookmarks() (A-CONT-2 P0 #1); got \(names)")
+    }
+
+    /// §1.27 — `parseContainerChildBodyChildren` SHALL recursively parse `<w:sdt>`
+    /// (block-level Structured Document Tag) into `.contentControl(_, children)`,
+    /// not capture as `.rawBlockElement`. A-CONT mirrored 5 of 6 cases from
+    /// `parseBodyChildren`; the missing `case "sdt"` meant container-side block-
+    /// level SDTs were captured as raw XML — round-trip-preserved but invisible
+    /// to typed model walkers (incl. `nextBookmarkId` calibration on nested
+    /// bookmark ids).
+    func testParseContainerSDTRecursionPreservesNestedBookmark() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p><w:r><w:t>body</w:t></w:r></w:p>
+        </w:body>
+        </w:document>
+        """
+        let headerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:sdt>
+        <w:sdtPr><w:id w:val="42"/><w:tag w:val="hdrSDT"/></w:sdtPr>
+        <w:sdtContent>
+        <w:bookmarkStart w:id="500" w:name="sdtBookmark"/>
+        <w:p><w:r><w:t>inside SDT</w:t></w:r></w:p>
+        <w:bookmarkEnd w:id="500"/>
+        </w:sdtContent>
+        </w:sdt>
+        </w:hdr>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont2-sdt-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocxWithHeader(documentXML: documentXML, headerXML: headerXML, headerRId: "rId10", to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        guard let header = doc.headers.first else {
+            XCTFail("expected at least one header parsed")
+            return
+        }
+
+        // Assert the SDT was parsed as typed `.contentControl`, NOT `.rawBlockElement`.
+        let firstChild = header.bodyChildren.first
+        guard let firstChild = firstChild else {
+            XCTFail("expected at least one bodyChild in header; got empty")
+            return
+        }
+        if case .rawBlockElement = firstChild {
+            XCTFail("header SDT was captured as .rawBlockElement (A-CONT-2 P0 #2 — parseContainerChildBodyChildren missing `case \"sdt\"` recursion)")
+            return
+        }
+        guard case .contentControl(_, let inner) = firstChild else {
+            XCTFail("expected `.contentControl` for header SDT; got \(firstChild)")
+            return
+        }
+
+        // Assert the nested .bookmarkMarker is reachable.
+        let hasNestedBookmark = inner.contains { child in
+            if case .bookmarkMarker(let marker) = child, marker.id == 500, marker.name == "sdtBookmark" {
+                return true
+            }
+            return false
+        }
+        XCTAssertTrue(hasNestedBookmark,
+            "nested bookmark inside header SDT SHALL be reachable as .bookmarkMarker; got \(inner)")
+
+        // Assert nextBookmarkId calibration picked up the nested id.
+        XCTAssertGreaterThan(doc.nextBookmarkId, 500,
+            "nextBookmarkId SHALL reflect SDT-nested bookmark id (A-CONT-2 P0 #2 — calibration walker must recurse through .contentControl); got \(doc.nextBookmarkId)")
+    }
+
+    /// §1.30 — Synthetic fixture matrix-pin: assert container bookmark count
+    /// parity on a fixture that ACTUALLY has body-level bookmarks in headers.
+    /// The thesis fixture has 0 such bookmarks across all 12 container parts,
+    /// so `assertContainerBookmarkStartParity` against it is regression-blind
+    /// (asserts 0=0). This synthetic test ensures the matrix-pin can detect
+    /// regressions for real (asserts 2=2 by construction).
+    func testMatrixPinCatchesContainerBookmarkRegression() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body><w:p><w:r><w:t>body</w:t></w:r></w:p></w:body>
+        </w:document>
+        """
+        let headerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:bookmarkStart w:id="201" w:name="hdrBookmark1"/>
+        <w:p><w:r><w:t>part 1</w:t></w:r></w:p>
+        <w:bookmarkEnd w:id="201"/>
+        <w:bookmarkStart w:id="202" w:name="hdrBookmark2"/>
+        <w:p><w:r><w:t>part 2</w:t></w:r></w:p>
+        <w:bookmarkEnd w:id="202"/>
+        </w:hdr>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont2-mp-in-\(UUID().uuidString).docx")
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont2-mp-out-\(UUID().uuidString).docx")
+        defer {
+            try? FileManager.default.removeItem(at: inURL)
+            try? FileManager.default.removeItem(at: outURL)
+        }
+        try buildMinimalDocxWithHeader(documentXML: documentXML, headerXML: headerXML, headerRId: "rId10", to: inURL)
+
+        var doc = try DocxReader.read(from: inURL)
+        doc.modifiedParts.insert("word/header1.xml")
+        try DocxWriter.write(doc, to: outURL)
+
+        // Apply the matrix-pin's container-source assertion to this fixture.
+        try Self.assertContainerBookmarkStartParity(srcURL: inURL, outURL: outURL)
+
+        // Sanity: our fixture actually has 2 bookmarkStarts in header1.xml so
+        // the assertion above asserts 2=2, not the regression-blind 0=0 it
+        // does on the thesis fixture.
+        let headerOut = try Self.readPartXMLString(from: outURL, partPath: "word/header1.xml")
+        XCTAssertEqual(Self.countBookmarkStartElements(in: headerOut), 2,
+            "synthetic fixture sanity: 2 <w:bookmarkStart> SHALL survive in output header; got \(Self.countBookmarkStartElements(in: headerOut))")
+    }
+
     // MARK: - Cross-cutting matrix-pin (incremental — sub-stack A initial version)
 
     /// §1.7 / §2.7 / §3.9 — Cross-cutting content-equality invariant against
