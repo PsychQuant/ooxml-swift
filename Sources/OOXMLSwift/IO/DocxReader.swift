@@ -2329,14 +2329,36 @@ public struct DocxReader {
         // `<w14:textFill>`, `<w14:glow>`, `<w14:shadow>`, `<w14:reflection>`,
         // `<w14:scene3d>`, `<w14:props3d>`, `<w14:ligatures>`, and any other
         // element that isn't in our typed set. Same pattern as `Run.rawElements`.
+        //
+        // v0.20.1+ (#60 sub-stack C-CONT, R2 + R5 verify finding): the set
+        // SHALL contain ONLY elements that parseRunProperties actually extracts
+        // into typed fields. Pre-fix included `spacing`/`position`/`w`/`effect`/
+        // `shd`/`outline`/`shadow`/`emboss`/`imprint`/`vanish`/`specVanish`/
+        // `webHidden`/`em`/`fitText`/`rtl`/`cs`/`snapToGrid`/`caps`/`smallCaps`/
+        // `bdr` — but parseRunProperties has NO extraction for these → silent
+        // drop because they neither become typed fields NOR get captured into
+        // rawChildren. R2 caught this as P2; R5 escalated to P0 noting that
+        // common elements like `<w:spacing>` (character spacing), `<w:caps>`,
+        // `<w:smallCaps>`, `<w:position>`, `<w:shd>` (run shading), `<w:bdr>`
+        // (run border), `<w:em>` (CJK emphasis marks) all silently disappear
+        // post-roundtrip. Trim set to ONLY actually-parsed kinds; everything
+        // else falls into rawChildren and round-trips byte-equivalent.
         let recognizedRprChildren: Set<String> = [
-            "rStyle", "b", "bCs", "i", "iCs", "u", "strike", "dstrike", "sz", "szCs",
-            "rFonts", "color", "highlight", "vertAlign", "spacing", "w", "kern",
-            "noProof", "lang", "rPrChange",
-            // characterSpacing typed-handled — covered below if present
-            "shd", "position", "outline", "shadow", "emboss", "imprint", "vanish",
-            "specVanish", "webHidden", "em", "fitText", "rtl", "cs", "snapToGrid",
-            "caps", "smallCaps", "effect", "bdr"
+            // Typed-extracted by parseRunProperties + typed-emitted by RunProperties.toXML().
+            "rStyle", "b", "i", "u", "strike", "sz", "szCs",
+            "rFonts", "color", "highlight", "vertAlign",
+            "noProof", "kern", "lang",
+            // szCs is typed-EMITTED via fontSize (toXML line ~259) even though
+            // not separately extracted; KEEPING in recognized prevents writer
+            // duplicate emission. bCs/iCs/dstrike/eastAsianLayout/etc are NOT
+            // typed-emitted; EXCLUDED from set so rawChildren captures them.
+            "rPrChange"
+            // rPrChange typed-handled via parseRPrChangeFromRunInline at the
+            // run level (DocxReader.swift:1532+). Parser there reads the inner
+            // <w:rPr> via parseRunProperties recursively. Including in this set
+            // prevents rPrChange itself from being captured into rawChildren of
+            // the outer rPr (which would cause double emission via Revision +
+            // raw replay).
         ]
         var collectedRpr: [RawElement] = []
         for child in element.children ?? [] {
