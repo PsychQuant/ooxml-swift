@@ -349,6 +349,53 @@ public struct WordDocument: Equatable {
                 find: find, with: replacement, options: options
             )
         }
+        // PsychQuant/che-word-mcp#63: inline `<w:sdt>` content controls store
+        // their inner runs as raw XML in `ContentControl.content`, not typed
+        // `[Run]` arrays. Pre-fix `replace_text` silently 0-matched on text
+        // wrapped in inline SDTs — common in docx output from external
+        // converters (pandoc / Quarto / LaTeX→docx) which wrap cross-ref
+        // placeholders (`[tab:foo]`, `[fig:bar]`) in inline SDTs by convention.
+        // Issue title pointed at "literal `[ ]` brackets" but the brackets
+        // were a coincidence — the trigger is the SDT wrapping.
+        for cIdx in 0..<para.contentControls.count {
+            count += try replaceInContentControl(
+                &para.contentControls[cIdx], find: find, with: replacement, options: options
+            )
+        }
+        return count
+    }
+
+    /// Recursively replace text inside an inline `<w:sdt>` content control.
+    ///
+    /// `ContentControl.content` is verbatim inner XML (typically a sequence of
+    /// `<w:r><w:t>...</w:t></w:r>` blocks, possibly mixed with `<w:hyperlink>`,
+    /// `<w:fldSimple>`, etc). We mutate text by walking the parsed XML tree's
+    /// `<w:t>` descendants and applying cross-element find/replace, preserving
+    /// the wrapper's structure (sdtPr, hyperlink/fldSimple wrappers inside,
+    /// unrecognized elements). `<w:delText>` and `<w:instrText>` are skipped
+    /// because they don't represent displayed text. Nested `<w:sdt>` subtrees
+    /// inside the content blob are also skipped — those would have been parsed
+    /// out into `cc.children` by `SDTParser.parseSDT`, so we recurse via
+    /// `cc.children` instead of duplicating coverage.
+    private static func replaceInContentControl(
+        _ cc: inout ContentControl,
+        find: String,
+        with replacement: String,
+        options: ReplaceOptions
+    ) throws -> Int {
+        var count = 0
+        if !cc.content.isEmpty, cc.content.contains("<w:t") {
+            let result = try TextReplacementEngine.replaceInContentXML(
+                cc.content, find: find, with: replacement, options: options
+            )
+            cc.content = result.xml
+            count += result.replacements
+        }
+        for ccIdx in 0..<cc.children.count {
+            count += try replaceInContentControl(
+                &cc.children[ccIdx], find: find, with: replacement, options: options
+            )
+        }
         return count
     }
 
