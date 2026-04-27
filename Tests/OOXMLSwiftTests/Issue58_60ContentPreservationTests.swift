@@ -1132,6 +1132,53 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         )
     }
 
+    /// §2.33-CONTENT (B-CONT-2-CONT — R2 finding) — `<w:delText>` CONTENT
+    /// survives round-trip, not just the opening tag.
+    ///
+    /// The original §2.33 test only counts opening tags, which passed even
+    /// after TIER-0 introduced an empty-content regression. R2 verify caught
+    /// this: parseRun's `<w:t>` loop never sees `<w:delText>`, so run.text="".
+    /// With "delText" in recognizedRunChildren, rawElements is empty too.
+    /// Writer gate `!run.text.isEmpty || (run.rawElements?.isEmpty ?? true)`
+    /// evaluates `false || true` → emits synthetic `<w:delText></w:delText>`
+    /// with empty content. Deleted text silently destroyed.
+    func testDelTextContentPreservedThroughRoundTrip() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+        <w:p>
+        <w:del w:id="1" w:author="tester" w:date="2026-04-27T00:00:00Z">
+        <w:r><w:delText>deleted-content-marker-xyz</w:delText></w:r>
+        </w:del>
+        </w:p>
+        </w:body>
+        </w:document>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont2cont-content-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocx(documentXML: documentXML, to: inURL)
+
+        var doc = try DocxReader.read(from: inURL)
+        doc.modifiedParts.insert("word/document.xml")
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue59-bcont2cont-content-out-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: outURL) }
+        try DocxWriter.write(doc, to: outURL)
+
+        let outDocXML = try Self.readDocumentXMLString(from: outURL)
+        XCTAssertTrue(
+            outDocXML.contains("deleted-content-marker-xyz"),
+            "<w:delText> CONTENT SHALL survive round-trip — not just the opening tag "
+            + "(B-CONT-2-CONT — R2 finding: TIER-0 fix removed delText from rawElements path; "
+            + "writer's synthetic-emission gate then emits empty <w:delText></w:delText> when "
+            + "run.text is empty AND rawElements is empty/nil). Output XML excerpt:\n"
+            + "\(outDocXML.prefix(2000))"
+        )
+    }
+
     /// §2.34 (B-CONT-2 TIER-0) — multiple `<w:del>` blocks each containing
     /// whitespace `<w:delText>` round-trip without counter desync.
     func testDeleteTextCounterStaysSyncedAcrossMultipleDels() throws {
