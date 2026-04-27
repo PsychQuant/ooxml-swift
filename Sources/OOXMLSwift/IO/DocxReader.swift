@@ -1144,24 +1144,34 @@ public struct DocxReader {
                 paragraph.smartTags.append(
                     SmartTagBlock(rawXML: childElement.xmlString, position: childPosition)
                 )
+                // v0.19.12+ (#59 B-CONT-2 P0, R2 finding): scanner counts inner
+                // `<w:t>` elements during pre-scan; parser doesn't descend into
+                // raw-carrier. Advance counter to keep alignment.
+                Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
 
             case "customXml":
                 // v0.19.0+ (#56) Phase 4: custom XML wrapper raw-carrier.
                 paragraph.customXmlBlocks.append(
                     CustomXmlBlock(rawXML: childElement.xmlString, position: childPosition)
                 )
+                // v0.19.12+ (#59 B-CONT-2 P0): see smartTag case.
+                Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
 
             case "dir":
                 // v0.19.0+ (#56) Phase 4: directional override (RTL / LTR) wrapper.
                 paragraph.bidiOverrides.append(
                     BidiOverrideBlock(element: .dir, rawXML: childElement.xmlString, position: childPosition)
                 )
+                // v0.19.12+ (#59 B-CONT-2 P0): see smartTag case.
+                Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
 
             case "bdo":
                 // v0.19.0+ (#56) Phase 4: bidirectional override wrapper.
                 paragraph.bidiOverrides.append(
                     BidiOverrideBlock(element: .bdo, rawXML: childElement.xmlString, position: childPosition)
                 )
+                // v0.19.12+ (#59 B-CONT-2 P0): see smartTag case.
+                Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
 
             case "bookmarkStart":
                 // v0.19.0+ (PsychQuant/che-word-mcp#56) Phase 2: source-side
@@ -1500,6 +1510,11 @@ public struct DocxReader {
                 children.append(.rawBlockElement(
                     RawElement(name: childElement.localName ?? "unknown", xml: childElement.xmlString)
                 ))
+                // v0.19.12+ (#59 B-CONT-2 P0, Codex finding): mirror of body
+                // raw fallback fix — scanner counts inner `<w:t>` during pre-scan
+                // for container parts (header/footer/footnote/endnote), but
+                // parser doesn't descend into raw block elements. Advance counter.
+                Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
             }
         }
         return children
@@ -1644,6 +1659,11 @@ public struct DocxReader {
                 let raw = childElement.xmlString
                 rawChildren.append(raw)
                 children.append(.rawXML(raw))
+                // v0.19.12+ (#59 B-CONT-2 P0, R2 finding): nested non-`<w:r>`
+                // hyperlink children (e.g., `<w:fldSimple>`, `<mc:AlternateContent>`,
+                // `<w:smartTag>`) are stored as raw XML — parser doesn't descend.
+                // Scanner counts inner `<w:t>`; advance counter to keep alignment.
+                Self.advanceWhitespaceCounter(forSkippedXML: raw)
             }
         }
 
@@ -1731,6 +1751,13 @@ public struct DocxReader {
             guard let childElement = child as? XMLElement else { continue }
             if childElement.localName == "r" {
                 runs.append(try parseRun(from: childElement, relationships: relationships))
+            } else {
+                // v0.19.12+ (#59 B-CONT-2 P0, R2 finding): non-`<w:r>` children
+                // (e.g., nested `<mc:AlternateContent>`, `<w:fldSimple>`) are
+                // silently skipped here. This is an independent content-loss
+                // bug, but at minimum advance the whitespace counter so any
+                // inner `<w:t>` doesn't desync subsequent overlay lookups.
+                Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
             }
         }
 
@@ -1844,7 +1871,20 @@ public struct DocxReader {
         // Recognized typed kinds are skipped because they're already captured
         // into typed fields above. Source-document order is preserved by
         // walking children sequentially.
-        let recognizedRunChildren: Set<String> = ["rPr", "t", "drawing", "oMath", "oMathPara"]
+        //
+        // v0.19.12+ (#59 B-CONT-2 P0): "delText" must be in this set. When
+        // parseRun is called for a `<w:r>` inside `<w:del>` (DocxReader.swift
+        // line ~998), the explicit delText loop at line ~970-993 already
+        // consumes the `<w:delText>` element via the WhitespaceOverlay
+        // delTextCounter and assembles deletedText. Without "delText" in
+        // recognizedRunChildren, the rawElements loop below ALSO sees the
+        // delText, captures it into Run.rawElements, AND advances delTextCounter
+        // again — counter desyncs by N per <w:del> with N delText elements.
+        // Sub-stack B-CONT 6-AI verify (R5 finding, confirmed by §2.34 test).
+        // Note: writer-side duplicate emission is prevented by Paragraph.swift:787
+        // gate (`!run.text.isEmpty || (run.rawElements?.isEmpty ?? true)`) which
+        // skips explicit `<w:delText>` when rawElements covers it.
+        let recognizedRunChildren: Set<String> = ["rPr", "t", "delText", "drawing", "oMath", "oMathPara"]
         var collectedRawElements: [RawElement] = []
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement,
