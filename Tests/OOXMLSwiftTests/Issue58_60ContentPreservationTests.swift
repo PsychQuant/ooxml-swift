@@ -380,6 +380,117 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
             "synthetic fixture sanity: 2 <w:bookmarkStart> SHALL survive in output header; got \(Self.countBookmarkStartElements(in: headerOut))")
     }
 
+    // MARK: - Sub-stack A-CONT-3: deleteBookmark persistence + paragraph-level container coverage + insertBookmark symmetry
+
+    /// §1.39 — `deleteBookmark` for header body-level bookmark SHALL persist to disk.
+    /// Pre-A-CONT-3 `Document.swift:2067` does `modifiedParts.insert(headers[i].fileName)`
+    /// which inserts BASENAME (`"header1.xml"`); writer overlay-mode dirty-gate at
+    /// `DocxWriter.swift:141` checks `dirty.contains("word/\(header.fileName)")` —
+    /// looks for FULL PATH (`"word/header1.xml"`). Format mismatch → writer skips
+    /// re-emitting → deletion silently lost on disk.
+    func testDeleteBookmarkInHeaderPersistsToDisk() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body><w:p><w:r><w:t>body</w:t></w:r></w:p></w:body>
+        </w:document>
+        """
+        let headerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:bookmarkStart w:id="9" w:name="hdrBookmark"/>
+        <w:p><w:r><w:t>x</w:t></w:r></w:p>
+        <w:bookmarkEnd w:id="9"/>
+        </w:hdr>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont3-delhdr-in-\(UUID().uuidString).docx")
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont3-delhdr-out-\(UUID().uuidString).docx")
+        defer {
+            try? FileManager.default.removeItem(at: inURL)
+            try? FileManager.default.removeItem(at: outURL)
+        }
+        try buildMinimalDocxWithHeader(documentXML: documentXML, headerXML: headerXML, headerRId: "rId10", to: inURL)
+
+        var doc = try DocxReader.read(from: inURL)
+        try doc.deleteBookmark(name: "hdrBookmark")
+        try DocxWriter.write(doc, to: outURL)
+
+        let outHeaderXML = try Self.readPartXMLString(from: outURL, partPath: "word/header1.xml")
+        XCTAssertFalse(
+            outHeaderXML.contains("hdrBookmark"),
+            "header bookmark deletion SHALL persist to disk (A-CONT-3 P0 #1 — modifiedParts path mismatch silently dropped change). Header still contains:\n\(outHeaderXML)"
+        )
+    }
+
+    /// §1.41 — `getBookmarks()` SHALL surface paragraph-level bookmarks from
+    /// container paragraphs (not just body-level container markers).
+    /// Pre-A-CONT-3 `collectBodyLevelBookmarkNamesRecursive` skipped `.paragraph`
+    /// cases entirely — paragraph-level container bookmarks (the more common
+    /// case) were invisible to MCP `list_bookmarks`.
+    func testGetBookmarksSurfacesContainerParagraphLevelBookmarks() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body><w:p><w:r><w:t>body</w:t></w:r></w:p></w:body>
+        </w:document>
+        """
+        let headerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:p><w:bookmarkStart w:id="50" w:name="paraInHdr"/><w:bookmarkEnd w:id="50"/><w:r><w:t>x</w:t></w:r></w:p>
+        </w:hdr>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont3-paracov-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocxWithHeader(documentXML: documentXML, headerXML: headerXML, headerRId: "rId10", to: inURL)
+
+        let doc = try DocxReader.read(from: inURL)
+        let names = doc.getBookmarks().map { $0.name }
+        XCTAssertTrue(
+            names.contains("paraInHdr"),
+            "paragraph-level bookmark inside header SHALL be surfaced by getBookmarks() (A-CONT-3 P0 #2); got \(names)"
+        )
+    }
+
+    /// §1.42 — `insertBookmark` SHALL detect duplicate names across all 5 part
+    /// types (body + headers + footers + footnotes + endnotes), not just body.
+    /// Pre-A-CONT-3 `insertBookmark` only walked body for duplicate detection;
+    /// after A-CONT-2 a TOC anchor in header survived `insertBookmark(name: ...)`
+    /// and produced silent name collision.
+    func testInsertBookmarkDuplicateNameInContainerThrows() throws {
+        let documentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body><w:p><w:r><w:t>body</w:t></w:r></w:p></w:body>
+        </w:document>
+        """
+        let headerXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:bookmarkStart w:id="3" w:name="dupName"/>
+        <w:p><w:r><w:t>x</w:t></w:r></w:p>
+        <w:bookmarkEnd w:id="3"/>
+        </w:hdr>
+        """
+
+        let inURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue58-acont3-dup-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: inURL) }
+        try buildMinimalDocxWithHeader(documentXML: documentXML, headerXML: headerXML, headerRId: "rId10", to: inURL)
+
+        var doc = try DocxReader.read(from: inURL)
+        // Attempt to insert a bookmark with the same name targeting body para 0.
+        XCTAssertThrowsError(
+            try doc.insertBookmark(name: "dupName", at: 0),
+            "insertBookmark SHALL throw on duplicate name across all 5 part types (A-CONT-3 P0 #3); did not throw"
+        )
+    }
+
     // MARK: - Cross-cutting matrix-pin (incremental — sub-stack A initial version)
 
     /// §1.7 / §2.7 / §3.9 — Cross-cutting content-equality invariant against
