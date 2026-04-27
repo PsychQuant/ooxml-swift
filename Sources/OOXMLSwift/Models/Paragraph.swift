@@ -121,6 +121,18 @@ public struct ParagraphProperties: Equatable {
     public var border: ParagraphBorder?        // 段落邊框
     public var shading: ParagraphShading?      // 段落底色
 
+    /// v0.20.2+ (#65 sub-stack D): paragraph-mark RunProperties — the
+    /// `<w:rPr>` direct child of `<w:pPr>` that controls pilcrow ¶ glyph
+    /// formatting (font, size, color, language, kerning) per ECMA-376
+    /// §17.3.1.27 CT_PPrBase. Schema is identical to run-level CT_RPr,
+    /// so parser reuses `parseRunProperties` verbatim and emit reuses
+    /// `RunProperties.toXML()` — typed extraction (rFonts 4-axis, noProof,
+    /// kern, lang 3-axis) and raw passthrough (rawChildren for w14:* effects)
+    /// come for free from sub-stack C. Pre-fix this nested rPr was silently
+    /// dropped at parse time, accounting for ~50% of the residual `<w:lang>`
+    /// loss in NTPU thesis fixture round-trip (16.66% → < 5% target).
+    public var markRunProperties: RunProperties?
+
     public init() {}
 
     /// 合併格式（覆蓋非 nil 值）
@@ -136,6 +148,7 @@ public struct ParagraphProperties: Equatable {
         if let sectionBreak = other.sectionBreak { self.sectionBreak = sectionBreak }
         if let border = other.border { self.border = border }
         if let shading = other.shading { self.shading = shading }
+        if let markRunProperties = other.markRunProperties { self.markRunProperties = markRunProperties }
     }
 }
 
@@ -894,6 +907,22 @@ extension ParagraphProperties {
         // 段落底色
         if let shading = shading {
             parts.append(shading.toXML())
+        }
+
+        // v0.20.2+ (#65 sub-stack D): paragraph-mark <w:rPr> emitted after
+        // typed pPr children (pStyle, jc, spacing, ind, numPr, keep*, border,
+        // shading) and before closing </w:pPr>. ECMA-376 §17.3.1.27 places
+        // <w:rPr> near the end of CT_PPrBase children; Word tolerates this
+        // position. RunProperties.toXML() returns the inner content (rStyle,
+        // b, rFonts, lang, rawChildren, etc.) without the outer wrapper, so
+        // we wrap with <w:rPr>...</w:rPr> here. Skip emission when nil OR
+        // when the inner content is empty — matches the "no synthetic empty
+        // <w:rPr/>" gate discipline established in sub-stack B-CONT-2.
+        if let markProps = markRunProperties {
+            let inner = markProps.toXML()
+            if !inner.isEmpty {
+                parts.append("<w:rPr>\(inner)</w:rPr>")
+            }
         }
 
         return parts.joined()

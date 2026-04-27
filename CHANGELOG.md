@@ -6,6 +6,74 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.20.2] - 2026-04-27
+
+### Added — Sub-stack D of paragraph-level content-equality (closes #65)
+
+`ParagraphProperties` now extracts and round-trips the `<w:rPr>` direct child of `<w:pPr>` (paragraph-mark formatting per ECMA-376 §17.3.1.27 CT_PPrBase) — the rPr that controls pilcrow ¶ glyph appearance (font, size, color, language tag, kerning).
+
+#### What was lost pre-fix
+
+`parseParagraphProperties` only extracted typed `<w:pPr>` direct children (pStyle, jc, spacing, ind, numPr). The nested `<w:rPr>` was silently dropped at parse time — accounting for ~50% of the residual `<w:lang>` loss in the NTPU thesis fixture round-trip.
+
+#### How it's fixed
+
+Reuse `parseRunProperties(from:)` verbatim. The schema is identical to run-level CT_RPr, so all of sub-stack C's typed extraction (`RFontsProperties` 4-axis, `<w:noProof>`, `<w:kern>`, `LanguageProperties` 3-axis) and raw passthrough (`rawChildren` for `w14:*` effects like `<w14:textOutline>`, `<w14:glow>`, `<w14:textFill>`) come for free. Zero schema duplication.
+
+```swift
+// New field on ParagraphProperties (Models/Paragraph.swift)
+public var markRunProperties: RunProperties?
+
+// Parser extension (IO/DocxReader.swift parseParagraphProperties)
+if let markRPr = element.elements(forName: "w:rPr").first {
+    props.markRunProperties = parseRunProperties(from: markRPr)
+}
+
+// Writer emits inside <w:pPr>...</w:pPr> with empty-gate discipline
+if let markProps = markRunProperties, !markProps.toXML().isEmpty {
+    parts.append("<w:rPr>\(markProps.toXML())</w:rPr>")
+}
+```
+
+#### Measured impact (NTPU thesis fixture, post-D)
+
+| Preservation class | Pre-D | Post-D | Improvement |
+|---|---|---|---|
+| `<w:lang ` retention | 50% | **98.89%** | +48.89 pp |
+| `<w:rFonts>` retention | 88% | 98.77% | +10.77 pp |
+| `<w:noProof>` retention | 92% | 100% | +8 pp |
+| `<w:kern>` retention | 84% | 99.93% | +15.93 pp |
+| `document.xml` size loss | 16.66% | **10.95%** | -5.71 pp |
+
+#### Matrix-pin floor ratchets
+
+`testDocumentContentEqualityInvariant` ratchets in lockstep:
+- `<w:lang ` floor: 0.45 → **0.95**
+- `<w:rFonts` floor: 0.85 → **0.95**
+- `<w:noProof` floor: 0.90 → **0.95**
+- `<w:kern ` floor: 0.80 → **0.95**
+- `sizeLossRatio` ceiling: 0.175 → **0.12**
+- `w14:` floor unchanged (0.04) — sub-stack E (#66) ratchets to 0.95
+
+Any future regression in run-level OR paragraph-level RunProperties handling now fails the matrix-pin.
+
+#### Tests added (4)
+
+- `testParagraphMarkRunPropertiesPreservedThroughRoundtrip` — payload-parity for `<w:lang>` 3-axis with structural assertion that emission stays inside `<w:pPr>`
+- `testParagraphMarkRFontsFourAxisPreservedThroughRoundtrip` — 4-axis font preservation for pilcrow CJK glyph
+- `testParagraphMarkW14NamespaceEffectsPreservedAsRawChildren` — `<w14:textOutline>` raw-children passthrough in pPr context
+- `testParagraphWithoutMarkRunPropertiesEmitsNoRPr` — negative test with full-pPr range-slicing assertion (catches synthetic empty `<w:rPr>` after typed children)
+
+Suite: 682 → 686 tests pass / 0 failures / 1 skipped.
+
+#### Architecture context
+
+Sub-stack D of the `che-word-mcp-paragraph-level-content-equality` Spectra change (bundles #65 + #66). The cross-cutting matrix-pin established in sub-stack C is ratcheted, not duplicated — the architectural principle "if not typed, preserve as raw" extends from run-level (sub-stack C) to paragraph-mark level (sub-stack D). Sub-stack E (#66) will extend to paragraph w14:paraId/textId attributes, completing the path to `< 5%` round-trip loss.
+
+#### Backward compatibility
+
+`markRunProperties` is optional (default nil). All pre-existing callers continue to work — paragraphs without source pPr/rPr emit no synthetic empty wrappers thanks to the writer's `!inner.isEmpty` gate.
+
 ## [0.20.1] - 2026-04-27
 
 ### Fixed — Sub-stack C-CONT of #58/#59/#60: trim `recognizedRprChildren` to actually-extracted set

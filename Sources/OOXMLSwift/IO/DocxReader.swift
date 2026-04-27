@@ -1377,6 +1377,18 @@ public struct DocxReader {
             props.pageBreakBefore = true
         }
 
+        // v0.20.2+ (#65 sub-stack D): paragraph-mark <w:rPr> direct child of
+        // <w:pPr> per ECMA-376 §17.3.1.27 CT_PPrBase. Schema is identical to
+        // run-level CT_RPr — reuse `parseRunProperties` verbatim so all
+        // typed extraction (rFonts 4-axis, noProof, kern, lang 3-axis) and
+        // raw passthrough (rawChildren for w14:* effects) come for free from
+        // sub-stack C. Pre-fix this nested rPr was silently dropped at parse
+        // time, accounting for ~50% of residual <w:lang> loss in the NTPU
+        // thesis fixture round-trip.
+        if let markRPr = element.elements(forName: "w:rPr").first {
+            props.markRunProperties = parseRunProperties(from: markRPr)
+        }
+
         return props
     }
 
