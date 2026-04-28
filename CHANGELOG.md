@@ -6,6 +6,65 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.21.0] - 2026-04-28
+
+### Added — wrapCaptionSequenceFields lib API (Refs PsychQuant/che-word-mcp#62)
+
+New public method on `WordDocument` that bulk-converts plain-text caption number portions into SEQ-field-bearing runs. Unblocks `insert_table_of_figures` / `insert_table_of_tables` on documents pasted from external sources (LaTeX-converted Word, Google Docs, Pandoc) where caption numbering is plain text instead of real Word SEQ fields.
+
+#### Public surface
+
+```swift
+extension WordDocument {
+    public mutating func wrapCaptionSequenceFields(
+        pattern: NSRegularExpression,
+        sequenceName: String,
+        format: SequenceField.SequenceFormat = .arabic,
+        scope: TextScope = .body,
+        insertBookmark: Bool = false,
+        bookmarkTemplate: String? = nil
+    ) throws -> WrapCaptionResult
+}
+```
+
+New supporting types:
+
+- `enum TextScope: Equatable, Sendable { case body, all }` — shared scope vocabulary mirroring `updateAllFields(isolatePerContainer:)` semantics.
+- `struct WrapCaptionResult` — per-paragraph structured result with `matchedParagraphs`, `fieldsInserted`, `paragraphsModified: [Int]` (top-level body-child indices), and `skipped: [SkippedParagraph]`.
+- `struct SkippedParagraph` — `paragraphIndex` + `reason` + optional `container` (reserved for `.all` scope).
+- `enum WrapCaptionError: Error, Equatable` — `patternMissingCaptureGroup(actual:)`, `bookmarkTemplateMissing`, `scopeNotImplemented(TextScope)`.
+
+#### Phase 1 scope: `.body` only
+
+`scope: .all` (cross-container — headers/footers/footnotes/endnotes) throws `WrapCaptionError.scopeNotImplemented(.all)` and lands in v0.21.1 alongside the MCP wrapper integration test. Phase 1's body-only walk recurses into `.table` (rows × cells × paragraphs + nestedTables) and block-level `.contentControl` children, mirroring `Document.replaceInParagraphSurfaces` surface coverage.
+
+#### Idempotency contract
+
+Re-running `wrapCaptionSequenceFields` on an already-wrapped paragraph reports the paragraph in `WrapCaptionResult.skipped` with `reason: "already wraps SEQ <name>"` and **never** double-wraps. Detection covers both:
+
+- Typed `FieldSimple` SEQ emissions (where `instr` contains `"SEQ <name>"`)
+- `Run.rawXML`-embedded 5-run `<w:fldChar>` blocks (the emission style `insertCaption` and this method use)
+
+The match-counting walker uses a "rendered" view of the paragraph that inlines existing SEQ `cachedResult` values (extracted from `<w:t>N</w:t>` inside the fldChar block), so the regex can still recognize captions like "Figure 1." after the digit has been moved into a SEQ field's cached result.
+
+#### Bookmark wrap (opt-in)
+
+Default off — passing 23 plain captions through with `insertBookmark: false` adds zero bookmarks (avoids polluting `list_bookmarks`). When `insertBookmark: true`, callers MUST also pass `bookmarkTemplate` containing the literal `${number}` placeholder; the method substitutes the captured numeric and emits `<w:bookmarkStart w:name="<substituted>" w:id="<unique-id>">` / `<w:bookmarkEnd w:id="<same-id>">` immediately around the SEQ run. Unique bookmark IDs come from the existing `WordDocument.nextBookmarkId` counter.
+
+#### Capture group contract
+
+The pattern MUST contain exactly one capture group whose match becomes the SEQ field's `cachedResult` (preserving the user-typed numeral so Word's first-open render shows the original numbering before F9). Patterns with 0 or ≥2 capture groups throw `WrapCaptionError.patternMissingCaptureGroup(actual:)` BEFORE any body mutation.
+
+#### Reported indices
+
+`paragraphsModified` and `SkippedParagraph.paragraphIndex` carry **top-level `body.children` indices**. When a matched paragraph is nested inside a `.table` cell or block-level `.contentControl`, the reported index points to the containing top-level BodyChild — same semantic as `findBodyChildContainingText` (#68). One body child can appear multiple times in `paragraphsModified` if multiple nested paragraphs inside it matched.
+
+#### Tests
+
+`Tests/OOXMLSwiftTests/WrapCaptionSequenceFieldsTests.swift` — 10 sub-tests covering body-scope wrap, idempotent re-run (rendered-text matcher), zero/two capture group rejection, bookmark wrap with template substitution, idempotency over both fldSimple and rawXML emissions, cachedResult preservation for first-open render, table-cell anchor wrap, and `.all` scope deferral. All tests green; full suite 706/706 pass.
+
+Phase 2 (the `wrap_caption_seq` MCP tool in `che-word-mcp`) lands in v3.17.0 once this lib release is available.
+
 ## [0.20.6] - 2026-04-28
 
 ### Fixed — Text anchor lookup recurses into table cells + block-level SDT (Refs PsychQuant/che-word-mcp#68)
