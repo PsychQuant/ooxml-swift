@@ -16,18 +16,23 @@ import XCTest
 /// v0.19.1 added `case "pPr": break` as a hot-fix. v0.21.1 (#4) hardens
 /// the guard with two layers:
 ///
-/// 1. **Walker entry whitelist** (`alreadyConsumed: Set<String>`) — pPr
+/// 1. **Walker entry whitelist** (`walkerPreConsumed: Set<String>`) — pPr
 ///    is filtered BEFORE entering the switch, structurally guaranteeing
 ///    it never reaches `unrecognizedChildren`.
 /// 2. **`#if DEBUG` invariant assert** at the catch-all `default` append
 ///    site — runtime tripwire if anyone ever removes both the whitelist
 ///    AND the explicit `case` (defense in depth).
 ///
-/// These tests assert the OBSERVABLE invariant — no pPr leaks into
-/// `unrecognizedChildren`, and the round-trip emits exactly one `<w:pPr>`
-/// block. They will pass with the v0.19.1 hot-fix alone OR with the
-/// v0.21.1 whitelist; their job is to catch regression if either layer
-/// is silently removed in the future.
+/// **Coverage claim (honest):** these observable-invariant tests will fail
+/// only when *both* layers (the v0.19.1 explicit `case "pPr": break` AND
+/// the v0.21.1 whitelist) are silently removed at the same time —
+/// confirmed by counterfactual experiment in the verify report for #4.
+/// Single-layer silent breakage is invisible to the observable-invariant
+/// tests because the surviving layer absorbs the leak. The new positive
+/// `testWalkerPreConsumedContainsPPr` below closes that gap by asserting
+/// the whitelist constant directly, so a typo or accidental clear of
+/// `walkerPreConsumed` is caught even when the explicit `case` still
+/// holds.
 final class Issue4PPrRegressionGuardTests: XCTestCase {
 
     // MARK: - Helpers
@@ -150,19 +155,39 @@ final class Issue4PPrRegressionGuardTests: XCTestCase {
     /// but it makes the regression-guard intent explicit for a future reader
     /// who runs this file in isolation.
     func testRegressionGuardIntentDocumented() {
-        // The 3 tests above collectively form the regression guard contract:
+        // The 4 functional tests above collectively form the regression guard:
         //   #1 — pPr never leaks into unrecognizedChildren
         //   #2 — round-trip emits exactly one <w:pPr>
         //   #3 — invariant holds when sibling runs share the paragraph
+        //   #4 — walker whitelist constant `walkerPreConsumed` contains "pPr"
         //
-        // If any of those fail, either:
+        // If any of #1-#3 fail, either:
         //   (a) `case "pPr": break` was removed from DocxReader.parseParagraph
-        //   (b) `alreadyConsumed: Set<String>` whitelist was removed
+        //   (b) `walkerPreConsumed: Set<String>` whitelist was removed
         //   (c) `parseParagraphProperties` is no longer being called
         //   (d) Paragraph.toXMLSortedByPosition emits unrecognizedChildren
         //       items whose name == "pPr" without filtering
         //
+        // If #4 fails, the whitelist itself was silently broken (typo /
+        // accidentally cleared) — caught directly even when the v0.19.1
+        // explicit `case "pPr": break` still absorbs the observable leak.
+        //
         // See: PsychQuant/ooxml-swift#4 + PsychQuant/che-word-mcp#56.
         XCTAssertTrue(true, "Documentation-only test — see comment above")
+    }
+
+    // MARK: - 5. Whitelist content sanity (closes single-layer regression gap)
+
+    /// Direct assertion on the whitelist constant. Catches the case where the
+    /// observable-invariant tests #1-#3 still pass (because the v0.19.1 explicit
+    /// `case "pPr": break` absorbs the leak) but the new whitelist mechanism
+    /// has been silently broken — typo `"pPR"`, accidentally cleared to `[]`,
+    /// renamed without update, etc. Verify report for #4 documented this
+    /// single-layer gap as Experiment B; this test closes it.
+    func testWalkerPreConsumedContainsPPr() {
+        XCTAssertTrue(
+            DocxReader.walkerPreConsumed.contains("pPr"),
+            "DocxReader.walkerPreConsumed must contain \"pPr\" to keep the structural pre-switch filter active. Without this, the v0.19.1 explicit `case` becomes the sole defense — defeating the v0.21.1 (#4) defense-in-depth design."
+        )
     }
 }
