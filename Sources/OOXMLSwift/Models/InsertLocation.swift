@@ -159,18 +159,76 @@ extension WordDocument {
     /// `<mc:AlternateContent>` silently threw `textNotFound`. Now mirrors the
     /// surface coverage of `Document.replaceInParagraphSurfaces` so the LOOKUP
     /// path matches the REPLACE path.
+    /// Returns the **top-level** `body.children` index of the BodyChild whose
+    /// any descendant paragraph contains `needle` for the `nthInstance`-th
+    /// match, or `nil` if not found / inputs invalid.
+    ///
+    /// **Counting rule (#68)**: each top-level BodyChild that contains the
+    /// needle ANYWHERE inside it counts as ONE `nthInstance` (e.g., a table
+    /// with the needle in 5 cells = 1 instance, not 5). This mirrors the
+    /// pre-#68 behavior where multi-occurrence within ONE top-level
+    /// `.paragraph` also counted as 1.
+    ///
+    /// **Insert-position consequence (#68 — caller `.afterText` / `.beforeText`)**:
+    /// returned idx is top-level, so when needle is inside a `.table` /
+    /// `.contentControl`, the new paragraph lands AT BODY LEVEL adjacent to
+    /// the entire table/SDT — NOT inside the table cell or SDT child list.
+    /// This is intentional: `.intoTableCell` exists for inside-cell inserts.
     private func findBodyChildContainingText(_ needle: String, nthInstance: Int) -> Int? {
-        guard nthInstance >= 1 else { return nil }
+        guard nthInstance >= 1, !needle.isEmpty else { return nil }
         var seen = 0
         for (i, child) in body.children.enumerated() {
-            if case .paragraph(let para) = child {
-                if para.flattenedDisplayText().contains(needle) {
-                    seen += 1
-                    if seen == nthInstance { return i }
-                }
+            if Self.bodyChildContainsText(child, needle: needle) {
+                seen += 1
+                if seen == nthInstance { return i }
             }
         }
         return nil
+    }
+
+    /// PsychQuant/che-word-mcp#68 — recursive descent for text-anchor lookup.
+    /// Returns `true` if any paragraph anywhere inside `child` contains `needle`
+    /// (via `Paragraph.flattenedDisplayText()`, which already covers inline SDT
+    /// per #63). Caller (`findBodyChildContainingText`) treats one matching
+    /// top-level BodyChild as ONE `nthInstance` count regardless of how many
+    /// nested paragraphs match — consistent with pre-fix top-level paragraph
+    /// behavior where multi-occurrence within one paragraph counts once.
+    ///
+    /// Surfaces walked:
+    /// - `.paragraph` — direct text via `flattenedDisplayText()`
+    /// - `.table` — `rows[].cells[].paragraphs[]` + `cells[].nestedTables[]`
+    ///   (parser depth-limited to 5; recursion depth bounded by parser)
+    /// - `.contentControl(_, children:)` — recurse on each child via this helper
+    /// - `.bookmarkMarker`, raw catch-all — no text content; returns false
+    private static func bodyChildContainsText(_ child: BodyChild, needle: String) -> Bool {
+        switch child {
+        case .paragraph(let para):
+            return para.flattenedDisplayText().contains(needle)
+        case .table(let table):
+            return tableContainsText(table, needle: needle)
+        case .contentControl(_, let kids):
+            return kids.contains { bodyChildContainsText($0, needle: needle) }
+        case .bookmarkMarker:
+            return false
+        case .rawBlockElement:
+            return false
+        }
+    }
+
+    /// Walks every paragraph in every cell of every row, then recurses into
+    /// `nestedTables`. Returns true on first match (short-circuit).
+    private static func tableContainsText(_ table: Table, needle: String) -> Bool {
+        for row in table.rows {
+            for cell in row.cells {
+                for para in cell.paragraphs {
+                    if para.flattenedDisplayText().contains(needle) { return true }
+                }
+                for nested in cell.nestedTables {
+                    if tableContainsText(nested, needle: needle) { return true }
+                }
+            }
+        }
+        return false
     }
 }
 

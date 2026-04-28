@@ -6,6 +6,45 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [0.20.6] - 2026-04-28
+
+### Fixed — Text anchor lookup recurses into table cells + block-level SDT (Refs PsychQuant/che-word-mcp#68)
+
+`InsertLocation.findBodyChildContainingText` (used by `.afterText` / `.beforeText` resolution in `insertParagraph`) previously only iterated `.paragraph` BodyChild cases. Anchor text inside a table cell or block-level `<w:sdt>` was silently skipped → `textNotFound` thrown even though the text was present. Real-world thesis docs (figure / table captions inside table cells) became unanchorable.
+
+#### What changed
+
+- New private static helper `bodyChildContainsText(_:needle:)` walks `.paragraph` (via `flattenedDisplayText()`, post-#63 inline-SDT coverage), `.table` (via `tableContainsText` over `rows[].cells[].paragraphs` + `cell.nestedTables`), and `.contentControl(_, children:)` (recursive on the children list).
+- `findBodyChildContainingText` now uses this helper for the per-BodyChild check; counting rule preserved (1 top-level BodyChild containing the needle = 1 `nthInstance` count, regardless of how many nested paragraphs match — same semantic as pre-fix multi-occurrence within ONE paragraph).
+- Returned idx is still the TOP-LEVEL `body.children` index, so `.afterText` / `.beforeText` insert at body level adjacent to the entire containing table/SDT, not inside its cells/children. (Use `.intoTableCell` for inside-cell inserts.)
+- New empty-needle guard: `findBodyChildContainingText` returns nil for `needle.isEmpty` (pre-fix `String.contains("")` returned true → silent insert at idx 1).
+
+#### Tests
+
+10 new sub-tests in `Issue68TextAnchorTraversalTests`:
+- 1-level table cell paragraph
+- Nested table (`cell.nestedTables`) paragraph
+- Block-level SDT child paragraph
+- Nested block SDT (SDT > SDT > paragraph)
+- Mixed nesting (SDT > table > cell > paragraph)
+- nthInstance ordering across paragraph + table + SDT
+- Multi-cell counting pin (1 table with 3 needle cells = 1 instance)
+- Empty needle throws `textNotFound`
+- Pre-existing inline SDT path (regression pin via `flattenedDisplayText`)
+- `textNotFound` still throws for absent needle
+
+Suite: `696 → 706` (+10, 0 fail / 1 skip).
+
+#### Out of scope (verify-68 follow-ups)
+
+- **Parser-side SDT depth limit**: `DocxReader.parseBodyChildren` recurses into `<w:sdt>` children with no explicit depth cap (table nesting is parser-depth-limited to 5 at `Table.swift:80`). Verify-68 DA flagged as P1 pre-existing risk. The new `bodyChildContainsText` adds 2 stack frames per SDT level, amplifying the existing surface but not introducing it. Track separately.
+- **Headers / footers / footnotes / endnotes**: those parts have their own `bodyChildren` collections (`Footnote.swift:121`, etc.); the helper only walks `body.children`. Anchor text inside headers/footers/footnote bodies is still unfindable. #68 scope was explicitly body-level traversal; cross-part anchor lookup is a separate enhancement.
+- **`.bookmarkMarker` / `.rawBlockElement` (vendor extensions)**: silently return false. Acceptable since vendor extension content is opaque by design.
+
+#### Backward compatibility
+
+Strict superset of pre-fix behavior: anchor lookup now succeeds in MORE cases (table cells + block SDT). No callers should depend on the prior `textNotFound` for those locations. No public API change.
+
 ## [0.20.3] - 2026-04-27
 
 ### Added — Sub-stack E of paragraph-level content-equality (closes #66)
