@@ -159,8 +159,23 @@ extension WordDocument {
     /// `<mc:AlternateContent>` silently threw `textNotFound`. Now mirrors the
     /// surface coverage of `Document.replaceInParagraphSurfaces` so the LOOKUP
     /// path matches the REPLACE path.
+    /// Returns the **top-level** `body.children` index of the BodyChild whose
+    /// any descendant paragraph contains `needle` for the `nthInstance`-th
+    /// match, or `nil` if not found / inputs invalid.
+    ///
+    /// **Counting rule (#68)**: each top-level BodyChild that contains the
+    /// needle ANYWHERE inside it counts as ONE `nthInstance` (e.g., a table
+    /// with the needle in 5 cells = 1 instance, not 5). This mirrors the
+    /// pre-#68 behavior where multi-occurrence within ONE top-level
+    /// `.paragraph` also counted as 1.
+    ///
+    /// **Insert-position consequence (#68 — caller `.afterText` / `.beforeText`)**:
+    /// returned idx is top-level, so when needle is inside a `.table` /
+    /// `.contentControl`, the new paragraph lands AT BODY LEVEL adjacent to
+    /// the entire table/SDT — NOT inside the table cell or SDT child list.
+    /// This is intentional: `.intoTableCell` exists for inside-cell inserts.
     private func findBodyChildContainingText(_ needle: String, nthInstance: Int) -> Int? {
-        guard nthInstance >= 1 else { return nil }
+        guard nthInstance >= 1, !needle.isEmpty else { return nil }
         var seen = 0
         for (i, child) in body.children.enumerated() {
             if Self.bodyChildContainsText(child, needle: needle) {

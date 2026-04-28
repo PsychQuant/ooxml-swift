@@ -242,6 +242,69 @@ final class Issue68TextAnchorTraversalTests: XCTestCase {
         XCTAssertEqual(p.runs.first?.text, "inserted")
     }
 
+    // MARK: - Verify-68 P3 fixes
+
+    /// Counting rule pin (Verify-68 Logic P2): a single table containing the
+    /// needle in MULTIPLE cells still counts as ONE `nthInstance`. This locks
+    /// in the design choice (1 BodyChild = 1 instance) so future refactors
+    /// can't silently switch to "1 cell paragraph = 1 instance".
+    func testAfterTextOneTableWithMultipleCellsContainingNeedleIsOneInstance() throws {
+        var doc = WordDocument()
+        let cellA = TableCell(paragraphs: [Paragraph(text: "needle in cell A")])
+        let cellB = TableCell(paragraphs: [Paragraph(text: "needle in cell B")])
+        let cellC = TableCell(paragraphs: [Paragraph(text: "needle in cell C")])
+        let row = TableRow(cells: [cellA, cellB, cellC])
+        let table = Table(rows: [row])
+
+        doc.body.children = [
+            .table(table),                                    // instance 1 (single table, 3 cells)
+            .paragraph(Paragraph(text: "needle outside table")), // instance 2
+        ]
+
+        try doc.insertParagraph(
+            Paragraph(text: "after-instance-2"),
+            at: .afterText("needle", instance: 2)
+        )
+
+        // 2nd instance is the trailing paragraph at original idx 1 → insert at idx 2.
+        XCTAssertEqual(doc.body.children.count, 3)
+        guard case .paragraph(let p) = doc.body.children[2] else {
+            XCTFail("Expected paragraph at idx 2; got \(doc.body.children[2])")
+            return
+        }
+        XCTAssertEqual(p.runs.first?.text, "after-instance-2")
+
+        // Sanity: instance 3 must NOT exist (the 3 cells of the table count as 1).
+        XCTAssertThrowsError(try doc.insertParagraph(
+            Paragraph(text: "x"),
+            at: .afterText("needle", instance: 3)
+        ))
+    }
+
+    /// Empty needle MUST NOT match anything (Verify-68 Logic P3 / DA P2).
+    /// Pre-fix `String.contains("")` returns true, silently inserting at idx 1
+    /// (after the first BodyChild). Post-fix: explicit guard returns nil →
+    /// `textNotFound` thrown.
+    func testAfterTextEmptyNeedleThrowsNotFound() {
+        var doc = WordDocument()
+        doc.body.children = [
+            .paragraph(Paragraph(text: "hello")),
+            .paragraph(Paragraph(text: "world")),
+        ]
+
+        XCTAssertThrowsError(try doc.insertParagraph(
+            Paragraph(text: "x"),
+            at: .afterText("", instance: 1)
+        )) { error in
+            if let we = error as? InsertLocationError,
+               case let .textNotFound(searchText: s, instance: _) = we {
+                XCTAssertEqual(s, "")
+            } else {
+                XCTFail("Expected InsertLocationError.textNotFound; got \(error)")
+            }
+        }
+    }
+
     /// Pre-existing: anchor not found anywhere → throws textNotFound.
     func testAfterTextNotFoundStillThrows() {
         var doc = WordDocument()
