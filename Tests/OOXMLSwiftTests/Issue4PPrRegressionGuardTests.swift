@@ -47,17 +47,21 @@ final class Issue4PPrRegressionGuardTests: XCTestCase {
         )
     }
 
-    /// Count occurrences of `<w:pPr` (open tag) in the emitted XML.
-    /// Use the open-tag prefix (no `>` or `/>`) so it matches both empty
-    /// (`<w:pPr/>`) and non-empty (`<w:pPr>...</w:pPr>`) forms.
+    /// Count occurrences of `<w:pPr` open tags in the emitted XML.
+    ///
+    /// Matches `<w:pPr>`, `<w:pPr/>`, and `<w:pPr xmlns:...>` (any opener with
+    /// `>`, `/`, or whitespace immediately following the element name).
+    /// **Does NOT** match `<w:pPrChange>` — the Track Changes element nested
+    /// INSIDE pPr blocks — because the next char `C` is not in `[\s/>]`. See
+    /// PsychQuant/ooxml-swift#16 for the substring-fragility regression that
+    /// motivated this regex.
     private func countPPrOpenTags(in xml: String) -> Int {
-        var count = 0
-        var searchRange = xml.startIndex..<xml.endIndex
-        while let range = xml.range(of: "<w:pPr", range: searchRange) {
-            count += 1
-            searchRange = range.upperBound..<xml.endIndex
+        let pattern = #"<w:pPr[\s/>]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return 0
         }
-        return count
+        let range = NSRange(xml.startIndex..., in: xml)
+        return regex.numberOfMatches(in: xml, range: range)
     }
 
     // MARK: - 1. pPr only — no leak into unrecognizedChildren
@@ -108,6 +112,54 @@ final class Issue4PPrRegressionGuardTests: XCTestCase {
         XCTAssertEqual(
             pPrCount, 1,
             "Round-trip must emit exactly ONE <w:pPr> block. Pre-v0.19.1 the bug emitted two (legacy pPr block + verbatim unrecognizedChildren copy). Output:\n\(xml)"
+        )
+    }
+
+    // MARK: - 2b. Empty <w:pPr/> self-closing form — no leak (#13)
+
+    /// Closes the test gap flagged by [PsychQuant/ooxml-swift#13](https://github.com/PsychQuant/ooxml-swift/issues/13).
+    ///
+    /// Defensive insurance against a hypothetical future "skip empty pPr"
+    /// optimization in `parseParagraphProperties` accidentally re-routing
+    /// the empty form back through the walker's `default` branch.
+    ///
+    /// **Asymmetry vs non-empty pPr (discovered while implementing this
+    /// test; documented per #13):** the round-trip emit DROPS an empty
+    /// `<w:pPr/>` block entirely. `Paragraph.toXMLSortedByPosition` (and
+    /// the legacy emit path) skips emitting `<w:pPr>...</w:pPr>` when
+    /// `paragraph.properties` is all-default. This is OOXML-spec-compliant
+    /// — absence of `<w:pPr>` is semantically equivalent to `<w:pPr/>`
+    /// (both mean "use default paragraph properties") — so the drop is
+    /// information-preserving, not a bug. The non-empty test
+    /// (`testPPrOnlyParagraphRoundTripsExactlyOnePPrBlock`) asserts
+    /// `count == 1` because there's pStyle / jc inside; the empty form
+    /// asserts `count == 0`.
+    ///
+    /// What this test DOES guard against:
+    ///   - Empty pPr leaking into `unrecognizedChildren` (the original
+    ///     #4 / v0.19.0 double-emit bug class, applied to the self-closing
+    ///     form) — would set count > 0 with `name == "pPr"` in the leak.
+    ///   - Future changes that emit `<w:pPr></w:pPr>` (open+close pair)
+    ///     for an all-default pPr — would set count > 0 and signal an
+    ///     emit-side regression.
+    func testEmptyPPrSelfClosingProducesNoUnrecognizedAndDropsEmptyBlock() throws {
+        let xmlSrc = """
+        <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:pPr/>
+        </w:p>
+        """
+
+        let paragraph = try parse(xmlSrc)
+
+        XCTAssertTrue(
+            paragraph.unrecognizedChildren.filter { $0.name == "pPr" }.isEmpty,
+            "Self-closing <w:pPr/> must not leak into unrecognizedChildren."
+        )
+
+        let xml = paragraph.toXML()
+        XCTAssertEqual(
+            countPPrOpenTags(in: xml), 0,
+            "Round-trip of EMPTY <w:pPr/> drops the block — OOXML-equivalent to no pPr at all. If this fails with count > 0 either pPr leaked into unrecognizedChildren OR the emitter started writing all-default pPr (regression). Output:\n\(xml)"
         )
     }
 
