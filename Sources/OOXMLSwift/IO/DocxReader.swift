@@ -13,6 +13,18 @@ public struct DocxReader {
     /// test setup / teardown, not during document parsing.
     public static var debugLoggingEnabled: Bool = false
 
+    /// Direct-child element local names of `<w:p>` that have already been
+    /// consumed by a dedicated parser BEFORE `parseParagraph`'s child walker
+    /// runs (currently just `pPr` via `parseParagraphProperties`). Filtered
+    /// at loop entry so they cannot reach `unrecognizedChildren.append` in
+    /// the `default` branch — see PsychQuant/ooxml-swift#4 (v0.21.1+) for
+    /// the regression-guard rationale and the v0.19.0 → v0.19.1 hot-fix
+    /// history that motivated this structural defense.
+    ///
+    /// Grow this set when adding new walker-pre steps (e.g., a future
+    /// "pre-scan footnoteReference" pass).
+    internal static let walkerPreConsumed: Set<String> = ["pPr"]
+
     // MARK: - Whitespace overlay context (#59 sub-stack B, v0.19.10+)
 
     /// Per-part whitespace recovery context. Class (not struct) so the counter
@@ -879,6 +891,19 @@ public struct DocxReader {
             guard let childElement = child as? XMLElement else { continue }
             defer { childPosition += 1 }
 
+            // v0.21.1+ (#4): walker entry whitelist. Any localName in
+            // `walkerPreConsumed` was already handled by a dedicated parser
+            // BEFORE this loop (currently just `pPr` via
+            // `parseParagraphProperties`); skipping here at loop entry —
+            // BEFORE the switch — guarantees structurally that such elements
+            // can never reach `unrecognizedChildren.append` in the `default`
+            // branch, even if a future maintainer removes the explicit
+            // `case "pPr": break` below. Defer still increments childPosition
+            // so subsequent children retain correct source-order indices.
+            if Self.walkerPreConsumed.contains(childElement.localName ?? "") {
+                continue
+            }
+
             switch childElement.localName {
             case "pPr":
                 // v0.19.1+ (#56 follow-up): pPr is consumed by the dedicated
@@ -890,7 +915,13 @@ public struct DocxReader {
                 // at the top of `Paragraph.toXMLSortedByPosition`, once
                 // verbatim from `unrecognizedChildren`). xmllint accepts the
                 // duplicate but file size grows by ~1 KB per round-trip per
-                // paragraph. Skip explicitly here.
+                // paragraph.
+                //
+                // v0.21.1+ (#4): kept as defense-in-depth alongside the
+                // `walkerPreConsumed` whitelist above. The whitelist
+                // `continue` path means this branch is unreachable in normal
+                // flow, but if the whitelist is ever silently dropped this
+                // explicit `break` still prevents pPr from reaching `default`.
                 break
 
             case "r":
@@ -1278,6 +1309,19 @@ public struct DocxReader {
                 // Without this, dropped elements would silently disappear and
                 // the test would have no way to surface the gap.
                 let name = childElement.localName ?? "<nil>"
+                #if DEBUG
+                // v0.21.1+ (#4) regression-guard tripwire: pPr should be
+                // filtered by `walkerPreConsumed` at loop entry and absorbed
+                // by the explicit `case "pPr": break` even if the whitelist
+                // is removed. Reaching this default branch with name == "pPr"
+                // means BOTH layers of defense were silently dropped — we'd
+                // re-introduce the v0.19.0 double-emit bug. Fail loudly in
+                // debug so the regression is impossible to miss in CI.
+                assert(
+                    name != "pPr",
+                    "DocxReader.parseParagraph: pPr leaked into unrecognizedChildren — see PsychQuant/ooxml-swift#4 + che-word-mcp#56. The walker entry whitelist (or the explicit case) was removed. This would cause double-emit of <w:pPr> on every round-trip."
+                )
+                #endif
                 paragraph.unrecognizedChildren.append(
                     UnrecognizedChild(
                         name: name,
