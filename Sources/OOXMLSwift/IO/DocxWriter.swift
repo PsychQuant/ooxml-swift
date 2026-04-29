@@ -627,17 +627,20 @@ public struct DocxWriter {
     /// `case .contentControl: break` (or `return ""`) which silently
     /// dropped any block-level SDT inside a header / footer / note on
     /// save (verify R5 P1 #9 / Logic L6 / Codex P2).
-    static func xmlForBodyChild(_ child: BodyChild) -> String {
+    static func xmlForBodyChild(_ child: BodyChild) throws -> String {
         switch child {
         case .paragraph(let para):
-            return para.toXML()
+            // v0.21.4+ (#6, F8): use throwing emit so `AlternateContent`
+            // dirty-tracking refusal surfaces at save time rather than silently
+            // writing stale rawXML.
+            return try para.toXMLThrowing()
         case .table(let table):
             return table.toXML()
         case .contentControl(let metadata, let children):
             var xml = "<w:sdt>"
             xml += metadata.sdt.toSdtPrXML()
             xml += "<w:sdtContent>"
-            for c in children { xml += xmlForBodyChild(c) }
+            for c in children { xml += try xmlForBodyChild(c) }
             xml += "</w:sdtContent></w:sdt>"
             return xml
         case .bookmarkMarker(let marker):
@@ -666,7 +669,7 @@ public struct DocxWriter {
         // to the hardcoded xmlns:w + xmlns:r pair only when the dictionary is
         // empty keeps create-from-scratch (`WordDocument()` initializer) behavior
         // unchanged.
-        let rootOpenTag = renderDocumentRootOpenTag(document.documentRootAttributes)
+        let rootOpenTag = try renderDocumentRootOpenTag(document.documentRootAttributes)
         var xml = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         \(rootOpenTag)
@@ -675,7 +678,7 @@ public struct DocxWriter {
 
         // 段落和表格
         for child in document.body.children {
-            xml += xmlForBodyChild(child)
+            xml += try xmlForBodyChild(child)
         }
 
         // 分節屬性（頁面設定）- 使用文件的 sectionProperties
@@ -699,7 +702,7 @@ public struct DocxWriter {
     /// (`mc:Ignorable` etc.) in alphabetical order. Dictionaries do not preserve
     /// insertion order, so a deterministic emit order avoids spurious diffs in
     /// regression suites.
-    static func renderDocumentRootOpenTag(_ attrs: [String: String]) -> String {
+    static func renderDocumentRootOpenTag(_ attrs: [String: String]) throws -> String {
         if attrs.isEmpty {
             return """
             <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
@@ -710,6 +713,10 @@ public struct DocxWriter {
         var otherXmlns: [(String, String)] = []
         var nonNamespace: [(String, String)] = []
         for (name, value) in attrs {
+            // F12 — second-line defence on emit. Reader-side `splitAttributes`
+            // is the primary gate; this catches names that bypassed it (e.g.,
+            // post-load API mutation). Throws `XMLHardeningError.invalidAttributeName`.
+            try DocxReader.validateAttrName(name, context: "document root")
             if name == "xmlns:w" {
                 xmlnsW = value
             } else if name == "xmlns:r" {
@@ -806,7 +813,7 @@ public struct DocxWriter {
     // MARK: - Header
 
     private static func writeHeader(_ header: Header, to baseURL: URL) throws {
-        let xml = header.toXML()
+        let xml = try header.toXML()
         let url = baseURL.appendingPathComponent("word/\(header.fileName)")
         try xml.write(to: url, atomically: true, encoding: .utf8)
 
@@ -845,7 +852,7 @@ public struct DocxWriter {
             xml = footer.toXMLWithPageNumber(format: .simple)
         } else {
             // 有 bodyChildren，使用一般 XML 輸出
-            xml = footer.toXML()
+            xml = try footer.toXML()
         }
 
         let url = baseURL.appendingPathComponent("word/\(footer.fileName)")
@@ -1033,7 +1040,7 @@ public struct DocxWriter {
     // MARK: - Footnotes
 
     private static func writeFootnotes(_ footnotes: FootnotesCollection, to baseURL: URL) throws {
-        let xml = footnotes.toXML()
+        let xml = try footnotes.toXML()
         let url = baseURL.appendingPathComponent("word/footnotes.xml")
         try xml.write(to: url, atomically: true, encoding: .utf8)
 
@@ -1050,7 +1057,7 @@ public struct DocxWriter {
     // MARK: - Endnotes
 
     private static func writeEndnotes(_ endnotes: EndnotesCollection, to baseURL: URL) throws {
-        let xml = endnotes.toXML()
+        let xml = try endnotes.toXML()
         let url = baseURL.appendingPathComponent("word/endnotes.xml")
         try xml.write(to: url, atomically: true, encoding: .utf8)
 
