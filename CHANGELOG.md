@@ -45,9 +45,14 @@ Only **top-level direct `.paragraph`** body children count toward `currentHeadin
 
 Suite: 805 → 809 (+4, 0 failures, 1 pre-existing skip).
 
+#### Known limitations (follow-ups tracked separately)
+
+- **Coverage limited to body**: header / footer / footnote / endnote SEQ scans still walk flat `.paragraphs` view (`WordDocument+UpdateAllFields.swift:88-156`, see `Header.swift:71-94`). SEQ fields anchored in header/footer table cells, footer SDT children, footnote tables, or endnote containers are still silently skipped. The body-side scenario (the most common thesis layout) is fixed; the parallel container families are tracked as a separate child issue.
+- **Inline SDT / hyperlink / fieldSimple paragraph surfaces**: `FieldParser.parse(paragraph:)` only walks `para.runs[*].rawXML`. SEQ inside inline SDT (`para.contentControls`), hyperlink runs (`para.hyperlinks[*].runs[*].rawXML`), `<w:fldSimple>` wrappers (`para.fieldSimples`), or `<mc:AlternateContent>` fallbacks are still missed. Same pattern as the OMML wrapper-paths fix in #92, tracked separately.
+
 #### Affected MCP tools (transitive via che-word-mcp dep bump)
 
-- `update_all_fields` → now finds and updates SEQ fields inside table cells / SDT children (no MCP source change needed)
+- `update_all_fields` → now finds and updates SEQ fields inside body-level table cells / SDT children (no MCP source change needed; header/footer/footnote/endnote and inline SDT surfaces still pending follow-ups)
 
 ### Fixed — `wrapCaptionSequenceFields` SEQ run inherits `position` from source run ([PsychQuant/che-word-mcp#93](https://github.com/PsychQuant/che-word-mcp/issues/93))
 
