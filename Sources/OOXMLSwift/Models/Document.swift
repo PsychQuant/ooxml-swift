@@ -3975,9 +3975,24 @@ extension WordDocument {
             // anchors. che-word-mcp#91 Defect 2: explicit bounds-check before
             // delegating to legacy `Int?` overload, which silently no-ops on
             // out-of-range index (asymmetric vs display mode's throw).
+            //
+            // che-word-mcp#91 verify F1 (convergent finding from Codex P1 +
+            // Devil's Advocate DA-1): bounds-check MUST count only top-level
+            // `.paragraph` body children, NOT `getParagraphs().count` which
+            // recurses into block-level `.contentControl` (Document.swift:222).
+            // The legacy `Int?` overload's loop at line 4044 below ONLY
+            // enumerates direct top-level paragraphs (no SDT descent), so a
+            // narrower count is what the delegate can actually reach.
+            // Pre-corrective bug: doc shape `[.contentControl(_, [.paragraph])]`
+            // has `getParagraphs().count == 1`, so `.paragraphIndex(0)` passed
+            // the guard but the delegate found zero matches and silently
+            // no-op'd — exactly the failure class Defect 2 was meant to fix.
             if case .paragraphIndex(let idx) = location {
-                let paragraphCount = getParagraphs().count
-                guard idx >= 0, idx < paragraphCount else {
+                let topLevelParagraphCount = body.children.reduce(0) { count, child in
+                    if case .paragraph = child { return count + 1 }
+                    return count
+                }
+                guard idx >= 0, idx < topLevelParagraphCount else {
                     throw InsertLocationError.invalidParagraphIndex(idx)
                 }
                 insertEquation(at: idx, latex: latex, displayMode: false)
