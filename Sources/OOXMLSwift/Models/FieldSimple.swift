@@ -35,14 +35,14 @@ public struct FieldSimple: Equatable {
     public var rawAttributes: [String: String]
 
     /// Source-document order index, used by Phase 4 `Paragraph.toXML()`
-    /// sort-by-position emit.
-    public var position: Int
+    /// sort-by-position emit. `nil` = "append at emit time" per F6.
+    public var position: Int?
 
     public init(
         instr: String,
         runs: [Run] = [],
         rawAttributes: [String: String] = [:],
-        position: Int = 0
+        position: Int? = nil
     ) {
         self.instr = instr
         self.runs = runs

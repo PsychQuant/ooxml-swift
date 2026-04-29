@@ -301,11 +301,15 @@ extension Paragraph {
             || !customXmlBlocks.isEmpty
             || !bidiOverrides.isEmpty
             || !unrecognizedChildren.isEmpty
-            || runs.contains(where: { $0.position > 0 })
-            || hyperlinks.contains(where: { $0.position > 0 })
+            || runs.contains(where: { ($0.position ?? 0) > 0 })
+            || hyperlinks.contains(where: { ($0.position ?? 0) > 0 })
             // v0.19.4+ (#56 R3-NEW-2): paragraph-level <w:sdt> with source
             // position participates in sort-by-position emit.
-            || contentControls.contains(where: { $0.position > 0 })
+            // PsychQuant/ooxml-swift#5 (F6): position is now `Int? = nil` —
+            // nil means "append-mode" (API-built, no explicit source order),
+            // so it does NOT trigger sort path; only explicit positive
+            // positions do. Mirror legacy `> 0` semantic via `?? 0`.
+            || contentControls.contains(where: { ($0.position ?? 0) > 0 })
     }
 
     /// 轉換為 OOXML XML 字串
@@ -327,7 +331,7 @@ extension Paragraph {
     /// `openspec/changes/roundtrip-loud-fail/tasks.md` Group 3).
     public func toXMLThrowing() throws -> String {
         for ac in alternateContents where ac.fallbackRunsModified {
-            throw RoundtripError.unserializedFallbackEdit(position: ac.position)
+            throw RoundtripError.unserializedFallbackEdit(position: ac.position ?? 0)
         }
         return toXML()
     }
@@ -556,17 +560,17 @@ extension Paragraph {
         // appended Run with default position 0 sorted before any
         // `position >= 1` source run → text rendered at paragraph head
         // instead of the intended append position (verify R5 P0 #6 / DA C3).
-        for run in runs where run.position > 0 {
-            positioned.append((run.position, .run(run)))
+        for run in runs where (run.position ?? 0) > 0 {
+            positioned.append((run.position!, .run(run)))
         }
-        for hyperlink in hyperlinks where hyperlink.position > 0 {
-            positioned.append((hyperlink.position, .xml(hyperlink.toXML())))
+        for hyperlink in hyperlinks where (hyperlink.position ?? 0) > 0 {
+            positioned.append((hyperlink.position!, .xml(hyperlink.toXML())))
         }
-        for field in fieldSimples where field.position > 0 {
-            positioned.append((field.position, .xml(Self.emitFieldSimple(field))))
+        for field in fieldSimples where (field.position ?? 0) > 0 {
+            positioned.append((field.position!, .xml(Self.emitFieldSimple(field))))
         }
-        for ac in alternateContents where ac.position > 0 {
-            positioned.append((ac.position, .xml(ac.rawXML)))
+        for ac in alternateContents where (ac.position ?? 0) > 0 {
+            positioned.append((ac.position!, .xml(ac.rawXML)))
         }
         // v0.19.5+ (#56 R5-CONT-2 P0 #4): apply `where position > 0` filter
         // to the 8 remaining positioned collections, completing the sweep
@@ -578,35 +582,35 @@ extension Paragraph {
         // position-0 entries in append position to mirror the
         // contentControls + runs / hyperlinks / fieldSimples /
         // alternateContents handling.
-        for marker in bookmarkMarkers where marker.position > 0 {
-            positioned.append((marker.position, .xml(Self.emitBookmarkMarker(marker, paragraph: self))))
+        for marker in bookmarkMarkers where (marker.position ?? 0) > 0 {
+            positioned.append((marker.position!, .xml(Self.emitBookmarkMarker(marker, paragraph: self))))
         }
-        for marker in commentRangeMarkers where marker.position > 0 {
-            positioned.append((marker.position, .xml(Self.emitCommentRangeMarker(marker))))
+        for marker in commentRangeMarkers where (marker.position ?? 0) > 0 {
+            positioned.append((marker.position!, .xml(Self.emitCommentRangeMarker(marker))))
         }
-        for marker in permissionRangeMarkers where marker.position > 0 {
-            positioned.append((marker.position, .xml(Self.emitPermissionRangeMarker(marker))))
+        for marker in permissionRangeMarkers where (marker.position ?? 0) > 0 {
+            positioned.append((marker.position!, .xml(Self.emitPermissionRangeMarker(marker))))
         }
-        for marker in proofErrorMarkers where marker.position > 0 {
-            positioned.append((marker.position, .xml("<w:proofErr w:type=\"\(marker.type.rawValue)\"/>")))
+        for marker in proofErrorMarkers where (marker.position ?? 0) > 0 {
+            positioned.append((marker.position!, .xml("<w:proofErr w:type=\"\(marker.type.rawValue)\"/>")))
         }
-        for tag in smartTags where tag.position > 0 {
-            positioned.append((tag.position, .xml(tag.rawXML)))
+        for tag in smartTags where (tag.position ?? 0) > 0 {
+            positioned.append((tag.position!, .xml(tag.rawXML)))
         }
-        for block in customXmlBlocks where block.position > 0 {
-            positioned.append((block.position, .xml(block.rawXML)))
+        for block in customXmlBlocks where (block.position ?? 0) > 0 {
+            positioned.append((block.position!, .xml(block.rawXML)))
         }
-        for block in bidiOverrides where block.position > 0 {
-            positioned.append((block.position, .xml(block.rawXML)))
+        for block in bidiOverrides where (block.position ?? 0) > 0 {
+            positioned.append((block.position!, .xml(block.rawXML)))
         }
-        for child in unrecognizedChildren where child.position > 0 {
-            positioned.append((child.position, .xml(child.rawXML)))
+        for child in unrecognizedChildren where (child.position ?? 0) > 0 {
+            positioned.append((child.position!, .xml(child.rawXML)))
         }
         // v0.19.4+ (#56 R3-NEW-2): paragraph-level <w:sdt> with source position
         // joins the sorted emit. Position-0 controls are API-built and stay on
         // the post-content legacy path below for backward-compatibility.
-        for control in contentControls where control.position > 0 {
-            positioned.append((control.position, .xml(control.toXML())))
+        for control in contentControls where (control.position ?? 0) > 0 {
+            positioned.append((control.position!, .xml(control.toXML())))
         }
 
         // Stable sort by position. Equal positions retain insertion order.
@@ -661,7 +665,7 @@ extension Paragraph {
         // (API-built). Position>0 controls were already emitted in the sorted
         // list above at their source position; emitting them again would
         // duplicate the SDT in the output.
-        for control in contentControls where control.position == 0 {
+        for control in contentControls where (control.position ?? 0) == 0 {
             xml += control.toXML()
         }
         // v0.19.5+ (#56 R5-CONT P0 #6): symmetric post-content emit for
@@ -672,43 +676,43 @@ extension Paragraph {
         // paragraph silently relocated text to the paragraph head. Now they
         // emit AFTER source-loaded children, matching the append semantics
         // that contentControls (R5 P0 #2) and the legacy emit path use.
-        for run in runs where run.position == 0 {
+        for run in runs where (run.position ?? 0) == 0 {
             xml += Self.emitRun(run, asDelText: false, paragraphRevisions: revisions)
         }
-        for hyperlink in hyperlinks where hyperlink.position == 0 {
+        for hyperlink in hyperlinks where (hyperlink.position ?? 0) == 0 {
             xml += hyperlink.toXML()
         }
-        for field in fieldSimples where field.position == 0 {
+        for field in fieldSimples where (field.position ?? 0) == 0 {
             xml += Self.emitFieldSimple(field)
         }
-        for ac in alternateContents where ac.position == 0 {
+        for ac in alternateContents where (ac.position ?? 0) == 0 {
             xml += ac.rawXML
         }
         // v0.19.5+ (#56 R5-CONT-2 P0 #4): post-content emit for the 8
         // remaining position-0 collections — completes the sweep
         // R5-CONT P0 #6 only half-covered. Symmetric with the above.
-        for marker in bookmarkMarkers where marker.position == 0 {
+        for marker in bookmarkMarkers where (marker.position ?? 0) == 0 {
             xml += Self.emitBookmarkMarker(marker, paragraph: self)
         }
-        for marker in commentRangeMarkers where marker.position == 0 {
+        for marker in commentRangeMarkers where (marker.position ?? 0) == 0 {
             xml += Self.emitCommentRangeMarker(marker)
         }
-        for marker in permissionRangeMarkers where marker.position == 0 {
+        for marker in permissionRangeMarkers where (marker.position ?? 0) == 0 {
             xml += Self.emitPermissionRangeMarker(marker)
         }
-        for marker in proofErrorMarkers where marker.position == 0 {
+        for marker in proofErrorMarkers where (marker.position ?? 0) == 0 {
             xml += "<w:proofErr w:type=\"\(marker.type.rawValue)\"/>"
         }
-        for tag in smartTags where tag.position == 0 {
+        for tag in smartTags where (tag.position ?? 0) == 0 {
             xml += tag.rawXML
         }
-        for block in customXmlBlocks where block.position == 0 {
+        for block in customXmlBlocks where (block.position ?? 0) == 0 {
             xml += block.rawXML
         }
-        for block in bidiOverrides where block.position == 0 {
+        for block in bidiOverrides where (block.position ?? 0) == 0 {
             xml += block.rawXML
         }
-        for child in unrecognizedChildren where child.position == 0 {
+        for child in unrecognizedChildren where (child.position ?? 0) == 0 {
             xml += child.rawXML
         }
         // v0.19.4+ (#56 R3-NEW-3): per-id gate (see pre-content emit above).

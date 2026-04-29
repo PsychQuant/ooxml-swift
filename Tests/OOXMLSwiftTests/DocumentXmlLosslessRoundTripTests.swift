@@ -133,7 +133,7 @@ final class DocumentXmlLosslessRoundTripTests: XCTestCase {
         )
         let start42 = try XCTUnwrap(para42.bookmarkMarkers.first(where: { $0.id == 42 && $0.kind == .start }))
         let end42 = try XCTUnwrap(para42.bookmarkMarkers.first(where: { $0.id == 42 && $0.kind == .end }))
-        XCTAssertLessThan(start42.position, end42.position,
+        XCTAssertLessThan(start42.position ?? 0, end42.position ?? 0,
                           "BookmarkStart must have lower position than BookmarkEnd in source order")
     }
 

@@ -138,7 +138,10 @@ final class RunTests: XCTestCase {
         let xml = run.toXML()
         XCTAssertTrue(xml.hasPrefix("<w:r>"))
         XCTAssertTrue(xml.hasSuffix("</w:r>"))
-        XCTAssertTrue(xml.contains("<w:t xml:space=\"preserve\">Hello</w:t>"))
+        // PsychQuant/ooxml-swift#5 (F13): xml:space="preserve" is now autosense.
+        // "Hello" has no leading / trailing / consecutive whitespace, so the
+        // flag is omitted (XML normalises any single internal whitespace).
+        XCTAssertTrue(xml.contains("<w:t>Hello</w:t>"))
     }
 
     func testRunWithProperties() {

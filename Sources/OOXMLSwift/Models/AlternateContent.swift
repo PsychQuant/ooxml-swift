@@ -52,7 +52,9 @@ public struct AlternateContent: Equatable {
     }
 
     /// Source-document order index for Phase 4 sort-by-position emit.
-    public var position: Int
+    /// `nil` means "append at emit time after the highest explicit position
+    /// in the same collection" (PsychQuant/ooxml-swift#5 / F6).
+    public var position: Int?
 
     /// Dirty flag flipped by `fallbackRuns`'s `didSet` observer
     /// (PsychQuant/ooxml-swift#6, F8). `false` for Reader-loaded /
@@ -61,7 +63,7 @@ public struct AlternateContent: Equatable {
     /// writes.
     public private(set) var fallbackRunsModified: Bool = false
 
-    public init(rawXML: String, fallbackRuns: [Run] = [], position: Int = 0) {
+    public init(rawXML: String, fallbackRuns: [Run] = [], position: Int? = nil) {
         self.rawXML = rawXML
         self.fallbackRuns = fallbackRuns
         self.position = position

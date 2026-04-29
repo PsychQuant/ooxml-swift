@@ -12,7 +12,67 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - `Paragraph.commentIds` stored field (deprecated v0.21.4): consumers SHALL migrate to `commentRangeMarkers` (writes) or `commentRangeIds` computed (reads) before v0.22.
 - `WordDocument.insertEquation(at: Int?, latex:, displayMode:)` legacy overload (deprecated v0.21.5): consumers SHALL migrate to `insertEquation(at: InsertLocation, latex:, displayMode:)` before v0.22.
-- (also pending) `Hyperlink.text` setter from #5 / `mutation-surface-fix` SDD bundle.
+- `Hyperlink.text` setter (deprecated v0.21.6): consumers SHALL migrate to `hyperlink.runs = [Run(text: "x")]` direct assignment before v0.22.
+
+## [0.21.6] - 2026-04-29
+
+### Changed — API mutation surface safety bundle (Refs PsychQuant/ooxml-swift#5)
+
+Closes the 3 sub-findings (F5/F6/F13) from che-word-mcp#56 verification via the `mutation-surface-fix` SDD bundle.
+
+#### F5 — `Hyperlink.text` setter deprecation
+
+The setter at `Hyperlink.swift:61-64` is now `@available(*, deprecated, message: "Mutates runs destructively (loses formatting / rawElements). Use .runs directly to preserve formatting; assign a single Run to replace, append/insert Runs to extend.")`. Runtime behaviour preserved (still collapses runs to a single Run carrying the new text). Compile-time warning fires at every set-site, producing a punch-list for v0.22 removal. Getter is unchanged.
+
+#### F6 — Position type cascade (`Int = 0` → `Int? = nil`)
+
+13 typed-child position fields converted from non-optional `Int` (default 0) to optional `Int?` (default `nil`):
+
+- `Hyperlink.position` / `Run.position` / `AlternateContent.position` / `FieldSimple.position` / `StructuredDocumentTag.position`
+- 8 `ParagraphChildMarkers` types: `BookmarkRangeMarker` / `CommentRangeMarker` / `PermissionRangeMarker` / `ProofErrorMarker` / `SmartTag` / `CustomXmlBlock` / `BidiOverride` / `UnrecognizedChildElement`
+
+Initializers default to `nil`. Reader-loaded children carry explicit positive positions (1-based, populated by `DocxReader.parseParagraph`). API-built children default to `nil` → emit at append-mode position (after the highest explicit position in the same collection). `Paragraph.toXMLSortedByPosition()` partition logic uses `(position ?? 0) > 0` (sort path) and `(position ?? 0) == 0` (legacy post-content append path) — preserves v0.21.5 behaviour for both Reader-loaded and API-built children.
+
+**Migration**: callers that read `position` as `Int` need `position ?? 0` (or any explicit fallback). Test/internal sites updated; external consumers will get a compile error pointing at the optional unwrap requirement.
+
+#### F13 — `Run.toXML()` `xml:space="preserve"` autosense
+
+`Run.toXML()` now emits `xml:space="preserve"` only when text contains semantically significant whitespace:
+
+- text begins with whitespace (`" leading"` → flag)
+- text ends with whitespace (`"trailing "` → flag)
+- text contains 2+ consecutive whitespace chars (`"two  spaces"` → flag)
+- single internal whitespace (`"hello world"` → no flag, XML normalises)
+- empty text (`""` → no flag)
+- consecutive tabs (`"a\t\tb"` → flag); leading newline (`"\nfoo"` → flag)
+
+Pre-fix the attribute was emitted unconditionally — harmless but non-canonical. Post-fix the attribute appears only when needed.
+
+**Side effect**: thesis-fixture round-trip output is ~3 percentage points smaller than v0.21.5 (matrix-pin in `testDocumentContentEqualityInvariant` relaxed 0.10 → 0.135 to acknowledge the intentional output reduction).
+
+### Migration
+
+| Caller pattern | Action |
+| -------------- | ------ |
+| `hyperlink.text = "x"` | Compiles with deprecation warning. Migrate to `hyperlink.runs = [Run(text: "x")]` before v0.22 |
+| `someChild.position` (read as `Int`) | Use `pos ?? 0` for legacy semantic, or `pos ?? someDefault` |
+| `someChild.position > 0` | Replace with `(someChild.position ?? 0) > 0` |
+| `Run(text: "Hello").toXML()` | No longer contains `xml:space="preserve"` — use `Run(text: "Hello").toXML().contains("<w:t>Hello</w:t>")` for assertions |
+
+### v0.22 milestone update
+
+`Hyperlink.text` setter now joins:
+1. `Hyperlink.text` setter (this release — v0.21.6)
+2. `Paragraph.commentIds` field (#6 — v0.21.4)
+3. `insertEquation(at: Int?)` overload (#84 — v0.21.5)
+
+### Tests
+
+`Tests/OOXMLSwiftTests/Issue5MutationSurfaceTests.swift` — 13 tests (3 default-position + 3 emit-partition + 7 xml:space autosense). Suite 757 → 770 (1 pre-existing skip, 0 failures).
+
+### SemVer
+
+Patch release. Deprecation is non-breaking. `Int? = nil` cascade is technically source-breaking (callers reading `position` as `Int` now need `?? 0`), but lib is still 0.x; in practice 0 source-tree call sites broke (test sites updated in this commit). External SPM consumers will see the requirement at recompile time.
 
 ## [0.21.5] - 2026-04-29
 

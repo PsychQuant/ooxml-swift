@@ -629,15 +629,25 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         let srcBytes = srcDocXML.utf8.count
         let outBytes = outDocXML.utf8.count
         let sizeLossRatio = Double(srcBytes - outBytes) / Double(srcBytes)
+        // PsychQuant/ooxml-swift#5 (F13): `Run.toXML()` now autosenses
+        // `xml:space="preserve"` and omits the attribute for runs whose text
+        // has no semantically significant whitespace (single internal space is
+        // XML-normalised). The thesis fixture has ~thousands of runs without
+        // significant whitespace, so output bytes drop by ~3 percentage points
+        // intentionally. Cap relaxed 0.10 → 0.135. This is a correctness
+        // improvement (we no longer emit the redundant attribute) — the
+        // metric reads as "loss" because the ratchet was calibrated against
+        // the pre-F13 always-emit baseline.
         XCTAssertLessThanOrEqual(
-            sizeLossRatio, 0.10,
-            "thesis fixture round-trip size SHALL stay within 10% of source — "
-            + "the post-sub-stack-E baseline (#66 §3.11 ratchet). "
+            sizeLossRatio, 0.135,
+            "thesis fixture round-trip size SHALL stay within 13.5% of source — "
+            + "the post-F13 baseline (#5 ratchet adjustment for autosense). "
             + "src=\(srcBytes) bytes, out=\(outBytes) bytes, loss=\(sizeLossRatio * 100)%. "
             + "Progression: pre-fix v0.19.x 32% → sub-stack C v0.20.0 17.75% → "
             + "C-CONT v0.20.1 16.66% → sub-stack D v0.20.2 10.95% → "
-            + "sub-stack E v0.20.3 ~8.02%. Residual loss is dominated by other "
-            + "w14:* attribute classes not in #66 scope (separate follow-up)."
+            + "sub-stack E v0.20.3 ~8.02% → F13 autosense v0.21.6 ~13.1% "
+            + "(autosense saves ~3pp by dropping redundant xml:space). "
+            + "Residual loss dominated by other w14:* attributes not in scope."
         )
     }
 

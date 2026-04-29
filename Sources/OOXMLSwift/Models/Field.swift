@@ -1496,14 +1496,15 @@ public struct ContentControl: Equatable {
     /// the parent paragraph's `childPosition` so they round-trip in source
     /// order between sibling runs / hyperlinks / markers. Implements design
     /// Decision: Add `position: Int` to `ContentControl`.
-    public var position: Int
+    /// `nil` = "append at emit time" per F6 (PsychQuant/ooxml-swift#5).
+    public var position: Int?
 
     public init(
         sdt: StructuredDocumentTag,
         content: String,
         children: [ContentControl] = [],
         parentSdtId: Int? = nil,
-        position: Int = 0
+        position: Int? = nil
     ) {
         self.sdt = sdt
         self.content = content
