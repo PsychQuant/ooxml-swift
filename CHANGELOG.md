@@ -6,6 +6,107 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **v0.19.4** (never tagged) — The R3 stack-completion content originally targeted v0.19.4. After the round-3 fix landed, the round-4 6-AI verify (https://github.com/PsychQuant/che-word-mcp/issues/56#issuecomment-4321562429) returned BLOCK with 6 new P0 + 7 P1 findings (walker-asymmetry follow-ups, `position == 0` sentinel collision, attribute-escape sweep gap, block-level SDT typed-Revision propagation, container-symmetric `replaceText`, container `<w:tbl>` parser drop). v0.19.4 was held back. v0.19.5 ships the R3 stack content (preserved verbatim below) **plus** the R5 stack-completion fixes (6 P0 + 5 P1, additive — no breaking change versus the v0.19.4 contract). No v0.19.4 git tag, no v0.19.4 GitHub Release.
 
+## [Unreleased]
+
+### v0.22 milestone — planned removals
+
+- `Paragraph.commentIds` stored field (deprecated v0.21.4): consumers SHALL migrate to `commentRangeMarkers` (writes) or `commentRangeIds` computed (reads) before v0.22.
+
+## [0.21.4] - 2026-04-29
+
+### Changed — Roundtrip loud-fail bundle (Refs PsychQuant/ooxml-swift#6)
+
+Closes the 2 sub-findings (F8/F9) surfaced during PsychQuant/che-word-mcp#56 verification. Both tighten the typed-edit / raw-XML drift surface that previously produced silent corruption.
+
+#### F8 — AlternateContent.fallbackRuns dirty-tracking + emit-time throw
+
+`AlternateContent.fallbackRuns` is now backed by a `didSet` observer that flips a new `public private(set) var fallbackRunsModified: Bool` to `true` on any mutation (assignment, indexed write, append, etc.). Construction-time assignment via `init(rawXML:fallbackRuns:position:)` does NOT fire `didSet`, so Reader-loaded values start clean — this is the load-bearing invariant.
+
+A new `Paragraph.toXMLThrowing() throws -> String` performs the dirty-check before delegating to the existing non-throwing `toXML()`. When any `AlternateContent` in `alternateContents` has `fallbackRunsModified == true`, the throwing emit returns `RoundtripError.unserializedFallbackEdit(position: ac.position)` instead of silently emitting stale `rawXML`.
+
+`DocxWriter.xmlForBodyChild` and the four container emit paths (`Header.toXML`, `Footer.toXML`, `Footnote.toXML`, `Endnote.toXML`, plus the two `*Collection.toXML` aggregates) cascade the new `throws` so the throw surfaces at the actual save boundary. The non-throwing `Paragraph.toXML()` is preserved unchanged for in-memory inspection / debug callers, bounding the SemVer impact (deviation from design D2 documented in `openspec/changes/roundtrip-loud-fail/tasks.md` Group 3).
+
+#### F9 — commentIds deprecation + computed `commentRangeIds`
+
+`Paragraph.commentIds` is now `@available(*, deprecated, message: "Use commentRangeMarkers (source of truth since Phase 4) or the computed commentRangeIds. Stored commentIds is no longer populated by Reader since v0.21.4 and will be removed in v0.22.")`. The stored field is retained for one minor (callers that mutate it via `Document.insertComment` etc. continue to compile) but Reader no longer populates it on load.
+
+A new `public var commentRangeIds: [Int]` computed property derives the canonical list from `commentRangeMarkers`, returning unique ids in order of first appearance and reflecting both Reader-loaded and post-load marker mutations. The Reader-side comment→paragraph linkage (`paragraphIndex` assignment) was switched to read from `commentRangeIds` so the existing comment-paragraph mapping behaviour is preserved.
+
+(Deviation from design D3: planned full conversion to computed property would have broken `Document.insertComment` / `deleteComment` and 5+ test suites; pragmatic substitute documented in `openspec/changes/roundtrip-loud-fail/tasks.md` Group 4. v0.22 milestone removal is unaffected.)
+
+#### New error type
+
+`RoundtripError: Error, LocalizedError, Equatable` (in `Sources/OOXMLSwift/Errors/RoundtripError.swift`) carries the `unserializedFallbackEdit(position:)` case. Per-domain error enum mirrors `XMLHardeningError` (#7) and the existing pattern. Apply-time deviation from spec: spec assumed an existing `OOXMLError` enum; the change creates a new per-domain enum to match the established codebase pattern.
+
+#### Migration
+
+| Caller pattern | Action |
+| -------------- | ------ |
+| `paragraph.toXML()` (in-memory, no save) | None — non-throwing emit unchanged |
+| `DocxWriter.write(...)` against valid input | None — no-op round-trips byte-equivalent to v0.21.3 |
+| `DocxWriter.write(...)` after typed `fallbackRuns` edit without rawXML regen | Now throws `RoundtripError.unserializedFallbackEdit(position:)` instead of silently writing stale XML — caller catches + surfaces |
+| `paragraph.commentIds` (read) | Deprecation warning fires; migrate to `paragraph.commentRangeIds` |
+| `paragraph.commentIds = [...]` (write) | Compiles with deprecation warning; v0.22 removes the field |
+| `header.toXML()` / `footer.toXML()` / `footnote.toXML()` / `endnote.toXML()` | Now `throws` — add `try` |
+| `xmlForBodyChild(...)` | Now `throws` — add `try` |
+
+#### Tests
+
+`Tests/OOXMLSwiftTests/Issue6RoundtripLoudFailTests.swift` — 10 new tests covering all spec scenarios (didSet flag for 4 mutation patterns; emit throws on dirty / clean / multi-AC; commentRangeIds reader/live; comment marker round-trip preservation). Suite 733 → 743 (1 pre-existing skip, 0 failures).
+
+#### SemVer
+
+Patch release (v0.21.4). Throws are additive on already-mutated typed-edit input; no observable behaviour change for valid `.docx` corpus that doesn't touch `fallbackRuns`. Caller compile signatures change for `xmlForBodyChild` / `Header.toXML` / `Footer.toXML` / `Footnote.toXML` / `Endnote.toXML` / `*Collection.toXML` (all gained `throws`). The non-throwing `Paragraph.toXML()` is preserved for in-memory use.
+
+## [0.21.3] - 2026-04-29
+
+### Security — XML input hardening bundle (Refs PsychQuant/ooxml-swift#7)
+
+Closes the 4 sub-findings (F10/F11/F12/F14) surfaced during PsychQuant/che-word-mcp#56 verification. All four close attack-surface gaps at the `DocxReader` / `DocxWriter` raw-bytes / root-attribute boundary. **No public API change for valid input** — every change is additive on already-malformed or potentially malicious input.
+
+#### F10 — DTD pre-scan reject
+
+`DocxReader.read(from:)` now pre-scans every container part's raw bytes for `<!DOCTYPE` (case-insensitive ASCII variants) before constructing `XMLDocument(data:)`. Throws `XMLHardeningError.dtdNotAllowed(part:)` on hit. Closes the billion-laughs / quadratic-blowup attack surface — Foundation's `XMLDocument` disables external entities by default but does NOT cap internal entity expansion.
+
+Applied at all 11 `XMLDocument(data:)` call sites: `word/document.xml`, `word/styles.xml`, `word/numbering.xml`, `word/header*.xml`, `word/footer*.xml`, `word/footnotes.xml`, `word/endnotes.xml`, `docProps/core.xml`, `word/comments.xml`, `word/commentsExtended.xml`, `word/_rels/document.xml.rels`. (Spec/design estimated 12; actual count is 11.)
+
+#### F11 — XMLParser SAX root-attr parser
+
+`parseContainerRootAttributes(from:)` is now backed by `Foundation.XMLParser` in SAX mode. Captures the first start-element's `attributes` dictionary then `abortParsing()`. Handles arbitrary namespace prefix variants natively — previously the string-prefix matcher hardcoded each container's open-tag literal (`<w:document` / `<w:hdr` / etc.) and silently returned `[:]` for legitimate variants like `<wordml:document>` or default-namespace `<document xmlns="...">`.
+
+The `rootElementOpenPrefix:` parameter is **removed** from the public signature — caller migration is mechanical (drop the second argument).
+
+#### F12 — Attribute-name whitelist on ingest + emit
+
+Both `DocxReader.splitAttributes` and `DocxWriter.renderDocumentRootOpenTag` now validate every root-level attribute name against the XML 1.0 NameChar regex `^[A-Za-z_:][A-Za-z0-9._:-]*$`. Throws `XMLHardeningError.invalidAttributeName(name:context:)` on violation (`context` = `"split-attributes"` for reader, `"document root"` for writer). Closes the corruption-transit path where malformed names from a corrupted source could ride through reader → writer and produce invalid XML in saved output.
+
+#### F14 — 64 KiB attribute-value byte cap
+
+`DocxReader.splitAttributes` enforces a 64 KiB UTF-8 byte cap per root-level attribute value. Throws `XMLHardeningError.attributeValueTooLarge(name:byteSize:cap:)` when exceeded. Cap rationale: ~1000× the largest legitimate `mc:Ignorable` (~200 chars) / `xmlns:*` (~150 chars) value observed in real OOXML corpora. Truncation is unsafe (would break namespace declarations), so the helper throws.
+
+#### New error type
+
+`XMLHardeningError: Error, LocalizedError, Equatable` (in `Sources/OOXMLSwift/Errors/XMLHardeningError.swift`) carries the three new cases. Per-domain error enum mirrors the existing pattern (`WordError` / `RevisionError` / `ImageError` / etc.). Apply-time deviation from spec: spec assumed an existing `OOXMLError` enum (no global enum exists in this codebase); the change creates a new per-domain enum to match the established pattern.
+
+#### Migration
+
+| Caller pattern | Action |
+| -------------- | ------ |
+| `DocxReader.read(from:)` against valid `.docx` | None — behaviour unchanged |
+| `DocxReader.read(from:)` against attacker / corrupted `.docx` | Now throws `XMLHardeningError.*` instead of silently transiting / DoS amplification |
+| `DocxReader.parseContainerRootAttributes(from:rootElementOpenPrefix:)` | Drop second argument: `parseContainerRootAttributes(from:)` |
+| `DocxReader.parseDocumentRootAttributes(from:)` | Now `throws` — add `try` |
+| `DocxWriter.renderDocumentRootOpenTag(_:)` | Now `throws` — add `try` |
+| `DocxReader.splitAttributes(_:)` | Now `throws` + visibility raised to `internal` (was `private`) for `@testable` access — add `try` |
+
+#### Tests
+
+`Tests/OOXMLSwiftTests/Issue7XMLHardeningTests.swift` — 11 new tests covering all spec scenarios (DTD reject in document/header/lowercase variants; SAX root-attr custom-prefix / default-ns / malformed; attr-name validation on reader + writer; cap boundary at 65 535 / 65 536 / 65 537 bytes). Suite 722 → 733 (1 pre-existing skip, 0 failures).
+
+#### SemVer
+
+Patch release (v0.21.3). Throws are additive on already-malformed input; no observable behaviour change for valid `.docx` corpus. Caller compile signatures change for `splitAttributes` / `parseContainerRootAttributes` / `renderDocumentRootOpenTag` / `parseDocumentRootAttributes` (all gained `throws` and/or simplified signature) — these are `internal` / package-internal methods, so external SemVer is unaffected.
+
 ## [0.21.0] - 2026-04-28
 
 ### Added — wrapCaptionSequenceFields lib API (Refs PsychQuant/che-word-mcp#62)
