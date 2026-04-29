@@ -50,17 +50,30 @@ extension WordDocument {
         var lastResetHeadingCount: [String: Int] = [:]  // identifier -> heading count at last reset
         var currentHeadingCount: [Int: Int] = [:]  // heading level -> times seen
 
-        // Body
+        // Body — recursive walker.
+        //
+        // v0.21.9+ (PsychQuant/che-word-mcp#94): pre-fix only the `.paragraph`
+        // case was processed at body top-level; `.table` and `.contentControl`
+        // were silently skipped so SEQ fields anchored inside table cells or
+        // block-level SDTs never updated. Now we recurse into both, mirroring
+        // the recursion pattern established by `findBodyChildContainingText`
+        // (#68, v0.20.6).
+        //
+        // Heading-count semantics: only top-level direct `.paragraph` body
+        // children count toward `currentHeadingCount` (chapter-reset).
+        // Headings nested inside tables / SDTs do NOT increment. Rationale:
+        // thesis workflows put chapter headings at body top level; SDT/table
+        // -internal headings are rare and would create false resets.
         var bodyDirty = false
         for i in 0..<body.children.count {
-            if case .paragraph(var para) = body.children[i] {
-                if let level = headingLevel(of: para) {
-                    currentHeadingCount[level, default: 0] += 1
-                }
-                if processParagraph(&para, counters: &counters, lastResetHeadingCount: &lastResetHeadingCount, currentHeadingCount: currentHeadingCount) {
-                    bodyDirty = true
-                }
-                body.children[i] = .paragraph(para)
+            if walkAndProcessBodyChildForFields(
+                &body.children[i],
+                counters: &counters,
+                lastResetHeadingCount: &lastResetHeadingCount,
+                currentHeadingCount: &currentHeadingCount,
+                isTopLevel: true
+            ) {
+                bodyDirty = true
             }
         }
 
@@ -157,6 +170,88 @@ extension WordDocument {
         if footnotesDirty { modifiedParts.insert("word/footnotes.xml") }
         if endnotesDirty { modifiedParts.insert("word/endnotes.xml") }
         return counters
+    }
+
+    /// Recursive walker for body children — processes SEQ fields in
+    /// `.paragraph`, recurses into `.table` cells (rows × cells × paragraphs +
+    /// nestedTables) and `.contentControl(_, children:)`. Mirrors the
+    /// recursion pattern from `findBodyChildContainingText` (#68).
+    ///
+    /// `isTopLevel` controls whether headings increment `currentHeadingCount`.
+    /// Only direct top-level body paragraphs trigger the heading counter to
+    /// avoid container-nested headings causing false SEQ chapter-resets (#94).
+    ///
+    /// - Returns: `true` if any descendant paragraph had a SEQ field rewritten.
+    private func walkAndProcessBodyChildForFields(
+        _ child: inout BodyChild,
+        counters: inout [String: Int],
+        lastResetHeadingCount: inout [String: Int],
+        currentHeadingCount: inout [Int: Int],
+        isTopLevel: Bool
+    ) -> Bool {
+        var anyDirty = false
+        switch child {
+        case .paragraph(var para):
+            if isTopLevel, let level = headingLevel(of: para) {
+                currentHeadingCount[level, default: 0] += 1
+            }
+            if processParagraph(&para,
+                                counters: &counters,
+                                lastResetHeadingCount: &lastResetHeadingCount,
+                                currentHeadingCount: currentHeadingCount) {
+                anyDirty = true
+            }
+            child = .paragraph(para)
+        case .table(var table):
+            // Walk every cell paragraph + nested tables. All marked
+            // non-top-level so heading-count is unaffected.
+            for r in 0..<table.rows.count {
+                for c in 0..<table.rows[r].cells.count {
+                    for p in 0..<table.rows[r].cells[c].paragraphs.count {
+                        var para = table.rows[r].cells[c].paragraphs[p]
+                        if processParagraph(&para,
+                                            counters: &counters,
+                                            lastResetHeadingCount: &lastResetHeadingCount,
+                                            currentHeadingCount: currentHeadingCount) {
+                            anyDirty = true
+                        }
+                        table.rows[r].cells[c].paragraphs[p] = para
+                    }
+                    for n in 0..<table.rows[r].cells[c].nestedTables.count {
+                        var nestedAsChild: BodyChild = .table(table.rows[r].cells[c].nestedTables[n])
+                        if walkAndProcessBodyChildForFields(
+                            &nestedAsChild,
+                            counters: &counters,
+                            lastResetHeadingCount: &lastResetHeadingCount,
+                            currentHeadingCount: &currentHeadingCount,
+                            isTopLevel: false
+                        ) {
+                            anyDirty = true
+                        }
+                        if case .table(let updatedNested) = nestedAsChild {
+                            table.rows[r].cells[c].nestedTables[n] = updatedNested
+                        }
+                    }
+                }
+            }
+            child = .table(table)
+        case .contentControl(let cc, var children):
+            for i in 0..<children.count {
+                if walkAndProcessBodyChildForFields(
+                    &children[i],
+                    counters: &counters,
+                    lastResetHeadingCount: &lastResetHeadingCount,
+                    currentHeadingCount: &currentHeadingCount,
+                    isTopLevel: false
+                ) {
+                    anyDirty = true
+                }
+            }
+            child = .contentControl(cc, children: children)
+        case .bookmarkMarker, .rawBlockElement:
+            break
+        }
+        return anyDirty
     }
 
     /// Process one paragraph: find SEQ fields, increment counters (with reset

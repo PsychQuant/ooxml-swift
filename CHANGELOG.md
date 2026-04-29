@@ -16,6 +16,39 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [0.21.9] - 2026-04-30
 
+### Fixed — `updateAllFields` now traverses `.table` and `.contentControl` containers ([PsychQuant/che-word-mcp#94](https://github.com/PsychQuant/che-word-mcp/issues/94))
+
+`WordDocument.updateAllFields` body loop only processed top-level `.paragraph` BodyChild cases — silently skipped `.table` and `.contentControl(_, children:)`. SEQ fields anchored inside table cells or block-level SDTs were never updated, surfacing as stale cachedResults / "no SEQ fields found" for callers.
+
+This is the same gap that #68 (v0.20.6) closed for `findBodyChildContainingText` — `updateAllFields` was added in v0.10.0 and never got the matching recursive-traversal upgrade. Thesis docs commonly have caption paragraphs inside table cells (figure/table captions sit inside the table they describe), surfacing the bug whenever `update_all_fields` runs.
+
+#### Fix
+
+New `walkAndProcessBodyChildForFields` recursive walker mirrors the recursion pattern from `findBodyChildContainingText`:
+
+- `.paragraph` → `processParagraph` (same as before)
+- `.table` → walks all rows × cells × paragraphs + nested tables
+- `.contentControl(_, children:)` → recurses into block-level SDT children
+- `.bookmarkMarker` / `.rawBlockElement` → skip
+
+#### Heading-count semantics decision
+
+Only **top-level direct `.paragraph`** body children count toward `currentHeadingCount` (chapter-reset). Headings nested inside tables / SDTs do NOT increment. Rationale: thesis workflows put chapter headings at body top level; SDT/table-internal headings would create false resets. Pinned by `testUpdateAllFieldsHeadingResetIgnoresContainerNestedHeadings`.
+
+#### Test coverage
+
+`Issue94UpdateAllFieldsContainerCoverageTests` (4 sub-tests):
+- `testUpdateAllFieldsRecursesIntoTableCellParagraphs` — primary reproducer: SEQ in table cell (RED pre-fix)
+- `testUpdateAllFieldsRecursesIntoSDTChildParagraphs` — SEQ in block-level SDT (RED pre-fix)
+- `testUpdateAllFieldsTopLevelUnaffectedByTableContents` — counter walks document order interleaving top-level + cell paragraphs (RED pre-fix)
+- `testUpdateAllFieldsHeadingResetIgnoresContainerNestedHeadings` — heading-count semantics: container-nested heading doesn't trigger SEQ reset
+
+Suite: 805 → 809 (+4, 0 failures, 1 pre-existing skip).
+
+#### Affected MCP tools (transitive via che-word-mcp dep bump)
+
+- `update_all_fields` → now finds and updates SEQ fields inside table cells / SDT children (no MCP source change needed)
+
 ### Fixed — `wrapCaptionSequenceFields` SEQ run inherits `position` from source run ([PsychQuant/che-word-mcp#93](https://github.com/PsychQuant/che-word-mcp/issues/93))
 
 When the splice logic in `WordDocument.wrapCaptionSequenceFields` ran on a paragraph whose runs were source-loaded with explicit `position > 0`, the new SEQ field run was constructed with default `position = nil`. Paragraph emit (`Paragraph.swift:560-740`) bifurcates by position field:
