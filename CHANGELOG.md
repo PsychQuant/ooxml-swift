@@ -14,6 +14,70 @@ All notable changes to ooxml-swift will be documented in this file.
 - `WordDocument.insertEquation(at: Int?, latex:, displayMode:)` legacy overload (deprecated v0.21.5): consumers SHALL migrate to `insertEquation(at: InsertLocation, latex:, displayMode:)` before v0.22.
 - `Hyperlink.text` setter (deprecated v0.21.6): consumers SHALL migrate to `hyperlink.runs = [Run(text: "x")]` direct assignment before v0.22.
 
+## [0.21.9] - 2026-04-29
+
+### Fixed — `Comment.paragraphIndex` linker now uses flat-paragraph counter ([PsychQuant/che-word-mcp#87](https://github.com/PsychQuant/che-word-mcp/issues/87)) — **observable behavior change**
+
+`DocxReader`'s comment-link pass at `Sources/OOXMLSwift/IO/DocxReader.swift:440-447` previously wrote `Comment.paragraphIndex = body.children.enumerated() index`, which counts `.table` / `.contentControl` / `.bookmarkMarker` / `.rawBlockElement` alongside `.paragraph`. Callers using the documented `getParagraphs()[paragraphIndex]` pattern got the wrong paragraph (off-by-N where N = number of non-paragraph siblings before the commented paragraph). The off-by-one originally reported in #87 was a coincidence of the user's docx layout (1 table before the commented paragraph); a docx with N tables/SDTs would show off-by-N.
+
+#### Fix
+
+Replaced the body.children loop with a flat-paragraph counter walker that mirrors `getParagraphs()` semantics — recurses into `.contentControl` children, skips `.table` / `.bookmarkMarker` / `.rawBlockElement`. Same convention-split pattern as `propagateRevisionsFromBodyChildren` (revisions linker, since v0.19.5+ #56 R5-CONT-2 P0 #1+#5).
+
+```swift
+var commentFlatParaCounter = 0
+func linkCommentMarkers(in para: Paragraph) {
+    for commentId in para.commentRangeIds {
+        if let idx = document.comments.comments.firstIndex(where: { $0.id == commentId }) {
+            document.comments.comments[idx].paragraphIndex = commentFlatParaCounter
+        }
+    }
+    commentFlatParaCounter += 1
+}
+func walkBodyChildForCommentLinker(_ child: BodyChild) {
+    switch child {
+    case .paragraph(let para): linkCommentMarkers(in: para)
+    case .contentControl(_, let inner): for c in inner { walkBodyChildForCommentLinker(c) }
+    case .table, .bookmarkMarker, .rawBlockElement: return
+    }
+}
+for child in document.body.children { walkBodyChildForCommentLinker(child) }
+```
+
+#### Behavior change — read CAREFULLY
+
+This is a **bug fix** but also a **caller-visible behavior change**:
+
+- Callers using the documented `getParagraphs()[comment.paragraphIndex]` pattern: **now correct** for all body layouts. Previously off-by-N for any layout with non-paragraph body children before the commented paragraph.
+- Callers manually compensating with `paragraphIndex - 1` (or `- N`) to work around the bug: **will over-correct** and need to remove their compensation. Audit downstream code that does any arithmetic on `Comment.paragraphIndex`.
+- Callers consuming `Comment.paragraphIndex` directly (without indexing into `getParagraphs()`): **now matches** the flat-paragraph index. Previously matched body.children enum index. The two semantics diverge whenever the body has tables / SDTs.
+
+#### New behavior — SDT recursion
+
+Pre-fix the linker did NOT recurse into `.contentControl` children, so comments anchored to paragraphs inside block-level SDTs had `paragraphIndex` left at the model's default (`-1` if never written, or whatever the application set). Post-fix the linker recurses into SDTs matching `getParagraphs()` recursion. Comments inside SDTs now get a valid `paragraphIndex`.
+
+#### Out of scope (unchanged)
+
+- Comments anchored to paragraphs inside table cells: linker still does not enter table cells. `paragraphIndex` for cell-anchored comments remains unset by the body-level walker. This matches `getParagraphs()` semantics (which also excludes table cells; use `getAllParagraphs()` for full traversal). Cell-comment linkage is an additive enhancement (separate issue if real-world impact observed).
+
+#### Test coverage
+
+`Issue87CommentParagraphIndexTests` (4 sub-tests):
+- `testCommentParagraphIndexMatchesGetParagraphsWith0Tables` — baseline regression: no body-children non-paragraph siblings, `paragraphIndex == 1` (no behavior change for plain layouts)
+- `testCommentParagraphIndexMatchesGetParagraphsWith1TableBefore` — primary fix: `body.children = [P, table, P(comment)]` → `paragraphIndex == 1` (was 2 pre-fix)
+- `testCommentParagraphIndexMatchesGetParagraphsWithSDTContaining` — SDT recursion: `body.children = [P, sdt(P(comment)), P]` → `paragraphIndex == 1` (was -1 pre-fix; never linked)
+- `testCommentParagraphIndexUnaffectedWhenCommentInsideTableCell` — out-of-scope guard: cell-anchored comments stay unlinked at body-level walker (current behavior, intentional)
+
+Suite: 796 → 800 (+4, 0 failures, 1 pre-existing skip).
+
+#### Affected MCP tools (transitive via che-word-mcp dep bump)
+
+- `list_comments` → returns correct `paragraph_index` matching `get_paragraphs[idx]`
+- `get_comment_thread` → reads via `Comments.comments[idx].paragraphIndex`, fixed transitively
+- `list_comment_threads` → same path
+
+No MCP source changes needed; behavior change surfaces via `che-word-mcp` v3.17.5 dep bump.
+
 ## [0.21.8] - 2026-04-29
 
 Two lib-only post-#85 verify follow-ups, paired into a single dep bump for `che-word-mcp` consumers.

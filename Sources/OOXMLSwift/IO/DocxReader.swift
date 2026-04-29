@@ -437,15 +437,39 @@ public struct DocxReader {
         // v0.21.4+ (#6, F9): Reader no longer populates the deprecated
         // `commentIds` stored field. Source of truth is now the marker list,
         // exposed as the computed `commentRangeIds`.
-        for (index, child) in document.body.children.enumerated() {
-            if case .paragraph(let para) = child {
-                for commentId in para.commentRangeIds {
-                    if let idx = document.comments.comments.firstIndex(where: { $0.id == commentId }) {
-                        document.comments.comments[idx].paragraphIndex = index
-                    }
+        //
+        // v0.21.9+ (PsychQuant/che-word-mcp#87, ooxml-swift#10 family):
+        // walks via flat-paragraph counter matching `getParagraphs()`
+        // semantics — recurses into `.contentControl` children, skips
+        // `.table` / `.bookmarkMarker` / `.rawBlockElement`. Pre-fix the
+        // loop wrote `paragraphIndex = body.children.enumerated() index`,
+        // which broke `getParagraphs()[paragraphIndex]` callers when
+        // tables / SDTs sat before the commented paragraph (off-by-N).
+        // Same convention-split fix family as #69 / #75 / #79 (insert
+        // tools) and `propagateRevisionsFromBodyChildren` (revisions linker).
+        var commentFlatParaCounter = 0
+        func linkCommentMarkers(in para: Paragraph) {
+            for commentId in para.commentRangeIds {
+                if let idx = document.comments.comments.firstIndex(where: { $0.id == commentId }) {
+                    document.comments.comments[idx].paragraphIndex = commentFlatParaCounter
                 }
             }
+            commentFlatParaCounter += 1
         }
+        func walkBodyChildForCommentLinker(_ child: BodyChild) {
+            switch child {
+            case .paragraph(let para):
+                linkCommentMarkers(in: para)
+            case .contentControl(_, let inner):
+                for c in inner { walkBodyChildForCommentLinker(c) }
+            case .table, .bookmarkMarker, .rawBlockElement:
+                // `getParagraphs()` excludes table cells; comment linker
+                // mirrors that semantics. Cell-anchored comments remain
+                // unlinked at body level (additive enhancement if needed).
+                return
+            }
+        }
+        for child in document.body.children { walkBodyChildForCommentLinker(child) }
 
         // 10. 收集段落內的修訂記錄到 document.revisions
         // v0.19.5+ (#56 R5-CONT-2 P0 #1+#5): single call to the shared
