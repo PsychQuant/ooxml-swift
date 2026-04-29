@@ -14,6 +14,44 @@ All notable changes to ooxml-swift will be documented in this file.
 - `WordDocument.insertEquation(at: Int?, latex:, displayMode:)` legacy overload (deprecated v0.21.5): consumers SHALL migrate to `insertEquation(at: InsertLocation, latex:, displayMode:)` before v0.22.
 - `Hyperlink.text` setter (deprecated v0.21.6): consumers SHALL migrate to `hyperlink.runs = [Run(text: "x")]` direct assignment before v0.22.
 
+## [0.21.7] - 2026-04-29
+
+### Added — public anchor-lookup API (closes [PsychQuant/che-word-mcp#86](https://github.com/PsychQuant/che-word-mcp/issues/86))
+
+Three previously-internal helpers on `WordDocument` are now `public`, eliminating the fork-and-diverge pattern external Swift SPM consumers (rescue scripts, dxedit CLI, third-party tooling) had to follow:
+
+- `public func findBodyChildContainingText(_ needle: String, nthInstance: Int = 1) -> Int?` — instance method on `WordDocument`. Returns the index in `body.children` of the n-th BodyChild whose flattened text contains `needle`, or `nil` if no match. `nthInstance < 1` or empty `needle` returns `nil` (defensive contract).
+- `public static func bodyChildContainsText(_ child: BodyChild, needle: String) -> Bool` — primitive for callers building custom traversal. Recurses into `.contentControl(_, children:)` and walks `.table` cells (per #68); returns `false` for `.bookmarkMarker` and `.rawBlockElement` (no flattened text).
+- `public static func tableContainsText(_ table: Table, needle: String) -> Bool` — depth-bounded table walker covering `rows[].cells[].paragraphs[]` + `cells[].nestedTables[]`. Returns true on first match (short-circuit).
+
+#### Why minimal exposure (Option C from triage)
+
+The issue's suggested API surface included an `AnchorLookupOptions` struct with toggles for `traverseContentControls` / `traverseTableCells` / `traverseBlockSDT`. We deliberately deferred that:
+
+- The internal helper already traverses all surfaces by default (post-#68); exposing it 1:1 means external consumers get *exactly* what `che-word-mcp`'s MCP tools see — zero divergence.
+- `AnchorLookupOptions` is feature creep until an actual consumer asks for narrowing. Easier to add options later than to remove them (semver: adding a default-arg overload is non-breaking; changing defaults is).
+- Smaller test surface (10 tests vs ~16 for the option-rich version).
+
+If a future consumer needs opt-out for `.table` or `.contentControl` traversal, file a follow-up; the public primitives `bodyChildContainsText` + `tableContainsText` are already exposed for callers building custom traversal.
+
+#### Test coverage
+
+`Issue86PublicAnchorLookupTests` (10 sub-tests):
+- Top-level paragraph match + nthInstance disambiguation (3)
+- Empty needle / negative instance defensive contract (1)
+- ContentControl child traversal (1)
+- Table cell traversal (1)
+- Bookmark / rawBlockElement skip (1)
+- Static `bodyChildContainsText` primitive (2)
+- Static `tableContainsText` walking nested tables (1)
+- Round-trip parity test: public lookup result matches `.afterText` resolution (1)
+
+Suite total: 770 → 780 (0 failures, 1 skip).
+
+#### Backward compatibility
+
+Pure additive — no breaking changes. Existing internal `WordDocument` callers continue to use the same code path; the `private` → `public` keyword change has no caller-side impact.
+
 ## [0.21.6] - 2026-04-29
 
 ### Changed — API mutation surface safety bundle (Refs PsychQuant/ooxml-swift#5)
