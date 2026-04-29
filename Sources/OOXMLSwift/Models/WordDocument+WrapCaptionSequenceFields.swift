@@ -266,6 +266,18 @@ extension WordDocument {
 
         // Build the SEQ-field run via the existing FieldCode emission machinery
         // (5-run fldChar block) — same emission style insertCaption uses.
+        //
+        // v0.21.9+ (PsychQuant/che-word-mcp#93): inherit position from the
+        // source run being split. Pre-fix the SEQ run was constructed with
+        // default `position = nil`, which routes it through Paragraph's
+        // legacy post-content emit section (Paragraph.swift:691) AT THE END,
+        // while preText/postText (which copied the source's `position > 0`)
+        // emit through the positioned-list section. Visual result: SEQ
+        // appended at end of paragraph, not spliced at match position.
+        // Inheriting `preRun.position` puts all three (preText, SEQ,
+        // postText) into the same emit section at the same position;
+        // stable sort preserves insertion order — preText, SEQ, postText.
+        let preRun = para.runs[preRunIdx]
         let seqField = SequenceField(
             identifier: ctx.sequenceName,
             format: ctx.format,
@@ -273,6 +285,7 @@ extension WordDocument {
         )
         var seqRun = Run(text: "")
         seqRun.rawXML = seqField.toFieldXML()
+        seqRun.position = preRun.position
 
         // Build replacement runs in document order:
         //   [pre-text portion of preRunIdx (if non-empty),
@@ -281,8 +294,7 @@ extension WordDocument {
         // Then keep runs before preRunIdx and runs after postRunIdx untouched.
         var newRuns: [Run] = Array(para.runs[..<preRunIdx])
 
-        // Pre-text portion
-        let preRun = para.runs[preRunIdx]
+        // Pre-text portion (preRun bound above)
         let preRunNS = preRun.text as NSString
         if preRunLocalEnd > 0 {
             var preText = preRun

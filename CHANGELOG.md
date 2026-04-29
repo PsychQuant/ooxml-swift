@@ -14,7 +14,39 @@ All notable changes to ooxml-swift will be documented in this file.
 - `WordDocument.insertEquation(at: Int?, latex:, displayMode:)` legacy overload (deprecated v0.21.5): consumers SHALL migrate to `insertEquation(at: InsertLocation, latex:, displayMode:)` before v0.22.
 - `Hyperlink.text` setter (deprecated v0.21.6): consumers SHALL migrate to `hyperlink.runs = [Run(text: "x")]` direct assignment before v0.22.
 
-## [0.21.9] - 2026-04-29
+## [0.21.9] - 2026-04-30
+
+### Fixed — `wrapCaptionSequenceFields` SEQ run inherits `position` from source run ([PsychQuant/che-word-mcp#93](https://github.com/PsychQuant/che-word-mcp/issues/93))
+
+When the splice logic in `WordDocument.wrapCaptionSequenceFields` ran on a paragraph whose runs were source-loaded with explicit `position > 0`, the new SEQ field run was constructed with default `position = nil`. Paragraph emit (`Paragraph.swift:560-740`) bifurcates by position field:
+
+- **Positioned section** (`position > 0`): sorted by position, stable insertion order
+- **Legacy post-content section** (`position == nil` / `0`): emitted AT THE END
+
+So `[preText@1, postText@1]` (both inheriting source position) emit in the positioned section in array order, while `seqRun@nil` lands in the legacy section. Result: SEQ field appended at end of paragraph instead of spliced at match position. User-visible: caption like `「圖 4-1：xxx」` rendered as `「圖 4-：xxx1」`.
+
+Pre-existing `WrapCaptionSequenceFieldsTests` didn't catch this because the test pattern `Paragraph(text: "...")` constructs runs with `position = nil`, so all three new runs share the legacy emit path with no bug visible. Real Word documents have positioned source runs, surfacing the bug only on real docx data.
+
+#### Fix
+
+One-line change in `Sources/OOXMLSwift/Models/WordDocument+WrapCaptionSequenceFields.swift:288`:
+
+```swift
+seqRun.position = preRun.position
+```
+
+SEQ run now inherits the source run's position, so all three (preText, seqRun, postText) emit in the same section at the same position. Stable sort preserves insertion order: preText → seqRun → postText.
+
+#### Test coverage
+
+`Issue93WrapCaptionSeqPlacementTests` (5 sub-tests):
+- `testSingleRunCaptionPlacesSEQInPlaceOfDigit` — baseline positional sanity
+- `testMultiRunCaptionPlacesSEQAtMatchPosition` — multi-run pre-state
+- `testCaptionWithDigitInsideMixedRunPreservesSurroundingText` — splice integrity check
+- `testSingleRunCaptionRoundTripPreservesSEQPosition` — write/read roundtrip
+- `testWrapWithExplicitRunPositionPreservesSplicePosition` — **primary reproducer**: source-loaded `position = 1` mimics real Word doc; pre-fix RED, post-fix GREEN
+
+Suite: 800 → 805 (+5, 0 failures, 1 pre-existing skip).
 
 ### Fixed — `Comment.paragraphIndex` linker now uses flat-paragraph counter ([PsychQuant/che-word-mcp#87](https://github.com/PsychQuant/che-word-mcp/issues/87)) — **observable behavior change**
 
