@@ -23,6 +23,16 @@ public struct DocxReader {
     ///
     /// Grow this set when adding new walker-pre steps (e.g., a future
     /// "pre-scan footnoteReference" pass).
+    ///
+    /// Asymmetry note (#15): `parseRun` uses a function-local
+    /// `recognizedRunChildren` allowlist (~L1971) instead of a static
+    /// pre-consumed set. The patterns are intentionally different — `parseRun`
+    /// has only one pre-consumer (`rPr` via `parseRunProperties`) and its
+    /// recognized-set IS the natural switch coverage, while `parseParagraph`'s
+    /// pre-consumer (`pPr`) is structurally distinct from the switch's typed
+    /// cases and benefits from `@testable` static introspection (#4).
+    /// If `parseRun` ever gets a second pre-consumer, migrate to a parallel
+    /// static `runWalkerPreConsumed` for symmetry.
     internal static let walkerPreConsumed: Set<String> = ["pPr"]
 
     // MARK: - Whitespace overlay context (#59 sub-stack B, v0.19.10+)
@@ -1968,6 +1978,24 @@ public struct DocxReader {
         // emission with empty run.text). The double-counter-advance issue is
         // instead resolved by passing `includeDelText: false` to
         // `advanceWhitespaceCounter` below — the explicit loop already handles it.
+        // `recognizedRunChildren` is a function-local allowlist of `<w:r>`
+        // direct children handled by typed switch cases below. Anything not in
+        // this set falls into the `RawElement` capture loop for verbatim
+        // round-trip preservation.
+        //
+        // Pattern divergence from `parseParagraph` (#15): `parseParagraph` uses
+        // a static `walkerPreConsumed: Set<String> = ["pPr"]` (deny-list at
+        // loop entry — see L26-L42 doc comment). Different mental models
+        // because the responsibilities differ:
+        //   - `walkerPreConsumed` = "elements eaten by a separate parser
+        //     BEFORE the walker runs" → must be skipped at loop entry to avoid
+        //     duplicate capture (defense-in-depth from #4)
+        //   - `recognizedRunChildren` = "elements handled by my switch cases"
+        //     → natural allowlist for which children NOT to raw-capture
+        // Both achieve the same goal (don't double-capture typed-handled
+        // children) via complementary mechanisms. Keep local until parseRun
+        // gains a second pre-consumer that would benefit from `@testable`
+        // introspection.
         let recognizedRunChildren: Set<String> = ["rPr", "t", "drawing", "oMath", "oMathPara"]
         var collectedRawElements: [RawElement] = []
         for child in element.children ?? [] {
