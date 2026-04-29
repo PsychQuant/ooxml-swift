@@ -1569,7 +1569,7 @@ final class Issue56R4StackTests: XCTestCase {
         doc.footers = [footer]
 
         // Direct toXML emit MUST contain the <w:sdt> element + SDT inner content.
-        let xml = footer.toXML()
+        let xml = try footer.toXML()
         XCTAssertTrue(xml.contains("<w:sdt>"),
                       "Footer.toXML SHALL emit <w:sdt> for .contentControl bodyChildren; got:\n\(xml)")
         XCTAssertTrue(xml.contains("sdt-cell-text"),

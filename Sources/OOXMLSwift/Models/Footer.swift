@@ -116,14 +116,15 @@ public enum PageNumberFormat: Equatable {
 extension Footer {
     /// 轉換為完整的 footer.xml 內容
     /// v0.19.5+ (#56 R5 P0 #6): emit from bodyChildren — see Header.toXML.
-    func toXML() -> String {
+    /// v0.21.4+ (#6, F8): now `throws` — see Header.toXML.
+    func toXML() throws -> String {
         var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         xml += ContainerRootTag.render(elementName: "w:ftr", attributes: rootAttributes)
         // v0.19.5+ (#56 R5-CONT P1 #9): route through shared helper so
         // .contentControl emits as <w:sdt>...</w:sdt> instead of being
         // silently dropped — see Header.toXML.
         for child in bodyChildren {
-            xml += DocxWriter.xmlForBodyChild(child)
+            xml += try DocxWriter.xmlForBodyChild(child)
         }
         if bodyChildren.isEmpty {
             xml += "<w:p/>"

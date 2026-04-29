@@ -57,15 +57,17 @@ extension Footnote {
     /// Falls back to the legacy single-text-run template only for API-built
     /// footnotes constructed via `Footnote(id:text:paragraphIndex:)` without
     /// further paragraph mutation.
-    func toXML() -> String {
+    /// v0.21.4+ (#6, F8): now `throws` to propagate
+    /// `RoundtripError.unserializedFallbackEdit` from `xmlForBodyChild`.
+    func toXML() throws -> String {
         let inner: String
         if !bodyChildren.isEmpty {
             // v0.19.5+ (#56 R5 P0 #6): emit from bodyChildren so direct-child
             // tables round-trip in addition to paragraphs.
             // v0.19.5+ (#56 R5-CONT P1 #9): .contentControl now emits via
             // shared helper instead of being dropped — verify R5 P1 #9.
-            inner = bodyChildren.map { child -> String in
-                return DocxWriter.xmlForBodyChild(child)
+            inner = try bodyChildren.map { child -> String in
+                return try DocxWriter.xmlForBodyChild(child)
             }.joined()
         } else {
             inner = """
@@ -145,7 +147,8 @@ public struct FootnotesCollection: Equatable {
     }
 
     /// 產生完整的 footnotes.xml 內容
-    func toXML() -> String {
+    /// v0.21.4+ (#6, F8): now `throws` — see Footnote.toXML.
+    func toXML() throws -> String {
         var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         xml += ContainerRootTag.render(elementName: "w:footnotes", attributes: rootAttributes)
         xml += """
@@ -166,7 +169,7 @@ public struct FootnotesCollection: Equatable {
         """
 
         for footnote in footnotes {
-            xml += footnote.toXML()
+            xml += try footnote.toXML()
         }
 
         xml += "</w:footnotes>"
@@ -230,14 +233,16 @@ extension Endnote {
     /// 產生 endnotes.xml 中的單一尾註 XML
     /// v0.19.5+ (#56 R5 P1 #2): emit from `paragraphs` when populated; same
     /// rationale as `Footnote.toXML` above.
-    func toXML() -> String {
+    /// v0.21.4+ (#6, F8): now `throws` to propagate
+    /// `RoundtripError.unserializedFallbackEdit` from `xmlForBodyChild`.
+    func toXML() throws -> String {
         let inner: String
         if !bodyChildren.isEmpty {
             // v0.19.5+ (#56 R5 P0 #6): emit from bodyChildren — see Footnote.toXML.
             // v0.19.5+ (#56 R5-CONT P1 #9): .contentControl now emits via
             // shared helper instead of being dropped — verify R5 P1 #9.
-            inner = bodyChildren.map { child -> String in
-                return DocxWriter.xmlForBodyChild(child)
+            inner = try bodyChildren.map { child -> String in
+                return try DocxWriter.xmlForBodyChild(child)
             }.joined()
         } else {
             inner = """
@@ -314,7 +319,8 @@ public struct EndnotesCollection: Equatable {
     }
 
     /// 產生完整的 endnotes.xml 內容
-    func toXML() -> String {
+    /// v0.21.4+ (#6, F8): now `throws` — see Footnote.toXML.
+    func toXML() throws -> String {
         var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         xml += ContainerRootTag.render(elementName: "w:endnotes", attributes: rootAttributes)
         xml += """
@@ -335,7 +341,7 @@ public struct EndnotesCollection: Equatable {
         """
 
         for endnote in endnotes {
-            xml += endnote.toXML()
+            xml += try endnote.toXML()
         }
 
         xml += "</w:endnotes>"
