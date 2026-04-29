@@ -69,8 +69,12 @@ final class Issue84InsertEquationLocationTests: XCTestCase {
         XCTAssertEqual(texts[3], "last")
     }
 
-    /// Spec / che-word-mcp#67 F2: inline equation explicitly rejects
-    /// non-`paragraphIndex` anchors. `.afterText` in inline mode throws.
+    /// Spec / che-word-mcp#67 F2 + che-word-mcp#91: inline equation explicitly
+    /// rejects non-`paragraphIndex` anchors. `.afterText` in inline mode throws
+    /// the dedicated `InsertLocationError.inlineModeRequiresParagraphIndex`
+    /// case (post-#91; pre-#91 used the misleading `.invalidParagraphIndex(-1)`
+    /// sentinel — see `Issue91InlineModeRejectionTests` for full coverage of
+    /// all 5 non-paragraphIndex anchor cases).
     func testInlineModeRejectsAfterTextAnchor() throws {
         var doc = try buildDocWithThreeParagraphs()
         XCTAssertThrowsError(try doc.insertEquation(
@@ -78,9 +82,9 @@ final class Issue84InsertEquationLocationTests: XCTestCase {
             latex: "t",
             displayMode: false
         )) { error in
-            // Either InsertLocationError or a domain error is acceptable;
-            // the contract is "throws", not "throws X".
-            XCTAssertNotNil(error, "inline mode must reject non-paragraphIndex anchors")
+            XCTAssertEqual(error as? InsertLocationError,
+                .inlineModeRequiresParagraphIndex,
+                "inline mode must reject non-paragraphIndex anchors with the dedicated error case (#91)")
         }
     }
 
