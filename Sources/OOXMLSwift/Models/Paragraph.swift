@@ -368,6 +368,12 @@ extension Paragraph {
             guard let id = paragraphFormatChangeRevisionId else { return nil }
             return revisions.first { $0.id == id }
         }()
+        // `needsPPr` gate implements "drop empty <w:pPr> on emit" — an
+        // all-default paragraph emits nothing for pPr (OOXML treats absence ≡
+        // <w:pPr/>). This invariant is asserted by Issue4PPrRegressionGuardTests
+        // .testEmptyPPrSelfClosingProducesNoUnrecognizedAndDropsEmptyBlock; the
+        // sorted-by-position emit path at L502 mirrors this gate. If you extend
+        // either condition, update both sites + the test docstring to match.
         let needsPPr = !propsXML.isEmpty
             || properties.sectionBreak != nil
             || formatChangeRevision != nil
@@ -499,6 +505,12 @@ extension Paragraph {
             guard let id = paragraphFormatChangeRevisionId else { return nil }
             return revisions.first { $0.id == id }
         }()
+        // `needsPPr` gate — sorted-by-position counterpart of L371 (legacy emit
+        // path). Same drop-empty-pPr invariant locked in by
+        // Issue4PPrRegressionGuardTests
+        // .testEmptyPPrSelfClosingProducesNoUnrecognizedAndDropsEmptyBlock. Keep
+        // both sites in sync; if you add a new condition (e.g.,
+        // `|| isCustomDirectFormatting`), update both + the test docstring.
         let needsPPr = !propsXML.isEmpty
             || properties.sectionBreak != nil
             || formatChangeRevision != nil
