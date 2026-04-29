@@ -124,6 +124,127 @@ final class Issue91InlineModeRejectionTests: XCTestCase {
         }
     }
 
+    // MARK: - F1 corrective: SDT-nested + empty-doc + boundary
+
+    /// Verify F1 corrective (convergent finding: Codex P1 + Devil's Advocate
+    /// DA-1): pre-corrective bounds-check used `getParagraphs().count` which
+    /// recurses into block-level `.contentControl`, but the legacy delegate at
+    /// `Document.swift:4044` only walks top-level `.paragraph` body children
+    /// (no SDT descent). For a doc shape `[.contentControl(_, [.paragraph])]`,
+    /// the SDT-nested paragraph counted toward `getParagraphs().count == 1`,
+    /// so `.paragraphIndex(0)` passed the old guard but the delegate found
+    /// zero top-level paragraph matches and silently no-op'd — exactly the
+    /// failure class Defect 2 was meant to eliminate, just shifted to
+    /// SDT-nested docs.
+    ///
+    /// Post-corrective: bounds-check uses top-level `.paragraph` count only,
+    /// so `.paragraphIndex(0)` against an SDT-nested-only doc throws
+    /// `invalidParagraphIndex(0)` instead of silent no-op.
+    func testInlineModeThrowsOnSdtNestedOnlyDoc() throws {
+        var doc = WordDocument()
+        // Doc shape: only an SDT containing a paragraph; ZERO top-level paragraphs
+        let sdt = StructuredDocumentTag(id: 100, tag: "test-sdt")
+        let cc = ContentControl(sdt: sdt, content: "")
+        let nestedPara = Paragraph(runs: [Run(text: "inside-sdt")])
+        doc.body.children = [.contentControl(cc, children: [.paragraph(nestedPara)])]
+
+        XCTAssertThrowsError(try doc.insertEquation(
+            at: .paragraphIndex(0),
+            latex: "x",
+            displayMode: false
+        )) { error in
+            guard case let InsertLocationError.invalidParagraphIndex(idx) = error else {
+                XCTFail("Expected InsertLocationError.invalidParagraphIndex(0) for SDT-nested-only doc, got \(error)")
+                return
+            }
+            XCTAssertEqual(idx, 0,
+                "F1 corrective: bounds-check must count only top-level paragraphs, not recurse into SDTs")
+        }
+    }
+
+    /// Verify F1 corrective (mixed top-level + SDT). Doc shape:
+    /// `[.paragraph(p0), .contentControl(_, [.paragraph(sdt-p)])]` has
+    /// `getParagraphs().count == 2` (recurses) but only ONE top-level paragraph.
+    /// Pre-corrective: `.paragraphIndex(1)` passed `idx < 2` guard then silent
+    /// no-op'd in delegate. Post-corrective: throws `invalidParagraphIndex(1)`.
+    func testInlineModeThrowsOnIdxBeyondTopLevelButWithinGetParagraphs() throws {
+        var doc = WordDocument()
+        let p0 = Paragraph(runs: [Run(text: "top-level-0")])
+        let sdt = StructuredDocumentTag(id: 100, tag: "test-sdt")
+        let cc = ContentControl(sdt: sdt, content: "")
+        let nestedPara = Paragraph(runs: [Run(text: "inside-sdt")])
+        doc.body.children = [
+            .paragraph(p0),
+            .contentControl(cc, children: [.paragraph(nestedPara)]),
+        ]
+
+        // getParagraphs() returns 2 (recurses); body.children top-level .paragraph count = 1
+        XCTAssertEqual(doc.getParagraphs().count, 2,
+            "sanity: getParagraphs recurses into SDT")
+
+        // Pre-corrective: passes idx < 2 guard then silent no-op
+        // Post-corrective: throws invalidParagraphIndex(1)
+        XCTAssertThrowsError(try doc.insertEquation(
+            at: .paragraphIndex(1),
+            latex: "x",
+            displayMode: false
+        )) { error in
+            guard case let InsertLocationError.invalidParagraphIndex(idx) = error else {
+                XCTFail("Expected invalidParagraphIndex(1) — bounds-check should narrow to top-level only, got \(error)")
+                return
+            }
+            XCTAssertEqual(idx, 1)
+        }
+
+        // Sanity: idx 0 (top-level p0) still works correctly (does NOT throw)
+        XCTAssertNoThrow(try doc.insertEquation(
+            at: .paragraphIndex(0),
+            latex: "y",
+            displayMode: false
+        ), "valid top-level idx must still succeed post-corrective")
+    }
+
+    /// F6 verify follow-up: empty-doc edge case (`paragraphCount == 0`) +
+    /// `.paragraphIndex(0)` inline mode throws `invalidParagraphIndex(0)`.
+    func testInlineModeThrowsOnEmptyDocument() throws {
+        var doc = WordDocument()
+        // Empty body — no children at all
+        XCTAssertEqual(doc.body.children.count, 0)
+
+        XCTAssertThrowsError(try doc.insertEquation(
+            at: .paragraphIndex(0),
+            latex: "x",
+            displayMode: false
+        )) { error in
+            guard case let InsertLocationError.invalidParagraphIndex(idx) = error else {
+                XCTFail("Expected invalidParagraphIndex(0), got \(error)")
+                return
+            }
+            XCTAssertEqual(idx, 0)
+        }
+    }
+
+    /// F7 verify follow-up: boundary case (`.paragraphIndex(paragraphCount)`)
+    /// — the off-by-one most likely to hit callers by mistake. Inline mode
+    /// must throw (no append-at-end semantics for inline; that's display-mode's
+    /// job via `insertParagraph`).
+    func testInlineModeThrowsOnBoundaryAtParagraphCount() throws {
+        var doc = try buildDocWithThreeParagraphs()
+        // 3 top-level paragraphs; .paragraphIndex(3) is exactly at boundary
+        XCTAssertThrowsError(try doc.insertEquation(
+            at: .paragraphIndex(3),
+            latex: "x",
+            displayMode: false
+        )) { error in
+            guard case let InsertLocationError.invalidParagraphIndex(idx) = error else {
+                XCTFail("Expected invalidParagraphIndex(3), got \(error)")
+                return
+            }
+            XCTAssertEqual(idx, 3,
+                "boundary case: idx == paragraphCount must throw inline (no append semantics)")
+        }
+    }
+
     // MARK: - Display-mode regression guard
 
     /// Spec: display-mode behaviour is UNCHANGED. `.afterImageId` non-existent
