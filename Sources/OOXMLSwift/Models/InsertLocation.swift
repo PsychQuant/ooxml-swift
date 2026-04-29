@@ -174,7 +174,12 @@ extension WordDocument {
     /// `.contentControl`, the new paragraph lands AT BODY LEVEL adjacent to
     /// the entire table/SDT — NOT inside the table cell or SDT child list.
     /// This is intentional: `.intoTableCell` exists for inside-cell inserts.
-    private func findBodyChildContainingText(_ needle: String, nthInstance: Int) -> Int? {
+    ///
+    /// Public since v0.21.7 (PsychQuant/che-word-mcp#86) — external Swift SPM
+    /// consumers (rescue scripts, dxedit CLI, third-party tooling) previously
+    /// had to reimplement this with diverging semantics. Exposing the canonical
+    /// implementation eliminates that fragmentation.
+    public func findBodyChildContainingText(_ needle: String, nthInstance: Int = 1) -> Int? {
         guard nthInstance >= 1, !needle.isEmpty else { return nil }
         var seen = 0
         for (i, child) in body.children.enumerated() {
@@ -200,7 +205,11 @@ extension WordDocument {
     ///   (parser depth-limited to 5; recursion depth bounded by parser)
     /// - `.contentControl(_, children:)` — recurse on each child via this helper
     /// - `.bookmarkMarker`, raw catch-all — no text content; returns false
-    private static func bodyChildContainsText(_ child: BodyChild, needle: String) -> Bool {
+    ///
+    /// Public since v0.21.7 (PsychQuant/che-word-mcp#86) — exposed as a primitive
+    /// for callers who want to check a single `BodyChild` without the
+    /// `nthInstance` enumeration done by `findBodyChildContainingText`.
+    public static func bodyChildContainsText(_ child: BodyChild, needle: String) -> Bool {
         switch child {
         case .paragraph(let para):
             return para.flattenedDisplayText().contains(needle)
@@ -217,7 +226,11 @@ extension WordDocument {
 
     /// Walks every paragraph in every cell of every row, then recurses into
     /// `nestedTables`. Returns true on first match (short-circuit).
-    private static func tableContainsText(_ table: Table, needle: String) -> Bool {
+    ///
+    /// Public since v0.21.7 (PsychQuant/che-word-mcp#86) — exposed alongside
+    /// `bodyChildContainsText` so callers building custom traversal can reuse
+    /// the depth-bounded table walk.
+    public static func tableContainsText(_ table: Table, needle: String) -> Bool {
         for row in table.rows {
             for cell in row.cells {
                 for para in cell.paragraphs {
