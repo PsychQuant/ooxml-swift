@@ -265,34 +265,56 @@ extension Paragraph {
     /// the same text universe.
     ///
     /// PsychQuant/che-word-mcp#63 follow-up (verify F1 P1).
+    /// PsychQuant/che-word-mcp#85 — include OMML inline math text in top-level runs.
+    /// PsychQuant/che-word-mcp#92 — extend OMML walk to hyperlinks /
+    /// fieldSimples / alternateContents.fallbackRuns paths via shared
+    /// `flattenRunsWithOMML` helper. Pre-#92, those paths used
+    /// `runs.map { $0.text }.joined()` and silently dropped OMML inside
+    /// their wrappers (same failure class as #85's primary bug, just shifted
+    /// to wrappers — rare in practice but real for cross-ref placeholders
+    /// emitted by Pandoc/Quarto/LaTeX→docx with embedded math).
+    /// contentControls path stays separate (uses RAW XML walking via
+    /// `flattenContentControlText` since #63 — different recursion strategy).
     public func flattenedDisplayText() -> String {
         var parts: [String] = []
-        // PsychQuant/che-word-mcp#85: include OMML inline math text.
-        // Reader stores `<m:oMath>` / `<m:oMathPara>` subtrees on
-        // `Run.rawXML` (not as typed children). Walk runs in order: emit
-        // `text` for normal runs; for OMML-bearing runs, parse via
-        // OMMLParser and concat the AST's visibleText. Without this,
-        // anchors crossing inline math (e.g. "進行 t 檢定" in a paragraph
-        // with `<m:oMath><m:r><m:t>t</m:t></m:r></m:oMath>` between text
-        // runs) silently 0-match.
+        parts.append(Self.flattenRunsWithOMML(runs))
+        for h in hyperlinks {
+            parts.append(Self.flattenRunsWithOMML(h.runs))
+        }
+        for f in fieldSimples {
+            parts.append(Self.flattenRunsWithOMML(f.runs))
+        }
+        for ac in alternateContents {
+            parts.append(Self.flattenRunsWithOMML(ac.fallbackRuns))
+        }
+        for cc in contentControls {
+            parts.append(flattenContentControlText(cc))
+        }
+        return parts.joined()
+    }
+
+    /// Walk a `[Run]` list emitting each run's plain `text` plus, for
+    /// OMML-bearing runs (whose `rawXML` contains `oMath`), the parsed
+    /// math AST's `visibleText` immediately after. Single source of truth
+    /// for the OMML walk pattern shared across 4 surface paths in
+    /// `flattenedDisplayText` (top-level runs + hyperlinks + fieldSimples +
+    /// AC fallbackRuns).
+    ///
+    /// PsychQuant/che-word-mcp#85 introduced the per-run OMML walk for
+    /// top-level runs only. PsychQuant/che-word-mcp#92 extracted it as a
+    /// helper so the wrapper paths get identical coverage.
+    ///
+    /// Reader stores `<m:oMath>` / `<m:oMathPara>` subtrees on `Run.rawXML`
+    /// (not as typed children), so the cheap `raw.contains("oMath")`
+    /// short-circuit avoids invoking `OMMLParser` on plain runs.
+    private static func flattenRunsWithOMML(_ runs: [Run]) -> String {
+        var parts: [String] = []
         for run in runs {
             parts.append(run.text)
             if let raw = run.rawXML, raw.contains("oMath") {
                 let components = OMMLParser.parse(xml: raw)
                 parts.append(components.visibleText)
             }
-        }
-        for h in hyperlinks {
-            parts.append(h.runs.map { $0.text }.joined())
-        }
-        for f in fieldSimples {
-            parts.append(f.runs.map { $0.text }.joined())
-        }
-        for ac in alternateContents {
-            parts.append(ac.fallbackRuns.map { $0.text }.joined())
-        }
-        for cc in contentControls {
-            parts.append(flattenContentControlText(cc))
         }
         return parts.joined()
     }
