@@ -868,6 +868,27 @@ public struct DocxReader {
         }
 
         // 解析段落屬性
+        //
+        // Foreign-namespace asymmetry note (#14): this lookup is
+        // **prefix-qualified** (`w:pPr` matches the OOXML main-namespace
+        // prefix only), while `walkerPreConsumed` (L26-L42) and the
+        // `case "pPr": break` defense at L922 are **prefix-agnostic**
+        // (`localName == "pPr"` matches any namespace).
+        //
+        // A crafted .docx with `<x:pPr xmlns:x="other-ns">` as a child of
+        // `<w:p>` will:
+        //   - miss this prefix-qualified consumer (not parsed into properties)
+        //   - hit the prefix-agnostic walker whitelist (silently skipped)
+        // Net effect: foreign-namespace pPr is silently dropped — neither
+        // captured into `paragraph.properties` nor preserved in
+        // `unrecognizedChildren`.
+        //
+        // This asymmetry is **intentional**: ECMA-376 / OOXML defines
+        // `<w:pPr>` only in the wordprocessingml/2006/main namespace, so
+        // legitimate documents will never trigger this path. Silent-drop is
+        // the conservative response to malformed input. If a real-world doc
+        // ever exhibits foreign-ns pPr, switch this to (localName,
+        // namespaceURI) pair lookup (Option A from #14 diagnosis).
         if let pPr = element.elements(forName: "w:pPr").first {
             paragraph.properties = parseParagraphProperties(from: pPr)
 
