@@ -1,3 +1,5 @@
+import Foundation
+
 // MARK: - MathComponent protocol (OMML AST)
 
 /// A node in an Office Math Markup Language (OMML) AST. Concrete types emit
@@ -6,8 +8,24 @@
 /// Composition model: `[MathComponent]` arrays represent a sequence of math
 /// content (e.g. the numerator of a fraction). Nested structures (fraction
 /// inside a radical inside a summation base) compose naturally.
+///
+/// `visibleText` (PsychQuant/che-word-mcp#85) returns the concatenated leaf
+/// text of every `MathRun` descendant in document order. Used by
+/// `Paragraph.flattenedDisplayText()` so anchors crossing inline math
+/// (`before_text` / `after_text`) match natural sentence text instead of
+/// silently dropping the math span.
 public protocol MathComponent {
     func toOMML() -> String
+    var visibleText: String { get }
+}
+
+/// Concatenate the visible text of every `MathComponent` in an array, in
+/// document order. Convenience for AST consumers that hold `[MathComponent]`
+/// (e.g. fraction numerator, n-ary base).
+public extension Array where Element == MathComponent {
+    var visibleText: String {
+        return map { $0.visibleText }.joined()
+    }
 }
 
 /// XML escape for math text (narrower than the Field helper — only the three
@@ -344,5 +362,92 @@ public struct MathMatrix: MathComponent {
         }
         xml += "</m:m>"
         return xml
+    }
+}
+
+// MARK: - visibleText conformance (PsychQuant/che-word-mcp#85)
+//
+// Each concrete `MathComponent` exposes the leaf text it carries, recursing
+// into nested `[MathComponent]` arrays. `Paragraph.flattenedDisplayText()`
+// uses this to include inline OMML text in anchor-lookup flat strings.
+
+public extension MathRun {
+    var visibleText: String { text }
+}
+
+public extension MathFraction {
+    var visibleText: String { numerator.visibleText + denominator.visibleText }
+}
+
+public extension MathSubSuperScript {
+    var visibleText: String {
+        return base.visibleText + (sub?.visibleText ?? "") + (sup?.visibleText ?? "")
+    }
+}
+
+public extension MathAccent {
+    /// Accent character is decorative (combining diacritic over the base);
+    /// we expose only the base text. Anchor lookups against `\hat{x}` should
+    /// match `"x"`, not the accent codepoint.
+    var visibleText: String { base.visibleText }
+}
+
+public extension MathRadical {
+    /// Degree (the `n` in nth-root) flatten-includes; radicand follows.
+    var visibleText: String { (degree?.visibleText ?? "") + radicand.visibleText }
+}
+
+public extension MathNary {
+    /// Operator symbol (∑, ∫, etc.) emits literally so anchors can match
+    /// "∑x" or just "x" depending on how the user typed it.
+    var visibleText: String {
+        return op.rawValue + (sub?.visibleText ?? "") + (sup?.visibleText ?? "") + base.visibleText
+    }
+}
+
+public extension MathDelimiter {
+    /// Open / close characters emit literally; multi-element separator
+    /// joins the inner sequences.
+    var visibleText: String {
+        let inner = elements.map { $0.visibleText }.joined(separator: separator)
+        return open + inner + close
+    }
+}
+
+public extension MathFunction {
+    var visibleText: String { functionName.visibleText + argument.visibleText }
+}
+
+public extension MathLimit {
+    var visibleText: String { base.visibleText + limit.visibleText }
+}
+
+public extension UnknownMath {
+    /// Best-effort: extract `<m:t>...</m:t>` text content from the raw XML.
+    /// This is a fallback for OMML subtrees `OMMLParser` doesn't recognize
+    /// — anchors crossing them get partial coverage instead of silent drop.
+    /// Uses simple greedy regex; preserves `<` `>` `&` entity decoding for
+    /// the three OMML-mandated escapes.
+    var visibleText: String {
+        let pattern = #"<m:t(?:\s[^>]*)?>([^<]*)</m:t>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return "" }
+        let range = NSRange(rawXML.startIndex..., in: rawXML)
+        let matches = regex.matches(in: rawXML, range: range)
+        return matches.compactMap { m -> String? in
+            guard m.numberOfRanges >= 2,
+                  let r = Range(m.range(at: 1), in: rawXML) else { return nil }
+            return String(rawXML[r])
+                .replacingOccurrences(of: "&amp;", with: "&")
+                .replacingOccurrences(of: "&lt;", with: "<")
+                .replacingOccurrences(of: "&gt;", with: ">")
+        }.joined()
+    }
+}
+
+public extension MathMatrix {
+    var visibleText: String {
+        return rows.map { row in
+            row.map { $0.visibleText }.joined()
+        }.joined()
     }
 }

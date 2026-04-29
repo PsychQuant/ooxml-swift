@@ -246,7 +246,21 @@ extension Paragraph {
     /// PsychQuant/che-word-mcp#63 follow-up (verify F1 P1).
     public func flattenedDisplayText() -> String {
         var parts: [String] = []
-        parts.append(runs.map { $0.text }.joined())
+        // PsychQuant/che-word-mcp#85: include OMML inline math text.
+        // Reader stores `<m:oMath>` / `<m:oMathPara>` subtrees on
+        // `Run.rawXML` (not as typed children). Walk runs in order: emit
+        // `text` for normal runs; for OMML-bearing runs, parse via
+        // OMMLParser and concat the AST's visibleText. Without this,
+        // anchors crossing inline math (e.g. "進行 t 檢定" in a paragraph
+        // with `<m:oMath><m:r><m:t>t</m:t></m:r></m:oMath>` between text
+        // runs) silently 0-match.
+        for run in runs {
+            parts.append(run.text)
+            if let raw = run.rawXML, raw.contains("oMath") {
+                let components = OMMLParser.parse(xml: raw)
+                parts.append(components.visibleText)
+            }
+        }
         for h in hyperlinks {
             parts.append(h.runs.map { $0.text }.joined())
         }
