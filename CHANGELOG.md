@@ -14,6 +14,76 @@ All notable changes to ooxml-swift will be documented in this file.
 - `WordDocument.insertEquation(at: Int?, latex:, displayMode:)` legacy overload (deprecated v0.21.5): consumers SHALL migrate to `insertEquation(at: InsertLocation, latex:, displayMode:)` before v0.22.
 - `Hyperlink.text` setter (deprecated v0.21.6): consumers SHALL migrate to `hyperlink.runs = [Run(text: "x")]` direct assignment before v0.22.
 
+## [0.21.8] - 2026-04-29
+
+Two lib-only post-#85 verify follow-ups, paired into a single dep bump for `che-word-mcp` consumers.
+
+### Fixed — `insertEquation` inline-mode error semantics (closes [PsychQuant/che-word-mcp#91](https://github.com/PsychQuant/che-word-mcp/issues/91))
+
+`WordDocument.insertEquation(at: InsertLocation, latex:, displayMode:)` previously silently no-op'd when called with `inlineMath` mode and a non-`paragraphIndex` anchor type (e.g., `.atEnd`, `.bookmark`, `.contentControlByTag`), and accepted out-of-bounds `paragraphIndex` values without complaint. Both classes now surface dedicated `InsertLocationError` cases:
+
+- `InsertLocationError.inlineModeRequiresParagraphIndex` — thrown when inline mode is requested with any anchor type other than `.paragraphIndex`. Inline math by definition lives inside an existing paragraph; other anchor types implicitly create a new paragraph, which contradicts the inline contract.
+- `InsertLocationError.invalidParagraphIndex(Int)` — thrown when `paragraphIndex` is negative or `≥ topLevelParagraphCount`. The bounds check counts only top-level `<w:p>` children of `body.children` (matches the lib's #69/#75/#79 family convention; SDT-nested paragraphs are not counted).
+
+#### Why the bounds-check uses top-level paragraph count
+
+A literal `getParagraphs().count` recurses into SDTs and would falsely accept indices that point into nested-only paragraphs — but those paragraphs aren't addressable via `paragraphIndex` (which targets `body.children`). The corrective fix narrowed the comparison to `body.children.reduce(0) { count, child in case .paragraph = child ? count + 1 : count }`. See `Sources/OOXMLSwift/Models/Document.swift:3978-4001`.
+
+#### Test coverage
+
+`Issue91InlineModeRejectionTests` (11 sub-tests):
+- 3 anchor-type rejection cases (`.atEnd`, `.bookmark`, `.contentControlByTag`) → `inlineModeRequiresParagraphIndex`
+- 4 bounds-check cases (`-1`, `paragraphCount`, `paragraphCount + 5`, `Int.max`) → `invalidParagraphIndex`
+- 4 corrective cases: SDT-nested-only doc + mixed top-level+SDT + empty doc + boundary at `topLevelParagraphCount`
+
+Suite: 791 → 793 (+2 net after F1 corrective consolidation).
+
+### Fixed — `flattenedDisplayText` OMML coverage extended to wrapper paths (closes [PsychQuant/che-word-mcp#92](https://github.com/PsychQuant/che-word-mcp/issues/92))
+
+`Paragraph.flattenedDisplayText()` walked OMML in the top-level `runs` loop only after #85's v0.21.5 fix. The 3 sibling surface paths — `hyperlinks[].runs`, `fieldSimples[].runs`, `alternateContents[].fallbackRuns` — still used `runs.map { $0.text }.joined()` and silently dropped any `<m:oMath>` inside those wrappers. Anchor lookups against paragraphs containing inline math inside wrapper-nested runs failed the same way #85's primary bug failed (silent 0-match).
+
+#### Solution
+
+Extracted the OMML walk into a `private static func flattenRunsWithOMML(_ runs: [Run]) -> String` helper at `Sources/OOXMLSwift/Models/InsertLocation.swift:310-320`. Routed all 4 wrapper paths through the helper:
+
+```swift
+public func flattenedDisplayText() -> String {
+    var parts: [String] = []
+    parts.append(Self.flattenRunsWithOMML(runs))
+    for h in hyperlinks { parts.append(Self.flattenRunsWithOMML(h.runs)) }
+    for f in fieldSimples { parts.append(Self.flattenRunsWithOMML(f.runs)) }
+    for ac in alternateContents { parts.append(Self.flattenRunsWithOMML(ac.fallbackRuns)) }
+    for cc in contentControls { parts.append(flattenContentControlText(cc)) }
+    return parts.joined()
+}
+```
+
+The `contentControls` path remains on its existing `flattenContentControlText` helper (different recursion strategy via `TextReplacementEngine.flatTextOfContentXML`, established in #63). The cheap `raw.contains("oMath")` short-circuit gates `OMMLParser` invocation per run — benign docs pay only an `Optional` unwrap + substring scan.
+
+#### Test coverage
+
+`Issue92OMMLWalkSurfaceCoverageTests` (5 sub-tests):
+- `testHyperlinkRunsWithInlineMathFlattenIncludeMathText` (α inside `<w:hyperlink>`)
+- `testFieldSimpleRunsWithInlineMathFlattenIncludeMathText` (β inside `<w:fldSimple>`)
+- `testAlternateContentFallbackRunsWithInlineMathFlattenIncludeMathText` (γ inside `<mc:Fallback>`)
+- `testTopLevelRunsRegressionAfterRefactor` — pins #85 contract under helper-based impl
+- `testPlainHyperlinkFlattensWithoutOMML` — non-OMML helper guard
+
+Suite: 793 → 796 (+3 from #92 over the #91-only baseline; +5 over v0.21.7's 791).
+
+### Behavior change
+
+Strict superset of pre-fix lookup behavior. Anchors that previously found text continue to find it; anchors against wrapper-nested OMML paragraphs now succeed where they previously silently 0-matched. No API change (helper is `private static`).
+
+### Follow-ups filed (not in scope)
+
+Devils-advocate verify of #92 surfaced 4 structurally-identical sibling bugs at neighboring container levels (DA-1..DA-4 = direct-child OMML in `<w:p>` / `<w:hyperlink>` / `<mc:Fallback>` + nested wrapper). Filed as `che-word-mcp` #99-#103 for separate disposition. None are regressions introduced by v0.21.8.
+
+### Test status
+
+- 796 tests, 1 skipped, 0 failures
+- TDD verified for both fixes (RED on baseline, GREEN post-fix)
+
 ## [0.21.7] - 2026-04-29
 
 ### Added — public anchor-lookup API (closes [PsychQuant/che-word-mcp#86](https://github.com/PsychQuant/che-word-mcp/issues/86))
