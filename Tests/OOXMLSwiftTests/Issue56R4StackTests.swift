@@ -124,9 +124,9 @@ final class Issue56R4StackTests: XCTestCase {
 
         // Reader assigns position >= 1 for ALL source children — first child is 1, not 0.
         XCTAssertEqual(firstPara.contentControls.count, 1, "Expected one source SDT in first paragraph")
-        XCTAssertGreaterThan(firstPara.contentControls[0].position, 0,
-                             "First-child source SDT SHALL receive position > 0; got \(firstPara.contentControls[0].position)")
-        XCTAssertGreaterThan(firstPara.runs.first?.position ?? 0, firstPara.contentControls[0].position,
+        XCTAssertGreaterThan(firstPara.contentControls[0].position ?? 0, 0,
+                             "First-child source SDT SHALL receive position > 0; got \(String(describing: firstPara.contentControls[0].position))")
+        XCTAssertGreaterThan(firstPara.runs.first?.position ?? 0, firstPara.contentControls[0].position ?? 0,
                              "Run after SDT SHALL receive higher position than the SDT")
 
         // Round-trip — emitted XML SHALL place the SDT before the run, matching source.
@@ -150,7 +150,9 @@ final class Issue56R4StackTests: XCTestCase {
         p.runs = [Run(text: "first")]
         p.runs[0].position = 1  // simulate a source-positioned run for sorted-emit routing
         let cc = ContentControl.richText(tag: "API", alias: "API", content: "<w:r><w:t>API</w:t></w:r>")
-        XCTAssertEqual(cc.position, 0, "API-built ContentControl SHALL default to position 0")
+        // PsychQuant/ooxml-swift#5 (F6): position defaults to nil instead of 0.
+        // Both nil and 0 route to the post-content append path during emit.
+        XCTAssertNil(cc.position, "API-built ContentControl SHALL default to position nil (was 0 pre-F6)")
         p.contentControls.append(cc)
 
         let emit = p.toXML()
@@ -909,12 +911,12 @@ final class Issue56R4StackTests: XCTestCase {
         }
         XCTAssertEqual(para.contentControls.count, 1, "Outer SDT SHALL be parsed")
         let outer = para.contentControls[0]
-        XCTAssertGreaterThanOrEqual(outer.position, 1,
-                                    "Outer SDT (source-loaded) SHALL have position >= 1, got \(outer.position)")
+        XCTAssertGreaterThanOrEqual(outer.position ?? 0, 1,
+                                    "Outer SDT (source-loaded) SHALL have position >= 1, got \(String(describing: outer.position))")
         XCTAssertEqual(outer.children.count, 1, "Outer SDT SHALL have one nested ContentControl child")
         let inner = outer.children[0]
-        XCTAssertGreaterThanOrEqual(inner.position, 1,
-                                    "Nested SDT SHALL have position >= 1 (not the API-built 0 sentinel), got \(inner.position)")
+        XCTAssertGreaterThanOrEqual(inner.position ?? 0, 1,
+                                    "Nested SDT SHALL have position >= 1 (not the API-built 0 sentinel), got \(String(describing: inner.position))")
     }
 
     func testNestedSiblingSDTsReceiveOneBasedSiblingPositions() throws {
@@ -1317,10 +1319,11 @@ final class Issue56R4StackTests: XCTestCase {
         XCTAssertTrue(para.hasSourcePositionedChildren,
                       "Sanity: source-positioned runs SHALL route to toXMLSortedByPosition")
 
-        // Append a new API-built Run with default position (0).
+        // Append a new API-built Run with default position.
+        // PsychQuant/ooxml-swift#5 (F6): position defaults to nil instead of 0.
         let appendedRun = Run(text: "[appended]")
-        XCTAssertEqual(appendedRun.position, 0,
-                       "Sanity: API-built Run defaults to position == 0")
+        XCTAssertNil(appendedRun.position,
+                     "Sanity: API-built Run defaults to position == nil (was 0 pre-F6)")
         para.runs.append(appendedRun)
 
         let xml = para.toXML()

@@ -37,14 +37,14 @@ public struct BookmarkRangeMarker: Equatable {
 
     public var kind: Kind
     public var id: Int
-    public var position: Int
+    public var position: Int?
     /// Bookmark name (only set on `kind == .start`; nil on `.end`). At
     /// paragraph level the name is also carried via `Paragraph.bookmarks`,
     /// but at body level (BodyChild.bookmarkMarker) there is no enclosing
     /// paragraph so the marker carries the name directly. PsychQuant/che-word-mcp#58.
     public var name: String?
 
-    public init(kind: Kind, id: Int, position: Int, name: String? = nil) {
+    public init(kind: Kind, id: Int, position: Int? = nil, name: String? = nil) {
         self.kind = kind
         self.id = id
         self.position = position
@@ -69,9 +69,9 @@ public struct CommentRangeMarker: Equatable {
 
     public var kind: Kind
     public var id: Int
-    public var position: Int
+    public var position: Int?
 
-    public init(kind: Kind, id: Int, position: Int) {
+    public init(kind: Kind, id: Int, position: Int? = nil) {
         self.kind = kind
         self.id = id
         self.position = position
@@ -93,9 +93,9 @@ public struct PermissionRangeMarker: Equatable {
     public var editorGroup: String?
     /// `w:ed` (specific editor name) for permStart.
     public var editor: String?
-    public var position: Int
+    public var position: Int?
 
-    public init(kind: Kind, id: String, editorGroup: String? = nil, editor: String? = nil, position: Int) {
+    public init(kind: Kind, id: String, editorGroup: String? = nil, editor: String? = nil, position: Int? = nil) {
         self.kind = kind
         self.id = id
         self.editorGroup = editorGroup
@@ -120,9 +120,9 @@ public struct ProofErrorMarker: Equatable {
     }
 
     public var type: ErrorType
-    public var position: Int
+    public var position: Int?
 
-    public init(type: ErrorType, position: Int) {
+    public init(type: ErrorType, position: Int? = nil) {
         self.type = type
         self.position = position
     }
@@ -137,9 +137,9 @@ public struct ProofErrorMarker: Equatable {
 /// byte-equivalent without typed modeling.
 public struct SmartTagBlock: Equatable {
     public var rawXML: String
-    public var position: Int
+    public var position: Int?
 
-    public init(rawXML: String, position: Int) {
+    public init(rawXML: String, position: Int? = nil) {
         self.rawXML = rawXML
         self.position = position
     }
@@ -153,9 +153,9 @@ public struct SmartTagBlock: Equatable {
 /// a no-op round-trip.
 public struct CustomXmlBlock: Equatable {
     public var rawXML: String
-    public var position: Int
+    public var position: Int?
 
-    public init(rawXML: String, position: Int) {
+    public init(rawXML: String, position: Int? = nil) {
         self.rawXML = rawXML
         self.position = position
     }
@@ -176,9 +176,9 @@ public struct BidiOverrideBlock: Equatable {
 
     public var element: Element
     public var rawXML: String
-    public var position: Int
+    public var position: Int?
 
-    public init(element: Element, rawXML: String, position: Int) {
+    public init(element: Element, rawXML: String, position: Int? = nil) {
         self.element = element
         self.rawXML = rawXML
         self.position = position
@@ -195,9 +195,9 @@ public struct BidiOverrideBlock: Equatable {
 public struct UnrecognizedChild: Equatable {
     public var name: String
     public var rawXML: String
-    public var position: Int
+    public var position: Int?
 
-    public init(name: String, rawXML: String, position: Int) {
+    public init(name: String, rawXML: String, position: Int? = nil) {
         self.name = name
         self.rawXML = rawXML
         self.position = position

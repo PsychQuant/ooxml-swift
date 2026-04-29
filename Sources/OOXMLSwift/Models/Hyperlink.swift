@@ -52,7 +52,7 @@ public struct Hyperlink: Equatable {
     /// v0.19.0+ (#56): source-document order index for Phase 4 sort-by-position
     /// emit. Default 0 for hyperlinks created via initializers (those rely on
     /// the existing `Paragraph.toXML()` paths until Phase 4 lands).
-    public var position: Int = 0
+    public var position: Int? = nil
 
     /// v0.19.0+ (#56): displayed text computed as the joined run text. Setter
     /// collapses `runs` to a single Run carrying the assigned string (matches
@@ -60,6 +60,7 @@ public struct Hyperlink: Equatable {
     /// multi-run hyperlink already replaced the entire visible text).
     public var text: String {
         get { runs.map { $0.text }.joined() }
+        @available(*, deprecated, message: "Mutates runs destructively (loses formatting / rawElements). Use .runs directly to preserve formatting; assign a single Run to replace, append/insert Runs to extend.")
         set { runs = [Run(text: newValue)] }
     }
 
@@ -106,7 +107,7 @@ public struct Hyperlink: Equatable {
         rawAttributes: [String: String] = [:],
         rawChildren: [String] = [],
         children: [HyperlinkChild] = [],
-        position: Int = 0
+        position: Int? = nil
     ) {
         self.id = id
         self.runs = runs

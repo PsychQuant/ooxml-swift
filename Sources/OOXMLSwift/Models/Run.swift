@@ -52,7 +52,7 @@ public struct Run: Equatable {
     /// inside revision wrappers (`<w:ins>` / `<w:del>` / etc.) leave this
     /// at 0 because their emit order is governed by the enclosing wrapper.
     /// Default 0 keeps backward compat with API-built Runs.
-    public var position: Int = 0
+    public var position: Int? = nil
 
     public init(text: String, properties: RunProperties = RunProperties()) {
         self.text = text
@@ -269,7 +269,18 @@ extension Run {
             // empty <w:t> emission. Empty <w:t> + <w:pict> would inject a
             // spurious empty text node into Word output. Only emit <w:t> when
             // we have actual text OR when there are no rawElements to emit.
-            xml += "<w:t xml:space=\"preserve\">\(escapeXML(text))</w:t>"
+            //
+            // PsychQuant/ooxml-swift#5 (F13): autosense `xml:space="preserve"`.
+            // Pre-fix this attribute was emitted unconditionally — harmless
+            // but non-canonical for runs with empty / single-internal-space
+            // text. Post-fix the attribute appears only when text contains
+            // semantically significant whitespace (leading / trailing /
+            // 2+ consecutive whitespace chars). Single internal whitespace
+            // is XML-normalised so the flag adds noise; empty text needs no
+            // protection at all.
+            let needsPreserve = Self.needsXMLSpacePreserve(text)
+            let openTag = needsPreserve ? "<w:t xml:space=\"preserve\">" : "<w:t>"
+            xml += "\(openTag)\(escapeXML(text))</w:t>"
         }
 
         // v0.14.0+ (che-word-mcp#52): emit preserved unknown elements in
@@ -283,6 +294,20 @@ extension Run {
         xml += "</w:r>"
 
         return xml
+    }
+
+    /// PsychQuant/ooxml-swift#5 (F13): determine whether a `<w:t>` payload
+    /// needs the `xml:space="preserve"` attribute. XML normalises single
+    /// internal whitespace; semantic whitespace needs the flag to survive
+    /// round-trip through Word's parser. Trigger when text starts/ends with
+    /// whitespace OR contains two-or-more consecutive whitespace characters.
+    /// Empty text returns false (nothing to protect).
+    fileprivate static func needsXMLSpacePreserve(_ text: String) -> Bool {
+        if text.isEmpty { return false }
+        if text.first?.isWhitespace == true { return true }
+        if text.last?.isWhitespace == true { return true }
+        // Two-or-more consecutive whitespace chars (regex `\s\s`).
+        return text.range(of: #"\s\s"#, options: .regularExpression) != nil
     }
 
     private func escapeXML(_ string: String) -> String {

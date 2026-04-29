@@ -2222,19 +2222,22 @@ public struct WordDocument: Equatable {
 
         // Compute the next free position after every existing positioned child.
         // Mirrors the collections enumerated by `Paragraph.toXMLSortedByPosition`.
-        let positions: [Int] =
-            paragraph.runs.map { $0.position }
-            + paragraph.hyperlinks.map { $0.position }
-            + paragraph.fieldSimples.map { $0.position }
-            + paragraph.alternateContents.map { $0.position }
-            + paragraph.bookmarkMarkers.map { $0.position }
-            + paragraph.commentRangeMarkers.map { $0.position }
-            + paragraph.permissionRangeMarkers.map { $0.position }
-            + paragraph.proofErrorMarkers.map { $0.position }
-            + paragraph.smartTags.map { $0.position }
-            + paragraph.customXmlBlocks.map { $0.position }
-            + paragraph.bidiOverrides.map { $0.position }
-            + paragraph.unrecognizedChildren.map { $0.position }
+        // PsychQuant/ooxml-swift#5 (F6): position is now `Int? = nil`. Treat
+        // nil as "no explicit position" by mapping to -1, which is below any
+        // valid position; max() then ignores nil contributions naturally.
+        var positions: [Int] = []
+        positions.append(contentsOf: paragraph.runs.compactMap { $0.position })
+        positions.append(contentsOf: paragraph.hyperlinks.compactMap { $0.position })
+        positions.append(contentsOf: paragraph.fieldSimples.compactMap { $0.position })
+        positions.append(contentsOf: paragraph.alternateContents.compactMap { $0.position })
+        positions.append(contentsOf: paragraph.bookmarkMarkers.compactMap { $0.position })
+        positions.append(contentsOf: paragraph.commentRangeMarkers.compactMap { $0.position })
+        positions.append(contentsOf: paragraph.permissionRangeMarkers.compactMap { $0.position })
+        positions.append(contentsOf: paragraph.proofErrorMarkers.compactMap { $0.position })
+        positions.append(contentsOf: paragraph.smartTags.compactMap { $0.position })
+        positions.append(contentsOf: paragraph.customXmlBlocks.compactMap { $0.position })
+        positions.append(contentsOf: paragraph.bidiOverrides.compactMap { $0.position })
+        positions.append(contentsOf: paragraph.unrecognizedChildren.compactMap { $0.position })
         let nextPosition = (positions.max() ?? -1) + 1
 
         paragraph.bookmarkMarkers.append(
