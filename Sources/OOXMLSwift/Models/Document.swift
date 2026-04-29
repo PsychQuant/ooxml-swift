@@ -3980,7 +3980,19 @@ extension WordDocument {
         // insertParagraph(_:at:) which handles all 6 InsertLocation cases.
         let equation = MathEquation(latex: latex, displayMode: true)
         var run = Run(text: "")
-        run.properties.rawXML = equation.toXML()
+        let omml = equation.toXML()
+        run.properties.rawXML = omml
+        // Verify findings (PsychQuant/che-word-mcp#85 BLOCKING #2 from
+        // batched verify of e53fa00): also set top-level `run.rawXML` so
+        // the new `Paragraph.flattenedDisplayText()` OMML walk sees this
+        // freshly-inserted equation BEFORE a save → reload cycle. Without
+        // this, sequential anchor lookups (the canonical batch-CLI
+        // workflow — rescue script Phase 5) would skip equations inserted
+        // earlier in the same session because flatten reads `run.rawXML`
+        // (single-source-of-truth for read-side OMML, populated by
+        // `DocxReader.parseRun`) but `properties.rawXML` is the write-side
+        // sink that only round-trips through disk re-parse.
+        run.rawXML = omml
         var para = Paragraph()
         para.runs = [run]
         para.properties.alignment = .center
