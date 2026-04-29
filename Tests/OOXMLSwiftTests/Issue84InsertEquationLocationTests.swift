@@ -84,6 +84,35 @@ final class Issue84InsertEquationLocationTests: XCTestCase {
         }
     }
 
+    /// Verify finding (DA §4.2 + §2.1, BLOCKING in batched-verify of e53fa00):
+    /// API-inserted display equations must be visible to `flattenedDisplayText()`
+    /// IMMEDIATELY (before any save → reload). Without the in-scope fix that
+    /// also sets `run.rawXML` alongside `run.properties.rawXML`, the canonical
+    /// batch-CLI workflow (rescue script Phase 5: insert equation → next
+    /// anchor lookup) silently resolves anchors against a doc whose prior
+    /// inserts are invisible.
+    func testInsertEquationThenFlattenSeesMathText() throws {
+        var doc = try buildDocWithThreeParagraphs()
+        // Insert display equation at index 1 (between "first" and "middle").
+        try doc.insertEquation(
+            at: .paragraphIndex(1),
+            latex: "x = 1",
+            displayMode: true
+        )
+        // The newly-inserted equation paragraph is at body.children[1].
+        guard case .paragraph(let eqPara) = doc.body.children[1] else {
+            XCTFail("Expected equation paragraph at index 1")
+            return
+        }
+        let flat = eqPara.flattenedDisplayText()
+        // The OMML emitted by MathEquation contains the latex tokens; we
+        // only assert that flatten is non-empty (the math text appears) —
+        // exact content depends on MathEquation's internal escape pipeline.
+        XCTAssertFalse(flat.isEmpty,
+            "API-inserted equation must flatten with non-empty math text immediately, " +
+            "without requiring save → reload round-trip. Got empty flatten — \(flat)")
+    }
+
     /// Spec: text-not-found surface returns `InsertLocationError.textNotFound`.
     /// Mirrors `insertParagraph(at: .afterText)` error semantics.
     func testAfterTextThrowsWhenAnchorNotFound() throws {
