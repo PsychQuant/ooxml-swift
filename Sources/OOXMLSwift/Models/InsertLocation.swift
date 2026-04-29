@@ -31,6 +31,14 @@ public enum InsertLocationError: Error, Equatable {
     case tableIndexOutOfRange(Int)
     case tableCellOutOfRange(tableIndex: Int, row: Int, col: Int)
     case textNotFound(searchText: String, instance: Int)
+    /// Inline-mode `WordDocument.insertEquation(at:latex:displayMode:false)` only
+    /// supports `.paragraphIndex` anchors per che-word-mcp#67 F2 (semantic
+    /// ambiguity for text/image anchors in inline mode). Pre-#91 this rejection
+    /// abused `.invalidParagraphIndex(-1)` as a sentinel — structurally lying
+    /// because that case is documented for "out-of-range index", not "wrong
+    /// anchor kind". This dedicated case lets callers distinguish the two
+    /// failures cleanly.
+    case inlineModeRequiresParagraphIndex
 }
 
 // MARK: - Document resolution

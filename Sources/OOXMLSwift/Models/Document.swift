@@ -3955,12 +3955,16 @@ extension WordDocument {
     /// per che-word-mcp#67 F2 (inline anchor semantics are ambiguous —
     /// "append OMML run into existing para containing this text" vs
     /// "insert new para before/after the matching para"); other anchors
-    /// throw `InsertLocationError.invalidParagraphIndex(-1)` to surface
-    /// the rejection structurally.
+    /// throw `InsertLocationError.inlineModeRequiresParagraphIndex` (post-#91;
+    /// pre-#91 abused `.invalidParagraphIndex(-1)` as a sentinel which lied
+    /// about the failure shape).
     ///
     /// - Throws: `InsertLocationError` on anchor resolution failure;
-    ///   `InsertLocationError.invalidParagraphIndex(-1)` for inline-mode
-    ///   non-`paragraphIndex` anchors.
+    ///   `InsertLocationError.inlineModeRequiresParagraphIndex` for inline-mode
+    ///   non-`paragraphIndex` anchors;
+    ///   `InsertLocationError.invalidParagraphIndex(idx)` for inline-mode
+    ///   `.paragraphIndex(idx)` with out-of-range `idx` (post-#91; pre-#91 this
+    ///   silently no-op'd via the deprecated `Int?` overload).
     public mutating func insertEquation(
         at location: InsertLocation,
         latex: String,
@@ -3968,15 +3972,20 @@ extension WordDocument {
     ) throws {
         if !displayMode {
             // che-word-mcp#67 F2: inline equation rejects non-paragraphIndex
-            // anchors. Convert to legacy Int? path only for `.paragraphIndex`.
+            // anchors. che-word-mcp#91 Defect 2: explicit bounds-check before
+            // delegating to legacy `Int?` overload, which silently no-ops on
+            // out-of-range index (asymmetric vs display mode's throw).
             if case .paragraphIndex(let idx) = location {
+                let paragraphCount = getParagraphs().count
+                guard idx >= 0, idx < paragraphCount else {
+                    throw InsertLocationError.invalidParagraphIndex(idx)
+                }
                 insertEquation(at: idx, latex: latex, displayMode: false)
                 return
             }
-            // Use invalidParagraphIndex(-1) sentinel to surface the rejection
-            // through the InsertLocationError vocabulary callers already
-            // handle for resolution failures.
-            throw InsertLocationError.invalidParagraphIndex(-1)
+            // che-word-mcp#91 Defect 1: dedicated error case (was
+            // `.invalidParagraphIndex(-1)` sentinel pre-fix).
+            throw InsertLocationError.inlineModeRequiresParagraphIndex
         }
 
         // Display mode: build the equation paragraph then route through
