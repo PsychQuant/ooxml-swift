@@ -124,6 +124,7 @@ public struct DocxReader {
         }
 
         let documentData = try Data(contentsOf: documentURL)
+        try Self.rejectDTD(documentData, part: "word/document.xml")
         let documentXML = try XMLDocument(data: documentData)
 
         // 5. 讀取 styles.xml（先解析，用於語義標註）
@@ -141,11 +142,12 @@ public struct DocxReader {
         // and silently drops xmlns:* prefixes that are not referenced in the
         // tree it can see — so to capture the source set verbatim we re-parse
         // the root open tag from raw bytes instead of relying on the DOM.
-        document.documentRootAttributes = Self.parseDocumentRootAttributes(from: documentData)
+        document.documentRootAttributes = try Self.parseDocumentRootAttributes(from: documentData)
 
         let stylesURL = tempDir.appendingPathComponent("word/styles.xml")
         if FileManager.default.fileExists(atPath: stylesURL.path) {
             let stylesData = try Data(contentsOf: stylesURL)
+            try Self.rejectDTD(stylesData, part: "word/styles.xml")
             let stylesXML = try XMLDocument(data: stylesData)
             document.styles = try parseStyles(from: stylesXML)
             document.latentStyles = parseLatentStyles(from: stylesXML)
@@ -155,6 +157,7 @@ public struct DocxReader {
         let numberingURL = tempDir.appendingPathComponent("word/numbering.xml")
         if FileManager.default.fileExists(atPath: numberingURL.path) {
             let numberingData = try Data(contentsOf: numberingURL)
+            try Self.rejectDTD(numberingData, part: "word/numbering.xml")
             let numberingXML = try XMLDocument(data: numberingData)
             document.numbering = try parseNumbering(from: numberingXML)
         }
@@ -202,6 +205,7 @@ public struct DocxReader {
             let headerURL = tempDir.appendingPathComponent("word/\(rel.target)")
             guard FileManager.default.fileExists(atPath: headerURL.path) else { continue }
             let headerData = try Data(contentsOf: headerURL)
+            try Self.rejectDTD(headerData, part: "word/\(rel.target)")
             let headerXML = try XMLDocument(data: headerData)
             // v0.19.5+ (#56 R5-CONT P1 #8): load per-container rels
             // (`word/_rels/header*.xml.rels`) and merge with document-scope
@@ -233,9 +237,7 @@ public struct DocxReader {
             // v0.19.2+ (#56 follow-up F4): preserve `<w:hdr>` root attributes
             // (xmlns:* + mc:Ignorable + vendor) so VML watermark prefixes
             // round-trip beyond the hardcoded 5-namespace template.
-            let rootAttrs = Self.parseContainerRootAttributes(
-                from: headerData, rootElementOpenPrefix: "<w:hdr"
-            )
+            let rootAttrs = try Self.parseContainerRootAttributes(from: headerData)
             var header = Header(id: rel.id, originalFileName: rel.target, rootAttributes: rootAttrs)
             header.bodyChildren = bodyChildren
             header.relationships = headerRels  // store ONLY the container's own rels (not merged)
@@ -260,6 +262,7 @@ public struct DocxReader {
             let footerURL = tempDir.appendingPathComponent("word/\(rel.target)")
             guard FileManager.default.fileExists(atPath: footerURL.path) else { continue }
             let footerData = try Data(contentsOf: footerURL)
+            try Self.rejectDTD(footerData, part: "word/\(rel.target)")
             let footerXML = try XMLDocument(data: footerData)
             // v0.19.5+ (#56 R5-CONT P1 #8): per-container rels — see header parse.
             // Container rels prepended for first-match correctness.
@@ -278,9 +281,7 @@ public struct DocxReader {
                 )
             }
             // v0.19.2+ (#56 follow-up F4): preserve `<w:ftr>` root attributes.
-            let rootAttrs = Self.parseContainerRootAttributes(
-                from: footerData, rootElementOpenPrefix: "<w:ftr"
-            )
+            let rootAttrs = try Self.parseContainerRootAttributes(from: footerData)
             var footer = Footer(id: rel.id, originalFileName: rel.target, rootAttributes: rootAttrs)
             footer.bodyChildren = bodyChildren
             footer.relationships = footerRels
@@ -292,6 +293,7 @@ public struct DocxReader {
         let footnotesURL = tempDir.appendingPathComponent("word/footnotes.xml")
         if FileManager.default.fileExists(atPath: footnotesURL.path) {
             let footnotesData = try Data(contentsOf: footnotesURL)
+            try Self.rejectDTD(footnotesData, part: "word/footnotes.xml")
             let footnotesXML = try XMLDocument(data: footnotesData)
             // v0.19.5+ (#56 R5-CONT P1 #8): per-collection rels for the
             // footnotes part. See header parse comment for full rationale.
@@ -303,9 +305,7 @@ public struct DocxReader {
             var mergedFootnoteRels = RelationshipsCollection()
             mergedFootnoteRels.relationships = footnotesRels.relationships + relationships.relationships
             // v0.19.2+ (#56 follow-up F4): preserve `<w:footnotes>` root attributes.
-            document.footnotes.rootAttributes = Self.parseContainerRootAttributes(
-                from: footnotesData, rootElementOpenPrefix: "<w:footnotes"
-            )
+            document.footnotes.rootAttributes = try Self.parseContainerRootAttributes(from: footnotesData)
             // v0.19.10+ (#59 sub-stack B): footnotes-part-wide whitespace context.
             // ALL footnote entries share the same overlay because they live in
             // the same XML part — the byte-stream scan covers all `<w:t>` tags
@@ -346,6 +346,7 @@ public struct DocxReader {
         let endnotesURL = tempDir.appendingPathComponent("word/endnotes.xml")
         if FileManager.default.fileExists(atPath: endnotesURL.path) {
             let endnotesData = try Data(contentsOf: endnotesURL)
+            try Self.rejectDTD(endnotesData, part: "word/endnotes.xml")
             let endnotesXML = try XMLDocument(data: endnotesData)
             // v0.19.5+ (#56 R5-CONT P1 #8): per-collection rels for endnotes.
             let endnotesRels = try Self.parseRelationshipsFile(
@@ -356,9 +357,7 @@ public struct DocxReader {
             var mergedEndnoteRels = RelationshipsCollection()
             mergedEndnoteRels.relationships = endnotesRels.relationships + relationships.relationships
             // v0.19.2+ (#56 follow-up F4): preserve `<w:endnotes>` root attributes.
-            document.endnotes.rootAttributes = Self.parseContainerRootAttributes(
-                from: endnotesData, rootElementOpenPrefix: "<w:endnotes"
-            )
+            document.endnotes.rootAttributes = try Self.parseContainerRootAttributes(from: endnotesData)
             // v0.19.10+ (#59 sub-stack B): endnotes-part-wide whitespace context.
             let endnotesWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: endnotesData))
             try Self.withWhitespaceContext(endnotesWsContext) {
@@ -395,6 +394,7 @@ public struct DocxReader {
         let coreURL = tempDir.appendingPathComponent("docProps/core.xml")
         if FileManager.default.fileExists(atPath: coreURL.path) {
             let coreData = try Data(contentsOf: coreURL)
+            try Self.rejectDTD(coreData, part: "docProps/core.xml")
             let coreXML = try XMLDocument(data: coreData)
             document.properties = try parseCoreProperties(from: coreXML)
         }
@@ -404,6 +404,7 @@ public struct DocxReader {
         let commentsURL = tempDir.appendingPathComponent("word/comments.xml")
         if FileManager.default.fileExists(atPath: commentsURL.path) {
             let commentsData = try Data(contentsOf: commentsURL)
+            try Self.rejectDTD(commentsData, part: "word/comments.xml")
             let commentsXML = try XMLDocument(data: commentsData)
             let commentsWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: commentsData))
             document.comments = try Self.withWhitespaceContext(commentsWsContext) {
@@ -411,10 +412,13 @@ public struct DocxReader {
             }
         }
 
-        // 9. Link comment paragraphIndex from paragraph commentIds
+        // 9. Link comment paragraphIndex from paragraph commentRangeMarkers
+        // v0.21.4+ (#6, F9): Reader no longer populates the deprecated
+        // `commentIds` stored field. Source of truth is now the marker list,
+        // exposed as the computed `commentRangeIds`.
         for (index, child) in document.body.children.enumerated() {
             if case .paragraph(let para) = child {
-                for commentId in para.commentIds {
+                for commentId in para.commentRangeIds {
                     if let idx = document.comments.comments.firstIndex(where: { $0.id == commentId }) {
                         document.comments.comments[idx].paragraphIndex = index
                     }
@@ -487,6 +491,7 @@ public struct DocxReader {
         let commentsExtURL = tempDir.appendingPathComponent("word/commentsExtended.xml")
         if FileManager.default.fileExists(atPath: commentsExtURL.path) {
             let extData = try Data(contentsOf: commentsExtURL)
+            try Self.rejectDTD(extData, part: "word/commentsExtended.xml")
             let extXML = try XMLDocument(data: extData)
             try parseCommentsExtended(from: extXML, into: &document.comments)
         }
@@ -580,6 +585,7 @@ public struct DocxReader {
         }
 
         let relsData = try Data(contentsOf: relsURL)
+        try Self.rejectDTD(relsData, part: "word/_rels/document.xml.rels")
         let relsXML = try XMLDocument(data: relsData)
 
         // 取得所有 Relationship 節點
@@ -1143,9 +1149,10 @@ public struct DocxReader {
             case "commentRangeStart":
                 if let idStr = childElement.attribute(forName: "w:id")?.stringValue,
                    let id = Int(idStr) {
-                    paragraph.commentIds.append(id)
-                    // v0.19.0+ (#56) Phase 4: also populate the position-indexed
-                    // marker so sort-by-position emit can re-emit at original offset.
+                    // v0.21.4+ (#6, F9): Reader stops populating the deprecated
+                    // `paragraph.commentIds` stored field. The new computed
+                    // `paragraph.commentRangeIds` derives the canonical id list
+                    // from `commentRangeMarkers` instead.
                     paragraph.commentRangeMarkers.append(
                         CommentRangeMarker(kind: .start, id: id, position: childPosition)
                     )
@@ -3273,52 +3280,131 @@ public struct DocxReader {
     /// Locates the substring between `<w:document` and the matching `>` (skipping
     /// `?>` from the XML prolog), splits attributes on whitespace while respecting
     /// quoted values, and returns them as a `[name: value]` map.
-    static func parseDocumentRootAttributes(from data: Data) -> [String: String] {
-        return parseContainerRootAttributes(from: data, rootElementOpenPrefix: "<w:document")
+    static func parseDocumentRootAttributes(from data: Data) throws -> [String: String] {
+        return try parseContainerRootAttributes(from: data)
     }
 
-    /// v0.19.2+ (#56 follow-up F4): generalized version of
-    /// `parseDocumentRootAttributes` for any container's root element.
-    /// Used by header (`<w:hdr`), footer (`<w:ftr`), footnotes
-    /// (`<w:footnotes`) and endnotes (`<w:endnotes`) raw-byte ingestion so
-    /// every part type — not just `word/document.xml` — preserves source
-    /// `xmlns:*` declarations and other root-level attributes through a
-    /// no-op round-trip.
+    /// v0.21.3+ (PsychQuant/ooxml-swift#7 / F11): SAX-based root-element
+    /// attribute parser using `Foundation.XMLParser`. Replaces the prior
+    /// string-prefix matcher that hardcoded each container's open-tag
+    /// literal (`<w:document` / `<w:hdr` / etc.) and silently failed for
+    /// legitimate prefix variants like `<wordml:document>` or default-namespace
+    /// `<document xmlns="...">`.
     ///
-    /// Pass the literal opening prefix including `<` and the element local
-    /// name (e.g., `"<w:hdr"`). Behaviour matches the document.xml variant:
-    /// returns `[:]` on UTF-8 decode failure, missing prefix, or unterminated
-    /// open tag (Writer falls back to its hardcoded namespace template).
+    /// Captures the first encountered start-element's `attributes` dictionary
+    /// (qualified-name keys, exactly as written in source) and aborts the
+    /// parser, so the cost is bounded regardless of part size. Returns `[:]`
+    /// on truly malformed XML — the caller's existing fallback to a
+    /// hardcoded namespace template still applies.
+    ///
+    /// Throws `XMLHardeningError.invalidAttributeName` /
+    /// `.attributeValueTooLarge` indirectly through the post-validation pass
+    /// (mirrors `splitAttributes` semantics for hardened ingest).
     static func parseContainerRootAttributes(
-        from data: Data,
-        rootElementOpenPrefix: String
-    ) -> [String: String] {
-        guard let raw = String(data: data, encoding: .utf8) else { return [:] }
-        guard let openRange = raw.range(of: rootElementOpenPrefix) else { return [:] }
-        // Find the closing `>` of the open tag (ignoring `>` inside attribute values).
-        var idx = openRange.upperBound
-        var inQuote: Character? = nil
-        while idx < raw.endIndex {
-            let c = raw[idx]
-            if let q = inQuote {
-                if c == q { inQuote = nil }
-            } else if c == "\"" || c == "'" {
-                inQuote = c
-            } else if c == ">" {
-                break
+        from data: Data
+    ) throws -> [String: String] {
+        let delegate = RootAttrSAXDelegate()
+        let parser = XMLParser(data: data)
+        parser.delegate = delegate
+        parser.shouldProcessNamespaces = false
+        parser.shouldReportNamespacePrefixes = false
+        parser.shouldResolveExternalEntities = false
+        _ = parser.parse()
+        guard let attrs = delegate.captured else { return [:] }
+        // Apply the same hardening pass to SAX-captured attrs as `splitAttributes`
+        // does for raw-byte ingest. Names get NameChar-validated; values get
+        // 64 KiB cap-checked.
+        for (name, value) in attrs {
+            try validateAttrName(name, context: "split-attributes")
+            let byteSize = value.utf8.count
+            if byteSize > attrValueByteCap {
+                throw XMLHardeningError.attributeValueTooLarge(
+                    name: name, byteSize: byteSize, cap: attrValueByteCap
+                )
             }
-            idx = raw.index(after: idx)
         }
-        guard idx < raw.endIndex else { return [:] }
-        // attrSlice is "<w:hdr ATTRS" — strip element name, keep ATTRS.
-        let attrSlice = String(raw[raw.index(openRange.lowerBound, offsetBy: rootElementOpenPrefix.count)..<idx])
-        return splitAttributes(attrSlice)
+        return attrs
     }
+
+    /// XMLParser delegate that captures attributes of the first start-element
+    /// and aborts. Internal — only used by `parseContainerRootAttributes`.
+    private final class RootAttrSAXDelegate: NSObject, XMLParserDelegate {
+        var captured: [String: String]?
+
+        func parser(
+            _ parser: XMLParser,
+            didStartElement elementName: String,
+            namespaceURI: String?,
+            qualifiedName qName: String?,
+            attributes attributeDict: [String: String]
+        ) {
+            if captured == nil {
+                captured = attributeDict
+                parser.abortParsing()
+            }
+        }
+    }
+
+    // MARK: - XML hardening (PsychQuant/ooxml-swift#7)
+
+    /// XML 1.0 NameChar whitelist for root-level attribute names. Conservative
+    /// subset: leading must be letter / `_` / `:`, body may add digits / `.` / `-`.
+    /// Throws `XMLHardeningError.invalidAttributeName` (D4 / F12).
+    internal static let attrNameRegex: NSRegularExpression = {
+        // swiftlint:disable:next force_try
+        try! NSRegularExpression(pattern: #"^[A-Za-z_:][A-Za-z0-9._:-]*$"#)
+    }()
+
+    /// Per-attribute-value byte cap (D5 / F14). 64 KiB — ~1000× the largest
+    /// legitimate `mc:Ignorable` / `xmlns:*` value observed in real docs.
+    /// Truncation is unsafe (would break namespace declarations), so the
+    /// helper throws instead of silently shortening.
+    internal static let attrValueByteCap: Int = 65_536
+
+    /// Validate a root-level attribute name. Throws on violation; returns
+    /// silently otherwise. Shared between reader-side (`splitAttributes`) and
+    /// writer-side (`DocxWriter.renderDocumentRootOpenTag`).
+    internal static func validateAttrName(_ name: String, context: String) throws {
+        let range = NSRange(name.startIndex..., in: name)
+        if attrNameRegex.firstMatch(in: name, range: range) == nil {
+            throw XMLHardeningError.invalidAttributeName(name: name, context: context)
+        }
+    }
+
+    /// Pre-scan raw `Data` for `<!DOCTYPE` (case-insensitive ASCII) and throw
+    /// `XMLHardeningError.dtdNotAllowed(part:)` if present. Applied before
+    /// every `XMLDocument(data:)` construction site so that internal entity
+    /// expansion (the billion-laughs vector) cannot begin. OOXML disallows
+    /// DTD per ECMA-376 part 1 §17.18.42, so this introduces no false-positive
+    /// on legitimate input. See `openspec/changes/harden-xml-security/` for
+    /// the full hardening change.
+    internal static func rejectDTD(_ data: Data, part: String) throws {
+        // ASCII byte sequences for `<!DOCTYPE` and `<!doctype` (and one mixed
+        // case sentinel). XML DTD declaration tokens are case-insensitive in
+        // OOXML/Word output paths but the raw byte scan is case-sensitive, so
+        // we cover all three observed forms explicitly.
+        for needle in dtdNeedles {
+            if data.range(of: needle) != nil {
+                throw XMLHardeningError.dtdNotAllowed(part: part)
+            }
+        }
+    }
+
+    private static let dtdNeedles: [Data] = [
+        Data("<!DOCTYPE".utf8),
+        Data("<!doctype".utf8),
+        Data("<!Doctype".utf8),
+    ]
 
     /// Split a whitespace-and-attribute string like ` xmlns:w="..." mc:Ignorable="w14"`
     /// into a name→value map. Handles either `"` or `'` quoting and ignores the
     /// trailing `/` self-closing slash.
-    private static func splitAttributes(_ s: String) -> [String: String] {
+    ///
+    /// Throws `XMLHardeningError.invalidAttributeName` if any attribute name
+    /// fails the XML 1.0 NameChar whitelist, and
+    /// `XMLHardeningError.attributeValueTooLarge` if any value exceeds the
+    /// 64 KiB byte cap (PsychQuant/ooxml-swift#7 / F12 + F14).
+    internal static func splitAttributes(_ s: String) throws -> [String: String] {
         var result: [String: String] = [:]
         var i = s.startIndex
         let end = s.endIndex
@@ -3345,7 +3431,21 @@ public struct DocxReader {
             if i >= end { break }
             let value = String(s[valueStart..<i])
             i = s.index(after: i)
-            if !name.isEmpty { result[name] = value }
+            if !name.isEmpty {
+                // F12 — reject names that fail the XML 1.0 NameChar regex
+                // before they can transit into `documentRootAttributes` /
+                // `headerN.xml` root attrs etc.
+                try validateAttrName(name, context: "split-attributes")
+                // F14 — enforce 64 KiB byte cap per attribute value to close
+                // the DoS-amplification surface (oversized `mc:Ignorable`).
+                let byteSize = value.utf8.count
+                if byteSize > attrValueByteCap {
+                    throw XMLHardeningError.attributeValueTooLarge(
+                        name: name, byteSize: byteSize, cap: attrValueByteCap
+                    )
+                }
+                result[name] = value
+            }
         }
         return result
     }
