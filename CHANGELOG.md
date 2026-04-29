@@ -17,7 +17,7 @@ All notable changes to ooxml-swift will be documented in this file.
 
 Result: `update_all_fields` returned `[:]` (silent no-op) and `list_captions` returned "no SEQ fields found" on docs with valid SEQ fields.
 
-This was the bug behind v3.17.5 verify-with-user-fixture follow-up ([ooxml-swift#209](https://github.com/PsychQuant/ooxml-swift/issues/209)) — surfaced in production verification of v3.17.5 on a document docx where 19 visible SEQ Figure / SEQ Table fields returned 0 detection. Distinct from [#26](https://github.com/PsychQuant/ooxml-swift/issues/26) (paragraph wrapper-path coverage: inline SDT / hyperlink / fieldSimple / alternateContent) which is a different gap.
+**Form-level vs container-level**: this is a **form-level** coverage gap (baked vs canonical fldChar emission), orthogonal to the recent [PsychQuant/che-word-mcp#268](https://github.com/PsychQuant/che-word-mcp/issues/268) **container-level** fix (`.table` / `.contentControl` recursion). The two address independent walker dimensions and were filed/resolved separately. Surfaced by v3.17.5 verify-with-user-fixture ([ooxml-swift#209](https://github.com/PsychQuant/ooxml-swift/issues/209)) on a document docx where 19 visible SEQ Figure / SEQ Table fields returned 0 detection. Distinct from [#26](https://github.com/PsychQuant/ooxml-swift/issues/26) (paragraph wrapper-path coverage: inline SDT / hyperlink / fieldSimple / alternateContent) which is a third independent gap.
 
 #### Fix
 
@@ -26,16 +26,21 @@ Two-phase scan in `parse(paragraph:)`:
 - **Phase 1 (baked form)**: scan runs whose rawXML contains BOTH `"fldChar"` AND `"instrText"` — existing path, used by in-memory `wrapCaptionSequenceFields` output before save.
 - **Phase 2 (canonical form fallback)**: when Phase 1 finds nothing, walk runs as a state machine — `idle → seenBegin → seenInstrText → seenSeparate → seenCached → emit on end`. Probes both `Run.rawXML` AND `Run.rawElements` (DocxReader stores unrecognized fldChar/instrText as `RawElement` entries, NOT `rawXML`).
 
-`processParagraph` (`Sources/OOXMLSwift/Models/WordDocument+UpdateAllFields.swift:264-312`) updated to handle canonical-form cached-value rewriting: detects whether the cached run is baked-form (`rawXML.contains("fldChar")`) and routes to the existing regex-based `rewriteCachedResult`, OR canonical-form (dedicated cached run with rawXML=nil, value in `Run.text`) and updates `Run.text` directly. DocxWriter re-serializes `Run.text` inside `<w:t>`, so the canonical-form rewrite roundtrips correctly.
+`processParagraph` (`Sources/OOXMLSwift/Models/WordDocument+UpdateAllFields.swift:264-312`) updated to handle canonical-form cached-value rewriting: detects whether the cached run is baked-form (`rawXML.contains("fldChar")`) and routes to the existing regex-based `rewriteCachedResult`, OR canonical-form (dedicated cached run with possibly-nil rawXML, value in `Run.text`) and uses the new `rewriteCanonicalCachedText` helper to splice the new value into the embedded `<w:t>` while preserving `xml:space="preserve"` and `<w:rPr>` siblings, AND updates `Run.text` to keep both surfaces consistent.
+
+#### Sub-fix — P1 rawXML-shadowing (surfaced by 6-AI verify of #104)
+
+The first canonical-branch implementation only updated `Run.text` and trusted the doc-comment claim that "DocxWriter re-serializes Run.text inside `<w:t>`". This is true ONLY when the cached run's `rawXML` is `nil` — `Run.toXML()` short-circuits on non-nil `rawXML` (`Run.swift:246-248`) and never re-emits the typed `text` field. The DocxReader roundtrip path is safe (cached `<w:t>` becomes `Run.text` with `rawXML=nil`), but hand-built fixtures, native Word emit (when read by other code), and any upstream tool preserving raw form would silently no-op the rewrite while `updateAllFields()` reported a populated counter dict — counter / disk content desync. Devil's Advocate confirmed with runtime test during 6-AI verify of #104. Fix: splice the new value into the embedded `<w:t>` (preserves `<w:rPr>` and attributes), AND keep `Run.text` in sync.
 
 #### Test coverage
 
-`Issue104FieldParserCanonicalFormTests` (3 sub-tests):
+`Issue104FieldParserCanonicalFormTests` (4 sub-tests):
 - `testFieldParserDetectsCanonical5RunSEQAfterRoundTrip` — **primary RED reproducer**: `wrapCaptionSequenceFields` → DocxWriter → DocxReader → `FieldParser.parse` returns 1 ParsedField (pre-fix: 0)
 - `testUpdateAllFieldsHandlesCanonical5RunFormAfterRoundTrip` — **end-to-end fix**: same roundtrip → `updateAllFields()` returns `["Figure": 1]` (pre-fix: `[:]`)
 - `testFieldParserHandlesNativeWord5RunSEQ` — native-Word emission form (constructed by hand, no roundtrip dependency) detected with correct span boundaries (`startRunIdx`, `endRunIdx`, `cachedResultRunIdx`)
+- `testUpdateAllFieldsRewritesNativeWord5RunCachedRunRawXML` — **P1 rawXML-shadowing regression test**: hand-built native-Word 5-run paragraph with `cachedRun.rawXML = "<w:t xml:space=\"preserve\">999</w:t>"`. Pre-P1-fix: `Run.toXML()` emits stale `999` despite `Run.text == "1"`. Post-P1-fix: rawXML spliced to `>1<`, emitted XML reflects new value, `xml:space="preserve"` preserved.
 
-Suite: 809 → 812 (+3, 0 failures, 1 pre-existing skip).
+Suite: 809 → 813 (+4, 0 failures, 1 pre-existing skip).
 
 #### Scope
 
