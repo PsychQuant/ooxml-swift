@@ -11,6 +11,59 @@ All notable changes to ooxml-swift will be documented in this file.
 ### v0.22 milestone — planned removals
 
 - `Paragraph.commentIds` stored field (deprecated v0.21.4): consumers SHALL migrate to `commentRangeMarkers` (writes) or `commentRangeIds` computed (reads) before v0.22.
+- `WordDocument.insertEquation(at: Int?, latex:, displayMode:)` legacy overload (deprecated v0.21.5): consumers SHALL migrate to `insertEquation(at: InsertLocation, latex:, displayMode:)` before v0.22.
+- (also pending) `Hyperlink.text` setter from #5 / `mutation-surface-fix` SDD bundle.
+
+## [0.21.5] - 2026-04-29
+
+### Added — `insertEquation(at: InsertLocation, ...)` overload (Refs PsychQuant/che-word-mcp#84)
+
+New `WordDocument.insertEquation(at: InsertLocation, latex: String, displayMode: Bool = false) throws` overload. Mirrors `insertImage` / `insertParagraph` signature so external Swift SPM consumers (rescue CLI, planned dxedit CLI per `macdoc#92`) no longer need to reimplement text → bodyChild Int conversion.
+
+- **Display mode**: routes through `insertParagraph(_:at:)`; all 6 `InsertLocation` cases supported via delegation
+- **Inline mode**: only `.paragraphIndex` accepted (per che-word-mcp#67 F2 inline-mode anchor rejection); other cases throw `InsertLocationError.invalidParagraphIndex(-1)` sentinel (cleanup deferred to follow-up — see che-word-mcp#91)
+- Legacy `(at: Int?, ...)` overload `@available(*, deprecated)` — v0.22 removal alongside `Hyperlink.text` setter (#5) and `Paragraph.commentIds` field (#6)
+
+### Fixed — `Paragraph.flattenedDisplayText()` OMML coverage (Refs PsychQuant/che-word-mcp#85)
+
+Previously `flattenedDisplayText` walked typed run children (`runs` / `hyperlinks` / `fieldSimples` / `alternateContents` / `contentControls`) but skipped OMML (`<m:oMath>` / `<m:oMathPara>`) subtrees stored on `Run.rawXML`. Result: any `before_text` / `after_text` MCP anchor crossing inline math span silently 0-matched.
+
+- New `MathComponent.visibleText` accessor on protocol + per-type implementation across all 11 concrete types: `MathRun` / `MathFraction` / `MathSubSuperScript` / `MathAccent` / `MathRadical` / `MathNary` / `MathDelimiter` / `MathFunction` / `MathLimit` / `UnknownMath` / `MathMatrix`. `[MathComponent].visibleText` extension joins arrays in order.
+- `Paragraph.flattenedDisplayText()` walks runs in order; for each run with `rawXML?.contains("oMath") == true`, parses via `OMMLParser.parse(xml:)` and emits `.visibleText` at the run's source position.
+
+### Fixed — `insertEquation` writes both rawXML fields (verify in-scope fix, batched-verify of #84+#85)
+
+`Document.swift` `insertEquation(at: InsertLocation, ..., displayMode: true)` now sets `run.rawXML = omml` alongside the existing `run.properties.rawXML = omml` write. Without this, the canonical batch-CLI workflow (sequential insert → next anchor lookup) silently mis-resolved anchors because `flattenedDisplayText` reads `run.rawXML` (read-side, populated by `DocxReader.parseRun`) but the write-side sink is `properties.rawXML` (only round-trips through disk re-parse). This was BLOCKING #1 from the 6-AI verify of e53fa00.
+
+### Migration
+
+| Caller pattern | Action |
+| -------------- | ------ |
+| `insertEquation(at: 5, latex: "x")` (legacy `Int?` overload) | Compiles with deprecation warning. Migrate to `try insertEquation(at: .paragraphIndex(5), latex: "x")` before v0.22 |
+| `insertEquation` `before_text` / `after_text` anchors | Now natively supported via new overload — no manual text → Int conversion needed |
+| `Paragraph.flattenedDisplayText()` against paragraphs without inline math | Behaviour unchanged (additive-only OMML walk) |
+| `Paragraph.flattenedDisplayText()` against paragraphs WITH inline math | Now includes math text in flatten output. **Prior callers depending on math text being silently dropped will see new tokens** — but no legitimate caller should depend on silent text loss |
+
+### Tests
+
+`Tests/OOXMLSwiftTests/Issue84InsertEquationLocationTests.swift` (6 tests: afterText / beforeText / paragraphIndex / inline-mode rejection / textNotFound error / verify-fix regression for fresh-insert flatten visibility)
+`Tests/OOXMLSwiftTests/Issue85InlineMathFlattenTests.swift` (8 tests: 4 `MathComponent.visibleText` accessor + inline mid-paragraph + nested fraction + plain regression + array helper)
+
+Suite 743 → 757 (1 pre-existing skip, 0 failures).
+
+### SemVer
+
+Patch release. Throws are additive on already-malformed input (inline-mode rejection); new APIs are additive; the deprecated legacy overload still compiles and works. **Internal protocol requirement** `MathComponent.visibleText` (no default impl) is technically SemVer-breaking for external `MathComponent` conformers; audit confirms zero external conformers in the workspace, so practical impact is nil.
+
+### Verify
+
+6-reviewer ensemble (5 Claude teammates + Codex CLI gpt-5.5 xhigh) — verify report at PsychQuant/che-word-mcp#84 [issuecomment-4340218249](https://github.com/PsychQuant/che-word-mcp/issues/84#issuecomment-4340218249). 2 BLOCKING refutations from Devil's Advocate; #1 fixed in-scope (commit `f1f7a41`), #2 deferred as follow-up (PsychQuant/che-word-mcp#90 — H₀ Unicode subscript anchor matching).
+
+### Follow-ups filed (Step 5b triage)
+
+- PsychQuant/che-word-mcp#90 — P3 enhancement: H₀ Unicode subscript anchors don't match flatten output
+- PsychQuant/che-word-mcp#91 — P2 bug: insertEquation inline-mode silent no-op + misleading invalidParagraphIndex(-1) sentinel
+- PsychQuant/che-word-mcp#92 — P3 enhancement: extend flattenedDisplayText OMML walk to hyperlinks/fieldSimples/AC paths
 
 ## [0.21.4] - 2026-04-29
 
