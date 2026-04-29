@@ -94,16 +94,155 @@ public enum FieldParser {
     /// Parse all field spans in the given paragraph's runs. Returns one
     /// `ParsedField` per recognized field. Unknown field types produce
     /// `.unknown(instrText:)` cases — callers never lose data.
+    ///
+    /// Two-phase scan (PsychQuant/che-word-mcp#104):
+    /// - **Phase 1 (baked form)**: scan runs whose rawXML contains BOTH
+    ///   `"fldChar"` AND `"instrText"` — this is the v2.0.0 convention where
+    ///   `wrapCaptionSequenceFields` and `Field.toFieldXML()` produce a single
+    ///   `Run.rawXML` carrying all 5 fldChar elements as nested `<w:r>` blocks.
+    /// - **Phase 2 (canonical 5-run form)**: if Phase 1 finds nothing, walk the
+    ///   runs as a state machine looking for the disk/native-Word emission form
+    ///   where each fldChar element lives in its own `<w:r>`. DocxReader
+    ///   produces this form when re-reading any docx (including our own
+    ///   `wrapCaptionSequenceFields` output after Writer→Reader roundtrip).
     public static func parse(paragraph: Paragraph) -> [ParsedField] {
         var result: [ParsedField] = []
 
         for (runIdx, run) in paragraph.runs.enumerated() {
-            guard let rawXML = run.rawXML, rawXML.contains("fldChar") else { continue }
+            guard let rawXML = run.rawXML else { continue }
+            // Phase 1 marker: BOTH fldChar AND instrText in the same rawXML
+            // means this run carries a baked-form 5-run block.
+            guard rawXML.contains("fldChar"), rawXML.contains("instrText") else { continue }
 
-            // Per v2.0.0 convention, the whole 5-run block is baked into a single
-            // run's rawXML. Extract instrText + cached result from that string.
             let fields = parseFieldsInRawXML(rawXML, atRunIdx: runIdx)
             result.append(contentsOf: fields)
+        }
+
+        // Phase 2: canonical form fallback when Phase 1 found nothing.
+        // (Mixed forms — some baked, some canonical — are not supported because
+        // they would require the canonical scanner to skip ranges already
+        // claimed by Phase 1. No real-world producer mixes the two in a single
+        // paragraph; documenting the assumption is sufficient.)
+        if result.isEmpty {
+            result.append(contentsOf: parseFiveRunSpan(paragraph: paragraph))
+        }
+
+        return result
+    }
+
+    /// Phase-2 walker: detect SEQ fields emitted as 5 separate `<w:r>` runs
+    /// (begin / instrText / separate / cachedValue / end). State machine
+    /// resets on out-of-order patterns to be robust against malformed
+    /// paragraphs.
+    private static func parseFiveRunSpan(paragraph: Paragraph) -> [ParsedField] {
+        // State of an in-progress field span as we walk the runs.
+        struct InProgress {
+            var beginRunIdx: Int
+            var instrText: String?
+            var separateRunIdx: Int?
+            var cachedRunIdx: Int?
+        }
+
+        var result: [ParsedField] = []
+        var current: InProgress?
+
+        // Reusable instrText extractor: matches `<w:instrText[ ...]>...</w:instrText>`
+        // anywhere in the run's rawXML and returns the inner content.
+        let instrTextRegex = try? NSRegularExpression(
+            pattern: #"<w:instrText[^>]*>(.*?)</w:instrText>"#,
+            options: [.dotMatchesLineSeparators]
+        )
+
+        func extractInstrText(_ rawXML: String) -> String? {
+            guard let regex = instrTextRegex else { return nil }
+            let nsRange = NSRange(rawXML.startIndex..., in: rawXML)
+            guard let match = regex.firstMatch(in: rawXML, options: [], range: nsRange),
+                  match.numberOfRanges >= 2,
+                  let innerRange = Range(match.range(at: 1), in: rawXML) else { return nil }
+            return String(rawXML[innerRange])
+        }
+
+        // Probe a single run for fldChar/instrText fragments. DocxReader stores
+        // unrecognized run children (including `<w:fldChar>` and
+        // `<w:instrText>`) in `Run.rawElements` (NOT `Run.rawXML`). Native-Word
+        // 5-run paragraphs constructed by hand may instead embed the fragment
+        // directly in `Run.rawXML`. Check both surfaces.
+        func runFragments(_ run: Run) -> String {
+            var pieces: [String] = []
+            if let rawXML = run.rawXML { pieces.append(rawXML) }
+            if let elems = run.rawElements {
+                for elem in elems {
+                    pieces.append(elem.xml)
+                }
+            }
+            return pieces.joined()
+        }
+
+        for (idx, run) in paragraph.runs.enumerated() {
+            let fragments = runFragments(run)
+            // Caption text runs (only `<w:t>`) carry no fldChar/instrText
+            // signal. Treat them as neutral — they neither advance nor reset
+            // the in-progress span (caption text interleaved with fldChar runs
+            // is normal). But a run with `<w:t>` text right after `separate`
+            // IS the cached value, so check that case below.
+            let hasFldCharBegin = fragments.contains("fldCharType=\"begin\"")
+            let hasFldCharSeparate = fragments.contains("fldCharType=\"separate\"")
+            let hasFldCharEnd = fragments.contains("fldCharType=\"end\"")
+            let hasInstrText = fragments.contains("<w:instrText")
+            let hasText = fragments.contains("<w:t")
+                       || (run.rawXML == nil && (run.rawElements?.isEmpty ?? true) && !run.text.isEmpty)
+
+            // fldChar begin: start (or restart) a span
+            if hasFldCharBegin {
+                current = InProgress(beginRunIdx: idx, instrText: nil,
+                                     separateRunIdx: nil, cachedRunIdx: nil)
+                continue
+            }
+
+            // instrText: capture content into in-progress span
+            if hasInstrText, var span = current {
+                if let extracted = extractInstrText(fragments) {
+                    span.instrText = extracted
+                    current = span
+                }
+                continue
+            }
+
+            // fldChar separate: mark separator position
+            if hasFldCharSeparate, var span = current {
+                span.separateRunIdx = idx
+                current = span
+                continue
+            }
+
+            // First text-bearing run after `separate`: capture cached result
+            // run index. Native Word emits the cached value as `<w:t>1</w:t>`
+            // in its own run between separate and end. After roundtrip,
+            // DocxReader exposes that text via `Run.text` (rawXML is nil for
+            // this run because `<w:t>` is in `recognizedRunChildren`).
+            if let span = current, span.separateRunIdx != nil, span.cachedRunIdx == nil,
+               hasText {
+                var updated = span
+                updated.cachedRunIdx = idx
+                current = updated
+                continue
+            }
+
+            // fldChar end: emit span and reset
+            if hasFldCharEnd, let span = current {
+                if let instrText = span.instrText {
+                    let parsedValue = dispatchParse(instrText: instrText)
+                    result.append(ParsedField(
+                        startRunIdx: span.beginRunIdx,
+                        endRunIdx: idx,
+                        cachedResultRunIdx: span.cachedRunIdx,
+                        instrText: instrText,
+                        field: parsedValue
+                    ))
+                }
+                current = nil
+                continue
+            }
         }
 
         return result

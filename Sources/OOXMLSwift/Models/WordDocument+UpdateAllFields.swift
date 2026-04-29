@@ -290,21 +290,52 @@ extension WordDocument {
             counters[id, default: 0] += 1
             let newValue = counters[id]!
 
-            // Rewrite cachedResult run in rawXML
+            // Rewrite cachedResult run.
+            //
+            // Two forms (PsychQuant/che-word-mcp#104):
+            //
+            // 1. Baked form (v2.0.0 convention): `cachedResultRunIdx` points to
+            //    the SAME run that holds all 5 `<w:fldChar>` elements in its
+            //    `rawXML`. Use the regex-based `rewriteCachedResult` to splice
+            //    the new value into the embedded `<w:t>...</w:t>` between
+            //    `separate` and `end`.
+            //
+            // 2. Canonical 5-run form (post-roundtrip / native Word):
+            //    `cachedResultRunIdx` points to a DEDICATED run whose only
+            //    content is the cached value. After DocxReader, that run has
+            //    `rawXML == nil` and the value lives in `Run.text` (`<w:t>`
+            //    is in `recognizedRunChildren` at DocxReader.swift:1985 so it
+            //    isn't captured as raw). For native-emitted XML constructed by
+            //    hand, it may have `rawXML == "<w:t>1</w:t>"`. Either way, we
+            //    update `Run.text` directly — no regex needed.
             if let idx = field.cachedResultRunIdx, idx < para.runs.count {
-                let oldXML = para.runs[idx].rawXML ?? ""
-                let (newXML, didMatch) = rewriteCachedResult(oldXML, newValue: "\(newValue)", matchingInstrText: field.instrText)
-                if newXML != oldXML {
-                    para.runs[idx].rawXML = newXML
-                    rewroteSomething = true
-                } else if !didMatch {
-                    // v0.13.5+ (#54 sub-finding #5): regex schema drift detection.
-                    // FieldParser saw a SEQ with a cached-result run, but our
-                    // rewrite regex couldn't locate the cached <w:t>...</w:t>
-                    // block. The cached value may now be stale.
-                    FileHandle.standardError.write(
-                        Data("Warning: updateAllFields could not rewrite cached value for SEQ '\(id)' (instrText: '\(field.instrText)'). Cached value may be stale; potential XML schema drift. (#54)\n".utf8)
-                    )
+                let cachedRun = para.runs[idx]
+                let isBakedForm = (cachedRun.rawXML?.contains("fldChar") ?? false)
+
+                if isBakedForm {
+                    let oldXML = cachedRun.rawXML ?? ""
+                    let (newXML, didMatch) = rewriteCachedResult(oldXML, newValue: "\(newValue)", matchingInstrText: field.instrText)
+                    if newXML != oldXML {
+                        para.runs[idx].rawXML = newXML
+                        rewroteSomething = true
+                    } else if !didMatch {
+                        // v0.13.5+ (#54 sub-finding #5): regex schema drift detection.
+                        // FieldParser saw a SEQ with a cached-result run, but our
+                        // rewrite regex couldn't locate the cached <w:t>...</w:t>
+                        // block. The cached value may now be stale.
+                        FileHandle.standardError.write(
+                            Data("Warning: updateAllFields could not rewrite cached value for SEQ '\(id)' (instrText: '\(field.instrText)'). Cached value may be stale; potential XML schema drift. (#54)\n".utf8)
+                        )
+                    }
+                } else {
+                    // Canonical 5-run form: dedicated cached-value run.
+                    // DocxWriter re-serializes Run.text inside `<w:t>` so this
+                    // change round-trips correctly.
+                    let newText = "\(newValue)"
+                    if cachedRun.text != newText {
+                        para.runs[idx].text = newText
+                        rewroteSomething = true
+                    }
                 }
             }
         }

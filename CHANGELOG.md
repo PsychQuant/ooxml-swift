@@ -8,6 +8,44 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `FieldParser.parse(paragraph:)` detects canonical 5-run fldChar form ([PsychQuant/che-word-mcp#104](https://github.com/PsychQuant/che-word-mcp/issues/104))
+
+`FieldParser.parse(paragraph:)` (`Sources/OOXMLSwift/Parsing/FieldParser.swift:97-110` pre-fix) only handled the **v2.0.0 baked form** where ALL 5 `<w:r>` elements (begin / instrText / separate / cachedValue / end) live inside ONE `Run.rawXML`. The line-101 guard `rawXML.contains("fldChar")` filtered out the instrText run (whose rawXML has NO fldChar element) when the field was emitted as 5 separate `<w:r>` siblings — the **canonical form** that:
+
+- DocxReader produces after Writer→Reader roundtrip (any `wrapCaptionSequenceFields` output saved and re-opened)
+- Native Microsoft Word always emits
+
+Result: `update_all_fields` returned `[:]` (silent no-op) and `list_captions` returned "no SEQ fields found" on docs with valid SEQ fields.
+
+This was the bug behind v3.17.5 verify-with-user-fixture follow-up ([ooxml-swift#27](https://github.com/PsychQuant/ooxml-swift/issues/27)) — surfaced in production verification of v3.17.5 on a thesis docx where 19 visible SEQ Figure / SEQ Table fields returned 0 detection. Distinct from [#26](https://github.com/PsychQuant/ooxml-swift/issues/26) (paragraph wrapper-path coverage: inline SDT / hyperlink / fieldSimple / alternateContent) which is a different gap.
+
+#### Fix
+
+Two-phase scan in `parse(paragraph:)`:
+
+- **Phase 1 (baked form)**: scan runs whose rawXML contains BOTH `"fldChar"` AND `"instrText"` — existing path, used by in-memory `wrapCaptionSequenceFields` output before save.
+- **Phase 2 (canonical form fallback)**: when Phase 1 finds nothing, walk runs as a state machine — `idle → seenBegin → seenInstrText → seenSeparate → seenCached → emit on end`. Probes both `Run.rawXML` AND `Run.rawElements` (DocxReader stores unrecognized fldChar/instrText as `RawElement` entries, NOT `rawXML`).
+
+`processParagraph` (`Sources/OOXMLSwift/Models/WordDocument+UpdateAllFields.swift:264-312`) updated to handle canonical-form cached-value rewriting: detects whether the cached run is baked-form (`rawXML.contains("fldChar")`) and routes to the existing regex-based `rewriteCachedResult`, OR canonical-form (dedicated cached run with rawXML=nil, value in `Run.text`) and updates `Run.text` directly. DocxWriter re-serializes `Run.text` inside `<w:t>`, so the canonical-form rewrite roundtrips correctly.
+
+#### Test coverage
+
+`Issue104FieldParserCanonicalFormTests` (3 sub-tests):
+- `testFieldParserDetectsCanonical5RunSEQAfterRoundTrip` — **primary RED reproducer**: `wrapCaptionSequenceFields` → DocxWriter → DocxReader → `FieldParser.parse` returns 1 ParsedField (pre-fix: 0)
+- `testUpdateAllFieldsHandlesCanonical5RunFormAfterRoundTrip` — **end-to-end fix**: same roundtrip → `updateAllFields()` returns `["Figure": 1]` (pre-fix: `[:]`)
+- `testFieldParserHandlesNativeWord5RunSEQ` — native-Word emission form (constructed by hand, no roundtrip dependency) detected with correct span boundaries (`startRunIdx`, `endRunIdx`, `cachedResultRunIdx`)
+
+Suite: 809 → 812 (+3, 0 failures, 1 pre-existing skip).
+
+#### Scope
+
+Body paragraphs only (this fix). Header / footer / footnote / endnote container coverage tracked separately as [#25](https://github.com/PsychQuant/ooxml-swift/issues/25). FieldParser inline SDT / hyperlink / fieldSimple / alternateContent paragraph-surface coverage tracked as [#26](https://github.com/PsychQuant/ooxml-swift/issues/26).
+
+#### Affected MCP tools (transitive via che-word-mcp dep bump)
+
+- `update_all_fields` → now finds and updates SEQ fields in canonical 5-run form (after disk roundtrip / native Word emission). Previously only worked on in-memory `wrapCaptionSequenceFields` output before save.
+- `list_captions` → benefits transitively via shared FieldParser.
+
 ### v0.22 milestone — planned removals
 
 - `Paragraph.commentIds` stored field (deprecated v0.21.4): consumers SHALL migrate to `commentRangeMarkers` (writes) or `commentRangeIds` computed (reads) before v0.22.
