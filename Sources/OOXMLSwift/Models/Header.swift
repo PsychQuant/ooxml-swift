@@ -144,7 +144,9 @@ extension Header {
     /// `<w:hdr>` declares `xmlns:v` / `xmlns:o` / `xmlns:w10` so descendant
     /// `<v:shape>` / `<o:lock>` / `<w10:wrap>` resolve when the saved
     /// `header*.xml` is re-read.
-    func toXML() -> String {
+    /// v0.21.4+ (#6, F8): now `throws` to propagate
+    /// `RoundtripError.unserializedFallbackEdit` from `xmlForBodyChild`.
+    func toXML() throws -> String {
         var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         xml += ContainerRootTag.render(elementName: "w:hdr", attributes: rootAttributes)
         // v0.19.5+ (#56 R5 P0 #6): emit from bodyChildren so direct-child
@@ -155,7 +157,7 @@ extension Header {
         // arm was `break` which silently dropped any block-level SDT held
         // in `bodyChildren` — verify R5 P1 #9 / Logic L6.
         for child in bodyChildren {
-            xml += DocxWriter.xmlForBodyChild(child)
+            xml += try DocxWriter.xmlForBodyChild(child)
         }
         // 如果沒有段落且沒有任何 bodyChildren，加一個空段落
         if bodyChildren.isEmpty {

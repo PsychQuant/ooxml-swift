@@ -7,7 +7,8 @@ public struct Paragraph: Equatable {
     public var hasPageBreak: Bool = false      // 是否為分頁符段落
     public var bookmarks: [Bookmark] = []      // 段落內的書籤
     public var hyperlinks: [Hyperlink] = []    // 段落內的超連結
-    public var commentIds: [Int] = []          // 段落關聯的註解 ID
+    @available(*, deprecated, message: "Use commentRangeMarkers (source of truth since Phase 4) or the computed commentRangeIds. Stored commentIds is no longer populated by Reader since v0.21.4 and will be removed in v0.22.")
+    public var commentIds: [Int] = []          // 段落關聯的註解 ID（v0.21.4+ deprecated — Reader 不再填值）
     public var footnoteIds: [Int] = []         // 段落內的腳註 ID
     public var endnoteIds: [Int] = []          // 段落內的尾註 ID
     public var revisions: [Revision] = []      // 段落內的修訂記錄（w:ins/w:del）
@@ -58,6 +59,21 @@ public struct Paragraph: Equatable {
     /// while `commentRangeMarkers` carries the source position needed for
     /// sort-by-position emit.
     public var commentRangeMarkers: [CommentRangeMarker] = []
+
+    /// v0.21.4+ (PsychQuant/ooxml-swift#6, F9): canonical comment-id list
+    /// derived from `commentRangeMarkers`. Replaces the deprecated stored
+    /// `commentIds` field. Returns the unique ids in order of first appearance,
+    /// reflecting both Reader-loaded markers and any markers appended post-load.
+    public var commentRangeIds: [Int] {
+        var seen = Set<Int>()
+        var result: [Int] = []
+        for marker in commentRangeMarkers {
+            if seen.insert(marker.id).inserted {
+                result.append(marker.id)
+            }
+        }
+        return result
+    }
 
     /// v0.19.0+ (#56) Phase 4: position-indexed `<w:permStart>` / `<w:permEnd>`
     /// markers (editor permission gates).
@@ -298,6 +314,22 @@ extension Paragraph {
             return toXMLSortedByPosition()
         }
         return toXMLLegacy()
+    }
+
+    /// v0.21.4+ (PsychQuant/ooxml-swift#6, F8): throwing variant of `toXML()`
+    /// used by the save path (`DocxWriter.xmlForBodyChild`). Inspects
+    /// `alternateContents` for any `AlternateContent.fallbackRunsModified`
+    /// flag set to `true` and throws
+    /// `RoundtripError.unserializedFallbackEdit(position:)` per the dirty-tracking
+    /// contract documented on `AlternateContent.fallbackRuns`. The non-throwing
+    /// `toXML()` retains its current behaviour for in-memory inspection /
+    /// debug callers (deviation note recorded in
+    /// `openspec/changes/roundtrip-loud-fail/tasks.md` Group 3).
+    public func toXMLThrowing() throws -> String {
+        for ac in alternateContents where ac.fallbackRunsModified {
+            throw RoundtripError.unserializedFallbackEdit(position: ac.position)
+        }
+        return toXML()
     }
 
     /// v0.20.3+ (#66 sub-stack E): build the `<w:p>` opening tag with optional

@@ -211,7 +211,7 @@ final class Issue56FollowupTests: XCTestCase {
     /// trip those declarations on `<w:hdr>`. Pre-v0.19.2: Header.toXML used a
     /// hardcoded 5-namespace template (`w`/`r`/`v`/`o`/`w10`) that silently
     /// dropped any additional declarations from source.
-    func testHeaderRootAttributesRoundTrip() {
+    func testHeaderRootAttributesRoundTrip() throws {
         var header = Header(
             id: "rId99",
             paragraphs: [Paragraph(text: "header text")],
@@ -232,7 +232,7 @@ final class Issue56FollowupTests: XCTestCase {
         // suppress unused mutation warning
         _ = header
 
-        let xml = header.toXML()
+        let xml = try header.toXML()
 
         // Every captured attribute must appear on the open tag.
         for prefix in ["w", "r", "v", "o", "w10", "mc", "wp", "w14"] {
@@ -249,9 +249,9 @@ final class Issue56FollowupTests: XCTestCase {
 
     /// API-built header (rootAttributes empty) falls back to the hardcoded
     /// 5-namespace template. This is the no-regression backstop for F4.
-    func testHeaderEmptyRootAttributesFallsBackToFiveNamespaceTemplate() {
+    func testHeaderEmptyRootAttributesFallsBackToFiveNamespaceTemplate() throws {
         let header = Header(id: "rId99", paragraphs: [], type: .default)
-        let xml = header.toXML()
+        let xml = try header.toXML()
         for prefix in ["w", "r", "v", "o", "w10"] {
             XCTAssertTrue(xml.contains("xmlns:\(prefix)="), "Default template missing xmlns:\(prefix). Output:\n\(xml)")
         }
@@ -259,7 +259,7 @@ final class Issue56FollowupTests: XCTestCase {
 
     /// FootnotesCollection rootAttributes round-trip. Default template (when
     /// rootAttributes empty) is `xmlns:w` + `xmlns:r` only.
-    func testFootnotesRootAttributesRoundTrip() {
+    func testFootnotesRootAttributesRoundTrip() throws {
         let collection = FootnotesCollection(
             footnotes: [],
             rootAttributes: [
@@ -268,7 +268,7 @@ final class Issue56FollowupTests: XCTestCase {
                 "xmlns:w14": "http://schemas.microsoft.com/office/word/2010/wordml",
             ]
         )
-        let xml = collection.toXML()
+        let xml = try collection.toXML()
         XCTAssertTrue(xml.contains("xmlns:w14="), "FootnotesCollection.toXML must emit xmlns:w14 from rootAttributes. Output:\n\(xml)")
     }
 
