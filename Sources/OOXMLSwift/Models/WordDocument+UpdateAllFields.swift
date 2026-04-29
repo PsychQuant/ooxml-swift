@@ -329,11 +329,39 @@ extension WordDocument {
                     }
                 } else {
                     // Canonical 5-run form: dedicated cached-value run.
-                    // DocxWriter re-serializes Run.text inside `<w:t>` so this
-                    // change round-trips correctly.
+                    //
+                    // The cached run can take two shapes:
+                    //
+                    // (a) Post-DocxReader: `rawXML == nil`, value lives in
+                    //     `Run.text`. Updating `text` round-trips because
+                    //     `Run.toXML()` falls through to the typed-text path.
+                    //
+                    // (b) Hand-built / native-Word emit / upstream tools:
+                    //     `rawXML == "<w:rPr>...</w:rPr><w:t>1</w:t>"` (or
+                    //     just `<w:t>1</w:t>`). `Run.toXML()` short-circuits
+                    //     on non-nil rawXML (Run.swift:246-248) — mutating
+                    //     `Run.text` alone would silently no-op the rewrite.
+                    //
+                    // Strategy: splice the new value into the embedded `<w:t>`
+                    // when rawXML is non-nil, AND keep `Run.text` in sync so
+                    // both surfaces report the new value consistently. This
+                    // matches the v0.21.10 #104 follow-up gap surfaced by
+                    // 6-AI verify — see ooxml-swift#27 (closed) and the
+                    // verify report at che-word-mcp#104.
                     let newText = "\(newValue)"
+                    var rewrote = false
+                    if let rawXML = cachedRun.rawXML {
+                        let (newXML, didMatch) = rewriteCanonicalCachedText(rawXML, newValue: newText)
+                        if didMatch && newXML != rawXML {
+                            para.runs[idx].rawXML = newXML
+                            rewrote = true
+                        }
+                    }
                     if cachedRun.text != newText {
                         para.runs[idx].text = newText
+                        rewrote = true
+                    }
+                    if rewrote {
                         rewroteSomething = true
                     }
                 }
@@ -385,6 +413,43 @@ extension WordDocument {
             withTemplate: "$1\(newValue)$2"
         )
         return (rewritten, cachedMatchCount > 0)
+    }
+
+    /// Splice a new cached value into a canonical-form cached run's `rawXML`.
+    ///
+    /// The cached run in canonical 5-run form holds `<w:t>...</w:t>` (optionally
+    /// with `<w:rPr>...</w:rPr>` siblings) inside its `rawXML`. Mutating only
+    /// `Run.text` would silently no-op because `Run.toXML()` short-circuits on
+    /// non-nil `rawXML` (Run.swift:246-248). This helper does the minimum splice
+    /// to keep `<w:rPr>` and the `<w:t>` open-tag attributes (`xml:space="preserve"`)
+    /// intact while replacing the inner text.
+    ///
+    /// Returns `(rewritten, didMatch)`. `didMatch == false` means no `<w:t>` was
+    /// found in the rawXML — caller leaves rawXML untouched and falls back to
+    /// the typed-text path.
+    private func rewriteCanonicalCachedText(_ rawXML: String, newValue: String) -> (String, didMatch: Bool) {
+        let pattern = #"(<w:t(?:\s[^>]*)?>)[^<]*(</w:t>)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else {
+            return (rawXML, false)
+        }
+        let range = NSRange(rawXML.startIndex..., in: rawXML)
+        let matchCount = regex.numberOfMatches(in: rawXML, options: [], range: range)
+        if matchCount == 0 {
+            return (rawXML, false)
+        }
+        // newValue for SEQ counters is digits-only (Int → String), but escape
+        // defensively in case future field kinds reuse this helper.
+        let escaped = newValue
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        let rewritten = regex.stringByReplacingMatches(
+            in: rawXML,
+            options: [],
+            range: range,
+            withTemplate: "$1\(escaped)$2"
+        )
+        return (rewritten, true)
     }
 
     private func escapeForRegex(_ s: String) -> String {

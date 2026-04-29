@@ -159,4 +159,81 @@ final class Issue104FieldParserCanonicalFormTests: XCTestCase {
         XCTAssertEqual(field.cachedResultRunIdx, 6,
             "cachedResultRunIdx should point to the standalone <w:t> run between separate and end (run index 6)")
     }
+
+    // MARK: - 104.4 Native-Word 5-run + updateAllFields rewrite + emit roundtrip
+
+    /// Hand-built native-Word 5-run paragraph where the cached run carries a
+    /// non-nil `Run.rawXML` (mirroring native Word emission and any upstream
+    /// tool that preserves the `<w:t>` raw form). Pre-fix-of-P1: the canonical
+    /// branch in `processParagraph` only mutated `Run.text`, but `Run.toXML()`
+    /// short-circuits on non-nil rawXML (Run.swift:246-248) so the emitted
+    /// XML retained the **stale** cached value while `updateAllFields()` still
+    /// reported a populated counter dict — silent desync between counter and
+    /// disk content.
+    ///
+    /// **Pre-P1-fix**: `cachedRun.rawXML == "<w:t xml:space=\"preserve\">999</w:t>"`
+    /// after `updateAllFields()` returns `["Figure": 1]`.
+    /// **Post-P1-fix**: rawXML spliced to contain "1", emitted Paragraph XML
+    /// shows "1" not "999". Counter dict and disk content stay in sync.
+    ///
+    /// Surfaced by Devil's Advocate during 6-AI verify of #104. This pins the
+    /// invariant so future Run model changes can't silently regress this case.
+    func testUpdateAllFieldsRewritesNativeWord5RunCachedRunRawXML() {
+        var caption = Run(text: "圖 4-1：")
+
+        var beginRun = Run(text: "")
+        beginRun.rawXML = "<w:fldChar w:fldCharType=\"begin\"/>"
+
+        var instrRun = Run(text: "")
+        instrRun.rawXML = "<w:instrText xml:space=\"preserve\"> SEQ Figure </w:instrText>"
+
+        var separateRun = Run(text: "")
+        separateRun.rawXML = "<w:fldChar w:fldCharType=\"separate\"/>"
+
+        // Stale cached value baked into rawXML — this is the P1 trigger
+        var cachedRun = Run(text: "999")
+        cachedRun.rawXML = "<w:t xml:space=\"preserve\">999</w:t>"
+
+        var endRun = Run(text: "")
+        endRun.rawXML = "<w:fldChar w:fldCharType=\"end\"/>"
+
+        var para = Paragraph()
+        para.runs = [caption, beginRun, instrRun, separateRun, cachedRun, endRun]
+
+        var doc = WordDocument()
+        doc.body.children = [.paragraph(para)]
+
+        let result = doc.updateAllFields()
+        XCTAssertEqual(result, ["Figure": 1],
+            "counter dict should report Figure: 1 (this part already worked pre-P1-fix)")
+
+        guard case .paragraph(let updatedPara) = doc.body.children[0] else {
+            return XCTFail("expected paragraph after updateAllFields")
+        }
+
+        // Run.text mutated (this also worked pre-P1-fix)
+        XCTAssertEqual(updatedPara.runs[4].text, "1",
+            "Run.text should be updated to new counter value")
+
+        // The P1 assertion — pre-fix this would still be "999" because
+        // Run.toXML() short-circuits on non-nil rawXML.
+        let cachedRawXML = updatedPara.runs[4].rawXML ?? ""
+        XCTAssertTrue(cachedRawXML.contains(">1<"),
+            "P1 fix: Run.rawXML must be spliced to contain new value '1', got: '\(cachedRawXML)'")
+        XCTAssertFalse(cachedRawXML.contains(">999<"),
+            "P1 fix: Run.rawXML must NOT contain stale value '999', got: '\(cachedRawXML)'")
+
+        // Verify the emitted XML reflects the new value (the actual on-disk
+        // surface a downstream consumer would see).
+        let emittedRunXML = updatedPara.runs[4].toXML()
+        XCTAssertTrue(emittedRunXML.contains(">1<"),
+            "P1 fix: emitted run XML must contain new counter '1', got: '\(emittedRunXML)'")
+        XCTAssertFalse(emittedRunXML.contains(">999<"),
+            "P1 fix: emitted run XML must NOT contain stale '999', got: '\(emittedRunXML)'")
+
+        // Preservation invariant: xml:space="preserve" attribute should survive
+        // the splice (regression guard for the rawXML rewrite helper).
+        XCTAssertTrue(cachedRawXML.contains("xml:space=\"preserve\""),
+            "rawXML splice must preserve `xml:space=\"preserve\"` attribute")
+    }
 }
