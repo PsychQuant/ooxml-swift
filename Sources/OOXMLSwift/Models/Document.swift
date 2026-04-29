@@ -3943,7 +3943,57 @@ extension WordDocument {
 
     // MARK: - Mathematical Equations
 
-    /// 插入數學公式
+    /// Insert a math equation at the given `InsertLocation` (PsychQuant/che-word-mcp#84).
+    ///
+    /// Mirrors the anchor support already on `insertImage(at: InsertLocation, ...)`
+    /// and `insertParagraph(_:at:)`. Display-mode equations create a new
+    /// paragraph at the resolved location (all `InsertLocation` cases
+    /// supported). Inline-mode equations only support `.paragraphIndex`
+    /// per che-word-mcp#67 F2 (inline anchor semantics are ambiguous —
+    /// "append OMML run into existing para containing this text" vs
+    /// "insert new para before/after the matching para"); other anchors
+    /// throw `InsertLocationError.invalidParagraphIndex(-1)` to surface
+    /// the rejection structurally.
+    ///
+    /// - Throws: `InsertLocationError` on anchor resolution failure;
+    ///   `InsertLocationError.invalidParagraphIndex(-1)` for inline-mode
+    ///   non-`paragraphIndex` anchors.
+    public mutating func insertEquation(
+        at location: InsertLocation,
+        latex: String,
+        displayMode: Bool = false
+    ) throws {
+        if !displayMode {
+            // che-word-mcp#67 F2: inline equation rejects non-paragraphIndex
+            // anchors. Convert to legacy Int? path only for `.paragraphIndex`.
+            if case .paragraphIndex(let idx) = location {
+                insertEquation(at: idx, latex: latex, displayMode: false)
+                return
+            }
+            // Use invalidParagraphIndex(-1) sentinel to surface the rejection
+            // through the InsertLocationError vocabulary callers already
+            // handle for resolution failures.
+            throw InsertLocationError.invalidParagraphIndex(-1)
+        }
+
+        // Display mode: build the equation paragraph then route through
+        // insertParagraph(_:at:) which handles all 6 InsertLocation cases.
+        let equation = MathEquation(latex: latex, displayMode: true)
+        var run = Run(text: "")
+        run.properties.rawXML = equation.toXML()
+        var para = Paragraph()
+        para.runs = [run]
+        para.properties.alignment = .center
+        try insertParagraph(para, at: location)
+    }
+
+    /// Insert a math equation at the given paragraph index (legacy overload).
+    ///
+    /// **Deprecated in v0.21.5** — use the `InsertLocation` overload above
+    /// for anchor-aware insertion. This Int?-only signature will be removed
+    /// in v0.22 (alongside other v0.22 deprecations: `Hyperlink.text` setter,
+    /// `Paragraph.commentIds` field).
+    @available(*, deprecated, message: "Use insertEquation(at: InsertLocation, latex:, displayMode:) for anchor-aware insertion. Will be removed in v0.22.")
     public mutating func insertEquation(
         at paragraphIndex: Int? = nil,
         latex: String,
