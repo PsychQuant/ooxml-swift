@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.21.10] - 2026-04-30
+
 ### Fixed — `FieldParser.parse(paragraph:)` detects canonical 5-run fldChar form ([PsychQuant/che-word-mcp#104](https://github.com/PsychQuant/che-word-mcp/issues/104))
 
 `FieldParser.parse(paragraph:)` (`Sources/OOXMLSwift/Parsing/FieldParser.swift:97-110` pre-fix) only handled the **v2.0.0 baked form** where ALL 5 `<w:r>` elements (begin / instrText / separate / cachedValue / end) live inside ONE `Run.rawXML`. The line-101 guard `rawXML.contains("fldChar")` filtered out the instrText run (whose rawXML has NO fldChar element) when the field was emitted as 5 separate `<w:r>` siblings — the **canonical form** that:
