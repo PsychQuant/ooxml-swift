@@ -8,6 +8,70 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.21.11] - 2026-05-01
+
+### Added — Bilateral mirror coverage for direct-child OMML across 4 wrapper positions ([cluster fix che-word-mcp #99 / #100 / #101 / #102 / #103](https://github.com/PsychQuant/che-word-mcp/issues/99))
+
+Spectra change `flatten-replace-omml-bilateral-coverage`. Closes the post-#92 verify findings (DA-1..DA-5) cluster.
+
+#### Read side (`Paragraph.flattenedDisplayText`)
+
+`flattenedDisplayText` now walks direct-child OMML (`<m:oMath>` / `<m:oMathPara>` not wrapped in `<w:r>`) at all 4 wrapper positions:
+
+- Position 1 (`<w:p>` direct child) — Pandoc `$$...$$` display math (#99)
+- Position 2 (`<w:hyperlink>` direct child) — LaTeX→docx hyperlink-wrapped math (#100)
+- Position 3 (`<mc:Fallback>` direct child) — Office.js fallback emit (#101)
+- Position 4 nested (e.g. `<w:hyperlink><w:fldSimple>...<m:oMath>` nested wrapper) (#102)
+
+Source XML position determines emission order at the paragraph level (Decision 6). New private helpers in `InsertLocation.swift`: `flattenRunsAndDirectChildOMML`, `flattenHyperlinkChildren`, `extractDirectChildOMMLFromAlternateContentFallback`. Existing `flattenRunsWithOMML` preserved as the fast path for the common (no-direct-OMML) case.
+
+#### Write side (NEW public API `WordDocument.replaceTextWithBoundaryDetection`)
+
+New file `Sources/OOXMLSwift/Models/WordDocument+ReplaceTextWithBoundaryDetection.swift`:
+
+```swift
+public mutating func replaceTextWithBoundaryDetection(
+    find: String,
+    with replacement: String,
+    options: ReplaceOptions = ReplaceOptions()
+) throws -> ReplaceResult
+```
+
+Replacements wholly within `<w:r><w:t>` ranges proceed normally and are counted in `ReplaceResult.replaced(count:)`. Replacements whose match span intersects a direct-child OMML element refuse with informative `ReplaceResult.refusedDueToOMMLBoundary(occurrences: [Occurrence])` carrying `matchSpan: Range<Int>` and `ommlSpans: [Range<Int>]` in flattened-text coordinates. Mixed outcomes (same find appearing both wholly-within and cross-OMML in single call) carried via `ReplaceResult.mixed(replacedCount:, refusedOccurrences:)`.
+
+#### NEW public type — `ReplaceResult`
+
+`Sources/OOXMLSwift/Models/ReplaceResult.swift`. Equatable enum with three cases (`.replaced`, `.refusedDueToOMMLBoundary`, `.mixed`) plus nested `Occurrence` struct. Documented under spec capabilities `ooxml-paragraph-text-mirror` (mirror invariant) and `ooxml-library-design-principles` (Correctness primacy + Human-like operations).
+
+#### Mirror invariant — asymmetric by design
+
+`flattenedDisplayText` and `replaceTextWithBoundaryDetection` walk the **same** wrapper surfaces and detect direct-child OMML at the **same** 4 positions, but diverge on detected OMML — by design:
+
+- Reads include OMML `visibleText` so callers can locate paragraphs containing math
+- Writes treat OMML as opaque structural units — replacements crossing OMML refuse rather than mutate
+
+This is principle-driven (`ooxml-library-design-principles`):
+
+1. **Correctness primacy** — refuse > incorrect approximation. Producing structurally valid but semantically incorrect output (e.g. `"see δref X"` from cross-OMML mutation preserving the equation in the middle) violates this principle.
+2. **Human-like operations** — operations correspond to actions a human Word user would consciously perform. Silently deleting equations as a side effect of unrelated text replacement violates this principle. Explicit-destructive operations may be implemented in the future via opt-in parameters (e.g. `omml_handling: "drop"`); none ship in this change.
+
+#### Decision 4 — raw passthrough preserved
+
+Direct-child OMML stays in `Paragraph.unrecognizedChildren`, `HyperlinkChild.rawXML(_)`, and `AlternateContent.rawXML`. No parser change. No writer change. Round-trip fidelity unaffected (matrix-pin `testDocumentContentEqualityInvariant` unchanged). Walker reads raw storage on demand using `OMMLParser.parse(xml:).visibleText`.
+
+#### Tests
+
+`Issue99FlattenReplaceOMMLBilateralTests` — 16 tests across 4 sections (fixture sanity / ReplaceResult shape / flatten 4-position coverage / replace boundary detection / mirror invariant / round-trip preservation). Suite: 813 → 829 (+16, 0 failures, 1 pre-existing skip).
+
+#### Documentation
+
+`flattenedDisplayText` docstring refreshed at `InsertLocation.swift:264-266` with explicit reference to the asymmetric mirror invariant and library principles. Closes che-word-mcp #103 (DA-5 docstring sync).
+
+#### Affected MCP tools (transitive via che-word-mcp dep bump pending)
+
+- `replace_text` — gains structured `refusedDueToOMMLBoundary` outcome class (callers must handle the new `ReplaceResult` enum if they use `replaceTextWithBoundaryDetection`; existing `replace_text` flow via `Document.replaceInParagraphSurfaces` private static still returns `Int` and is backward-compatible).
+- All `findBodyChildContainingText`-based anchor lookups — gain ability to locate paragraphs containing direct-child OMML at any of the 4 wrapper positions.
+
 ## [0.21.10] - 2026-04-30
 
 ### Fixed — `FieldParser.parse(paragraph:)` detects canonical 5-run fldChar form ([PsychQuant/che-word-mcp#104](https://github.com/PsychQuant/che-word-mcp/issues/104))

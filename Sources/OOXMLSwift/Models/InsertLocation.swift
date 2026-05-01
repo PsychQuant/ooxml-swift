@@ -275,17 +275,63 @@ extension Paragraph {
     /// emitted by Pandoc/Quarto/LaTeX→docx with embedded math).
     /// contentControls path stays separate (uses RAW XML walking via
     /// `flattenContentControlText` since #63 — different recursion strategy).
+    ///
+    /// **Cluster fix `flatten-replace-omml-bilateral-coverage`** (closes
+    /// che-word-mcp #99 / #100 / #101 / #102 / #103): direct-child OMML
+    /// (`<m:oMath>` / `<m:oMathPara>` not wrapped in `<w:r>`) at all 4
+    /// wrapper positions — `<w:p>`, `<w:hyperlink>`, `<mc:Fallback>`, and
+    /// nested wrapper combinations — is now included in the flatten output.
+    /// Source XML position determines emission order (Decision 6).
+    ///
+    /// **Mirror invariant** (spec capability `ooxml-paragraph-text-mirror`):
+    /// this read-side method walks the same wrapper surfaces as
+    /// `WordDocument.replaceTextWithBoundaryDetection` (write-side) and both
+    /// detect direct-child OMML at the same 4 positions. The two diverge in
+    /// how they handle detected OMML — by design, **asymmetric**:
+    ///
+    /// - **Reads** include each OMML element's `visibleText` so callers can
+    ///   locate paragraphs containing math (anchor lookup universe extends
+    ///   to OMML).
+    /// - **Writes** treat OMML as opaque structural units — replacements
+    ///   crossing OMML boundaries refuse with
+    ///   `ReplaceResult.refusedDueToOMMLBoundary(occurrences:)`,
+    ///   replacements wholly within `<w:t>` ranges proceed normally.
+    ///
+    /// The asymmetry is principle-driven (spec capability
+    /// `ooxml-library-design-principles`): Correctness primacy + Human-like
+    /// operations forbid mutating OMML as a side effect of unrelated text
+    /// replacement. `<w:delText>` and `<w:instrText>` follow the same opaque
+    /// pattern in `Document.replaceInContentControl` for the same reason.
     public func flattenedDisplayText() -> String {
         var parts: [String] = []
-        parts.append(Self.flattenRunsWithOMML(runs))
+        // PsychQuant/che-word-mcp#99 — Pandoc display math:
+        // direct-child `<m:oMath>` / `<m:oMathPara>` of `<w:p>` lands in
+        // `unrecognizedChildren` (not in any typed wrapper). Interleave with
+        // top-level runs by source XML position (Decision 6) so flattened
+        // output matches user-visible reading order:
+        //   `<w:r>see eq </w:r><m:oMath>δ</m:oMath><w:r> here</w:r>`
+        //   → "see eq δ here"  (NOT "see eq  here" with δ appended).
+        parts.append(Self.flattenRunsAndDirectChildOMML(
+            runs: runs,
+            unrecognizedChildren: unrecognizedChildren
+        ))
+        // PsychQuant/che-word-mcp#100 / #102 — direct-child OMML inside
+        // hyperlink wrapper (and nested wrapper combinations like
+        // `<w:hyperlink><w:fldSimple>...<m:oMath>...</m:oMath></w:fldSimple></w:hyperlink>`):
+        // walk `h.children` (source-of-truth ordered list) instead of just
+        // `h.runs` typed projection. Source XML order preserved naturally.
         for h in hyperlinks {
-            parts.append(Self.flattenRunsWithOMML(h.runs))
+            parts.append(Self.flattenHyperlinkChildren(h.children))
         }
         for f in fieldSimples {
             parts.append(Self.flattenRunsWithOMML(f.runs))
         }
+        // PsychQuant/che-word-mcp#101 — direct-child OMML inside `<mc:Fallback>`:
+        // typed `ac.fallbackRuns` only captures `<w:r>`-wrapped content.
+        // Direct-child `<m:oMath>` lives in `ac.rawXML` Fallback subtree.
         for ac in alternateContents {
             parts.append(Self.flattenRunsWithOMML(ac.fallbackRuns))
+            parts.append(Self.extractDirectChildOMMLFromAlternateContentFallback(ac.rawXML))
         }
         for cc in contentControls {
             parts.append(flattenContentControlText(cc))
@@ -317,6 +363,129 @@ extension Paragraph {
             }
         }
         return parts.joined()
+    }
+
+    /// Position-merged walker for paragraph-level runs interleaved with
+    /// direct-child OMML (`<m:oMath>` / `<m:oMathPara>` as direct child of
+    /// `<w:p>`, parsed into `Paragraph.unrecognizedChildren`).
+    ///
+    /// Decision 6 (Spectra change `flatten-replace-omml-bilateral-coverage`):
+    /// source XML position determines emission order. A paragraph
+    /// `<w:r position=1>see eq </w:r><m:oMath position=2>δ</m:oMath><w:r position=3> here</w:r>`
+    /// flattens to `"see eq δ here"`, NOT `"see eq  here" + δ`.
+    ///
+    /// Fast path: if the paragraph has no direct-child OMML in
+    /// `unrecognizedChildren`, falls through to the existing
+    /// `flattenRunsWithOMML` (no sort cost on the common case).
+    ///
+    /// Decision 4 (raw passthrough): direct-child OMML stays in
+    /// `unrecognizedChildren`. Walker reads `child.rawXML` and parses with
+    /// `OMMLParser` on demand. No mutation, no typed-field promotion.
+    private static func flattenRunsAndDirectChildOMML(
+        runs: [Run],
+        unrecognizedChildren: [UnrecognizedChild]
+    ) -> String {
+        let directOMath = unrecognizedChildren.filter { child in
+            child.name == "oMath" || child.name == "oMathPara"
+        }
+        if directOMath.isEmpty {
+            // Common case — no direct-child OMML; preserve existing semantics
+            // (no positional sort, no overhead).
+            return flattenRunsWithOMML(runs)
+        }
+
+        // Build positional fragments for runs + direct-child OMML, then sort
+        // by source position. Runs and OMML children both carry `position`
+        // populated by `DocxReader.parseParagraph`'s `childPosition` counter
+        // — apples-to-apples comparison.
+        enum Fragment {
+            case run(Run)
+            case oMath(visibleText: String)
+        }
+        var fragments: [(position: Int, fragment: Fragment)] = []
+        for r in runs {
+            fragments.append((r.position ?? 0, .run(r)))
+        }
+        for child in directOMath {
+            let visibleText = OMMLParser.parse(xml: child.rawXML).visibleText
+            fragments.append((child.position ?? 0, .oMath(visibleText: visibleText)))
+        }
+        // Stable sort: equal positions preserve relative input order (rare but
+        // possible for API-built paragraphs where everything has position 0).
+        fragments.sort { $0.position < $1.position }
+
+        var result = ""
+        for (_, frag) in fragments {
+            switch frag {
+            case .run(let r):
+                result += r.text
+                if let raw = r.rawXML, raw.contains("oMath") {
+                    result += OMMLParser.parse(xml: raw).visibleText
+                }
+            case .oMath(let text):
+                result += text
+            }
+        }
+        return result
+    }
+
+    /// Walker for `Hyperlink.children` — the source-of-truth ordered list of
+    /// hyperlink contents (parallel to legacy `h.runs` projection).
+    ///
+    /// Closes PsychQuant/che-word-mcp#100 (`<m:oMath>` direct child of
+    /// `<w:hyperlink>`) and #102 (nested wrapper —
+    /// `<w:hyperlink><w:fldSimple><w:r><m:oMath>...</m:oMath></w:r></w:fldSimple></w:hyperlink>`).
+    ///
+    /// `.run(r)` cases mirror `flattenRunsWithOMML`'s per-run text + OMML
+    /// extraction. `.rawXML(raw)` cases scan the raw subtree for any nested
+    /// OMML (whether direct child or wrapped further) — `OMMLParser.parse`
+    /// finds `<m:oMath>` / `<m:oMathPara>` anywhere in the input via its
+    /// `<m:` prefix scan, so nested wrapper combinations work without
+    /// special-casing each shape (covers DA-2 + DA-4 from #92 verify).
+    private static func flattenHyperlinkChildren(_ children: [HyperlinkChild]) -> String {
+        var result = ""
+        for child in children {
+            switch child {
+            case .run(let r):
+                result += r.text
+                if let raw = r.rawXML, raw.contains("oMath") {
+                    result += OMMLParser.parse(xml: raw).visibleText
+                }
+            case .rawXML(let raw):
+                if raw.contains("oMath") {
+                    result += OMMLParser.parse(xml: raw).visibleText
+                }
+            }
+        }
+        return result
+    }
+
+    /// Extract visible text from `<m:oMath>` / `<m:oMathPara>` elements
+    /// appearing as direct children of `<mc:Fallback>` inside an
+    /// `<mc:AlternateContent>` raw XML blob.
+    ///
+    /// Closes PsychQuant/che-word-mcp#101. Typed `ac.fallbackRuns` only
+    /// surfaces `<w:r>`-wrapped content from Fallback; this scans the raw
+    /// subtree for unwrapped OMML.
+    ///
+    /// Scope: only Fallback section is scanned. `<mc:Choice>` is the
+    /// preferred-rendering branch typically used by Word when it supports
+    /// the choice's namespace; including its OMML in flatten would
+    /// double-count text the user actually sees. Fallback mirror is
+    /// consistent with `ac.fallbackRuns` walk.
+    private static func extractDirectChildOMMLFromAlternateContentFallback(_ rawXML: String) -> String {
+        guard rawXML.contains("oMath") else { return "" }
+        // Carve out just the `<mc:Fallback>...</mc:Fallback>` inner content.
+        // Bare-string scan is sufficient because this rawXML is reader-emitted
+        // (well-formed) and the AC schema doesn't permit nested
+        // `<mc:Fallback>` so backwards search isn't needed.
+        guard let openTagStart = rawXML.range(of: "<mc:Fallback") else { return "" }
+        guard let openTagEnd = rawXML.range(of: ">", range: openTagStart.upperBound..<rawXML.endIndex) else { return "" }
+        guard let closeRange = rawXML.range(of: "</mc:Fallback>", range: openTagEnd.upperBound..<rawXML.endIndex) else { return "" }
+        let fallbackInner = String(rawXML[openTagEnd.upperBound..<closeRange.lowerBound])
+        // OMMLParser.parseChildren scans for `<m:` and yields all OMML found
+        // — visibleText concatenates text from each.
+        return OMMLParser.parse(xml: fallbackInner).visibleText
     }
 
     /// Recursively walk a ContentControl + its nested children, returning the
