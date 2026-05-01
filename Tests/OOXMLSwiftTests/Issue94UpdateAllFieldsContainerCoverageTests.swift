@@ -59,6 +59,12 @@ final class Issue94UpdateAllFieldsContainerCoverageTests: XCTestCase {
         return nil
     }
 
+    private func singleCellTable(containing paragraph: Paragraph) -> Table {
+        var cell = TableCell()
+        cell.paragraphs = [paragraph]
+        return Table(rows: [TableRow(cells: [cell])])
+    }
+
     // MARK: - 94.1 Primary reproducer: SEQ inside table cell
 
     func testUpdateAllFieldsRecursesIntoTableCellParagraphs() {
@@ -96,6 +102,49 @@ final class Issue94UpdateAllFieldsContainerCoverageTests: XCTestCase {
         let cell2Cached = cachedResultOfFirstSEQ(in: updatedTable.rows[0].cells[1].paragraphs[0])
         XCTAssertEqual(cell1Cached, "1", "cell 0 SEQ cachedResult should be 1")
         XCTAssertEqual(cell2Cached, "2", "cell 1 SEQ cachedResult should be 2")
+    }
+
+    // MARK: - 94.1.1 Thesis-like roundtrip fixture (#27)
+
+    /// Synthetic shareable stand-in for the user thesis fixture requested by
+    /// #27. The original real docx is not present in this repository, so this
+    /// builds the closest regression surface from the issue description:
+    /// 12 figure captions and 7 table captions, all inside table cells, then
+    /// performs Writer -> Reader -> updateAllFields.
+    ///
+    /// This does not replace retesting Adam's original thesis document, but it
+    /// pins the container-roundtrip path that the #94 fix plausibly addressed.
+    func testThesisLikeTableCellCaptionRoundTripCountsTwelveFiguresAndSevenTables() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Issue27ThesisLike-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        var doc = WordDocument()
+        doc.body.children = [.paragraph(headingParagraph(level: 1, text: "Chapter 4"))]
+
+        for index in 1...12 {
+            let caption = Paragraph(text: "圖 4-\(index)：Figure caption \(index)")
+            doc.body.children.append(.table(singleCellTable(containing: caption)))
+        }
+        for index in 1...7 {
+            let caption = Paragraph(text: "表 4-\(index)：Table caption \(index)")
+            doc.body.children.append(.table(singleCellTable(containing: caption)))
+        }
+
+        let figurePattern = try NSRegularExpression(pattern: "圖 4-(\\d+)：")
+        let tablePattern = try NSRegularExpression(pattern: "表 4-(\\d+)：")
+        _ = try doc.wrapCaptionSequenceFields(pattern: figurePattern, sequenceName: "Figure")
+        _ = try doc.wrapCaptionSequenceFields(pattern: tablePattern, sequenceName: "Table")
+
+        let docxURL = tempDir.appendingPathComponent("thesis-like.docx")
+        try DocxWriter.write(doc, to: docxURL)
+        var reloaded = try DocxReader.read(from: docxURL)
+
+        let result = reloaded.updateAllFields()
+
+        XCTAssertEqual(result, ["Figure": 12, "Table": 7],
+            "thesis-like roundtrip should find all table-cell caption SEQ fields")
     }
 
     // MARK: - 94.2 SEQ inside block-level SDT (.contentControl)
