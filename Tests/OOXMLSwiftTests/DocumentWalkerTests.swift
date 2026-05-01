@@ -79,6 +79,43 @@ final class DocumentWalkerTests: XCTestCase {
         XCTAssertTrue(visited.contains("sdt-inner"), "SDT child paragraph not visited; got: \(visited)")
     }
 
+    func testBodyChildWalkerHonorsExplicitRecursionPolicy() {
+        struct TextVisitor: BodyChildVisitor {
+            var initialState: [String] = []
+            var recursesIntoTableCells: Bool = false
+            var recursesIntoNestedTables: Bool = false
+            var recursesIntoContentControls: Bool = true
+
+            mutating func visitParagraph(_ paragraph: inout Paragraph, state: inout [String]) {
+                state.append(paragraph.runs.map { $0.text }.joined())
+            }
+
+            mutating func visitSkippedTable(_ table: inout Table, state: inout [String]) {
+                state.append("skipped-table")
+            }
+        }
+
+        var top = Paragraph()
+        top.runs = [Run(text: "top")]
+        var tablePara = Paragraph()
+        tablePara.runs = [Run(text: "table")]
+        var sdtPara = Paragraph()
+        sdtPara.runs = [Run(text: "sdt")]
+
+        let table = Table(rows: [TableRow(cells: [TableCell(paragraphs: [tablePara])])])
+        let contentControl = ContentControl.richText(tag: "T", alias: "A", content: "")
+        let children: [BodyChild] = [
+            .paragraph(top),
+            .table(table),
+            .contentControl(contentControl, children: [.paragraph(sdtPara)])
+        ]
+
+        var visitor = TextVisitor()
+        let visited = BodyChildWalker.walk(children, visitor: &visitor)
+
+        XCTAssertEqual(visited, ["top", "skipped-table", "sdt"])
+    }
+
     func testWalkVisitsHeaderParagraphsWithHeaderPartKey() {
         var doc = WordDocument()
         var h = Header(id: "rId10", paragraphs: [], type: .default, originalFileName: "header3.xml")
