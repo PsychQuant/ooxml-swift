@@ -7,8 +7,20 @@ public struct Paragraph: Equatable {
     public var hasPageBreak: Bool = false      // 是否為分頁符段落
     public var bookmarks: [Bookmark] = []      // 段落內的書籤
     public var hyperlinks: [Hyperlink] = []    // 段落內的超連結
+    private var legacyCommentIds: [Int] = []
     @available(*, deprecated, message: "Use commentRangeMarkers (source of truth since Phase 4) or the computed commentRangeIds. Stored commentIds is no longer populated by Reader since v0.21.4 and will be removed in v0.22.")
-    public var commentIds: [Int] = []          // 段落關聯的註解 ID（v0.21.4+ deprecated — Reader 不再填值）
+    public var commentIds: [Int] {             // 段落關聯的註解 ID（v0.21.4+ deprecated — Reader 不再填值）
+        get { legacyCommentIds }
+        set { legacyCommentIds = newValue }
+    }
+    internal mutating func appendLegacyCommentId(_ commentId: Int) {
+        legacyCommentIds.append(commentId)
+    }
+
+    internal mutating func removeLegacyCommentId(_ commentId: Int) {
+        legacyCommentIds.removeAll { $0 == commentId }
+    }
+
     public var footnoteIds: [Int] = []         // 段落內的腳註 ID
     public var endnoteIds: [Int] = []          // 段落內的尾註 ID
     public var revisions: [Revision] = []      // 段落內的修訂記錄（w:ins/w:del）
@@ -406,7 +418,7 @@ extension Paragraph {
         }
 
         // 註解範圍開始標記
-        for commentId in commentIds {
+        for commentId in legacyCommentIds {
             xml += "<w:commentRangeStart w:id=\"\(commentId)\"/>"
         }
 
@@ -443,7 +455,7 @@ extension Paragraph {
         }
 
         // 註解範圍結束標記和參照
-        for commentId in commentIds {
+        for commentId in legacyCommentIds {
             xml += "<w:commentRangeEnd w:id=\"\(commentId)\"/>"
             xml += "<w:r><w:commentReference w:id=\"\(commentId)\"/></w:r>"
         }
@@ -549,7 +561,7 @@ extension Paragraph {
         // source-loaded commentRangeMarker, preserving R2 P0-5 no-double-emit
         // semantics while restoring R3-NEW-3 insertComment marker output.
         let commentIdsCoveredByMarkers = Set(commentRangeMarkers.map { $0.id })
-        for commentId in commentIds where !commentIdsCoveredByMarkers.contains(commentId) {
+        for commentId in legacyCommentIds where !commentIdsCoveredByMarkers.contains(commentId) {
             xml += "<w:commentRangeStart w:id=\"\(commentId)\"/>"
         }
 
@@ -733,7 +745,7 @@ extension Paragraph {
         // skipping a covered id avoids double-emit of end markers AND prevents
         // duplicating an inline reference run that the source-loaded paragraph
         // already carries (parsed as a Run with rawElements).
-        for commentId in commentIds where !commentIdsCoveredByMarkers.contains(commentId) {
+        for commentId in legacyCommentIds where !commentIdsCoveredByMarkers.contains(commentId) {
             xml += "<w:commentRangeEnd w:id=\"\(commentId)\"/>"
             xml += "<w:r><w:commentReference w:id=\"\(commentId)\"/></w:r>"
         }
