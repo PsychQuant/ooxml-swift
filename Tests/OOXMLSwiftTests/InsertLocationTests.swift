@@ -216,4 +216,27 @@ final class InsertLocationTests: XCTestCase {
         )
         XCTAssertEqual(doc.body.children.count, 2)
     }
+
+    func testInsertLocationErrorDescriptionsCoverEveryCase() {
+        let cases: [(InsertLocationError, [String])] = [
+            (.invalidParagraphIndex(7), ["Paragraph index 7", "out of range"]),
+            (.imageIdNotFound("rId404"), ["rId404", "No image"]),
+            (.tableIndexOutOfRange(3), ["Table index 3", "out of range"]),
+            (.tableCellOutOfRange(tableIndex: 2, row: 4, col: 6), ["table 2", "row 4", "col 6"]),
+            (.textNotFound(searchText: "needle", instance: 2), ["instance 2", "needle"]),
+            (.inlineModeRequiresParagraphIndex, ["Inline equations", "paragraphIndex"])
+        ]
+
+        for (error, expectedFragments) in cases {
+            let description = error.errorDescription
+            XCTAssertNotNil(description)
+            XCTAssertFalse(description?.isEmpty ?? true)
+            for fragment in expectedFragments {
+                XCTAssertTrue(
+                    description?.contains(fragment) ?? false,
+                    "Expected '\(description ?? "")' to contain '\(fragment)'"
+                )
+            }
+        }
+    }
 }
