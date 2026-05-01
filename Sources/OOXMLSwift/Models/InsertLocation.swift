@@ -25,7 +25,7 @@ public enum InsertLocation: Equatable {
 }
 
 /// Error thrown when an `InsertLocation` cannot be resolved in the target document.
-public enum InsertLocationError: Error, Equatable {
+public enum InsertLocationError: Error, Equatable, LocalizedError {
     case invalidParagraphIndex(Int)
     case imageIdNotFound(String)
     case tableIndexOutOfRange(Int)
@@ -39,6 +39,23 @@ public enum InsertLocationError: Error, Equatable {
     /// anchor kind". This dedicated case lets callers distinguish the two
     /// failures cleanly.
     case inlineModeRequiresParagraphIndex
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidParagraphIndex(let idx):
+            return "Paragraph index \(idx) is out of range for the document."
+        case .imageIdNotFound(let relationshipId):
+            return "No image with relationship id '\(relationshipId)' was found in the document."
+        case .tableIndexOutOfRange(let idx):
+            return "Table index \(idx) is out of range for the document."
+        case .tableCellOutOfRange(let tableIndex, let row, let col):
+            return "Table cell (table \(tableIndex), row \(row), col \(col)) is out of range."
+        case .textNotFound(let searchText, let instance):
+            return "Could not find instance \(instance) of text '\(searchText)' in the document."
+        case .inlineModeRequiresParagraphIndex:
+            return "Inline equations only support paragraphIndex anchors. Use a different anchor type or switch to displayMode: true."
+        }
+    }
 }
 
 // MARK: - Document resolution
