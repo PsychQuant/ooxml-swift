@@ -67,6 +67,95 @@ final class Issue104FieldParserCanonicalFormTests: XCTestCase {
             "ParsedField should expose identifier 'Figure' from instrText 'SEQ Figure \\* ARABIC'")
     }
 
+    // MARK: - 104.1.1 Baked-vs-canonical discriminator invariant (#33)
+
+    /// `wrapCaptionSequenceFields` emits the baked form before save: the parsed
+    /// cached-result run is the same run whose rawXML embeds the full field
+    /// block, including fldChar markers. `updateAllFields` depends on this
+    /// invariant to choose the baked rewrite path (#33).
+    func testBakedFormCachedRunRawXMLAlwaysContainsFldCharBeforeSave() throws {
+        var doc = WordDocument()
+        doc.body.children = [
+            .paragraph(Paragraph(text: "Figure 7. Distribution"))
+        ]
+        let pattern = try NSRegularExpression(pattern: "Figure (\\d+)\\.")
+        _ = try doc.wrapCaptionSequenceFields(pattern: pattern, sequenceName: "Figure")
+
+        guard case .paragraph(let paragraph) = doc.body.children[0] else {
+            return XCTFail("expected paragraph")
+        }
+
+        let fields = FieldParser.parse(paragraph: paragraph)
+        XCTAssertEqual(fields.count, 1)
+        guard let field = fields.first,
+              let cachedRunIdx = field.cachedResultRunIdx else {
+            return XCTFail("expected parsed field with cached result run")
+        }
+
+        XCTAssertEqual(field.startRunIdx, cachedRunIdx,
+            "baked form should report the same run for field start and cached result")
+        let cachedRawXML = paragraph.runs[cachedRunIdx].rawXML
+        XCTAssertNotNil(cachedRawXML)
+        XCTAssertTrue(cachedRawXML?.contains("fldChar") ?? false,
+            "baked-form cached run must carry fldChar markers for the discriminator")
+    }
+
+    /// After Writer -> Reader roundtrip, the same field is canonical 5-run
+    /// form: cached-result run is a dedicated value run and must not contain
+    /// fldChar. This prevents the baked-form discriminator from accidentally
+    /// routing canonical fields through the rawXML field-block regex (#33).
+    func testRoundTripCanonicalFormCachedRunRawXMLDoesNotContainFldChar() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Issue33RoundTripCanonical-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        var doc = WordDocument()
+        doc.body.children = [
+            .paragraph(Paragraph(text: "Figure 7. Distribution"))
+        ]
+        let pattern = try NSRegularExpression(pattern: "Figure (\\d+)\\.")
+        _ = try doc.wrapCaptionSequenceFields(pattern: pattern, sequenceName: "Figure")
+
+        let docxURL = tempDir.appendingPathComponent("test.docx")
+        try DocxWriter.write(doc, to: docxURL)
+        let reloaded = try DocxReader.read(from: docxURL)
+
+        guard case .paragraph(let paragraph) = reloaded.body.children[0] else {
+            return XCTFail("expected paragraph after roundtrip")
+        }
+
+        let fields = FieldParser.parse(paragraph: paragraph)
+        XCTAssertEqual(fields.count, 1)
+        guard let field = fields.first,
+              let cachedRunIdx = field.cachedResultRunIdx else {
+            return XCTFail("expected parsed field with cached result run")
+        }
+
+        XCTAssertNotEqual(field.startRunIdx, cachedRunIdx,
+            "canonical form should use a dedicated cached-result run")
+        XCTAssertFalse(paragraph.runs[cachedRunIdx].rawXML?.contains("fldChar") ?? false,
+            "canonical cached run must not look like a baked field block")
+    }
+
+    // MARK: - 104.1.2 Defensive large-paragraph scan (#32)
+
+    /// DoS regression guard for #32: large paragraphs with many runs should not
+    /// allocate a joined fragment string per run. The parser should complete a
+    /// 100k-run empty paragraph within a conservative local-test budget.
+    func testFieldParserHandlesHundredThousandEmptyRunsWithinBudget() {
+        var paragraph = Paragraph()
+        paragraph.runs = Array(repeating: Run(text: ""), count: 100_000)
+
+        let started = Date()
+        let fields = FieldParser.parse(paragraph: paragraph)
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertTrue(fields.isEmpty)
+        XCTAssertLessThan(elapsed, 5.0,
+            "FieldParser.parse should not do expensive per-run fragment joining for empty runs")
+    }
+
     // MARK: - 104.2 End-to-end: updateAllFields finds and updates SEQ after roundtrip
 
     /// Drives the actual MCP user scenario: roundtrip → `updateAllFields()`

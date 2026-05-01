@@ -153,55 +153,88 @@ public enum FieldParser {
             options: [.dotMatchesLineSeparators]
         )
 
-        func extractInstrText(_ rawXML: String) -> String? {
+        func extractInstrText(in fragment: String) -> String? {
             guard let regex = instrTextRegex else { return nil }
-            let nsRange = NSRange(rawXML.startIndex..., in: rawXML)
-            guard let match = regex.firstMatch(in: rawXML, options: [], range: nsRange),
+            let nsRange = NSRange(fragment.startIndex..., in: fragment)
+            guard let match = regex.firstMatch(in: fragment, options: [], range: nsRange),
                   match.numberOfRanges >= 2,
-                  let innerRange = Range(match.range(at: 1), in: rawXML) else { return nil }
-            return String(rawXML[innerRange])
+                  let innerRange = Range(match.range(at: 1), in: fragment) else { return nil }
+            return String(fragment[innerRange])
+        }
+
+        struct RunSignals {
+            var hasFldCharBegin = false
+            var hasFldCharSeparate = false
+            var hasFldCharEnd = false
+            var hasInstrText = false
+            var hasText = false
+            var instrText: String?
         }
 
         // Probe a single run for fldChar/instrText fragments. DocxReader stores
         // unrecognized run children (including `<w:fldChar>` and
         // `<w:instrText>`) in `Run.rawElements` (NOT `Run.rawXML`). Native-Word
         // 5-run paragraphs constructed by hand may instead embed the fragment
-        // directly in `Run.rawXML`. Check both surfaces.
-        func runFragments(_ run: Run) -> String {
-            var pieces: [String] = []
-            if let rawXML = run.rawXML { pieces.append(rawXML) }
+        // directly in `Run.rawXML`. Scan both surfaces once without joining
+        // them into a transient per-run string (#32).
+        func scanFragment(_ fragment: String, into signals: inout RunSignals) {
+            if !signals.hasFldCharBegin {
+                signals.hasFldCharBegin = fragment.contains("fldCharType=\"begin\"")
+            }
+            if !signals.hasFldCharSeparate {
+                signals.hasFldCharSeparate = fragment.contains("fldCharType=\"separate\"")
+            }
+            if !signals.hasFldCharEnd {
+                signals.hasFldCharEnd = fragment.contains("fldCharType=\"end\"")
+            }
+            if !signals.hasInstrText {
+                signals.hasInstrText = fragment.contains("<w:instrText")
+            }
+            if signals.instrText == nil {
+                signals.instrText = extractInstrText(in: fragment)
+            }
+            if !signals.hasText {
+                signals.hasText = fragment.contains("<w:t")
+            }
+        }
+
+        func scanRun(_ run: Run) -> RunSignals {
+            var signals = RunSignals()
+            if let rawXML = run.rawXML {
+                scanFragment(rawXML, into: &signals)
+            }
             if let elems = run.rawElements {
                 for elem in elems {
-                    pieces.append(elem.xml)
+                    scanFragment(elem.xml, into: &signals)
                 }
             }
-            return pieces.joined()
+            if !signals.hasText,
+               run.rawXML == nil,
+               (run.rawElements?.isEmpty ?? true),
+               !run.text.isEmpty {
+                signals.hasText = true
+            }
+            return signals
         }
 
         for (idx, run) in paragraph.runs.enumerated() {
-            let fragments = runFragments(run)
+            let signals = scanRun(run)
             // Caption text runs (only `<w:t>`) carry no fldChar/instrText
             // signal. Treat them as neutral — they neither advance nor reset
             // the in-progress span (caption text interleaved with fldChar runs
             // is normal). But a run with `<w:t>` text right after `separate`
             // IS the cached value, so check that case below.
-            let hasFldCharBegin = fragments.contains("fldCharType=\"begin\"")
-            let hasFldCharSeparate = fragments.contains("fldCharType=\"separate\"")
-            let hasFldCharEnd = fragments.contains("fldCharType=\"end\"")
-            let hasInstrText = fragments.contains("<w:instrText")
-            let hasText = fragments.contains("<w:t")
-                       || (run.rawXML == nil && (run.rawElements?.isEmpty ?? true) && !run.text.isEmpty)
 
             // fldChar begin: start (or restart) a span
-            if hasFldCharBegin {
+            if signals.hasFldCharBegin {
                 current = InProgress(beginRunIdx: idx, instrText: nil,
                                      separateRunIdx: nil, cachedRunIdx: nil)
                 continue
             }
 
             // instrText: capture content into in-progress span
-            if hasInstrText, var span = current {
-                if let extracted = extractInstrText(fragments) {
+            if signals.hasInstrText, var span = current {
+                if let extracted = signals.instrText {
                     span.instrText = extracted
                     current = span
                 }
@@ -209,7 +242,7 @@ public enum FieldParser {
             }
 
             // fldChar separate: mark separator position
-            if hasFldCharSeparate, var span = current {
+            if signals.hasFldCharSeparate, var span = current {
                 span.separateRunIdx = idx
                 current = span
                 continue
@@ -221,7 +254,7 @@ public enum FieldParser {
             // DocxReader exposes that text via `Run.text` (rawXML is nil for
             // this run because `<w:t>` is in `recognizedRunChildren`).
             if let span = current, span.separateRunIdx != nil, span.cachedRunIdx == nil,
-               hasText {
+               signals.hasText {
                 var updated = span
                 updated.cachedRunIdx = idx
                 current = updated
@@ -229,7 +262,7 @@ public enum FieldParser {
             }
 
             // fldChar end: emit span and reset
-            if hasFldCharEnd, let span = current {
+            if signals.hasFldCharEnd, let span = current {
                 if let instrText = span.instrText {
                     let parsedValue = dispatchParse(instrText: instrText)
                     result.append(ParsedField(

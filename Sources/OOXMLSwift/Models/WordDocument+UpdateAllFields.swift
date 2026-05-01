@@ -298,7 +298,8 @@ extension WordDocument {
             //    the SAME run that holds all 5 `<w:fldChar>` elements in its
             //    `rawXML`. Use the regex-based `rewriteCachedResult` to splice
             //    the new value into the embedded `<w:t>...</w:t>` between
-            //    `separate` and `end`.
+            //    `separate` and `end`. See `isBakedFormCachedRun(_:)` for the
+            //    discriminator invariant pinned by tests (#33).
             //
             // 2. Canonical 5-run form (post-roundtrip / native Word):
             //    `cachedResultRunIdx` points to a DEDICATED run whose only
@@ -310,7 +311,7 @@ extension WordDocument {
             //    update `Run.text` directly — no regex needed.
             if let idx = field.cachedResultRunIdx, idx < para.runs.count {
                 let cachedRun = para.runs[idx]
-                let isBakedForm = (cachedRun.rawXML?.contains("fldChar") ?? false)
+                let isBakedForm = isBakedFormCachedRun(cachedRun)
 
                 if isBakedForm {
                     let oldXML = cachedRun.rawXML ?? ""
@@ -368,6 +369,19 @@ extension WordDocument {
             }
         }
         return rewroteSomething
+    }
+
+    /// Returns true for the v2.0.0 baked SEQ emission form where the parsed
+    /// field's cached-result run is the same `Run.rawXML` that embeds the full
+    /// begin/instrText/separate/cached/end field block.
+    ///
+    /// In canonical 5-run form, `cachedResultRunIdx` points to a dedicated
+    /// cached-value run. That run may have `<w:t>...</w:t>` rawXML, but it must
+    /// not contain `fldChar`. This deliberately narrow discriminator prevents
+    /// canonical cached runs from being routed through the baked-form regex
+    /// rewrite path (#33).
+    private func isBakedFormCachedRun(_ run: Run) -> Bool {
+        run.rawXML?.contains("fldChar") ?? false
     }
 
     /// Returns heading level (1-9) if paragraph has `pStyle == "Heading N"`, else nil.
