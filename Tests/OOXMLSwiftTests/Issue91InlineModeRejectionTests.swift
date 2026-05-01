@@ -20,9 +20,10 @@ import XCTest
 ///    — asymmetric error semantics for one public API.
 ///
 /// Post-fix contract: BOTH cases throw, with the new dedicated
-/// `InsertLocationError.inlineModeRequiresParagraphIndex` for non-paragraphIndex
-/// anchors and the existing `InsertLocationError.invalidParagraphIndex(idx)` for
-/// bad index in inline mode.
+/// `InsertLocationError.inlineModeRequiresParagraphIndexForAnchor(anchor)` for
+/// non-paragraphIndex anchors and the existing
+/// `InsertLocationError.invalidParagraphIndex(idx)` for bad index in inline
+/// mode.
 final class Issue91InlineModeRejectionTests: XCTestCase {
 
     // MARK: - Defect 2: silent no-op on bad inline index
@@ -65,8 +66,8 @@ final class Issue91InlineModeRejectionTests: XCTestCase {
     // MARK: - Defect 1: sentinel misuse for non-paragraphIndex anchors
 
     /// Spec: inline-mode `insertEquation` with `.afterImageId` MUST throw the
-    /// dedicated `inlineModeRequiresParagraphIndex` error, NOT the
-    /// `invalidParagraphIndex(-1)` sentinel.
+    /// dedicated `inlineModeRequiresParagraphIndexForAnchor` error, NOT the
+    /// `invalidParagraphIndex(-1)` sentinel, and carries the rejected anchor.
     func testInlineModeThrowsOnAfterImageId() throws {
         var doc = try buildDocWithThreeParagraphs()
         XCTAssertThrowsError(try doc.insertEquation(
@@ -75,13 +76,13 @@ final class Issue91InlineModeRejectionTests: XCTestCase {
             displayMode: false
         )) { error in
             XCTAssertEqual(error as? InsertLocationError,
-                .inlineModeRequiresParagraphIndex,
+                .inlineModeRequiresParagraphIndexForAnchor("afterImageId"),
                 "inline mode rejection must use the dedicated error case, not invalidParagraphIndex(-1)")
         }
     }
 
     /// Spec: inline-mode `insertEquation` with `.intoTableCell` MUST throw the
-    /// dedicated `inlineModeRequiresParagraphIndex` error.
+    /// dedicated `inlineModeRequiresParagraphIndexForAnchor` error.
     func testInlineModeThrowsOnIntoTableCell() throws {
         var doc = try buildDocWithThreeParagraphs()
         XCTAssertThrowsError(try doc.insertEquation(
@@ -90,12 +91,12 @@ final class Issue91InlineModeRejectionTests: XCTestCase {
             displayMode: false
         )) { error in
             XCTAssertEqual(error as? InsertLocationError,
-                .inlineModeRequiresParagraphIndex)
+                .inlineModeRequiresParagraphIndexForAnchor("intoTableCell"))
         }
     }
 
     /// Spec: inline-mode `insertEquation` with `.afterTableIndex` MUST throw
-    /// the dedicated `inlineModeRequiresParagraphIndex` error.
+    /// the dedicated `inlineModeRequiresParagraphIndexForAnchor` error.
     func testInlineModeThrowsOnAfterTableIndex() throws {
         var doc = try buildDocWithThreeParagraphs()
         XCTAssertThrowsError(try doc.insertEquation(
@@ -104,13 +105,13 @@ final class Issue91InlineModeRejectionTests: XCTestCase {
             displayMode: false
         )) { error in
             XCTAssertEqual(error as? InsertLocationError,
-                .inlineModeRequiresParagraphIndex)
+                .inlineModeRequiresParagraphIndexForAnchor("afterTableIndex"))
         }
     }
 
     /// Spec: inline-mode `insertEquation` with `.beforeText` MUST throw the
-    /// dedicated `inlineModeRequiresParagraphIndex` error (the symmetric
-    /// counterpart to the existing `.afterText` test in
+    /// dedicated `inlineModeRequiresParagraphIndexForAnchor` error (the
+    /// symmetric counterpart to the existing `.afterText` test in
     /// `Issue84InsertEquationLocationTests.testInlineModeRejectsAfterTextAnchor`).
     func testInlineModeThrowsOnBeforeText() throws {
         var doc = try buildDocWithThreeParagraphs()
@@ -120,7 +121,7 @@ final class Issue91InlineModeRejectionTests: XCTestCase {
             displayMode: false
         )) { error in
             XCTAssertEqual(error as? InsertLocationError,
-                .inlineModeRequiresParagraphIndex)
+                .inlineModeRequiresParagraphIndexForAnchor("beforeText"))
         }
     }
 
@@ -204,6 +205,27 @@ final class Issue91InlineModeRejectionTests: XCTestCase {
         ), "valid top-level idx must still succeed post-corrective")
     }
 
+    /// #21 regression guard: valid inline insertion appends directly to the
+    /// target top-level paragraph and exposes the OMML immediately through the
+    /// inserted run's rawXML.
+    func testInlineModeValidParagraphIndexAppendsEquationRun() throws {
+        var doc = try buildDocWithThreeParagraphs()
+
+        try doc.insertEquation(
+            at: .paragraphIndex(1),
+            latex: "x + y",
+            displayMode: false
+        )
+
+        guard case .paragraph(let paragraph) = doc.body.children[1] else {
+            return XCTFail("expected target paragraph")
+        }
+        XCTAssertEqual(paragraph.runs.count, 2)
+        XCTAssertTrue(paragraph.runs[1].rawXML?.contains("x + y") ?? false,
+            "inline equation run should be appended to the target paragraph")
+        XCTAssertTrue(doc.modifiedParts.contains("word/document.xml"))
+    }
+
     /// F6 verify follow-up: empty-doc edge case (`paragraphCount == 0`) +
     /// `.paragraphIndex(0)` inline mode throws `invalidParagraphIndex(0)`.
     func testInlineModeThrowsOnEmptyDocument() throws {
@@ -263,6 +285,23 @@ final class Issue91InlineModeRejectionTests: XCTestCase {
             }
             XCTAssertEqual(rId, "rId-nonexistent")
         }
+    }
+
+    /// #22 regression guard: the deprecated Int? overload cannot throw without
+    /// a source-breaking signature change, so its deprecation warning must
+    /// explicitly document the legacy inline no-op risk.
+    func testDeprecatedIntOverloadWarningDocumentsLegacyNoOpRisk() throws {
+        let documentSource = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/OOXMLSwift/Models/Document.swift")
+        let source = try String(contentsOf: documentSource, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("legacy inline overload can silently no-op"),
+            "deprecated insertEquation Int? overload must warn direct callers about the legacy silent no-op risk")
+        XCTAssertTrue(source.contains("the new overload throws structured errors"),
+            "deprecated warning must point callers to the structured-error InsertLocation overload")
     }
 
     // MARK: - Helpers

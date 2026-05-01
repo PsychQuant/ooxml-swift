@@ -3955,13 +3955,14 @@ extension WordDocument {
     /// per che-word-mcp#67 F2 (inline anchor semantics are ambiguous —
     /// "append OMML run into existing para containing this text" vs
     /// "insert new para before/after the matching para"); other anchors
-    /// throw `InsertLocationError.inlineModeRequiresParagraphIndex` (post-#91;
-    /// pre-#91 abused `.invalidParagraphIndex(-1)` as a sentinel which lied
-    /// about the failure shape).
+    /// throw `InsertLocationError.inlineModeRequiresParagraphIndexForAnchor`
+    /// with the rejected anchor kind (post-#23; pre-#91 abused
+    /// `.invalidParagraphIndex(-1)` as a sentinel which lied about the failure
+    /// shape).
     ///
     /// - Throws: `InsertLocationError` on anchor resolution failure;
-    ///   `InsertLocationError.inlineModeRequiresParagraphIndex` for inline-mode
-    ///   non-`paragraphIndex` anchors;
+    ///   `InsertLocationError.inlineModeRequiresParagraphIndexForAnchor` for
+    ///   inline-mode non-`paragraphIndex` anchors;
     ///   `InsertLocationError.invalidParagraphIndex(idx)` for inline-mode
     ///   `.paragraphIndex(idx)` with out-of-range `idx` (post-#91; pre-#91 this
     ///   silently no-op'd via the deprecated `Int?` overload).
@@ -3973,34 +3974,29 @@ extension WordDocument {
         if !displayMode {
             // che-word-mcp#67 F2: inline equation rejects non-paragraphIndex
             // anchors. che-word-mcp#91 Defect 2: explicit bounds-check before
-            // delegating to legacy `Int?` overload, which silently no-ops on
+            // insertion because the legacy `Int?` overload silently no-ops on
             // out-of-range index (asymmetric vs display mode's throw).
             //
             // che-word-mcp#91 verify F1 (convergent finding from Codex P1 +
             // Devil's Advocate DA-1): bounds-check MUST count only top-level
             // `.paragraph` body children, NOT `getParagraphs().count` which
             // recurses into block-level `.contentControl` (Document.swift:222).
-            // The legacy `Int?` overload's loop at line 4044 below ONLY
-            // enumerates direct top-level paragraphs (no SDT descent), so a
-            // narrower count is what the delegate can actually reach.
+            // Inline insertion enumerates direct top-level paragraphs only (no
+            // SDT descent), so a narrower count is what the operation can
+            // actually reach.
             // Pre-corrective bug: doc shape `[.contentControl(_, [.paragraph])]`
             // has `getParagraphs().count == 1`, so `.paragraphIndex(0)` passed
-            // the guard but the delegate found zero matches and silently
+            // the old guard but the legacy path found zero matches and silently
             // no-op'd — exactly the failure class Defect 2 was meant to fix.
             if case .paragraphIndex(let idx) = location {
-                let topLevelParagraphCount = body.children.reduce(0) { count, child in
-                    if case .paragraph = child { return count + 1 }
-                    return count
-                }
-                guard idx >= 0, idx < topLevelParagraphCount else {
+                guard appendInlineEquationRun(atTopLevelParagraphIndex: idx, latex: latex) else {
                     throw InsertLocationError.invalidParagraphIndex(idx)
                 }
-                insertEquation(at: idx, latex: latex, displayMode: false)
                 return
             }
             // che-word-mcp#91 Defect 1: dedicated error case (was
             // `.invalidParagraphIndex(-1)` sentinel pre-fix).
-            throw InsertLocationError.inlineModeRequiresParagraphIndex
+            throw InsertLocationError.inlineModeRequiresParagraphIndexForAnchor(location.anchorKindName)
         }
 
         // Display mode: build the equation paragraph then route through
@@ -4032,16 +4028,15 @@ extension WordDocument {
     /// for anchor-aware insertion. This Int?-only signature will be removed
     /// in v0.22 (alongside other v0.22 deprecations: `Hyperlink.text` setter,
     /// `Paragraph.commentIds` field).
-    @available(*, deprecated, message: "Use insertEquation(at: InsertLocation, latex:, displayMode:) for anchor-aware insertion. Will be removed in v0.22.")
+    @available(*, deprecated, message: "Use insertEquation(at: InsertLocation, latex:, displayMode:) for anchor-aware insertion. WARNING: legacy inline overload can silently no-op on out-of-range indexes and SDT-nested paragraphs; the new overload throws structured errors. Will be removed in v0.22.")
     public mutating func insertEquation(
         at paragraphIndex: Int? = nil,
         latex: String,
         displayMode: Bool = false
     ) {
-        let equation = MathEquation(latex: latex, displayMode: displayMode)
-
         if displayMode {
             // 獨立區塊公式，建立新段落
+            let equation = MathEquation(latex: latex, displayMode: true)
             var para = Paragraph()
             var run = Run(text: "")
             run.properties.rawXML = equation.toXML()
@@ -4055,25 +4050,43 @@ extension WordDocument {
             }
         } else {
             // 行內公式，加入到現有段落
-            if let idx = paragraphIndex, idx >= 0 && idx < getParagraphs().count {
-                var childIndex = 0
-                for (i, child) in body.children.enumerated() {
-                    if case .paragraph = child {
-                        if childIndex == idx {
-                            var run = Run(text: "")
-                            run.properties.rawXML = equation.toXML()
-                            if case .paragraph(var para) = body.children[i] {
-                                para.runs.append(run)
-                                body.children[i] = .paragraph(para)
-                            }
-                            modifiedParts.insert("word/document.xml")
-                            return
-                        }
-                        childIndex += 1
-                    }
-                }
+            if let idx = paragraphIndex {
+                _ = appendInlineEquationRun(atTopLevelParagraphIndex: idx, latex: latex)
             }
         }
+    }
+
+    /// Append an inline equation run to the Nth top-level body paragraph.
+    ///
+    /// Inline equations intentionally target only direct `.paragraph` body
+    /// children. Block-level SDT descendants are excluded to match the
+    /// post-#91 contract and avoid `getParagraphs()` recursion drift. Returning
+    /// `false` lets the new `InsertLocation` overload throw while the deprecated
+    /// `Int?` overload preserves its legacy no-op behavior (#21/#22).
+    @discardableResult
+    private mutating func appendInlineEquationRun(
+        atTopLevelParagraphIndex paragraphIndex: Int,
+        latex: String
+    ) -> Bool {
+        guard paragraphIndex >= 0 else { return false }
+
+        var childIndex = 0
+        for i in body.children.indices {
+            guard case .paragraph(var para) = body.children[i] else { continue }
+            if childIndex == paragraphIndex {
+                let equation = MathEquation(latex: latex, displayMode: false)
+                let omml = equation.toXML()
+                var run = Run(text: "")
+                run.properties.rawXML = omml
+                run.rawXML = omml
+                para.runs.append(run)
+                body.children[i] = .paragraph(para)
+                modifiedParts.insert("word/document.xml")
+                return true
+            }
+            childIndex += 1
+        }
+        return false
     }
 
     // MARK: - Advanced Paragraph Formatting

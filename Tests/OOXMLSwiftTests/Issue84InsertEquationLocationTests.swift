@@ -71,8 +71,8 @@ final class Issue84InsertEquationLocationTests: XCTestCase {
 
     /// Spec / che-word-mcp#67 F2 + che-word-mcp#91: inline equation explicitly
     /// rejects non-`paragraphIndex` anchors. `.afterText` in inline mode throws
-    /// the dedicated `InsertLocationError.inlineModeRequiresParagraphIndex`
-    /// case (post-#91; pre-#91 used the misleading `.invalidParagraphIndex(-1)`
+    /// the dedicated `InsertLocationError.inlineModeRequiresParagraphIndexForAnchor`
+    /// case (post-#23; pre-#91 used the misleading `.invalidParagraphIndex(-1)`
     /// sentinel — see `Issue91InlineModeRejectionTests` for full coverage of
     /// all 5 non-paragraphIndex anchor cases).
     func testInlineModeRejectsAfterTextAnchor() throws {
@@ -83,7 +83,7 @@ final class Issue84InsertEquationLocationTests: XCTestCase {
             displayMode: false
         )) { error in
             XCTAssertEqual(error as? InsertLocationError,
-                .inlineModeRequiresParagraphIndex,
+                .inlineModeRequiresParagraphIndexForAnchor("afterText"),
                 "inline mode must reject non-paragraphIndex anchors with the dedicated error case (#91)")
         }
     }
