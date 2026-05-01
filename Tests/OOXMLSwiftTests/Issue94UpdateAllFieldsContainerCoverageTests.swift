@@ -227,4 +227,99 @@ final class Issue94UpdateAllFieldsContainerCoverageTests: XCTestCase {
         XCTAssertEqual(cachedResultOfFirstSEQ(in: f3), "3",
             "Trailing top-level Figure must continue counter (3), not reset to 1 by container-nested heading")
     }
+
+    // MARK: - 25.1 Header/footer/notes recurse through bodyChildren too
+
+    func testUpdateAllFieldsRecursesIntoHeaderTableCellParagraphs() {
+        var doc = WordDocument()
+        var header = Header(id: "rIdHeader", type: .default, originalFileName: "header1.xml")
+        header.bodyChildren = [
+            .table(Table(rows: [
+                TableRow(cells: [
+                    TableCell(paragraphs: [captionParagraph(identifier: "Figure", initialCached: "0")])
+                ])
+            ]))
+        ]
+        doc.headers = [header]
+
+        let result = doc.updateAllFields()
+        XCTAssertEqual(result, ["Figure": 1])
+        XCTAssertTrue(doc.modifiedParts.contains("word/header1.xml"))
+
+        guard case .table(let table) = doc.headers[0].bodyChildren[0] else {
+            return XCTFail("expected header table")
+        }
+        XCTAssertEqual(cachedResultOfFirstSEQ(in: table.rows[0].cells[0].paragraphs[0]), "1")
+    }
+
+    func testUpdateAllFieldsRecursesIntoFooterSDTChildParagraphs() {
+        var doc = WordDocument()
+        let sdt = StructuredDocumentTag(id: 2501, tag: "footer-seq")
+        let cc = ContentControl(sdt: sdt, content: "")
+        var footer = Footer(id: "rIdFooter", type: .default, originalFileName: "footer1.xml")
+        footer.bodyChildren = [
+            .contentControl(cc, children: [
+                .paragraph(captionParagraph(identifier: "Figure", initialCached: "1")),
+                .paragraph(captionParagraph(identifier: "Figure", initialCached: "1"))
+            ])
+        ]
+        doc.footers = [footer]
+
+        let result = doc.updateAllFields()
+        XCTAssertEqual(result, ["Figure": 2])
+        XCTAssertTrue(doc.modifiedParts.contains("word/footer1.xml"))
+
+        guard case .contentControl(_, let children) = doc.footers[0].bodyChildren[0],
+              case .paragraph(let p1) = children[0],
+              case .paragraph(let p2) = children[1] else {
+            return XCTFail("expected footer SDT paragraphs")
+        }
+        XCTAssertEqual(cachedResultOfFirstSEQ(in: p1), "1")
+        XCTAssertEqual(cachedResultOfFirstSEQ(in: p2), "2")
+    }
+
+    func testUpdateAllFieldsRecursesIntoFootnoteTableCellParagraphs() {
+        var doc = WordDocument()
+        var footnote = Footnote(id: 1, text: "", paragraphIndex: 0)
+        footnote.bodyChildren = [
+            .table(Table(rows: [
+                TableRow(cells: [
+                    TableCell(paragraphs: [captionParagraph(identifier: "Table", initialCached: "0")])
+                ])
+            ]))
+        ]
+        doc.footnotes.footnotes = [footnote]
+
+        let result = doc.updateAllFields()
+        XCTAssertEqual(result, ["Table": 1])
+        XCTAssertTrue(doc.modifiedParts.contains("word/footnotes.xml"))
+
+        guard case .table(let table) = doc.footnotes.footnotes[0].bodyChildren[0] else {
+            return XCTFail("expected footnote table")
+        }
+        XCTAssertEqual(cachedResultOfFirstSEQ(in: table.rows[0].cells[0].paragraphs[0]), "1")
+    }
+
+    func testUpdateAllFieldsRecursesIntoEndnoteContainerSEQ() {
+        var doc = WordDocument()
+        let sdt = StructuredDocumentTag(id: 2601, tag: "endnote-seq")
+        let cc = ContentControl(sdt: sdt, content: "")
+        var endnote = Endnote(id: 1, text: "", paragraphIndex: 0)
+        endnote.bodyChildren = [
+            .contentControl(cc, children: [
+                .paragraph(captionParagraph(identifier: "Table", initialCached: "0"))
+            ])
+        ]
+        doc.endnotes.endnotes = [endnote]
+
+        let result = doc.updateAllFields()
+        XCTAssertEqual(result, ["Table": 1])
+        XCTAssertTrue(doc.modifiedParts.contains("word/endnotes.xml"))
+
+        guard case .contentControl(_, let children) = doc.endnotes.endnotes[0].bodyChildren[0],
+              case .paragraph(let p) = children[0] else {
+            return XCTFail("expected endnote SDT paragraph")
+        }
+        XCTAssertEqual(cachedResultOfFirstSEQ(in: p), "1")
+    }
 }

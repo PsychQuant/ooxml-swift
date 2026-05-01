@@ -175,6 +175,45 @@ final class Issue93WrapCaptionSeqPlacementTests: XCTestCase {
         }
     }
 
+    // MARK: - 24.1 Bookmark wrapper must stay with positioned SEQ splice
+
+    func testInsertBookmarkMarkersInheritSourceRunPosition() throws {
+        var doc = WordDocument()
+        var sourceRun = Run(text: "圖 4-1：前後期報酬率分布直方圖")
+        sourceRun.position = 1
+        doc.body.children = [.paragraph(Paragraph(runs: [sourceRun]))]
+
+        let pattern = try NSRegularExpression(pattern: "圖 4-(\\d+)：")
+        _ = try doc.wrapCaptionSequenceFields(
+            pattern: pattern,
+            sequenceName: "Figure",
+            insertBookmark: true,
+            bookmarkTemplate: "fig_${number}"
+        )
+
+        guard case .paragraph(let p) = doc.body.children[0] else {
+            return XCTFail("expected paragraph")
+        }
+
+        let bookmarkStartIdx = p.runs.firstIndex { ($0.rawXML ?? "").contains("bookmarkStart") }
+        let seqIdx = p.runs.firstIndex { ($0.rawXML ?? "").contains("SEQ Figure") }
+        let bookmarkEndIdx = p.runs.firstIndex { ($0.rawXML ?? "").contains("bookmarkEnd") }
+        let suffixIdx = p.runs.firstIndex { $0.text.hasPrefix("：") }
+
+        XCTAssertNotNil(bookmarkStartIdx, "bookmarkStart run must exist")
+        XCTAssertNotNil(seqIdx, "SEQ run must exist")
+        XCTAssertNotNil(bookmarkEndIdx, "bookmarkEnd run must exist")
+        XCTAssertNotNil(suffixIdx, "suffix run must exist")
+
+        if let start = bookmarkStartIdx, let seq = seqIdx, let end = bookmarkEndIdx, let suffix = suffixIdx {
+            XCTAssertLessThan(start, seq, "bookmarkStart must immediately precede the SEQ run")
+            XCTAssertLessThan(seq, end, "bookmarkEnd must follow the SEQ run")
+            XCTAssertLessThan(end, suffix, "bookmark wrapper must remain before trailing caption text")
+            XCTAssertEqual(p.runs[start].position, sourceRun.position)
+            XCTAssertEqual(p.runs[end].position, sourceRun.position)
+        }
+    }
+
     // MARK: - 93.4 ROUND-TRIP test: write to docx, read back, verify position
 
     /// The user's reproducer (kiki830621/collaboration_guo_analysis#5) observed

@@ -115,6 +115,67 @@ final class UpdateAllFieldsTests: XCTestCase {
         }
     }
 
+    // MARK: Issue 26 wrapper-surface rewrites
+
+    func testUpdateAllFieldsRewritesSEQInParagraphWrapperSurfaces() {
+        var doc = WordDocument()
+
+        var fieldSimplePara = Paragraph()
+        fieldSimplePara.fieldSimples = [
+            FieldSimple(instr: " SEQ Figure \\* ARABIC ", runs: [Run(text: "0")])
+        ]
+
+        var hyperlinkRun = Run(text: "")
+        hyperlinkRun.rawXML = SequenceField(identifier: "Figure", cachedResult: "0").toFieldXML()
+        var hyperlink = Hyperlink.external(id: "h1", text: "", url: "https://example.com", relationshipId: "rId1")
+        hyperlink.runs = [hyperlinkRun]
+        var hyperlinkPara = Paragraph()
+        hyperlinkPara.hyperlinks = [hyperlink]
+
+        let sdt = StructuredDocumentTag(id: 2601, tag: "inline-seq")
+        var contentControlPara = Paragraph()
+        contentControlPara.contentControls = [
+            ContentControl(
+                sdt: sdt,
+                content: SequenceField(identifier: "Figure", cachedResult: "0").toFieldXML()
+            )
+        ]
+
+        let fallbackXML = SequenceField(identifier: "Figure", cachedResult: "0").toFieldXML()
+        var fallbackRun = Run(text: "")
+        fallbackRun.rawXML = fallbackXML
+        var alternateContentPara = Paragraph()
+        alternateContentPara.alternateContents = [
+            AlternateContent(
+                rawXML: "<mc:AlternateContent><mc:Fallback>\(fallbackXML)</mc:Fallback></mc:AlternateContent>",
+                fallbackRuns: [fallbackRun]
+            )
+        ]
+
+        doc.body.children = [
+            .paragraph(fieldSimplePara),
+            .paragraph(hyperlinkPara),
+            .paragraph(contentControlPara),
+            .paragraph(alternateContentPara)
+        ]
+
+        let result = doc.updateAllFields()
+        XCTAssertEqual(result, ["Figure": 4])
+
+        guard case .paragraph(let updatedFieldSimplePara) = doc.body.children[0],
+              case .paragraph(let updatedHyperlinkPara) = doc.body.children[1],
+              case .paragraph(let updatedContentControlPara) = doc.body.children[2],
+              case .paragraph(let updatedAlternateContentPara) = doc.body.children[3] else {
+            return XCTFail("expected four paragraphs")
+        }
+
+        XCTAssertEqual(updatedFieldSimplePara.fieldSimples[0].runs[0].text, "1")
+        XCTAssertTrue(updatedHyperlinkPara.hyperlinks[0].runs[0].rawXML?.contains("<w:t>2</w:t>") ?? false)
+        XCTAssertTrue(updatedContentControlPara.contentControls[0].content.contains("<w:t>3</w:t>"))
+        XCTAssertTrue(updatedAlternateContentPara.alternateContents[0].rawXML.contains("<w:t>4</w:t>"))
+        XCTAssertTrue(updatedAlternateContentPara.alternateContents[0].fallbackRuns[0].rawXML?.contains("<w:t>4</w:t>") ?? false)
+    }
+
     // MARK: Empty document
 
     func testEmptyDocumentReturnsEmptyDict() {

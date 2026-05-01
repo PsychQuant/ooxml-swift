@@ -121,4 +121,70 @@ final class FieldParserTests: XCTestCase {
         if case .styleRef = parsed[0].field {} else { XCTFail("Expected first to be styleRef") }
         if case .sequence = parsed[1].field {} else { XCTFail("Expected second to be sequence") }
     }
+
+    // MARK: Issue 26 wrapper surfaces
+
+    func testFieldParserHandlesFieldSimpleSEQ() {
+        var para = Paragraph()
+        para.fieldSimples = [
+            FieldSimple(instr: " SEQ Figure \\* ARABIC ", runs: [Run(text: "1")])
+        ]
+
+        let parsed = FieldParser.parse(paragraph: para)
+        XCTAssertEqual(parsed.count, 1)
+        guard let first = parsed.first, case .sequence(let seq) = first.field else {
+            return XCTFail("Expected .sequence")
+        }
+        XCTAssertEqual(seq.identifier, "Figure")
+    }
+
+    func testFieldParserHandlesInlineSDTSEQ() {
+        let field = SequenceField(identifier: "Figure", cachedResult: "1")
+        let sdt = StructuredDocumentTag(id: 2601, tag: "inline-seq")
+        var para = Paragraph()
+        para.contentControls = [
+            ContentControl(sdt: sdt, content: field.toFieldXML())
+        ]
+
+        let parsed = FieldParser.parse(paragraph: para)
+        XCTAssertEqual(parsed.count, 1)
+        guard let first = parsed.first, case .sequence(let seq) = first.field else {
+            return XCTFail("Expected .sequence")
+        }
+        XCTAssertEqual(seq.identifier, "Figure")
+    }
+
+    func testFieldParserHandlesHyperlinkWrappedSEQ() {
+        let field = SequenceField(identifier: "Figure", cachedResult: "1")
+        var run = Run(text: "")
+        run.rawXML = field.toFieldXML()
+        var link = Hyperlink.external(id: "h1", text: "", url: "https://example.com", relationshipId: "rId1")
+        link.runs = [run]
+        var para = Paragraph()
+        para.hyperlinks = [link]
+
+        let parsed = FieldParser.parse(paragraph: para)
+        XCTAssertEqual(parsed.count, 1)
+        guard let first = parsed.first, case .sequence(let seq) = first.field else {
+            return XCTFail("Expected .sequence")
+        }
+        XCTAssertEqual(seq.identifier, "Figure")
+    }
+
+    func testFieldParserHandlesAlternateContentFallbackSEQ() {
+        let field = SequenceField(identifier: "Figure", cachedResult: "1")
+        var run = Run(text: "")
+        run.rawXML = field.toFieldXML()
+        var para = Paragraph()
+        para.alternateContents = [
+            AlternateContent(rawXML: "<mc:AlternateContent/>", fallbackRuns: [run])
+        ]
+
+        let parsed = FieldParser.parse(paragraph: para)
+        XCTAssertEqual(parsed.count, 1)
+        guard let first = parsed.first, case .sequence(let seq) = first.field else {
+            return XCTFail("Expected .sequence")
+        }
+        XCTAssertEqual(seq.identifier, "Figure")
+    }
 }

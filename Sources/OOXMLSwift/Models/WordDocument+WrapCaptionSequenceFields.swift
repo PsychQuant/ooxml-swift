@@ -310,10 +310,12 @@ extension WordDocument {
             ctx.nextBookmarkId += 1
             var startRun = Run(text: "")
             startRun.rawXML = "<w:bookmarkStart w:id=\"\(bookmarkId)\" w:name=\"\(escapeBookmarkName(bookmarkName))\"/>"
+            startRun.position = preRun.position
             newRuns.append(startRun)
             newRuns.append(seqRun)
             var endRun = Run(text: "")
             endRun.rawXML = "<w:bookmarkEnd w:id=\"\(bookmarkId)\"/>"
+            endRun.position = preRun.position
             newRuns.append(endRun)
         } else {
             newRuns.append(seqRun)

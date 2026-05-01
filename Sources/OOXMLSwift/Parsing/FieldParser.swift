@@ -53,6 +53,14 @@ extension ParsedFieldValue: Equatable {
 
 /// One recognized field span inside a paragraph, with run-index location info
 /// so CRUD tools can modify specific runs.
+public enum ParsedFieldLocation: Equatable {
+    case paragraphRun
+    case hyperlinkRun(hyperlinkIndex: Int)
+    case fieldSimple(index: Int)
+    case alternateContentFallbackRun(alternateContentIndex: Int)
+    case contentControl(index: Int)
+}
+
 public struct ParsedField: Equatable {
     public static func == (lhs: ParsedField, rhs: ParsedField) -> Bool {
         lhs.startRunIdx == rhs.startRunIdx
@@ -60,6 +68,7 @@ public struct ParsedField: Equatable {
             && lhs.cachedResultRunIdx == rhs.cachedResultRunIdx
             && lhs.instrText == rhs.instrText
             && lhs.field == rhs.field
+            && lhs.location == rhs.location
     }
 
     /// Index of the run containing `<w:fldChar fldCharType="begin">`.
@@ -73,19 +82,23 @@ public struct ParsedField: Equatable {
     public let instrText: String
     /// Parsed field value, dispatched from instrText.
     public let field: ParsedFieldValue
+    /// Paragraph surface where this field was found.
+    public let location: ParsedFieldLocation
 
     public init(
         startRunIdx: Int,
         endRunIdx: Int,
         cachedResultRunIdx: Int?,
         instrText: String,
-        field: ParsedFieldValue
+        field: ParsedFieldValue,
+        location: ParsedFieldLocation = .paragraphRun
     ) {
         self.startRunIdx = startRunIdx
         self.endRunIdx = endRunIdx
         self.cachedResultRunIdx = cachedResultRunIdx
         self.instrText = instrText
         self.field = field
+        self.location = location
     }
 }
 
@@ -108,13 +121,55 @@ public enum FieldParser {
     public static func parse(paragraph: Paragraph) -> [ParsedField] {
         var result: [ParsedField] = []
 
-        for (runIdx, run) in paragraph.runs.enumerated() {
+        result.append(contentsOf: parseRuns(paragraph.runs) { _ in .paragraphRun })
+
+        for (index, hyperlink) in paragraph.hyperlinks.enumerated() {
+            result.append(contentsOf: parseRuns(hyperlink.runs) { _ in
+                .hyperlinkRun(hyperlinkIndex: index)
+            })
+        }
+
+        for (index, fieldSimple) in paragraph.fieldSimples.enumerated() {
+            result.append(ParsedField(
+                startRunIdx: -1,
+                endRunIdx: -1,
+                cachedResultRunIdx: nil,
+                instrText: fieldSimple.instr,
+                field: dispatchParse(instrText: fieldSimple.instr),
+                location: .fieldSimple(index: index)
+            ))
+        }
+
+        for (index, alternateContent) in paragraph.alternateContents.enumerated() {
+            result.append(contentsOf: parseRuns(alternateContent.fallbackRuns) { _ in
+                .alternateContentFallbackRun(alternateContentIndex: index)
+            })
+        }
+
+        for (index, control) in paragraph.contentControls.enumerated() where !control.content.isEmpty {
+            result.append(contentsOf: parseFieldsInRawXML(
+                control.content,
+                atRunIdx: -1,
+                location: .contentControl(index: index)
+            ))
+        }
+
+        return result
+    }
+
+    private static func parseRuns(
+        _ runs: [Run],
+        locationForRun: (Int) -> ParsedFieldLocation
+    ) -> [ParsedField] {
+        var result: [ParsedField] = []
+
+        for (runIdx, run) in runs.enumerated() {
             guard let rawXML = run.rawXML else { continue }
             // Phase 1 marker: BOTH fldChar AND instrText in the same rawXML
             // means this run carries a baked-form 5-run block.
             guard rawXML.contains("fldChar"), rawXML.contains("instrText") else { continue }
 
-            let fields = parseFieldsInRawXML(rawXML, atRunIdx: runIdx)
+            let fields = parseFieldsInRawXML(rawXML, atRunIdx: runIdx, location: locationForRun(runIdx))
             result.append(contentsOf: fields)
         }
 
@@ -124,7 +179,7 @@ public enum FieldParser {
         // claimed by Phase 1. No real-world producer mixes the two in a single
         // paragraph; documenting the assumption is sufficient.)
         if result.isEmpty {
-            result.append(contentsOf: parseFiveRunSpan(paragraph: paragraph))
+            result.append(contentsOf: parseFiveRunSpan(runs: runs, locationForRun: locationForRun))
         }
 
         return result
@@ -134,7 +189,10 @@ public enum FieldParser {
     /// (begin / instrText / separate / cachedValue / end). State machine
     /// resets on out-of-order patterns to be robust against malformed
     /// paragraphs.
-    private static func parseFiveRunSpan(paragraph: Paragraph) -> [ParsedField] {
+    private static func parseFiveRunSpan(
+        runs: [Run],
+        locationForRun: (Int) -> ParsedFieldLocation
+    ) -> [ParsedField] {
         // State of an in-progress field span as we walk the runs.
         struct InProgress {
             var beginRunIdx: Int
@@ -178,7 +236,7 @@ public enum FieldParser {
             return pieces.joined()
         }
 
-        for (idx, run) in paragraph.runs.enumerated() {
+        for (idx, run) in runs.enumerated() {
             let fragments = runFragments(run)
             // Caption text runs (only `<w:t>`) carry no fldChar/instrText
             // signal. Treat them as neutral — they neither advance nor reset
@@ -237,7 +295,8 @@ public enum FieldParser {
                         endRunIdx: idx,
                         cachedResultRunIdx: span.cachedRunIdx,
                         instrText: instrText,
-                        field: parsedValue
+                        field: parsedValue,
+                        location: locationForRun(idx)
                     ))
                 }
                 current = nil
@@ -251,7 +310,11 @@ public enum FieldParser {
     /// Extract field spans from a single Run.rawXML containing one or more
     /// embedded 5-run field blocks. All parsed fields report the same runIdx
     /// (they're logically inside that one paragraph run).
-    private static func parseFieldsInRawXML(_ rawXML: String, atRunIdx runIdx: Int) -> [ParsedField] {
+    private static func parseFieldsInRawXML(
+        _ rawXML: String,
+        atRunIdx runIdx: Int,
+        location: ParsedFieldLocation
+    ) -> [ParsedField] {
         var results: [ParsedField] = []
 
         // Scan for <w:instrText ...>...</w:instrText> occurrences.
@@ -279,7 +342,8 @@ public enum FieldParser {
                 endRunIdx: runIdx,
                 cachedResultRunIdx: runIdx,  // Same run — rawXML-embedded form
                 instrText: instrText,
-                field: parsedValue
+                field: parsedValue,
+                location: location
             ))
         }
 

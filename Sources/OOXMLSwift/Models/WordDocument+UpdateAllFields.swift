@@ -64,18 +64,13 @@ extension WordDocument {
         // Headings nested inside tables / SDTs do NOT increment. Rationale:
         // thesis workflows put chapter headings at body top level; SDT/table
         // -internal headings are rare and would create false resets.
-        var bodyDirty = false
-        for i in 0..<body.children.count {
-            if walkAndProcessBodyChildForFields(
-                &body.children[i],
-                counters: &counters,
-                lastResetHeadingCount: &lastResetHeadingCount,
-                currentHeadingCount: &currentHeadingCount,
-                isTopLevel: true
-            ) {
-                bodyDirty = true
-            }
-        }
+        let bodyDirty = walkAndProcessBodyChildrenForFields(
+            &body.children,
+            counters: &counters,
+            lastResetHeadingCount: &lastResetHeadingCount,
+            currentHeadingCount: &currentHeadingCount,
+            isTopLevel: true
+        )
 
         // Capture body's final counter state for return (per spec contract).
         // Per-container counter snapshots are NOT in the return value;
@@ -88,14 +83,14 @@ extension WordDocument {
         for i in 0..<headers.count {
             var headerCounters: [String: Int] = isolatePerContainer ? [:] : counters
             var headerLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
-            var headerDirty = false
-            for j in 0..<headers[i].paragraphs.count {
-                var para = headers[i].paragraphs[j]
-                if processParagraph(&para, counters: &headerCounters, lastResetHeadingCount: &headerLastReset, currentHeadingCount: currentHeadingCount) {
-                    headerDirty = true
-                }
-                headers[i].paragraphs[j] = para
-            }
+            var headerHeadingCount = currentHeadingCount
+            let headerDirty = walkAndProcessBodyChildrenForFields(
+                &headers[i].bodyChildren,
+                counters: &headerCounters,
+                lastResetHeadingCount: &headerLastReset,
+                currentHeadingCount: &headerHeadingCount,
+                isTopLevel: false
+            )
             if !isolatePerContainer {
                 counters = headerCounters
                 lastResetHeadingCount = headerLastReset
@@ -108,14 +103,14 @@ extension WordDocument {
         for i in 0..<footers.count {
             var footerCounters: [String: Int] = isolatePerContainer ? [:] : counters
             var footerLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
-            var footerDirty = false
-            for j in 0..<footers[i].paragraphs.count {
-                var para = footers[i].paragraphs[j]
-                if processParagraph(&para, counters: &footerCounters, lastResetHeadingCount: &footerLastReset, currentHeadingCount: currentHeadingCount) {
-                    footerDirty = true
-                }
-                footers[i].paragraphs[j] = para
-            }
+            var footerHeadingCount = currentHeadingCount
+            let footerDirty = walkAndProcessBodyChildrenForFields(
+                &footers[i].bodyChildren,
+                counters: &footerCounters,
+                lastResetHeadingCount: &footerLastReset,
+                currentHeadingCount: &footerHeadingCount,
+                isTopLevel: false
+            )
             if !isolatePerContainer {
                 counters = footerCounters
                 lastResetHeadingCount = footerLastReset
@@ -128,12 +123,15 @@ extension WordDocument {
         var footnotesLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
         var footnotesDirty = false
         for i in 0..<footnotes.footnotes.count {
-            for j in 0..<footnotes.footnotes[i].paragraphs.count {
-                var para = footnotes.footnotes[i].paragraphs[j]
-                if processParagraph(&para, counters: &footnotesCounters, lastResetHeadingCount: &footnotesLastReset, currentHeadingCount: currentHeadingCount) {
-                    footnotesDirty = true
-                }
-                footnotes.footnotes[i].paragraphs[j] = para
+            var footnoteHeadingCount = currentHeadingCount
+            if walkAndProcessBodyChildrenForFields(
+                &footnotes.footnotes[i].bodyChildren,
+                counters: &footnotesCounters,
+                lastResetHeadingCount: &footnotesLastReset,
+                currentHeadingCount: &footnoteHeadingCount,
+                isTopLevel: false
+            ) {
+                footnotesDirty = true
             }
         }
         if !isolatePerContainer {
@@ -146,12 +144,15 @@ extension WordDocument {
         var endnotesLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
         var endnotesDirty = false
         for i in 0..<endnotes.endnotes.count {
-            for j in 0..<endnotes.endnotes[i].paragraphs.count {
-                var para = endnotes.endnotes[i].paragraphs[j]
-                if processParagraph(&para, counters: &endnotesCounters, lastResetHeadingCount: &endnotesLastReset, currentHeadingCount: currentHeadingCount) {
-                    endnotesDirty = true
-                }
-                endnotes.endnotes[i].paragraphs[j] = para
+            var endnoteHeadingCount = currentHeadingCount
+            if walkAndProcessBodyChildrenForFields(
+                &endnotes.endnotes[i].bodyChildren,
+                counters: &endnotesCounters,
+                lastResetHeadingCount: &endnotesLastReset,
+                currentHeadingCount: &endnoteHeadingCount,
+                isTopLevel: false
+            ) {
+                endnotesDirty = true
             }
         }
         if !isolatePerContainer {
@@ -181,6 +182,29 @@ extension WordDocument {
     /// Only direct top-level body paragraphs trigger the heading counter to
     /// avoid container-nested headings causing false SEQ chapter-resets (#94).
     ///
+    /// - Returns: `true` if any descendant paragraph had a SEQ field rewritten.
+    private func walkAndProcessBodyChildrenForFields(
+        _ children: inout [BodyChild],
+        counters: inout [String: Int],
+        lastResetHeadingCount: inout [String: Int],
+        currentHeadingCount: inout [Int: Int],
+        isTopLevel: Bool
+    ) -> Bool {
+        var anyDirty = false
+        for i in 0..<children.count {
+            if walkAndProcessBodyChildForFields(
+                &children[i],
+                counters: &counters,
+                lastResetHeadingCount: &lastResetHeadingCount,
+                currentHeadingCount: &currentHeadingCount,
+                isTopLevel: isTopLevel
+            ) {
+                anyDirty = true
+            }
+        }
+        return anyDirty
+    }
+
     /// - Returns: `true` if any descendant paragraph had a SEQ field rewritten.
     private func walkAndProcessBodyChildForFields(
         _ child: inout BodyChild,
@@ -290,84 +314,147 @@ extension WordDocument {
             counters[id, default: 0] += 1
             let newValue = counters[id]!
 
-            // Rewrite cachedResult run.
-            //
-            // Two forms (PsychQuant/che-word-mcp#104):
-            //
-            // 1. Baked form (v2.0.0 convention): `cachedResultRunIdx` points to
-            //    the SAME run that holds all 5 `<w:fldChar>` elements in its
-            //    `rawXML`. Use the regex-based `rewriteCachedResult` to splice
-            //    the new value into the embedded `<w:t>...</w:t>` between
-            //    `separate` and `end`.
-            //
-            // 2. Canonical 5-run form (post-roundtrip / native Word):
-            //    `cachedResultRunIdx` points to a DEDICATED run whose only
-            //    content is the cached value. After DocxReader, that run has
-            //    `rawXML == nil` and the value lives in `Run.text` (`<w:t>`
-            //    is in `recognizedRunChildren` at DocxReader.swift:1985 so it
-            //    isn't captured as raw). For native-emitted XML constructed by
-            //    hand, it may have `rawXML == "<w:t>1</w:t>"`. Either way, we
-            //    update `Run.text` directly — no regex needed.
-            if let idx = field.cachedResultRunIdx, idx < para.runs.count {
-                let cachedRun = para.runs[idx]
-                let isBakedForm = (cachedRun.rawXML?.contains("fldChar") ?? false)
-
-                if isBakedForm {
-                    let oldXML = cachedRun.rawXML ?? ""
-                    let (newXML, didMatch) = rewriteCachedResult(oldXML, newValue: "\(newValue)", matchingInstrText: field.instrText)
-                    if newXML != oldXML {
-                        para.runs[idx].rawXML = newXML
-                        rewroteSomething = true
-                    } else if !didMatch {
-                        // v0.13.5+ (#54 sub-finding #5): regex schema drift detection.
-                        // FieldParser saw a SEQ with a cached-result run, but our
-                        // rewrite regex couldn't locate the cached <w:t>...</w:t>
-                        // block. The cached value may now be stale.
-                        FileHandle.standardError.write(
-                            Data("Warning: updateAllFields could not rewrite cached value for SEQ '\(id)' (instrText: '\(field.instrText)'). Cached value may be stale; potential XML schema drift. (#54)\n".utf8)
-                        )
-                    }
-                } else {
-                    // Canonical 5-run form: dedicated cached-value run.
-                    //
-                    // The cached run can take two shapes:
-                    //
-                    // (a) Post-DocxReader: `rawXML == nil`, value lives in
-                    //     `Run.text`. Updating `text` round-trips because
-                    //     `Run.toXML()` falls through to the typed-text path.
-                    //
-                    // (b) Hand-built / native-Word emit / upstream tools:
-                    //     `rawXML == "<w:rPr>...</w:rPr><w:t>1</w:t>"` (or
-                    //     just `<w:t>1</w:t>`). `Run.toXML()` short-circuits
-                    //     on non-nil rawXML (Run.swift:246-248) — mutating
-                    //     `Run.text` alone would silently no-op the rewrite.
-                    //
-                    // Strategy: splice the new value into the embedded `<w:t>`
-                    // when rawXML is non-nil, AND keep `Run.text` in sync so
-                    // both surfaces report the new value consistently. This
-                    // matches the v0.21.10 #104 follow-up gap surfaced by
-                    // 6-AI verify — see ooxml-swift#27 (closed) and the
-                    // verify report at che-word-mcp#104.
-                    let newText = "\(newValue)"
-                    var rewrote = false
-                    if let rawXML = cachedRun.rawXML {
-                        let (newXML, didMatch) = rewriteCanonicalCachedText(rawXML, newValue: newText)
-                        if didMatch && newXML != rawXML {
-                            para.runs[idx].rawXML = newXML
-                            rewrote = true
-                        }
-                    }
-                    if cachedRun.text != newText {
-                        para.runs[idx].text = newText
-                        rewrote = true
-                    }
-                    if rewrote {
-                        rewroteSomething = true
-                    }
-                }
+            if rewriteCachedResult(for: field, in: &para, identifier: id, newValue: newValue) {
+                rewroteSomething = true
             }
         }
         return rewroteSomething
+    }
+
+    private func rewriteCachedResult(
+        for field: ParsedField,
+        in para: inout Paragraph,
+        identifier: String,
+        newValue: Int
+    ) -> Bool {
+        let newText = "\(newValue)"
+        switch field.location {
+        case .paragraphRun:
+            guard let idx = field.cachedResultRunIdx, idx < para.runs.count else { return false }
+            return rewriteCachedResultRun(
+                &para.runs[idx],
+                field: field,
+                identifier: identifier,
+                newText: newText
+            )
+
+        case .hyperlinkRun(let hyperlinkIndex):
+            guard hyperlinkIndex < para.hyperlinks.count,
+                  let idx = field.cachedResultRunIdx,
+                  idx < para.hyperlinks[hyperlinkIndex].runs.count else { return false }
+            return rewriteCachedResultRun(
+                &para.hyperlinks[hyperlinkIndex].runs[idx],
+                field: field,
+                identifier: identifier,
+                newText: newText
+            )
+
+        case .fieldSimple(let index):
+            guard index < para.fieldSimples.count else { return false }
+            if para.fieldSimples[index].runs.isEmpty {
+                para.fieldSimples[index].runs = [Run(text: newText)]
+                return true
+            }
+            return rewriteCachedResultRun(
+                &para.fieldSimples[index].runs[0],
+                field: field,
+                identifier: identifier,
+                newText: newText
+            )
+
+        case .alternateContentFallbackRun(let alternateContentIndex):
+            guard alternateContentIndex < para.alternateContents.count,
+                  let idx = field.cachedResultRunIdx,
+                  idx < para.alternateContents[alternateContentIndex].fallbackRuns.count else { return false }
+            let oldAC = para.alternateContents[alternateContentIndex]
+            let (newRawXML, didMatch) = rewriteCachedResult(
+                oldAC.rawXML,
+                newValue: newText,
+                matchingInstrText: field.instrText
+            )
+            guard didMatch, newRawXML != oldAC.rawXML else {
+                if !didMatch {
+                    emitCachedResultWarning(identifier: identifier, instrText: field.instrText)
+                }
+                return false
+            }
+            var updatedRuns = oldAC.fallbackRuns
+            _ = rewriteCachedResultRun(
+                &updatedRuns[idx],
+                field: field,
+                identifier: identifier,
+                newText: newText
+            )
+            para.alternateContents[alternateContentIndex] = AlternateContent(
+                rawXML: newRawXML,
+                fallbackRuns: updatedRuns,
+                position: oldAC.position
+            )
+            return true
+
+        case .contentControl(let index):
+            guard index < para.contentControls.count else { return false }
+            let oldXML = para.contentControls[index].content
+            let (newXML, didMatch) = rewriteCachedResult(
+                oldXML,
+                newValue: newText,
+                matchingInstrText: field.instrText
+            )
+            if newXML != oldXML {
+                para.contentControls[index].content = newXML
+                return true
+            }
+            if !didMatch {
+                emitCachedResultWarning(identifier: identifier, instrText: field.instrText)
+            }
+            return false
+        }
+    }
+
+    private func rewriteCachedResultRun(
+        _ run: inout Run,
+        field: ParsedField,
+        identifier: String,
+        newText: String
+    ) -> Bool {
+        let isBakedForm = (run.rawXML?.contains("fldChar") ?? false)
+
+        if isBakedForm {
+            let oldXML = run.rawXML ?? ""
+            let (newXML, didMatch) = rewriteCachedResult(
+                oldXML,
+                newValue: newText,
+                matchingInstrText: field.instrText
+            )
+            if newXML != oldXML {
+                run.rawXML = newXML
+                return true
+            }
+            if !didMatch {
+                emitCachedResultWarning(identifier: identifier, instrText: field.instrText)
+            }
+            return false
+        }
+
+        var rewrote = false
+        if let rawXML = run.rawXML {
+            let (newXML, didMatch) = rewriteCanonicalCachedText(rawXML, newValue: newText)
+            if didMatch && newXML != rawXML {
+                run.rawXML = newXML
+                rewrote = true
+            }
+        }
+        if run.text != newText {
+            run.text = newText
+            rewrote = true
+        }
+        return rewrote
+    }
+
+    private func emitCachedResultWarning(identifier: String, instrText: String) {
+        FileHandle.standardError.write(
+            Data("Warning: updateAllFields could not rewrite cached value for SEQ '\(identifier)' (instrText: '\(instrText)'). Cached value may be stale; potential XML schema drift. (#54)\n".utf8)
+        )
     }
 
     /// Returns heading level (1-9) if paragraph has `pStyle == "Heading N"`, else nil.
