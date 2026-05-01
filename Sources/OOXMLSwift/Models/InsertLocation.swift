@@ -22,6 +22,24 @@ public enum InsertLocation: Equatable {
     case intoTableCell(tableIndex: Int, row: Int, col: Int)
     case afterText(String, instance: Int)
     case beforeText(String, instance: Int)
+
+    /// Payload-stripped anchor name for diagnostics and structured errors.
+    public var anchorKindName: String {
+        switch self {
+        case .paragraphIndex:
+            return "paragraphIndex"
+        case .afterImageId:
+            return "afterImageId"
+        case .afterTableIndex:
+            return "afterTableIndex"
+        case .intoTableCell:
+            return "intoTableCell"
+        case .afterText:
+            return "afterText"
+        case .beforeText:
+            return "beforeText"
+        }
+    }
 }
 
 /// Error thrown when an `InsertLocation` cannot be resolved in the target document.
@@ -39,6 +57,10 @@ public enum InsertLocationError: Error, Equatable {
     /// anchor kind". This dedicated case lets callers distinguish the two
     /// failures cleanly.
     case inlineModeRequiresParagraphIndex
+    /// Same inline-mode rejection as `inlineModeRequiresParagraphIndex`, with
+    /// payload-stripped context for the actual anchor kind the caller passed.
+    /// The bare case remains for source compatibility with existing switches.
+    case inlineModeRequiresParagraphIndexForAnchor(String)
 }
 
 // MARK: - Document resolution
