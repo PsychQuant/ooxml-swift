@@ -2055,6 +2055,17 @@ public struct DocxReader {
         // children) via complementary mechanisms. Keep local until parseRun
         // gains a second pre-consumer that would benefit from `@testable`
         // introspection.
+        //
+        // Foreign-namespace asymmetry note (#19): the typed `rPr` lookup above
+        // is prefix-qualified (`elements(forName: "w:rPr")`), while this
+        // allowlist is prefix-agnostic (`localName == "rPr"`). A malformed
+        // `<x:rPr xmlns:x="other-ns">` direct child is therefore neither parsed
+        // as run properties nor preserved as `rawElements`. This mirrors the
+        // documented paragraph-level `pPr` policy from #14: ECMA-376 defines
+        // run properties here as `<w:rPr>`, so silent-drop is the conservative
+        // response to foreign-namespace lookalikes. If a real producer emits
+        // meaningful foreign-namespace `rPr`, migrate this to a namespace-aware
+        // `(localName, namespaceURI)` check instead of widening the allowlist.
         let recognizedRunChildren: Set<String> = ["rPr", "t", "drawing", "oMath", "oMathPara"]
         var collectedRawElements: [RawElement] = []
         for child in element.children ?? [] {
