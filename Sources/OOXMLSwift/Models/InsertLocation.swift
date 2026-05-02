@@ -27,9 +27,23 @@ public enum InsertLocation: Equatable {
 /// Options for text-anchor lookup used by `findBodyChildContainingText` and
 /// `InsertLocation.afterText` / `.beforeText`.
 public struct AnchorLookupOptions: Equatable, Sendable {
-    /// When enabled, Unicode subscript/superscript variants such as `H₀` and
-    /// `xᵢ` are canonicalized to ASCII-like text (`H0`, `xi`) on both the
-    /// haystack and needle before matching. Exact matching remains the default.
+    /// When enabled, math-script Unicode forms are folded to ASCII-like text on
+    /// both haystack and needle before matching. Three folding classes apply:
+    ///
+    ///   1. Subscript / superscript variants (`H₀` ↔ `H0`, `xᵢ` ↔ `xi`).
+    ///      Latin sub/super letters, digits, and operators in U+2070..U+209C
+    ///      and the Latin-1 historical scripts (U+00B2/³/¹) are mapped.
+    ///   2. Greek subscripts (`xᵦ` ↔ `xβ`) for U+1D66..U+1D6A.
+    ///   3. Combining-mark accents on math letters (`X̄` ↔ `X`, `ŷ` ↔ `y`,
+    ///      `α̇` ↔ `α`). The matcher applies Unicode NFD decomposition and
+    ///      strips nonspacing marks so OMML accent emission (which omits the
+    ///      mark, see `MathAccent.visibleText`) round-trips against
+    ///      user-typed combined forms.
+    ///
+    /// Note: combining-mark stripping also folds language diacritics (`café` →
+    /// `cafe`). This is intentional for math-anchor matching but means callers
+    /// who need exact-with-accents must keep the default `.exact`.
+    /// Exact matching remains the default.
     public var mathScriptInsensitive: Bool
 
     public init(mathScriptInsensitive: Bool = false) {
@@ -40,16 +54,25 @@ public struct AnchorLookupOptions: Equatable, Sendable {
 }
 
 public extension AnchorLookupOptions {
-    /// Canonicalize known Unicode subscript/superscript glyphs to the closest
-    /// ASCII representation. Characters outside the explicit table are left
-    /// unchanged so this does not become broad Unicode folding.
+    /// Canonicalize Unicode math-script variants and combining accents to the
+    /// closest ASCII / base-letter representation. Characters outside the
+    /// explicit table and not under a combining mark are left unchanged.
     static func canonicalizeMathScriptVariants(_ text: String) -> String {
+        // NFD decompose so combining macron / acute / hat / dot / tilde land
+        // on their own scalar after the base, then drop nonspacing marks. This
+        // turns X̄ into X regardless of whether the source was precomposed or
+        // already-decomposed.
+        let decomposed = text.decomposedStringWithCanonicalMapping
         var result = ""
-        for scalar in text.unicodeScalars {
+        result.reserveCapacity(decomposed.unicodeScalars.count)
+        for scalar in decomposed.unicodeScalars {
+            if scalar.properties.generalCategory == .nonspacingMark {
+                continue
+            }
             if let replacement = Self.mathScriptVariantMap[scalar] {
-                result += replacement
+                result.append(replacement)
             } else {
-                result += String(scalar)
+                result.unicodeScalars.append(scalar)
             }
         }
         return result
@@ -92,6 +115,12 @@ private extension AnchorLookupOptions {
             ("ₖ", "k"), ("ₗ", "l"), ("ₘ", "m"), ("ₙ", "n"), ("ₒ", "o"),
             ("ₚ", "p"), ("ᵣ", "r"), ("ₛ", "s"), ("ₜ", "t"), ("ᵤ", "u"),
             ("ᵥ", "v"), ("ₓ", "x"),
+            ("ₔ", "ə"),  // U+2094 schwa — completes the U+2090..U+209C block
+        ]
+        // Greek subscripts U+1D66..U+1D6A. Common in stats / physics theses
+        // (e.g., regression coefficients, density subscripts).
+        let greekSubscriptLetters = [
+            ("ᵦ", "β"), ("ᵧ", "γ"), ("ᵨ", "ρ"), ("ᵩ", "φ"), ("ᵪ", "χ"),
         ]
         let superscriptLetters = [
             ("ᵃ", "a"), ("ᵇ", "b"), ("ᶜ", "c"), ("ᵈ", "d"), ("ᵉ", "e"),
@@ -109,6 +138,7 @@ private extension AnchorLookupOptions {
             + superscriptDigits
             + scriptSymbols
             + subscriptLetters
+            + greekSubscriptLetters
             + superscriptLetters {
             add(glyph, replacement)
         }
