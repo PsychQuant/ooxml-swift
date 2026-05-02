@@ -20,8 +20,130 @@ public enum InsertLocation: Equatable {
     case afterImageId(String)
     case afterTableIndex(Int)
     case intoTableCell(tableIndex: Int, row: Int, col: Int)
-    case afterText(String, instance: Int)
-    case beforeText(String, instance: Int)
+    case afterText(String, instance: Int, options: AnchorLookupOptions = .exact)
+    case beforeText(String, instance: Int, options: AnchorLookupOptions = .exact)
+}
+
+/// Options for text-anchor lookup used by `findBodyChildContainingText` and
+/// `InsertLocation.afterText` / `.beforeText`.
+public struct AnchorLookupOptions: Equatable, Sendable {
+    /// When enabled, math-script Unicode forms are folded to ASCII-like text on
+    /// both haystack and needle before matching. Three folding classes apply:
+    ///
+    ///   1. Subscript / superscript variants (`H₀` ↔ `H0`, `xᵢ` ↔ `xi`).
+    ///      Latin sub/super letters, digits, and operators in U+2070..U+209C
+    ///      and the Latin-1 historical scripts (U+00B2/³/¹) are mapped.
+    ///   2. Greek subscripts (`xᵦ` ↔ `xβ`) for U+1D66..U+1D6A.
+    ///   3. Combining-mark accents on math letters (`X̄` ↔ `X`, `ŷ` ↔ `y`,
+    ///      `α̇` ↔ `α`). The matcher applies Unicode NFD decomposition and
+    ///      strips nonspacing marks so OMML accent emission (which omits the
+    ///      mark, see `MathAccent.visibleText`) round-trips against
+    ///      user-typed combined forms.
+    ///
+    /// Note: combining-mark stripping also folds language diacritics (`café` →
+    /// `cafe`). This is intentional for math-anchor matching but means callers
+    /// who need exact-with-accents must keep the default `.exact`.
+    /// Exact matching remains the default.
+    public var mathScriptInsensitive: Bool
+
+    public init(mathScriptInsensitive: Bool = false) {
+        self.mathScriptInsensitive = mathScriptInsensitive
+    }
+
+    public static let exact = AnchorLookupOptions()
+}
+
+public extension AnchorLookupOptions {
+    /// Canonicalize Unicode math-script variants and combining accents to the
+    /// closest ASCII / base-letter representation. Characters outside the
+    /// explicit table and not under a combining mark are left unchanged.
+    static func canonicalizeMathScriptVariants(_ text: String) -> String {
+        // NFD decompose so combining macron / acute / hat / dot / tilde land
+        // on their own scalar after the base, then drop nonspacing marks. This
+        // turns X̄ into X regardless of whether the source was precomposed or
+        // already-decomposed.
+        let decomposed = text.decomposedStringWithCanonicalMapping
+        var result = ""
+        result.reserveCapacity(decomposed.unicodeScalars.count)
+        for scalar in decomposed.unicodeScalars {
+            if scalar.properties.generalCategory == .nonspacingMark {
+                continue
+            }
+            if let replacement = Self.mathScriptVariantMap[scalar] {
+                result.append(replacement)
+            } else {
+                result.unicodeScalars.append(scalar)
+            }
+        }
+        return result
+    }
+
+    internal func contains(_ needle: String, in haystack: String) -> Bool {
+        guard mathScriptInsensitive else {
+            return haystack.contains(needle)
+        }
+        return Self.canonicalizeMathScriptVariants(haystack)
+            .contains(Self.canonicalizeMathScriptVariants(needle))
+    }
+}
+
+private extension AnchorLookupOptions {
+    static let mathScriptVariantMap: [UnicodeScalar: String] = {
+        var map: [UnicodeScalar: String] = [:]
+        func add(_ glyph: String, _ replacement: String) {
+            guard let scalar = glyph.unicodeScalars.first else { return }
+            map[scalar] = replacement
+        }
+
+        let subscriptDigits = [
+            ("₀", "0"), ("₁", "1"), ("₂", "2"), ("₃", "3"), ("₄", "4"),
+            ("₅", "5"), ("₆", "6"), ("₇", "7"), ("₈", "8"), ("₉", "9"),
+        ]
+        let superscriptDigits = [
+            ("⁰", "0"), ("¹", "1"), ("²", "2"), ("³", "3"), ("⁴", "4"),
+            ("⁵", "5"), ("⁶", "6"), ("⁷", "7"), ("⁸", "8"), ("⁹", "9"),
+        ]
+        let scriptSymbols = [
+            ("₊", "+"), ("⁺", "+"),
+            ("₋", "-"), ("⁻", "-"),
+            ("₌", "="), ("⁼", "="),
+            ("₍", "("), ("⁽", "("),
+            ("₎", ")"), ("⁾", ")"),
+        ]
+        let subscriptLetters = [
+            ("ₐ", "a"), ("ₑ", "e"), ("ₕ", "h"), ("ᵢ", "i"), ("ⱼ", "j"),
+            ("ₖ", "k"), ("ₗ", "l"), ("ₘ", "m"), ("ₙ", "n"), ("ₒ", "o"),
+            ("ₚ", "p"), ("ᵣ", "r"), ("ₛ", "s"), ("ₜ", "t"), ("ᵤ", "u"),
+            ("ᵥ", "v"), ("ₓ", "x"),
+            ("ₔ", "ə"),  // U+2094 schwa — completes the U+2090..U+209C block
+        ]
+        // Greek subscripts U+1D66..U+1D6A. Common in stats / physics theses
+        // (e.g., regression coefficients, density subscripts).
+        let greekSubscriptLetters = [
+            ("ᵦ", "β"), ("ᵧ", "γ"), ("ᵨ", "ρ"), ("ᵩ", "φ"), ("ᵪ", "χ"),
+        ]
+        let superscriptLetters = [
+            ("ᵃ", "a"), ("ᵇ", "b"), ("ᶜ", "c"), ("ᵈ", "d"), ("ᵉ", "e"),
+            ("ᶠ", "f"), ("ᵍ", "g"), ("ʰ", "h"), ("ⁱ", "i"), ("ʲ", "j"),
+            ("ᵏ", "k"), ("ˡ", "l"), ("ᵐ", "m"), ("ⁿ", "n"), ("ᵒ", "o"),
+            ("ᵖ", "p"), ("ʳ", "r"), ("ˢ", "s"), ("ᵗ", "t"), ("ᵘ", "u"),
+            ("ᵛ", "v"), ("ʷ", "w"), ("ˣ", "x"), ("ʸ", "y"), ("ᶻ", "z"),
+            ("ᴬ", "A"), ("ᴮ", "B"), ("ᴰ", "D"), ("ᴱ", "E"), ("ᴳ", "G"),
+            ("ᴴ", "H"), ("ᴵ", "I"), ("ᴶ", "J"), ("ᴷ", "K"), ("ᴸ", "L"),
+            ("ᴹ", "M"), ("ᴺ", "N"), ("ᴼ", "O"), ("ᴾ", "P"), ("ᴿ", "R"),
+            ("ᵀ", "T"), ("ᵁ", "U"), ("ⱽ", "V"), ("ᵂ", "W"),
+        ]
+
+        for (glyph, replacement) in subscriptDigits
+            + superscriptDigits
+            + scriptSymbols
+            + subscriptLetters
+            + greekSubscriptLetters
+            + superscriptLetters {
+            add(glyph, replacement)
+        }
+        return map
+    }()
 }
 
 /// Error thrown when an `InsertLocation` cannot be resolved in the target document.
@@ -112,14 +234,14 @@ extension WordDocument {
             table.rows[row].cells[col].paragraphs.append(paragraph)
             body.children[bodyIdx] = .table(table)
 
-        case .afterText(let searchText, let instance):
-            guard let bodyIdx = findBodyChildContainingText(searchText, nthInstance: instance) else {
+        case .afterText(let searchText, let instance, let options):
+            guard let bodyIdx = findBodyChildContainingText(searchText, nthInstance: instance, options: options) else {
                 throw InsertLocationError.textNotFound(searchText: searchText, instance: instance)
             }
             body.children.insert(.paragraph(paragraph), at: bodyIdx + 1)
 
-        case .beforeText(let searchText, let instance):
-            guard let bodyIdx = findBodyChildContainingText(searchText, nthInstance: instance) else {
+        case .beforeText(let searchText, let instance, let options):
+            guard let bodyIdx = findBodyChildContainingText(searchText, nthInstance: instance, options: options) else {
                 throw InsertLocationError.textNotFound(searchText: searchText, instance: instance)
             }
             body.children.insert(.paragraph(paragraph), at: bodyIdx)
@@ -187,11 +309,15 @@ extension WordDocument {
     /// consumers (rescue scripts, dxedit CLI, third-party tooling) previously
     /// had to reimplement this with diverging semantics. Exposing the canonical
     /// implementation eliminates that fragmentation.
-    public func findBodyChildContainingText(_ needle: String, nthInstance: Int = 1) -> Int? {
+    public func findBodyChildContainingText(
+        _ needle: String,
+        nthInstance: Int = 1,
+        options: AnchorLookupOptions = .exact
+    ) -> Int? {
         guard nthInstance >= 1, !needle.isEmpty else { return nil }
         var seen = 0
         for (i, child) in body.children.enumerated() {
-            if Self.bodyChildContainsText(child, needle: needle) {
+            if Self.bodyChildContainsText(child, needle: needle, options: options) {
                 seen += 1
                 if seen == nthInstance { return i }
             }
@@ -217,14 +343,18 @@ extension WordDocument {
     /// Public since v0.21.7 (PsychQuant/che-word-mcp#86) — exposed as a primitive
     /// for callers who want to check a single `BodyChild` without the
     /// `nthInstance` enumeration done by `findBodyChildContainingText`.
-    public static func bodyChildContainsText(_ child: BodyChild, needle: String) -> Bool {
+    public static func bodyChildContainsText(
+        _ child: BodyChild,
+        needle: String,
+        options: AnchorLookupOptions = .exact
+    ) -> Bool {
         switch child {
         case .paragraph(let para):
-            return para.flattenedDisplayText().contains(needle)
+            return options.contains(needle, in: para.flattenedDisplayText())
         case .table(let table):
-            return tableContainsText(table, needle: needle)
+            return tableContainsText(table, needle: needle, options: options)
         case .contentControl(_, let kids):
-            return kids.contains { bodyChildContainsText($0, needle: needle) }
+            return kids.contains { bodyChildContainsText($0, needle: needle, options: options) }
         case .bookmarkMarker:
             return false
         case .rawBlockElement:
@@ -238,14 +368,18 @@ extension WordDocument {
     /// Public since v0.21.7 (PsychQuant/che-word-mcp#86) — exposed alongside
     /// `bodyChildContainsText` so callers building custom traversal can reuse
     /// the depth-bounded table walk.
-    public static func tableContainsText(_ table: Table, needle: String) -> Bool {
+    public static func tableContainsText(
+        _ table: Table,
+        needle: String,
+        options: AnchorLookupOptions = .exact
+    ) -> Bool {
         for row in table.rows {
             for cell in row.cells {
                 for para in cell.paragraphs {
-                    if para.flattenedDisplayText().contains(needle) { return true }
+                    if options.contains(needle, in: para.flattenedDisplayText()) { return true }
                 }
                 for nested in cell.nestedTables {
-                    if tableContainsText(nested, needle: needle) { return true }
+                    if tableContainsText(nested, needle: needle, options: options) { return true }
                 }
             }
         }
