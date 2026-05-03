@@ -8,6 +8,45 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-05-03
+
+### Fixed — `Paragraph.getText()` divergence from `flattenedDisplayText()` ([che-word-mcp#155](https://github.com/PsychQuant/che-word-mcp/issues/155) / [#43](https://github.com/PsychQuant/ooxml-swift/issues/43))
+
+`Paragraph.getText()` was a legacy 2024-era implementation that only joined `runs.map { $0.text }` + `hyperlink.text`, missing every walker enhancement that landed in `flattenedDisplayText()` over the #85 / #92 / #99 / #100 / #101 / #102 / #103 cluster. `che-word-mcp Server.swift:10310` calls `getText()` for `search_text` results, so callers couldn't grep for inline math symbols (α / β / γ / θ / λ / t) — silent zero gaps in match positions.
+
+#### Fix
+
+Collapsed `getText()` body to `return flattenedDisplayText()`. Two paths now identical. All callers (current and future) of either method see consistent text including:
+
+- Direct-child OMML in `unrecognizedChildren` (Pandoc display math)
+- Per-run OMath `visibleText` embedded in `Run.rawXML`
+- Field codes (`<w:fldSimple>`) and alternate-content fallback runs
+- Content controls (`<w:sdt>`)
+
+Callers who specifically want runs-only text (no OMath, no hyperlinks) should call `runs.map { $0.text }.joined()` directly rather than the legacy pre-#43 behavior.
+
+#### Tests
+
+- `Issue43GetTextDelegatesToFlattenedDisplayTextTests` — 4 tests using real Word OOXML fixture (`DocxReader.parseParagraph` round-trip with empty `<w:r><w:t></w:t></w:r>` wrappers around `<m:oMath>` direct child, NOT synthetic `Paragraph(text:)` per #93 release-note lesson)
+- Full suite: 852 tests, 0 failures, 1 pre-existing skip — no regressions
+
+#### Library design lesson
+
+The cluster fixes (#85 / #92 / #99-#103) all landed in `flattenedDisplayText()`, leaving `getText()` as a silent legacy alias. Two-path divergence with subtly different OMath semantics is the foot-gun. This release collapses the divergence at the source so `flattenedDisplayText()` becomes the canonical contract; future similar issues should also delegate to the same path.
+
+#### Downstream impact (transitive)
+
+- `che-word-mcp__search_text` auto-benefits via Package.resolved bump (no MCP source changes)
+- `kiki830621/collaboration_guo_analysis#6` (thesis 30 inline math symbols) unblocked from automation
+
+#### Release verification
+
+PR [#44](https://github.com/PsychQuant/ooxml-swift/pull/44) merged 2026-05-03T04:58:08Z (commit `f472563`). Full IDD pipeline ran via `/idd-all #43 --cwd` (cross-repo orchestration from a thesis-editing session in 0821 guo).
+
+## [0.22.0] - 2026-05-02
+
+Math-script-insensitive anchor lookup. See [GitHub release notes](https://github.com/PsychQuant/ooxml-swift/releases/tag/v0.22.0). (CHANGELOG entry omitted at release time; this stub maintains version-row continuity.)
+
 ## [0.21.11] - 2026-05-01
 
 ### Added — Bilateral mirror coverage for direct-child OMML across 4 wrapper positions ([cluster fix che-word-mcp #99 / #100 / #101 / #102 / #103](https://github.com/PsychQuant/che-word-mcp/issues/99))
