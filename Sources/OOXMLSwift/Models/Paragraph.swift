@@ -123,14 +123,31 @@ public struct Paragraph: Equatable {
         self.properties = properties
     }
 
-    /// 取得段落純文字
+    /// 取得段落純文字。
+    ///
+    /// As of v0.22.x (PsychQuant/ooxml-swift#43), this method delegates to
+    /// `flattenedDisplayText()` so the two text-extraction paths return
+    /// identical strings. Pre-#43 this was a legacy implementation that
+    /// only joined `runs.map { $0.text }` + `hyperlink.text`, missing:
+    ///
+    /// - Direct-child OMML in `unrecognizedChildren` (Pandoc display math
+    ///   `<m:oMath>` / `<m:oMathPara>` as direct child of `<w:p>`,
+    ///   per #99 / #100 / #101 / #102)
+    /// - Per-run OMath visibleText embedded in `Run.rawXML` (per #85 / #92)
+    /// - Field codes (`<w:fldSimple>`) and alternate content fallback runs
+    /// - Content controls (`<w:sdt>`)
+    ///
+    /// The pre-#43 divergence caused silent off-by-N gaps in
+    /// `che-word-mcp__search_text` because that MCP tool delegated to
+    /// `getText()` while anchor-matching paths used `flattenedDisplayText()`.
+    /// Unifying behind a single canonical implementation prevents future
+    /// callers from re-discovering the same trap.
+    ///
+    /// Callers who specifically want runs-only text (no OMath, no
+    /// hyperlinks) should call `runs.map { $0.text }.joined()` directly
+    /// rather than relying on the legacy pre-#43 behavior.
     public func getText() -> String {
-        var text = runs.map { $0.text }.joined()
-        // 加入超連結文字
-        for hyperlink in hyperlinks {
-            text += hyperlink.text
-        }
-        return text
+        return flattenedDisplayText()
     }
 }
 
