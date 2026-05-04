@@ -323,4 +323,118 @@ final class RunTests: XCTestCase {
         XCTAssertLessThan(rFontsIdx, bIdx, "rFonts must precede b")
         XCTAssertLessThan(rFontsIdx, szIdx, "rFonts must precede sz")
     }
+
+    // MARK: - rawChildren positional emit (v0.26.0+ #61 follow-up)
+    //
+    // After v0.25.0 fixed typed-emit ordering, the thesis docx still had 417
+    // residual rPr violations because `rawChildren` (parser-captured XML for
+    // elements not yet typed-extracted: `bCs`, `webHidden`, `iCs`, etc.) were
+    // appended unconditionally at the tail of `<w:rPr>`, regardless of
+    // canonical position. v0.26.0 generalises the reorder to slot rawChildren
+    // by their localName position.
+
+    func testRunPropertiesBCsRawChildEmittedBeforeI() {
+        // bCs is canonical pos 4 (between b=3 and i=5). When carried as a
+        // rawChild it must still land at slot 4, not at the tail of rPr.
+        var props = RunProperties()
+        props.italic = true                   // 5
+        props.fontSize = 36                   // 24/25
+        props.rawChildren = [RawElement(name: "bCs", xml: "<w:bCs/>")]
+
+        let xml = props.toXML()
+        let bCsIdx = xml.range(of: "<w:bCs/>")!.lowerBound
+        let iIdx = xml.range(of: "<w:i/>")!.lowerBound
+        let szIdx = xml.range(of: "<w:sz ")!.lowerBound
+        XCTAssertLessThan(bCsIdx, iIdx, "bCs (pos 4) must precede i (pos 5)")
+        XCTAssertLessThan(bCsIdx, szIdx, "bCs (pos 4) must precede sz (pos 24)")
+    }
+
+    func testRunPropertiesWebHiddenRawChildEmittedBeforeColor() {
+        // webHidden is canonical pos 18 (between vanish=17 and color=19).
+        // Appears as rawChild because parseRunProperties does not type-extract
+        // it. Must still land at slot 18.
+        var props = RunProperties()
+        props.color = "FF0000"                // 19
+        props.fontSize = 24                   // 24/25
+        props.rawChildren = [RawElement(name: "webHidden", xml: "<w:webHidden/>")]
+
+        let xml = props.toXML()
+        let webIdx = xml.range(of: "<w:webHidden/>")!.lowerBound
+        let colorIdx = xml.range(of: "<w:color ")!.lowerBound
+        let szIdx = xml.range(of: "<w:sz ")!.lowerBound
+        XCTAssertLessThan(webIdx, colorIdx, "webHidden (pos 18) must precede color (pos 19)")
+        XCTAssertLessThan(webIdx, szIdx, "webHidden (pos 18) must precede sz (pos 24)")
+    }
+
+    func testRunPropertiesUnknownVendorExtensionEmittedAtTail() {
+        // w14:ligatures has no canonical position in CT_RPr — it's a vendor
+        // extension. Should land at the tail (after every known child),
+        // BEFORE any rPrChange.
+        var props = RunProperties()
+        props.bold = true
+        props.fontSize = 24
+        props.rawChildren = [
+            RawElement(name: "ligatures",
+                       xml: "<w14:ligatures w14:val=\"standardContextual\"/>")
+        ]
+
+        let xml = props.toXML()
+        let ligIdx = xml.range(of: "<w14:ligatures ")!.lowerBound
+        let bIdx = xml.range(of: "<w:b/>")!.lowerBound
+        let szCsIdx = xml.range(of: "<w:szCs ")!.lowerBound
+        XCTAssertLessThan(bIdx, ligIdx, "vendor extension must follow known children")
+        XCTAssertLessThan(szCsIdx, ligIdx, "vendor extension must follow known children")
+    }
+
+    func testRunPropertiesMultipleRawChildrenAllSlotted() {
+        // Mixed bag: bCs (4), webHidden (18), iCs (6), unknown w14:ligatures.
+        // All should slot correctly even when fed in arbitrary insertion order.
+        var props = RunProperties()
+        props.bold = true                     // 3
+        props.italic = true                   // 5
+        props.color = "0000FF"                // 19
+        props.fontSize = 28                   // 24/25
+        props.rawChildren = [
+            RawElement(name: "ligatures",
+                       xml: "<w14:ligatures w14:val=\"standardContextual\"/>"),
+            RawElement(name: "webHidden", xml: "<w:webHidden/>"),
+            RawElement(name: "iCs", xml: "<w:iCs/>"),
+            RawElement(name: "bCs", xml: "<w:bCs/>")
+        ]
+
+        let xml = props.toXML()
+
+        // Walk emitted children, build position list, assert canonical order.
+        let pattern = #"<((?:w(?:14)?):[A-Za-z][A-Za-z0-9]*)\b"#
+        let regex = try! NSRegularExpression(pattern: pattern)
+        let nsxml = xml as NSString
+        let matches = regex.matches(in: xml, range: NSRange(location: 0, length: nsxml.length))
+        let names = matches.map { nsxml.substring(with: $0.range(at: 1)) }
+
+        // Expected canonical order:
+        // b (3), bCs (4), i (5), iCs (6), color (19), sz (24), szCs (25),
+        // webHidden (18) — wait, webHidden=18 is BEFORE color=19 and sz=24.
+        // So expected: b → bCs → i → iCs → webHidden → color → sz → szCs → ligatures.
+        let expected = ["w:b", "w:bCs", "w:i", "w:iCs", "w:webHidden",
+                        "w:color", "w:sz", "w:szCs", "w14:ligatures"]
+        XCTAssertEqual(names, expected, "Mixed rawChildren must slot at canonical positions; got: \(names)\nXML: \(xml)")
+    }
+
+    func testRunPropertiesRPrChangeStaysAtTail() {
+        // rPrChange has canonical pos 9999 (last per CT_RPr). Even when
+        // accompanied by rawChildren that should slot before it, rPrChange
+        // must end up last.
+        var props = RunProperties()
+        props.bold = true
+        props.rawChildren = [
+            RawElement(name: "rPrChange",
+                       xml: "<w:rPrChange w:id=\"1\" w:author=\"X\" w:date=\"2026\"><w:rPr/></w:rPrChange>"),
+            RawElement(name: "webHidden", xml: "<w:webHidden/>")
+        ]
+
+        let xml = props.toXML()
+        let webIdx = xml.range(of: "<w:webHidden/>")!.lowerBound
+        let changeIdx = xml.range(of: "<w:rPrChange ")!.lowerBound
+        XCTAssertLessThan(webIdx, changeIdx, "webHidden (pos 18) must precede rPrChange (last)")
+    }
 }

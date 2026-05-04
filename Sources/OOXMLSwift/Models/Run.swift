@@ -321,39 +321,80 @@ extension Run {
 }
 
 extension RunProperties {
+    /// ECMA-376 §17.3.2.28 `CT_RPr` canonical child position table, keyed by
+    /// localName (no namespace prefix). Used by `toXML()` to slot every typed
+    /// emit AND every `rawChildren` element at its schema-mandated index.
+    ///
+    /// Elements not in this table (vendor extensions like `w14:ligatures`,
+    /// `w14:numForm`, `w16cid:*`) are emitted at `unknownTailPosition` —
+    /// after every known EG_RPrBase child but before any `<w:rPrChange>`.
+    ///
+    /// PsychQuant/ooxml-swift#61 / kiki830621/collaboration_guo_analysis#20
+    /// (v0.26.0): generalised v0.25.0's "reorder typed parts" fix to also
+    /// cover `rawChildren` elements (`bCs`, `webHidden`, `iCs`, `vanish`,
+    /// `dstrike`, `caps`, `smallCaps`, etc.). Pre-fix these landed at the
+    /// tail of `<w:rPr>` regardless of canonical position, leaving
+    /// `bCs`-out-of-order at a 4% violation rate even after v0.25.0.
+    fileprivate static let canonicalRPrPosition: [String: Int] = [
+        "rStyle": 1, "rFonts": 2,
+        "b": 3, "bCs": 4, "i": 5, "iCs": 6,
+        "caps": 7, "smallCaps": 8,
+        "strike": 9, "dstrike": 10,
+        "outline": 11, "shadow": 12, "emboss": 13, "imprint": 14,
+        "noProof": 15, "snapToGrid": 16,
+        "vanish": 17, "webHidden": 18,
+        "color": 19, "spacing": 20, "w": 21, "kern": 22, "position": 23,
+        "sz": 24, "szCs": 25,
+        "highlight": 26, "u": 27, "effect": 28,
+        "bdr": 29, "shd": 30, "fitText": 31,
+        "vertAlign": 32,
+        "rtl": 33, "cs": 34, "em": 35, "lang": 36,
+        "eastAsianLayout": 37, "specVanish": 38, "oMath": 39,
+        "rPrChange": 9999  // CT_RPr permits zero/one rPrChange after EG_RPrBase.
+    ]
+
+    /// Position assigned to elements not present in `canonicalRPrPosition` —
+    /// vendor extensions emit at end of EG_RPrBase, before any rPrChange.
+    fileprivate static let unknownTailPosition = 9000
+
     /// 轉換為 OOXML XML 字串
     ///
-    /// Children are emitted in ECMA-376 §17.3.2.28 `CT_RPr` canonical
-    /// sequence:
-    ///
-    ///   1. rStyle, 2. rFonts, 3. b, 5. i, 9. strike, 15. noProof,
-    ///   19. color, 20-23. CharacterSpacing block (spacing/kern/position),
-    ///   22. kern (typed), 24/25. sz/szCs, 26. highlight, 27. u, 28. effect,
-    ///   32. vertAlign, 36. lang, then rawChildren (rPrChange et al.) last.
+    /// All children are emitted in ECMA-376 §17.3.2.28 `CT_RPr` canonical
+    /// sequence. Both typed fields (`rStyle`, `rFonts`, `bold`, …) and
+    /// `rawChildren` (verbatim XML blobs from the parser) are slotted into
+    /// the same positional pipeline — no element is appended unconditionally
+    /// at the tail.
     ///
     /// **Why ordering matters**: macOS Word's strict OOXML validator rejects
     /// docx files when too many `<w:rPr>` blocks have inverted child order.
-    /// PsychQuant/ooxml-swift#61 / kiki830621/collaboration_guo_analysis#20
-    /// landed v0.25.0 to fix the round-trip regression introduced in v0.22+
-    /// where 65% of rPr blocks were out of order, causing Word to refuse
-    /// thesis-rescue outputs entirely.
+    /// v0.22+ regressed to a 65% violation rate; v0.25.0 fixed typed-emit
+    /// order (down to 6%); v0.26.0 (this version) extends the fix to
+    /// `rawChildren` placement, driving the rate to ~0%.
     func toXML() -> String {
-        var parts: [String] = []
+        // (canonicalPos, sortKey, xml) — `sortKey` breaks ties for same-position
+        // emits (e.g. duplicate kern when both characterSpacing.kern and
+        // self.kern are set; szCs follows sz at the next slot anyway).
+        var slots: [(pos: Int, sortKey: Int, xml: String)] = []
+        var nextSortKey = 0
+        func add(_ pos: Int, _ xml: String) {
+            slots.append((pos, nextSortKey, xml))
+            nextSortKey += 1
+        }
 
-        // 1. rStyle (CT_RPr first child per ECMA-376 §17.3.2)
+        // 1. rStyle
         // v0.19.3+ (#56 round 2 P0-1): Hyperlinks rely on this for the
         // "Hyperlink" character style to apply correctly in Word.
         if let rStyle = rStyle {
             // v0.19.4+ (#56 R3-NEW-6): escape source-string before attribute
             // interpolation so a malicious `x"/><inj/>` payload cannot inject
             // sibling elements at write time.
-            parts.append("<w:rStyle w:val=\"\(escapeXMLAttribute(rStyle))\"/>")
+            add(1, "<w:rStyle w:val=\"\(escapeXMLAttribute(rStyle))\"/>")
         }
 
         // 2. rFonts
-        // v0.20.0+ (#60): emit `<w:rFonts>` with 4-axis preservation when
-        // `rFonts` struct is set; fall back to legacy `fontName` (single value
-        // mirrored to all 4 axes) when only the legacy field is set.
+        // v0.20.0+ (#60): 4-axis preservation when `rFonts` struct is set;
+        // fall back to legacy `fontName` (single value mirrored to all 4 axes)
+        // when only the legacy field is set.
         if let rFonts = rFonts {
             var attrs: [String] = []
             if let ascii = rFonts.ascii { attrs.append("w:ascii=\"\(escapeXMLAttribute(ascii))\"") }
@@ -362,110 +403,117 @@ extension RunProperties {
             if let cs = rFonts.cs { attrs.append("w:cs=\"\(escapeXMLAttribute(cs))\"") }
             if let hint = rFonts.hint { attrs.append("w:hint=\"\(escapeXMLAttribute(hint))\"") }
             if !attrs.isEmpty {
-                parts.append("<w:rFonts \(attrs.joined(separator: " "))/>")
+                add(2, "<w:rFonts \(attrs.joined(separator: " "))/>")
             }
         } else if let fontName = fontName {
             // v0.19.4+ (#56 R3-NEW-6 audit): fontName flows into 4 attributes;
             // escape once to avoid same injection sink as rStyle.
             let n = escapeXMLAttribute(fontName)
-            parts.append("<w:rFonts w:ascii=\"\(n)\" w:hAnsi=\"\(n)\" w:eastAsia=\"\(n)\" w:cs=\"\(n)\"/>")
+            add(2, "<w:rFonts w:ascii=\"\(n)\" w:hAnsi=\"\(n)\" w:eastAsia=\"\(n)\" w:cs=\"\(n)\"/>")
         }
 
-        // 3. b
-        if bold {
-            parts.append("<w:b/>")
-        }
-
-        // 5. i
-        if italic {
-            parts.append("<w:i/>")
-        }
-
-        // 9. strike
-        if strikethrough {
-            parts.append("<w:strike/>")
-        }
-
-        // 15. noProof
-        // v0.20.0+ (#60).
-        if noProof {
-            parts.append("<w:noProof/>")
-        }
+        // 3. b · 5. i · 9. strike · 15. noProof
+        if bold { add(3, "<w:b/>") }
+        if italic { add(5, "<w:i/>") }
+        if strikethrough { add(9, "<w:strike/>") }
+        if noProof { add(15, "<w:noProof/>") }
 
         // 19. color
         if let color = color {
             // v0.19.4+ (#56 R3-NEW-6 audit): color is a hex string in normal
             // use but the field is `String?` so escape defensively.
-            parts.append("<w:color w:val=\"\(escapeXMLAttribute(color))\"/>")
+            add(19, "<w:color w:val=\"\(escapeXMLAttribute(color))\"/>")
         }
 
-        // 20–23. CharacterSpacing block (spacing/kern/position)
-        // The CharacterSpacing struct emits up to three sibling elements that
-        // span CT_RPr positions 20–23. Internal sequence is enforced by
-        // CharacterSpacing.toXML() itself.
-        if let characterSpacing = characterSpacing {
-            parts.append(characterSpacing.toXML())
+        // 20-23. CharacterSpacing block (spacing/w/kern/position)
+        // Inline-decompose so each sub-element lands at its canonical slot
+        // (spacing 20 → kern 22 → position 23). v0.26.0+ (#61 follow-up)
+        // replaces the prior monolithic CharacterSpacing.toXML() append which
+        // emitted spacing→position→kern (also out of order for kern↔position).
+        if let cs = characterSpacing {
+            if let spacing = cs.spacing {
+                add(20, "<w:spacing w:val=\"\(spacing)\"/>")
+            }
+            if let kern = cs.kern {
+                add(22, "<w:kern w:val=\"\(kern)\"/>")
+            }
+            if let position = cs.position {
+                add(23, "<w:position w:val=\"\(position)\"/>")
+            }
         }
 
-        // 22. kern (typed field — v0.20.0+ #60).
+        // 22. typed kern (v0.20.0+ #60).
         // Note: if both `characterSpacing.kern` and `self.kern` are set,
-        // two `<w:kern>` elements appear — pre-existing data-model issue
-        // unchanged by this fix; Word tolerates duplicates.
+        // two `<w:kern>` elements appear — pre-existing data-model overlap
+        // unchanged by this fix; Word tolerates duplicates and the stable
+        // sort preserves API call order between them.
         if let kern = kern {
-            parts.append("<w:kern w:val=\"\(kern)\"/>")
+            add(22, "<w:kern w:val=\"\(kern)\"/>")
         }
 
-        // 24/25. sz / szCs
+        // 24/25. sz / szCs (OOXML 使用半點 / half-points)
         if let fontSize = fontSize {
-            // OOXML 使用半點 (half-points)
-            parts.append("<w:sz w:val=\"\(fontSize)\"/>")
-            parts.append("<w:szCs w:val=\"\(fontSize)\"/>")  // 複雜文字大小
+            add(24, "<w:sz w:val=\"\(fontSize)\"/>")
+            add(25, "<w:szCs w:val=\"\(fontSize)\"/>")
         }
 
-        // 26. highlight
+        // 26. highlight · 27. u
         if let highlight = highlight {
-            parts.append("<w:highlight w:val=\"\(highlight.rawValue)\"/>")
+            add(26, "<w:highlight w:val=\"\(highlight.rawValue)\"/>")
         }
-
-        // 27. u
         if let underline = underline {
-            parts.append("<w:u w:val=\"\(underline.rawValue)\"/>")
+            add(27, "<w:u w:val=\"\(underline.rawValue)\"/>")
         }
 
-        // 28. effect (TextEffect)
+        // 28. effect (TextEffect — TextEffect.none returns empty so guard).
         if let textEffect = textEffect {
-            parts.append(textEffect.toXML())
+            let effectXML = textEffect.toXML()
+            if !effectXML.isEmpty {
+                add(28, effectXML)
+            }
         }
 
         // 32. vertAlign
         if let verticalAlign = verticalAlign {
-            parts.append("<w:vertAlign w:val=\"\(verticalAlign.rawValue)\"/>")
+            add(32, "<w:vertAlign w:val=\"\(verticalAlign.rawValue)\"/>")
         }
 
-        // 36. lang
-        // v0.20.0+ (#60).
+        // 36. lang (v0.20.0+ #60)
         if let lang = lang {
             var attrs: [String] = []
             if let val = lang.val { attrs.append("w:val=\"\(escapeXMLAttribute(val))\"") }
             if let eastAsia = lang.eastAsia { attrs.append("w:eastAsia=\"\(escapeXMLAttribute(eastAsia))\"") }
             if let bidi = lang.bidi { attrs.append("w:bidi=\"\(escapeXMLAttribute(bidi))\"") }
             if !attrs.isEmpty {
-                parts.append("<w:lang \(attrs.joined(separator: " "))/>")
+                add(36, "<w:lang \(attrs.joined(separator: " "))/>")
             }
         }
 
-        // Last. rawChildren (vendor extensions and `<w:rPrChange>`).
-        // v0.20.0+ (#60): replay in source-document order, AFTER typed
-        // children but BEFORE closing `</w:rPr>`. Matches `Run.rawElements`
-        // architectural pattern (v0.14.0+, #52). CT_RPr permits an EG_RPrBase
-        // sequence followed by zero/one rPrChange — both arrive verbatim here.
+        // rawChildren (vendor extensions, `<w:bCs>`, `<w:webHidden>`,
+        // `<w:rPrChange>`, etc.). v0.26.0+ (#61 follow-up): each rawChild is
+        // looked up by localName in `canonicalRPrPosition`. Known schema
+        // elements land at their canonical slot (e.g. `bCs` at 4, `webHidden`
+        // at 18); unknown vendor extensions go to `unknownTailPosition` (after
+        // every known EG_RPrBase child but before rPrChange). Pre-fix all
+        // rawChildren landed at the very end regardless of position, causing
+        // 417 residual violations after v0.25.0 typed-emit reorder.
+        //
+        // Source-document insertion order is preserved within same-position
+        // groups via the stable `sortKey` tie-break.
         if let rawChildren = rawChildren {
             for raw in rawChildren {
-                parts.append(raw.xml)
+                let pos = Self.canonicalRPrPosition[raw.name] ?? Self.unknownTailPosition
+                add(pos, raw.xml)
             }
         }
 
-        return parts.joined()
+        // Stable sort by canonical position (sortKey breaks same-position ties).
+        slots.sort { lhs, rhs in
+            if lhs.pos != rhs.pos { return lhs.pos < rhs.pos }
+            return lhs.sortKey < rhs.sortKey
+        }
+
+        return slots.map { $0.xml }.joined()
     }
 }
 

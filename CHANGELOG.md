@@ -8,6 +8,43 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-05-04
+
+### Fixed — `rawChildren` placement extends rPr canonical order to vendor + late-typed elements ([#61 follow-up](https://github.com/PsychQuant/ooxml-swift/issues/61))
+
+v0.25.0 fixed `RunProperties.toXML()` typed-emit ordering, but `rawChildren` (parser-captured XML for elements not yet typed-extracted: `bCs`, `webHidden`, `iCs`, `vanish`, `dstrike`, `caps`, `smallCaps`, plus vendor extensions like `w14:ligatures`) were still appended unconditionally at the tail of `<w:rPr>`. On the thesis docx (kiki830621/collaboration_guo_analysis#20) this left **417 residual violations** — `bCs` (canonical pos 4) and `webHidden` (pos 18) emitted after `sz`/`color`/`lang`, still potentially within Word's tolerance but unnecessarily fragile.
+
+#### Fix
+
+Generalised the v0.25.0 reorder via a positional emit pipeline:
+
+1. Static `canonicalRPrPosition` table maps every CT_RPr child localName (39 named children + `rPrChange`) to its ECMA-376 §17.3.2.28 schema position.
+2. Each typed emit (rStyle, rFonts, b, i, color, sz, lang, …) now calls `add(pos:xml:)` with its canonical position rather than relying on insertion order.
+3. Each `rawChildren` element is looked up by `localName` in the canonical table; known elements slot at their schema position (e.g. `bCs` → 4, `webHidden` → 18); unknown vendor extensions go to a tail position **before** any `rPrChange` (which always lands at the absolute end per CT_RPr).
+4. Stable sort by canonical position; same-position ties preserve API call order.
+
+#### Side fix — `CharacterSpacing` decomposition
+
+`CharacterSpacing` previously emitted as a monolithic block (`<w:spacing/>` + `<w:position/>` + `<w:kern/>`) that internally used spacing→position→kern order. That sub-sequence violated CT_RPr's spacing(20) → kern(22) → position(23) order. v0.26.0 inline-decomposes the struct in `RunProperties.toXML()` so each sub-element lands at its canonical slot. `CharacterSpacing.toXML()` itself remains for other call sites (TOC fields etc.) but `RunProperties` no longer routes through it.
+
+#### Backward compatibility
+
+- ✅ `RunProperties` struct fields unchanged
+- ✅ `RawElement` API unchanged (still `name` + `xml`)
+- ✅ `CharacterSpacing.toXML()` unchanged (still callable for other sites)
+- ✅ Public API source-compatible
+- ✅ OOXML rendering is order-independent — visual output unchanged
+
+#### Tests added
+
+- `RunTests.testRunPropertiesBCsRawChildEmittedBeforeI`
+- `RunTests.testRunPropertiesWebHiddenRawChildEmittedBeforeColor`
+- `RunTests.testRunPropertiesUnknownVendorExtensionEmittedAtTail`
+- `RunTests.testRunPropertiesMultipleRawChildrenAllSlotted` (mixed bag — bCs / iCs / webHidden / w14:ligatures all interleaved)
+- `RunTests.testRunPropertiesRPrChangeStaysAtTail`
+
+Full suite: **879 tests, 0 failures, 1 established skip** — no regression versus v0.25.0's 874.
+
 ## [0.25.0] - 2026-05-04
 
 ### Fixed — `<w:rPr>` child element order violates ECMA-376 CT_RPr ([#61](https://github.com/PsychQuant/ooxml-swift/issues/61))
