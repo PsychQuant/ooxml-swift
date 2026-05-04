@@ -146,9 +146,9 @@ extension WordDocument {
                     omathIndex: i,
                     snippet: snippet
                 )
-                _ = omath  // keep reference; Swift unused-var hint suppression
             }
         }
+        _ = extracted  // retain captured array (loop already used); silences Swift hint
         return spliced
     }
 
@@ -325,12 +325,8 @@ extension WordDocument {
     /// rawXML is typically nil, so both sides get nil).
     internal static func splitRun(_ original: Run, atCharOffset offset: Int) -> (prefix: Run, suffix: Run) {
         let text = original.text
-        // Use UTF-16 offset semantics consistent with the rest of OOXMLSwift's text math.
         let utf16 = text.utf16
         let safeOffset = max(0, min(offset, utf16.count))
-        let splitIdx = utf16.index(utf16.startIndex, offsetBy: safeOffset)
-        let prefixText = String(String.UnicodeScalarView(text.unicodeScalars.prefix(safeOffset)))
-            // Fallback to UTF-16 substring mapped back to String when scalar count diverges.
         let prefixStr: String
         let suffixStr: String
         if let pStr = String(utf16.prefix(safeOffset)),
@@ -338,14 +334,12 @@ extension WordDocument {
             prefixStr = pStr
             suffixStr = sStr
         } else {
-            // Fallback: use Character-level slicing (safe for ASCII / BMP).
+            // Fallback: Character-level slicing (safe for ASCII / BMP).
             let chars = Array(text)
             let cap = min(safeOffset, chars.count)
             prefixStr = String(chars[0..<cap])
             suffixStr = String(chars[cap..<chars.count])
         }
-        _ = prefixText  // silence unused
-        _ = splitIdx
 
         var prefixRun = original
         prefixRun.text = prefixStr
@@ -555,14 +549,11 @@ extension WordDocument {
 // MARK: - String UTF-16 helpers
 
 private extension String {
-    /// Returns String from a UTF-16 view subsequence, or nil if invalid sequence.
+    /// Construct a String from a UTF-16 unit sequence (e.g. `String.UTF16View.SubSequence`)
+    /// via NSString bridge. Returns nil for empty sequences only when explicitly empty;
+    /// the bridge always succeeds for finite input.
     init?<S: Sequence>(_ utf16: S) where S.Element == UInt16 {
         let array = Array(utf16)
-        let scalars = String.UnicodeScalarView()
-        let view: String.UTF16View? = nil
-        _ = scalars
-        _ = view
-        // Use Foundation's NSString bridge for reliable round-trip.
         let ns = NSString(characters: array, length: array.count)
         self = ns as String
     }
