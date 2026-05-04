@@ -322,35 +322,35 @@ extension Run {
 
 extension RunProperties {
     /// 轉換為 OOXML XML 字串
+    ///
+    /// Children are emitted in ECMA-376 §17.3.2.28 `CT_RPr` canonical
+    /// sequence:
+    ///
+    ///   1. rStyle, 2. rFonts, 3. b, 5. i, 9. strike, 15. noProof,
+    ///   19. color, 20-23. CharacterSpacing block (spacing/kern/position),
+    ///   22. kern (typed), 24/25. sz/szCs, 26. highlight, 27. u, 28. effect,
+    ///   32. vertAlign, 36. lang, then rawChildren (rPrChange et al.) last.
+    ///
+    /// **Why ordering matters**: macOS Word's strict OOXML validator rejects
+    /// docx files when too many `<w:rPr>` blocks have inverted child order.
+    /// PsychQuant/ooxml-swift#61 / kiki830621/collaboration_guo_analysis#20
+    /// landed v0.25.0 to fix the round-trip regression introduced in v0.22+
+    /// where 65% of rPr blocks were out of order, causing Word to refuse
+    /// thesis-rescue outputs entirely.
     func toXML() -> String {
         var parts: [String] = []
 
-        // v0.19.3+ (#56 round 2 P0-1): rStyle MUST be first inside <w:rPr>
-        // per ECMA-376 §17.3.2 CT_RPr child order. Hyperlinks rely on this
-        // for the "Hyperlink" character style to apply correctly in Word.
+        // 1. rStyle (CT_RPr first child per ECMA-376 §17.3.2)
+        // v0.19.3+ (#56 round 2 P0-1): Hyperlinks rely on this for the
+        // "Hyperlink" character style to apply correctly in Word.
         if let rStyle = rStyle {
             // v0.19.4+ (#56 R3-NEW-6): escape source-string before attribute
             // interpolation so a malicious `x"/><inj/>` payload cannot inject
             // sibling elements at write time.
             parts.append("<w:rStyle w:val=\"\(escapeXMLAttribute(rStyle))\"/>")
         }
-        if bold {
-            parts.append("<w:b/>")
-        }
-        if italic {
-            parts.append("<w:i/>")
-        }
-        if let underline = underline {
-            parts.append("<w:u w:val=\"\(underline.rawValue)\"/>")
-        }
-        if strikethrough {
-            parts.append("<w:strike/>")
-        }
-        if let fontSize = fontSize {
-            // OOXML 使用半點 (half-points)
-            parts.append("<w:sz w:val=\"\(fontSize)\"/>")
-            parts.append("<w:szCs w:val=\"\(fontSize)\"/>")  // 複雜文字大小
-        }
+
+        // 2. rFonts
         // v0.20.0+ (#60): emit `<w:rFonts>` with 4-axis preservation when
         // `rFonts` struct is set; fall back to legacy `fontName` (single value
         // mirrored to all 4 axes) when only the legacy field is set.
@@ -370,31 +370,80 @@ extension RunProperties {
             let n = escapeXMLAttribute(fontName)
             parts.append("<w:rFonts w:ascii=\"\(n)\" w:hAnsi=\"\(n)\" w:eastAsia=\"\(n)\" w:cs=\"\(n)\"/>")
         }
+
+        // 3. b
+        if bold {
+            parts.append("<w:b/>")
+        }
+
+        // 5. i
+        if italic {
+            parts.append("<w:i/>")
+        }
+
+        // 9. strike
+        if strikethrough {
+            parts.append("<w:strike/>")
+        }
+
+        // 15. noProof
+        // v0.20.0+ (#60).
+        if noProof {
+            parts.append("<w:noProof/>")
+        }
+
+        // 19. color
         if let color = color {
             // v0.19.4+ (#56 R3-NEW-6 audit): color is a hex string in normal
             // use but the field is `String?` so escape defensively.
             parts.append("<w:color w:val=\"\(escapeXMLAttribute(color))\"/>")
         }
-        if let highlight = highlight {
-            parts.append("<w:highlight w:val=\"\(highlight.rawValue)\"/>")
-        }
-        if let verticalAlign = verticalAlign {
-            parts.append("<w:vertAlign w:val=\"\(verticalAlign.rawValue)\"/>")
-        }
+
+        // 20–23. CharacterSpacing block (spacing/kern/position)
+        // The CharacterSpacing struct emits up to three sibling elements that
+        // span CT_RPr positions 20–23. Internal sequence is enforced by
+        // CharacterSpacing.toXML() itself.
         if let characterSpacing = characterSpacing {
             parts.append(characterSpacing.toXML())
         }
+
+        // 22. kern (typed field — v0.20.0+ #60).
+        // Note: if both `characterSpacing.kern` and `self.kern` are set,
+        // two `<w:kern>` elements appear — pre-existing data-model issue
+        // unchanged by this fix; Word tolerates duplicates.
+        if let kern = kern {
+            parts.append("<w:kern w:val=\"\(kern)\"/>")
+        }
+
+        // 24/25. sz / szCs
+        if let fontSize = fontSize {
+            // OOXML 使用半點 (half-points)
+            parts.append("<w:sz w:val=\"\(fontSize)\"/>")
+            parts.append("<w:szCs w:val=\"\(fontSize)\"/>")  // 複雜文字大小
+        }
+
+        // 26. highlight
+        if let highlight = highlight {
+            parts.append("<w:highlight w:val=\"\(highlight.rawValue)\"/>")
+        }
+
+        // 27. u
+        if let underline = underline {
+            parts.append("<w:u w:val=\"\(underline.rawValue)\"/>")
+        }
+
+        // 28. effect (TextEffect)
         if let textEffect = textEffect {
             parts.append(textEffect.toXML())
         }
 
-        // v0.20.0+ (#60): emit new typed fields.
-        if noProof {
-            parts.append("<w:noProof/>")
+        // 32. vertAlign
+        if let verticalAlign = verticalAlign {
+            parts.append("<w:vertAlign w:val=\"\(verticalAlign.rawValue)\"/>")
         }
-        if let kern = kern {
-            parts.append("<w:kern w:val=\"\(kern)\"/>")
-        }
+
+        // 36. lang
+        // v0.20.0+ (#60).
         if let lang = lang {
             var attrs: [String] = []
             if let val = lang.val { attrs.append("w:val=\"\(escapeXMLAttribute(val))\"") }
@@ -405,9 +454,11 @@ extension RunProperties {
             }
         }
 
-        // v0.20.0+ (#60): replay rawChildren in source-document order, AFTER
-        // typed children but BEFORE closing `</w:rPr>`. Matches `Run.rawElements`
-        // architectural pattern (v0.14.0+, #52).
+        // Last. rawChildren (vendor extensions and `<w:rPrChange>`).
+        // v0.20.0+ (#60): replay in source-document order, AFTER typed
+        // children but BEFORE closing `</w:rPr>`. Matches `Run.rawElements`
+        // architectural pattern (v0.14.0+, #52). CT_RPr permits an EG_RPrBase
+        // sequence followed by zero/one rPrChange — both arrive verbatim here.
         if let rawChildren = rawChildren {
             for raw in rawChildren {
                 parts.append(raw.xml)

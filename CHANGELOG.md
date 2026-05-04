@@ -8,6 +8,43 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-05-04
+
+### Fixed — `<w:rPr>` child element order violates ECMA-376 CT_RPr ([#61](https://github.com/PsychQuant/ooxml-swift/issues/61))
+
+`RunProperties.toXML()` previously emitted children in struct declaration order, which placed `w:rFonts` (canonical position 2) AFTER `w:b/i/u/strike/sz/szCs` (positions 3, 5, 27, 9, 24, 25), and similarly inverted `w:noProof` (15) / `w:kern` (22) / `w:vertAlign` (32) / `w:lang` (36) relative to neighboring siblings. macOS Word's strict OOXML validator rejected docx files when the violation rate climbed above ~10%.
+
+#### Impact
+
+Discovered downstream during thesis rescue (`kiki830621/collaboration_guo_analysis#20`): v0.22+ rescue outputs hit a 65% violation rate (4341 of 6675 `<w:rPr>` blocks out of order) and were completely refused by macOS Word — "Word 嘗試開啟此檔案時發生錯誤" dialog with no recovery path. The 4/27 rescue (using v0.21.x) had only 2% violations and Word accepted it with a recovery prompt; v0.22+ pushed past the threshold.
+
+#### Fix
+
+Reordered the `parts.append(...)` calls in `RunProperties.toXML()` to emit children in ECMA-376 §17.3.2.28 canonical sequence. `RunProperties` struct fields and public API are unchanged — Equatable, init signatures, and field declaration order all preserved. Only the internal emit order changed.
+
+Canonical sequence emitted (subset present in this struct):
+
+```
+1.  rStyle      19. color           27. u
+2.  rFonts      20-23. character    28. effect (TextEffect)
+3.  b               Spacing block   32. vertAlign
+5.  i               (spacing/kern/  36. lang
+9.  strike          position)       last. rawChildren
+15. noProof     22. kern (typed)
+                24/25. sz/szCs
+                26. highlight
+```
+
+`rawChildren` (vendor extensions, `<w:rPrChange>`) continue to append last.
+
+#### Tests added
+
+- `RunTests.testRunPropertiesEmitsChildrenInCanonicalOrder` — constructs a RunProperties with 13 fields spanning the canonical sequence, regex-extracts emitted child element names, asserts each adjacent pair is in canonical order
+- `RunTests.testRunPropertiesRStyleFirstAndLangLastAmongTyped` — guards rStyle-first / lang-after-typed invariants
+- `RunTests.testRunPropertiesRFontsBeforeSizeAndBold` — guards the specific regression shape (`rFonts` after `b`/`sz`) that broke 4341/6675 thesis rPr blocks
+
+Full suite: 874 tests, 0 failures, 1 established skip — no regression.
+
 ## [0.24.0] - 2026-05-04
 
 ### Added — Cross-document OMath splice ([#57](https://github.com/PsychQuant/ooxml-swift/issues/57))

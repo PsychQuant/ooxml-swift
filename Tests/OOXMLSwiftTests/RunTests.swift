@@ -206,4 +206,121 @@ final class RunTests: XCTestCase {
         XCTAssertTrue(xml.contains("w:ascii=\"Times New Roman\""))
         XCTAssertTrue(xml.contains("<w:color w:val=\"0000FF\"/>"))
     }
+
+    // MARK: - ECMA-376 §17.3.2.28 CT_RPr canonical child order
+    //
+    // PsychQuant/ooxml-swift#61 (kiki830621/collaboration_guo_analysis#20):
+    // `RunProperties.toXML()` historically appended children in struct
+    // declaration order, which violated the schema-mandated sequence in
+    // CT_RPr. macOS Word's strict validator rejected docx files when more
+    // than ~10% of `<w:rPr>` blocks had inverted ordering — thesis rescue
+    // outputs hit ~65% rate and were completely refused.
+    //
+    // Canonical order (subset present in this struct, indexed per ECMA-376):
+    //   1. rStyle, 2. rFonts, 3. b, 5. i, 9. strike, 15. noProof,
+    //   19. color, 20. spacing (CharacterSpacing block: spacing→kern→position),
+    //   22. kern (typed field), 24. sz, 25. szCs, 26. highlight, 27. u,
+    //   28. effect (TextEffect), 32. vertAlign, 36. lang, then rawChildren.
+
+    func testRunPropertiesEmitsChildrenInCanonicalOrder() {
+        var props = RunProperties()
+        // Set fields that span the canonical sequence so order matters.
+        props.rStyle = "Hyperlink"            // 1
+        props.rFonts = RFontsProperties(eastAsia: "DFKai-SB")  // 2
+        props.bold = true                     // 3
+        props.italic = true                   // 5
+        props.strikethrough = true            // 9
+        props.noProof = true                  // 15
+        props.color = "FF0000"                // 19
+        props.kern = 32                       // 22 (typed field)
+        props.fontSize = 24                   // 24/25
+        props.highlight = .yellow             // 26
+        props.underline = .single             // 27
+        props.verticalAlign = .superscript    // 32
+        props.lang = LanguageProperties(val: "en-US")  // 36
+
+        let xml = props.toXML()
+
+        // Extract child element local names in document order.
+        // Match self-closing `<w:foo .../>` and opening `<w:foo>`.
+        let pattern = #"<(w(?:14)?:[A-Za-z][A-Za-z0-9]*)\b"#
+        let regex = try! NSRegularExpression(pattern: pattern)
+        let nsxml = xml as NSString
+        let matches = regex.matches(in: xml, range: NSRange(location: 0, length: nsxml.length))
+        let names = matches.map { nsxml.substring(with: $0.range(at: 1)) }
+
+        // Canonical position lookup (subset relevant to this struct).
+        let canonical: [String: Int] = [
+            "w:rStyle":       1,
+            "w:rFonts":       2,
+            "w:b":            3,
+            "w:bCs":          4,
+            "w:i":            5,
+            "w:iCs":          6,
+            "w:strike":       9,
+            "w:noProof":      15,
+            "w:webHidden":    18,
+            "w:color":        19,
+            "w:spacing":      20,
+            "w:kern":         22,
+            "w:position":     23,
+            "w:sz":           24,
+            "w:szCs":         25,
+            "w:highlight":    26,
+            "w:u":            27,
+            "w:effect":       28,
+            "w:vertAlign":    32,
+            "w:lang":         36
+        ]
+
+        // Walk emitted children pairwise; each pair must be in canonical order.
+        let emitted = names.compactMap { canonical[$0] != nil ? $0 : nil }
+        for i in 0..<(emitted.count - 1) {
+            let a = emitted[i]
+            let b = emitted[i + 1]
+            // szCs immediately follows sz — same canonical slot pair, skip strict <
+            if a == "w:sz" && b == "w:szCs" { continue }
+            let posA = canonical[a]!
+            let posB = canonical[b]!
+            XCTAssertLessThan(
+                posA, posB,
+                "rPr child order violation: \(a) (canonical pos \(posA)) emitted before \(b) (canonical pos \(posB))\nFull child sequence: \(emitted)\nFull XML: \(xml)"
+            )
+        }
+    }
+
+    func testRunPropertiesRStyleFirstAndLangLastAmongTyped() {
+        var props = RunProperties()
+        props.lang = LanguageProperties(val: "zh-TW")
+        props.rStyle = "Hyperlink"
+        props.bold = true
+        props.fontSize = 24
+
+        let xml = props.toXML()
+        // rStyle must be the first child
+        XCTAssertTrue(xml.hasPrefix("<w:rStyle "), "rStyle must be first; got: \(xml)")
+        // lang must come after sz/szCs and after b
+        let langIdx = xml.range(of: "<w:lang ")!.lowerBound
+        let bIdx = xml.range(of: "<w:b/>")!.lowerBound
+        let szIdx = xml.range(of: "<w:sz ")!.lowerBound
+        XCTAssertLessThan(bIdx, langIdx, "b must precede lang")
+        XCTAssertLessThan(szIdx, langIdx, "sz must precede lang")
+    }
+
+    func testRunPropertiesRFontsBeforeSizeAndBold() {
+        // The canonical-order regression: rFonts (pos 2) was being emitted
+        // AFTER b (3), i (5), sz (24). This is the specific shape that broke
+        // 4341/6675 rPr blocks in the thesis docx.
+        var props = RunProperties()
+        props.rFonts = RFontsProperties(eastAsia: "DFKai-SB")
+        props.bold = true
+        props.fontSize = 36
+
+        let xml = props.toXML()
+        let rFontsIdx = xml.range(of: "<w:rFonts ")!.lowerBound
+        let bIdx = xml.range(of: "<w:b/>")!.lowerBound
+        let szIdx = xml.range(of: "<w:sz ")!.lowerBound
+        XCTAssertLessThan(rFontsIdx, bIdx, "rFonts must precede b")
+        XCTAssertLessThan(rFontsIdx, szIdx, "rFonts must precede sz")
+    }
 }
