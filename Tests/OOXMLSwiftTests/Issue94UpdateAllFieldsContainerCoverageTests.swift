@@ -400,4 +400,52 @@ final class Issue94UpdateAllFieldsContainerCoverageTests: XCTestCase {
         let cellCached = cachedResultOfFirstSEQ(in: updatedTable.rows[0].cells[0].paragraphs[0])
         XCTAssertEqual(cellCached, "1", "endnote table cell SEQ cachedResult should be 1")
     }
+
+    // MARK: - 25.5 Container SEQ with resetLevel must not false-reset (P1 regression)
+
+    /// PsychQuant/ooxml-swift#25 verify P1 finding: pre-fix-commit, containers got
+    /// `containerHeadingCount = [:]` (always 0) while `lastResetHeadingCount`
+    /// inherited body's accumulated state. processParagraph's resetLevel logic
+    /// compares currentCount[level] vs lastReset[level] — `0 != N` triggered a
+    /// false reset, breaking SEQ chain into containers under shared-counter mode.
+    ///
+    /// Repro from Codex's blind verify: body Heading 1 + 2x Figure(\s 1), then
+    /// header Figure(\s 1) — pre-fix returned cached "1" (false-reset to start);
+    /// post-fix returns "3" (continues body counter). The 4 prior tests all use
+    /// `resetLevel: nil` so the resetLevel codepath was never exercised.
+    func testUpdateAllFieldsHeaderSEQWithResetLevelChainsBodyCounter() {
+        var doc = WordDocument()
+
+        // Body: Heading 1 + 2x Figure with resetLevel=1
+        let h1 = headingParagraph(level: 1, text: "Chapter 1")
+        let bodyFig1 = captionParagraph(identifier: "Figure", resetLevel: 1, initialCached: "1")
+        let bodyFig2 = captionParagraph(identifier: "Figure", resetLevel: 1, initialCached: "1")
+        doc.body.children = [
+            .paragraph(h1),
+            .paragraph(bodyFig1),
+            .paragraph(bodyFig2)
+        ]
+
+        // Header: 1x Figure with resetLevel=1 (same identifier as body)
+        let headerFig = captionParagraph(identifier: "Figure", resetLevel: 1, initialCached: "1")
+        var header = Header(id: "rId-h1")
+        header.bodyChildren = [.paragraph(headerFig)]
+        doc.headers = [header]
+
+        // Default isolatePerContainer=false — header should chain body's counter.
+        let result = doc.updateAllFields()
+
+        // Pre-fix: result == ["Figure": 1] (header false-reset to start)
+        // Post-fix: result == ["Figure": 3] (header continues body's counter)
+        XCTAssertEqual(result, ["Figure": 3],
+            "Header SEQ with resetLevel=1 must chain body's accumulated counter when " +
+            "isolatePerContainer=false. Pre-fix bug: containerHeadingCount=[:] " +
+            "+ inherited lastResetHeadingCount caused false reset.")
+
+        guard case .paragraph(let updatedHeaderPara) = doc.headers[0].bodyChildren[0] else {
+            return XCTFail("expected .paragraph in header bodyChildren")
+        }
+        XCTAssertEqual(cachedResultOfFirstSEQ(in: updatedHeaderPara), "3",
+            "Header Figure SEQ cachedResult must be 3 (continues body's counter), not 1 (false-reset)")
+    }
 }

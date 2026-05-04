@@ -102,7 +102,13 @@ extension WordDocument {
         for i in 0..<headers.count {
             var headerCounters: [String: Int] = isolatePerContainer ? [:] : counters
             var headerLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
-            var containerHeadingCount: [Int: Int] = [:]  // container-local; never feeds body
+            // #25 P1 fix: in shared-counter mode (isolatePerContainer=false), seed with body's
+// current heading count so SEQ resetLevel comparisons (currentCount vs lastReset)
+// don't false-reset. In isolation mode, fresh `[:]` is correct (containers are
+// independent of body's outline). Walker still passes isTopLevel:false for
+// containers, so heading-count never increments here — this seed only matters
+// for the resetLevel comparison inside processParagraph.
+var containerHeadingCount: [Int: Int] = isolatePerContainer ? [:] : currentHeadingCount  // container-local; never feeds body
             var headerDirty = false
             for j in 0..<headers[i].bodyChildren.count {
                 if walkAndProcessBodyChildForFields(
@@ -127,7 +133,13 @@ extension WordDocument {
         for i in 0..<footers.count {
             var footerCounters: [String: Int] = isolatePerContainer ? [:] : counters
             var footerLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
-            var containerHeadingCount: [Int: Int] = [:]
+            // #25 P1 fix: in shared-counter mode (isolatePerContainer=false), seed with body's
+// current heading count so SEQ resetLevel comparisons (currentCount vs lastReset)
+// don't false-reset. In isolation mode, fresh `[:]` is correct (containers are
+// independent of body's outline). Walker still passes isTopLevel:false for
+// containers, so heading-count never increments here — this seed only matters
+// for the resetLevel comparison inside processParagraph.
+var containerHeadingCount: [Int: Int] = isolatePerContainer ? [:] : currentHeadingCount
             var footerDirty = false
             for j in 0..<footers[i].bodyChildren.count {
                 if walkAndProcessBodyChildForFields(
@@ -153,7 +165,13 @@ extension WordDocument {
         var footnotesLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
         var footnotesDirty = false
         for i in 0..<footnotes.footnotes.count {
-            var containerHeadingCount: [Int: Int] = [:]
+            // #25 P1 fix: in shared-counter mode (isolatePerContainer=false), seed with body's
+// current heading count so SEQ resetLevel comparisons (currentCount vs lastReset)
+// don't false-reset. In isolation mode, fresh `[:]` is correct (containers are
+// independent of body's outline). Walker still passes isTopLevel:false for
+// containers, so heading-count never increments here — this seed only matters
+// for the resetLevel comparison inside processParagraph.
+var containerHeadingCount: [Int: Int] = isolatePerContainer ? [:] : currentHeadingCount
             for j in 0..<footnotes.footnotes[i].bodyChildren.count {
                 if walkAndProcessBodyChildForFields(
                     &footnotes.footnotes[i].bodyChildren[j],
@@ -177,7 +195,13 @@ extension WordDocument {
         var endnotesLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
         var endnotesDirty = false
         for i in 0..<endnotes.endnotes.count {
-            var containerHeadingCount: [Int: Int] = [:]
+            // #25 P1 fix: in shared-counter mode (isolatePerContainer=false), seed with body's
+// current heading count so SEQ resetLevel comparisons (currentCount vs lastReset)
+// don't false-reset. In isolation mode, fresh `[:]` is correct (containers are
+// independent of body's outline). Walker still passes isTopLevel:false for
+// containers, so heading-count never increments here — this seed only matters
+// for the resetLevel comparison inside processParagraph.
+var containerHeadingCount: [Int: Int] = isolatePerContainer ? [:] : currentHeadingCount
             for j in 0..<endnotes.endnotes[i].bodyChildren.count {
                 if walkAndProcessBodyChildForFields(
                     &endnotes.endnotes[i].bodyChildren[j],
