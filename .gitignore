@@ -13,3 +13,9 @@ xcuserdata/
 
 # macOS
 .DS_Store
+
+# Spectra app data
+.spectra/
+
+# IDD per-issue scratch
+.claude/
