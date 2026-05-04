@@ -4030,9 +4030,10 @@ extension WordDocument {
     ///
     /// **Deprecated in v0.21.5** — use the `InsertLocation` overload above
     /// for anchor-aware insertion. This Int?-only signature will be removed
-    /// in v0.22 (alongside other v0.22 deprecations: `Hyperlink.text` setter,
-    /// `Paragraph.commentIds` field).
-    @available(*, deprecated, message: "Use insertEquation(at: InsertLocation, latex:, displayMode:) for anchor-aware insertion. Will be removed in v0.22.")
+    /// in ooxml-swift 1.0 (alongside other 1.0 deprecations: `MathEquation`
+    /// flat-string OMML emit, `Hyperlink.text` setter, `Paragraph.commentIds`
+    /// field).
+    @available(*, deprecated, message: "Use insertEquation(at: InsertLocation, latex:, displayMode:) for anchor-aware insertion. Will be removed in ooxml-swift 1.0.")
     public mutating func insertEquation(
         at paragraphIndex: Int? = nil,
         latex: String,
