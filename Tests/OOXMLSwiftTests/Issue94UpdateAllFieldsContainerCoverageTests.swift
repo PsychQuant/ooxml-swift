@@ -227,4 +227,177 @@ final class Issue94UpdateAllFieldsContainerCoverageTests: XCTestCase {
         XCTAssertEqual(cachedResultOfFirstSEQ(in: f3), "3",
             "Trailing top-level Figure must continue counter (3), not reset to 1 by container-nested heading")
     }
+
+    // MARK: - 25.1 SEQ inside header table cell
+
+    /// PsychQuant/ooxml-swift#25 — header SEQ scan must recurse through bodyChildren.
+    /// Pre-#25 fix: header loop iterated `.paragraphs` (computed flat view, drops
+    /// `.table` siblings); SEQ inside header table cell was silently skipped.
+    /// Post-fix: header loop iterates `bodyChildren` through walkAndProcessBodyChildForFields.
+    func testUpdateAllFieldsRecursesIntoHeaderTableCellParagraphs() {
+        var doc = WordDocument()
+
+        let cellPara1 = captionParagraph(identifier: "Figure", initialCached: "1")
+        let cellPara2 = captionParagraph(identifier: "Figure", initialCached: "1")
+
+        let table = Table(rows: [
+            TableRow(cells: [
+                {
+                    var cell = TableCell()
+                    cell.paragraphs = [cellPara1]
+                    return cell
+                }(),
+                {
+                    var cell = TableCell()
+                    cell.paragraphs = [cellPara2]
+                    return cell
+                }()
+            ])
+        ])
+
+        var header = Header(id: "rId-h1")
+        header.bodyChildren = [.table(table)]
+        doc.headers = [header]
+
+        let result = doc.updateAllFields()
+        XCTAssertEqual(result, ["Figure": 2],
+            "Header SEQ scan must traverse table cells inside Header.bodyChildren")
+
+        // Verify cached results were rewritten in the header's table cells
+        guard case .table(let updatedTable) = doc.headers[0].bodyChildren[0] else {
+            return XCTFail("expected .table inside header bodyChildren")
+        }
+        let cell1Cached = cachedResultOfFirstSEQ(in: updatedTable.rows[0].cells[0].paragraphs[0])
+        let cell2Cached = cachedResultOfFirstSEQ(in: updatedTable.rows[0].cells[1].paragraphs[0])
+        XCTAssertEqual(cell1Cached, "1", "header table cell 0 SEQ cachedResult should be 1")
+        XCTAssertEqual(cell2Cached, "2", "header table cell 1 SEQ cachedResult should be 2")
+
+        // Dirty-bit propagation: header file marked modified
+        XCTAssertTrue(doc.modifiedParts.contains("word/\(doc.headers[0].fileName)"),
+            "modifiedParts must include the header file when its SEQ fields were updated")
+    }
+
+    // MARK: - 25.2 SEQ inside footer block-level SDT (.contentControl)
+
+    /// PsychQuant/ooxml-swift#25 — footer SEQ scan must recurse into block-level
+    /// SDT children. Pre-fix: footer loop iterated `.paragraphs` (drops
+    /// `.contentControl` siblings); SEQ inside footer SDT was silently skipped.
+    func testUpdateAllFieldsRecursesIntoFooterSDTChildParagraphs() {
+        var doc = WordDocument()
+
+        let innerPara1 = captionParagraph(identifier: "Figure", initialCached: "1")
+        let innerPara2 = captionParagraph(identifier: "Figure", initialCached: "1")
+
+        let sdt = StructuredDocumentTag(id: 200, tag: "issue25-footer-sdt")
+        let cc = ContentControl(sdt: sdt, content: "")
+
+        var footer = Footer(id: "rId-f1")
+        footer.bodyChildren = [
+            .contentControl(cc, children: [
+                .paragraph(innerPara1),
+                .paragraph(innerPara2)
+            ])
+        ]
+        doc.footers = [footer]
+
+        let result = doc.updateAllFields()
+        XCTAssertEqual(result, ["Figure": 2],
+            "Footer SEQ scan must recurse into block-level SDT children")
+
+        guard case .contentControl(_, let updatedChildren) = doc.footers[0].bodyChildren[0] else {
+            return XCTFail("expected .contentControl inside footer bodyChildren")
+        }
+        guard case .paragraph(let p1) = updatedChildren[0],
+              case .paragraph(let p2) = updatedChildren[1] else {
+            return XCTFail("expected paragraphs inside footer SDT")
+        }
+        XCTAssertEqual(cachedResultOfFirstSEQ(in: p1), "1",
+            "footer SDT child[0] SEQ cachedResult should be 1")
+        XCTAssertEqual(cachedResultOfFirstSEQ(in: p2), "2",
+            "footer SDT child[1] SEQ cachedResult should be 2")
+
+        // Dirty-bit propagation: footer file marked modified
+        XCTAssertTrue(doc.modifiedParts.contains("word/\(doc.footers[0].fileName)"),
+            "modifiedParts must include the footer file when its SEQ fields were updated")
+    }
+
+    // MARK: - 25.3 SEQ inside footnote table cell
+
+    /// PsychQuant/ooxml-swift#25 — footnote SEQ scan must recurse through
+    /// bodyChildren so SEQ inside footnote-internal tables is visible.
+    func testUpdateAllFieldsRecursesIntoFootnoteTableCellParagraphs() {
+        var doc = WordDocument()
+
+        let cellPara1 = captionParagraph(identifier: "Source", initialCached: "1")
+        let cellPara2 = captionParagraph(identifier: "Source", initialCached: "1")
+
+        let table = Table(rows: [
+            TableRow(cells: [
+                {
+                    var cell = TableCell()
+                    cell.paragraphs = [cellPara1]
+                    return cell
+                }(),
+                {
+                    var cell = TableCell()
+                    cell.paragraphs = [cellPara2]
+                    return cell
+                }()
+            ])
+        ])
+
+        var footnote = Footnote(id: 1, text: "", paragraphIndex: 0)
+        footnote.bodyChildren = [.table(table)]
+        doc.footnotes = FootnotesCollection(footnotes: [footnote])
+
+        let result = doc.updateAllFields()
+        XCTAssertEqual(result, ["Source": 2],
+            "Footnote SEQ scan must traverse table cells inside Footnote.bodyChildren")
+
+        guard case .table(let updatedTable) = doc.footnotes.footnotes[0].bodyChildren[0] else {
+            return XCTFail("expected .table inside footnote bodyChildren")
+        }
+        let cell1Cached = cachedResultOfFirstSEQ(in: updatedTable.rows[0].cells[0].paragraphs[0])
+        let cell2Cached = cachedResultOfFirstSEQ(in: updatedTable.rows[0].cells[1].paragraphs[0])
+        XCTAssertEqual(cell1Cached, "1", "footnote table cell 0 SEQ cachedResult should be 1")
+        XCTAssertEqual(cell2Cached, "2", "footnote table cell 1 SEQ cachedResult should be 2")
+
+        // Dirty-bit propagation: footnotes.xml marked modified
+        XCTAssertTrue(doc.modifiedParts.contains("word/footnotes.xml"),
+            "modifiedParts must include word/footnotes.xml when footnote SEQ fields were updated")
+    }
+
+    // MARK: - 25.4 SEQ inside endnote container
+
+    /// PsychQuant/ooxml-swift#25 — endnote SEQ scan must recurse through
+    /// bodyChildren so SEQ inside endnote-internal tables / SDTs is visible.
+    func testUpdateAllFieldsRecursesIntoEndnoteContainerSEQ() {
+        var doc = WordDocument()
+
+        let cellPara = captionParagraph(identifier: "Source", initialCached: "1")
+
+        let table = Table(rows: [
+            TableRow(cells: [
+                {
+                    var cell = TableCell()
+                    cell.paragraphs = [cellPara]
+                    return cell
+                }()
+            ])
+        ])
+
+        var endnote = Endnote(id: 1, text: "", paragraphIndex: 0)
+        endnote.bodyChildren = [.table(table)]
+        doc.endnotes = EndnotesCollection(endnotes: [endnote])
+
+        let result = doc.updateAllFields()
+        XCTAssertEqual(result, ["Source": 1],
+            "Endnote SEQ scan must traverse table cells inside Endnote.bodyChildren")
+
+        guard case .table(let updatedTable) = doc.endnotes.endnotes[0].bodyChildren[0] else {
+            return XCTFail("expected .table inside endnote bodyChildren")
+        }
+        let cellCached = cachedResultOfFirstSEQ(in: updatedTable.rows[0].cells[0].paragraphs[0])
+        XCTAssertEqual(cellCached, "1", "endnote table cell SEQ cachedResult should be 1")
+    }
 }

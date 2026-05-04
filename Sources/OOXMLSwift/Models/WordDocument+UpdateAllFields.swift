@@ -84,17 +84,36 @@ extension WordDocument {
 
         // Headers — per-header dirty bit. Under isolation, each header gets
         // a fresh counter dict (independent of body and other headers).
+        //
+        // #25 (v0.22.x+): containers iterate `bodyChildren` (canonical storage)
+        // through `walkAndProcessBodyChildForFields`, the same recursive walker
+        // body uses. This picks up SEQ inside header table cells / footer SDT
+        // children / etc. Previously the container loops iterated the legacy
+        // `.paragraphs` flat-view computed property, which silently dropped
+        // `.table` and `.contentControl` BodyChild siblings.
+        //
+        // `isTopLevel: false` for all container walks (matches body-side
+        // semantic at line ~64: SDT/table-internal headings don't reset
+        // chapter counters; same logic applies to container-internal headings).
+        // Each container instance gets a fresh `containerHeadingCount` dict —
+        // headers/footers may have their own outline that must not pollute
+        // body's chapter counter.
         var dirtyHeaderFiles: Set<String> = []
         for i in 0..<headers.count {
             var headerCounters: [String: Int] = isolatePerContainer ? [:] : counters
             var headerLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
+            var containerHeadingCount: [Int: Int] = [:]  // container-local; never feeds body
             var headerDirty = false
-            for j in 0..<headers[i].paragraphs.count {
-                var para = headers[i].paragraphs[j]
-                if processParagraph(&para, counters: &headerCounters, lastResetHeadingCount: &headerLastReset, currentHeadingCount: currentHeadingCount) {
+            for j in 0..<headers[i].bodyChildren.count {
+                if walkAndProcessBodyChildForFields(
+                    &headers[i].bodyChildren[j],
+                    counters: &headerCounters,
+                    lastResetHeadingCount: &headerLastReset,
+                    currentHeadingCount: &containerHeadingCount,
+                    isTopLevel: false
+                ) {
                     headerDirty = true
                 }
-                headers[i].paragraphs[j] = para
             }
             if !isolatePerContainer {
                 counters = headerCounters
@@ -103,18 +122,23 @@ extension WordDocument {
             if headerDirty { dirtyHeaderFiles.insert(headers[i].fileName) }
         }
 
-        // Footers — same isolation pattern as headers.
+        // Footers — same isolation + walker pattern as headers (#25).
         var dirtyFooterFiles: Set<String> = []
         for i in 0..<footers.count {
             var footerCounters: [String: Int] = isolatePerContainer ? [:] : counters
             var footerLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
+            var containerHeadingCount: [Int: Int] = [:]
             var footerDirty = false
-            for j in 0..<footers[i].paragraphs.count {
-                var para = footers[i].paragraphs[j]
-                if processParagraph(&para, counters: &footerCounters, lastResetHeadingCount: &footerLastReset, currentHeadingCount: currentHeadingCount) {
+            for j in 0..<footers[i].bodyChildren.count {
+                if walkAndProcessBodyChildForFields(
+                    &footers[i].bodyChildren[j],
+                    counters: &footerCounters,
+                    lastResetHeadingCount: &footerLastReset,
+                    currentHeadingCount: &containerHeadingCount,
+                    isTopLevel: false
+                ) {
                     footerDirty = true
                 }
-                footers[i].paragraphs[j] = para
             }
             if !isolatePerContainer {
                 counters = footerCounters
@@ -124,16 +148,22 @@ extension WordDocument {
         }
 
         // Footnotes — single container family, isolated as a unit.
+        // #25: walker recursion through bodyChildren (same as headers/footers).
         var footnotesCounters: [String: Int] = isolatePerContainer ? [:] : counters
         var footnotesLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
         var footnotesDirty = false
         for i in 0..<footnotes.footnotes.count {
-            for j in 0..<footnotes.footnotes[i].paragraphs.count {
-                var para = footnotes.footnotes[i].paragraphs[j]
-                if processParagraph(&para, counters: &footnotesCounters, lastResetHeadingCount: &footnotesLastReset, currentHeadingCount: currentHeadingCount) {
+            var containerHeadingCount: [Int: Int] = [:]
+            for j in 0..<footnotes.footnotes[i].bodyChildren.count {
+                if walkAndProcessBodyChildForFields(
+                    &footnotes.footnotes[i].bodyChildren[j],
+                    counters: &footnotesCounters,
+                    lastResetHeadingCount: &footnotesLastReset,
+                    currentHeadingCount: &containerHeadingCount,
+                    isTopLevel: false
+                ) {
                     footnotesDirty = true
                 }
-                footnotes.footnotes[i].paragraphs[j] = para
             }
         }
         if !isolatePerContainer {
@@ -142,16 +172,22 @@ extension WordDocument {
         }
 
         // Endnotes — single container family, isolated as a unit.
+        // #25: walker recursion through bodyChildren.
         var endnotesCounters: [String: Int] = isolatePerContainer ? [:] : counters
         var endnotesLastReset: [String: Int] = isolatePerContainer ? [:] : lastResetHeadingCount
         var endnotesDirty = false
         for i in 0..<endnotes.endnotes.count {
-            for j in 0..<endnotes.endnotes[i].paragraphs.count {
-                var para = endnotes.endnotes[i].paragraphs[j]
-                if processParagraph(&para, counters: &endnotesCounters, lastResetHeadingCount: &endnotesLastReset, currentHeadingCount: currentHeadingCount) {
+            var containerHeadingCount: [Int: Int] = [:]
+            for j in 0..<endnotes.endnotes[i].bodyChildren.count {
+                if walkAndProcessBodyChildForFields(
+                    &endnotes.endnotes[i].bodyChildren[j],
+                    counters: &endnotesCounters,
+                    lastResetHeadingCount: &endnotesLastReset,
+                    currentHeadingCount: &containerHeadingCount,
+                    isTopLevel: false
+                ) {
                     endnotesDirty = true
                 }
-                endnotes.endnotes[i].paragraphs[j] = para
             }
         }
         if !isolatePerContainer {
