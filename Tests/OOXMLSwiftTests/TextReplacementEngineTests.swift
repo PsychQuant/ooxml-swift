@@ -158,4 +158,81 @@ final class TextReplacementEngineTests: XCTestCase {
         XCTAssertEqual(map[2].runIdx, 1); XCTAssertEqual(map[2].offset, 0)
         XCTAssertEqual(map[3].runIdx, 1); XCTAssertEqual(map[3].offset, 1)
     }
+
+    // MARK: - #65 Run with rawElements survives multi-run replacement
+
+    /// Repro for PsychQuant/ooxml-swift#65 (kiki830621/collaboration_guo_analysis#20):
+    /// when `replaceText` finds a match whose flat-string boundary crosses an
+    /// empty-text Run that carries only `rawElements` (e.g. `<w:commentReference>`,
+    /// `<w:bookmarkStart>`, `<w:smartTag>` legacy carrier), the Run was being
+    /// silently REMOVED. `isTextRun` returns true for it (no rawXML, no drawing)
+    /// but its rawElements payload was being treated as deletable.
+    ///
+    /// Concrete failure observed in NTPU thesis: `<w:r><w:commentReference w:id="23"/></w:r>`
+    /// dropped between "適應性" and "，本研究…" runs, breaking the comment
+    /// triplet schema (rangeStart + rangeEnd present, reference missing).
+    /// Word strict validator rejects the resulting docx.
+    func testReplaceMultiRunPreservesCommentReferenceRun() throws {
+        // Simulate a paragraph parsed from:
+        //   <w:r>適應性</w:r>
+        //   <w:r><w:commentReference w:id="23"/></w:r>   ← empty text + rawElements
+        //   <w:r>，本研究</w:r>
+        // and replace text spanning the gap (idx[3] ⇒ "適應" only) with multi-run extent.
+        var commentRefRun = Run(text: "")
+        commentRefRun.rawElements = [
+            RawElement(name: "commentReference", xml: "<w:commentReference w:id=\"23\"/>")
+        ]
+
+        var runs = [
+            Run(text: "適應性"),
+            commentRefRun,
+            Run(text: "，本研究")
+        ]
+
+        // Force a multi-run match by replacing across the gap: "性，本" spans
+        // runs[0] (last char) → runs[2] (first 2 chars). The empty Run sits
+        // strictly between sRunIdx=0 and eRunIdx=2.
+        let count = try TextReplacementEngine.replace(
+            runs: &runs, find: "性，本", with: "X"
+        )
+
+        XCTAssertEqual(count, 1)
+        // Critical: commentReference Run must NOT have been removed.
+        XCTAssertEqual(runs.count, 3, "Run carrying only rawElements was deleted by multi-run remove pass")
+        XCTAssertEqual(runs[1].rawElements?.count, 1)
+        XCTAssertEqual(runs[1].rawElements?.first?.name, "commentReference")
+        // Text content correct
+        XCTAssertEqual(runs[0].text, "適應X")
+        XCTAssertEqual(runs[1].text, "")
+        XCTAssertEqual(runs[2].text, "研究")
+    }
+
+    /// Even when the "match" itself is single-run (start == end), but text
+    /// boundaries align such that an empty rawElements Run sits between the
+    /// start-run and a later text-bearing region the engine touches, that
+    /// rawElements Run must survive. This guards against future regressions
+    /// where the safety net might be applied only to multi-run paths.
+    func testReplaceSingleRunWithAdjacentRawElementsRunIntact() throws {
+        var refRun = Run(text: "")
+        refRun.rawElements = [
+            RawElement(name: "commentReference", xml: "<w:commentReference w:id=\"23\"/>")
+        ]
+
+        var runs = [
+            Run(text: "適應性"),
+            refRun,
+            Run(text: "，本研究")
+        ]
+
+        // Pure single-run match: 適應性 → 配適度 (all in runs[0]).
+        let count = try TextReplacementEngine.replace(
+            runs: &runs, find: "適應性", with: "配適度"
+        )
+
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(runs.count, 3)
+        XCTAssertEqual(runs[0].text, "配適度")
+        XCTAssertEqual(runs[1].rawElements?.first?.name, "commentReference")
+        XCTAssertEqual(runs[2].text, "，本研究")
+    }
 }

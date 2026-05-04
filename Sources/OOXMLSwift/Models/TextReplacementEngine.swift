@@ -399,10 +399,24 @@ public enum TextReplacementEngine {
             //    non-text runs (field runs with rawXML, drawing runs) that
             //    may sit between — they contributed zero characters to the
             //    flat string, so removing them would silently drop structure.
+            //
+            //    v0.27.0 (PsychQuant/ooxml-swift#65,
+            //    kiki830621/collaboration_guo_analysis#20): also preserve
+            //    runs whose `rawElements` is non-empty. A Run shaped like
+            //    `<w:r><w:rPr>…</w:rPr><w:commentReference w:id="23"/></w:r>`
+            //    parses with `text == ""`, `rawXML == nil`, `drawing == nil`
+            //    but `rawElements == [commentReference(...)]`. The pre-fix
+            //    `isTextRun` predicate returned true for it, so the loop
+            //    deleted the Run wholesale — dropping the commentReference
+            //    payload and breaking the comment marker triplet
+            //    (`commentRangeStart` + `commentRangeEnd` + `commentReference`).
+            //    Word strict validator rejects the resulting docx.
             if eRunIdx - sRunIdx > 1 {
                 var idx = eRunIdx - 1
                 while idx > sRunIdx {
-                    if isTextRun(runs[idx]) {
+                    let r = runs[idx]
+                    let hasStructuralPayload = !(r.rawElements?.isEmpty ?? true)
+                    if isTextRun(r) && !hasStructuralPayload {
                         runs.remove(at: idx)
                     }
                     idx -= 1

@@ -8,6 +8,31 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-05-05
+
+### Fixed — `replaceText` no longer drops Runs carrying only `rawElements` ([#65](https://github.com/PsychQuant/ooxml-swift/issues/65), [kiki830621/collaboration_guo_analysis#20](https://github.com/kiki830621/collaboration_guo_analysis/issues/20))
+
+`TextReplacementEngine.applyOneReplacement`'s multi-run path removed every "text run" strictly between the start and end run of a match. The `isTextRun` predicate (`rawXML == nil && drawing == nil`) returned `true` for an empty-text Run shaped like `<w:r><w:rPr>…</w:rPr><w:commentReference w:id="N"/></w:r>` because such a Run carries the `commentReference` element through `rawElements`, not `rawXML`.
+
+Effect on the NTPU thesis docx: replacing "適應性" → "配適度" caused the `<w:r><w:commentReference w:id="23"/></w:r>` Run that sat between "適應性" and "，本研究…" to be silently deleted, breaking the comment-marker triplet (`commentRangeStart` + `commentRangeEnd` present, `commentReference` missing). Word's strict OOXML validator rejected the resulting docx with "the file is corrupt and cannot be opened."
+
+#### Fix
+
+`applyOneReplacement` now treats a Run as deletable only when `isTextRun(r) == true` AND `r.rawElements` is nil-or-empty. Runs carrying any `rawElements` payload (`commentReference`, `bookmarkStart`/`End`, `smartTag` legacy carrier, vendor extensions captured under `rawElements`, …) survive the multi-run remove pass.
+
+`isTextRun` and `flattenRuns` are unchanged — searchability of Runs that carry both text AND `rawElements` (rare in practice) is preserved.
+
+#### Backward compatibility
+
+- ✅ Public API unchanged
+- ✅ Single-run replacements unaffected
+- ✅ Existing 879 tests unchanged behaviour
+
+#### Tests added
+
+- `TextReplacementEngineTests.testReplaceMultiRunPreservesCommentReferenceRun` — RED test that reproduces the issue (multi-run match with `<w:commentReference>` Run in the gap → asserts Run survives and `rawElements` payload intact).
+- `TextReplacementEngineTests.testReplaceSingleRunWithAdjacentRawElementsRunIntact` — guard test ensuring single-run path doesn't regress in the future.
+
 ## [0.26.0] - 2026-05-04
 
 ### Fixed — `rawChildren` placement extends rPr canonical order to vendor + late-typed elements ([#61 follow-up](https://github.com/PsychQuant/ooxml-swift/issues/61))
