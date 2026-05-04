@@ -8,6 +8,92 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-05-04
+
+### Added — Cross-document OMath splice ([#57](https://github.com/PsychQuant/ooxml-swift/issues/57))
+
+New public API on `WordDocument` for verbatim copy of `<m:oMath>` XML blocks between paragraphs across two `WordDocument` instances. Unblocks thesis-rescue use cases (kiki830621/collaboration_guo_analysis#15 / #17) where 522 inline OMath blocks were lost during prior image-insertion pipelines and need to be restored from a clean baseline document into a working document.
+
+#### API surface
+
+```swift
+public enum OMathSplicePosition {
+    case atStart
+    case atEnd
+    case afterText(_ anchor: String, instance: Int = 1, options: AnchorLookupOptions = AnchorLookupOptions())
+    case beforeText(_ anchor: String, instance: Int = 1, options: AnchorLookupOptions = AnchorLookupOptions())
+}
+
+public enum OMathSpliceRpRMode {
+    case full        // verbatim copy from source Run rPr (default)
+    case omathOnly   // whitelist: rFonts/sz/lang/bold/italic only
+    case discard     // empty rPr
+}
+
+public enum OMathSpliceNamespacePolicy {
+    case strict      // throw on any prefix or URI mismatch
+    case lenient     // accept prefix mismatch (default); throw only on URI mismatch
+}
+
+extension WordDocument {
+    @discardableResult
+    public mutating func spliceOMath(
+        from sourceParagraph: Paragraph,
+        toBodyParagraphIndex: Int,
+        position: OMathSplicePosition,
+        omathIndex: Int = 0,
+        rPrMode: OMathSpliceRpRMode = .full,
+        namespacePolicy: OMathSpliceNamespacePolicy = .lenient
+    ) throws -> Int
+
+    @discardableResult
+    public mutating func spliceParagraphOMath(
+        from sourceParagraph: Paragraph,
+        toBodyParagraphIndex: Int,
+        rPrMode: OMathSpliceRpRMode = .full,
+        namespacePolicy: OMathSpliceNamespacePolicy = .lenient
+    ) throws -> Int
+}
+```
+
+#### Design highlights (per Spectra change `cross-document-omath-splice`)
+
+- **Carrier preservation on extraction**: source's `Run.rawXML` OMath stays in `Run.rawXML` semantics; source's direct-child `unrecognizedChildren` OMath stays in direct-child semantics on target. Round-trip through `DocxWriter.write` + `DocxReader.read` may transition inline-Run OMath into `unrecognizedChildren` (existing `Run.toXML()` emits `rawXML` verbatim without `<w:r>` wrapper) — content is preserved regardless of carrier.
+- **Joint document-order index for `omathIndex`**: when source paragraph contains OMath in both carriers, `omathIndex` references "Nth OMath in source-document order" via `position` joint sort.
+- **Mid-paragraph splice via anchor-Run split**: `.afterText` / `.beforeText` resolving inside or across runs splits the relevant run at the anchor boundary; OMath Run is inserted between segments. All segments share the original run's `position` value — relies on `Paragraph.toXML`'s stable sort to retain insertion order. Does not touch the other 12 position-indexed paragraph carriers (isolated blast radius vs. position-renumber alternative).
+- **Namespace lenient default**: `.lenient` accepts prefix mismatch (e.g., source `mml:` + target `m:` both pointing to the standard OMML URI) by splicing the source XML verbatim; ECMA-376 allows mixed prefixes within one document. URI mismatch (rare; vendor-extension namespaces) always throws regardless of policy.
+- **`xmlns` injection on extraction**: extracted OMath rawXML is augmented with `xmlns:<prefix>="..."` if the source XML didn't carry the declaration locally (Foundation's `XMLElement.xmlString` may not propagate inherited declarations from parent `<w:p>` / `<w:document>`).
+
+#### Tests
+
+`Tests/OOXMLSwiftTests/OMathSpliceTests.swift` — 14 test cases covering all 8 spec requirements:
+
+- single-OMath splice via `Run.rawXML` carrier
+- direct-child OMath splice preserving `unrecognizedChildren` carrier
+- error taxonomy (sourceHasNoOMath / omathIndexOutOfRange / targetParagraphOutOfRange / anchorNotFound)
+- mid-paragraph anchor split (single-run + cross-run anchors)
+- rPr propagation modes (`.full` / `.discard`)
+- namespace policy (`.lenient` accepts prefix mismatch; `.strict` rejects)
+- paragraph-level batch splice (3 OMath splice in source order via auto-derived context anchors)
+- round-trip OMath content preservation across `DocxWriter.write` + `DocxReader.read`
+- no regression on pre-existing OMath in target paragraph
+
+Full suite: 871 tests, 0 failures, 1 pre-existing skip.
+
+#### Spec artifacts
+
+- `openspec/changes/cross-document-omath-splice/proposal.md`
+- `openspec/changes/cross-document-omath-splice/design.md` (6 design decisions with Pros/Cons trade-off tables)
+- `openspec/changes/cross-document-omath-splice/specs/omath-splice/spec.md` (8 requirements / 17 scenarios)
+- `openspec/changes/cross-document-omath-splice/tasks.md` (44 tasks / 9 stages)
+
+#### Out of scope (deferred)
+
+- LaTeX-to-structured-OMML conversion (existing `MathComponent` AST handles the API-built path)
+- Document-level batch (`spliceAllOMath` across entire WordDocument) — paragraph matching kept in caller layer
+- Splice into headers / footers / footnotes / endnotes (body paragraphs only in v0.1)
+- Auto-rewrite of namespace prefix for `.lenient` mode (verbatim copy preserves source XML)
+
 ## [0.22.1] - 2026-05-03
 
 ### Fixed — `Paragraph.getText()` divergence from `flattenedDisplayText()` ([che-word-mcp#155](https://github.com/PsychQuant/che-word-mcp/issues/155) / [#43](https://github.com/PsychQuant/ooxml-swift/issues/43))
