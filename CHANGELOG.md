@@ -37,7 +37,7 @@ Phase 0 of `word-aligned-state-sync` bumps to v0.30.x to leave room for v0.28 / 
 
 #### Why this matters
 
-Sets up Phase 1 (typed views become tree projections) without disturbing v0.27.x consumers. Once Phase 1 lands the `Paragraph` / `Run` / `Table` / `SectionProperties` types become read-views over the shared tree and op-emitters on mutation; no MCP API change. See `docs/swift-as-document-source.md` and `openspec/changes/word-aligned-state-sync/` (in `PsychQuant/macdoc`) for the full migration plan and the `.wdoc` DSL design that arrives in Phase 7.
+Sets up Phase 1 (typed views become tree projections) without disturbing v0.27.x consumers. Once Phase 1 lands the `Paragraph` / `Run` / `Table` / `SectionProperties` types become read-views over the shared tree and op-emitters on mutation; no MCP API change. See `docs/swift-as-document-source.md` and `openspec/changes/word-aligned-state-sync/` (in `PsychQuant/macdoc`) for the full migration plan and the `.wdocx` DSL design that arrives in Phase 7.
 
 ## [0.27.0] - 2026-05-05
 
