@@ -1,0 +1,4 @@
+{"op":"BeginComponent","type":"Summary","id":"ch1-summary","ts":1735689600}
+{"op":"InsertParagraph","id":"sum-frame","style":"SummaryFrame","in":"ch1-summary","at":0,"ts":1735689600}
+{"op":"SetRuns","id":"sum-frame","runs":[{"text":"note text"}],"ts":1735689600}
+{"op":"EndComponent","id":"ch1-summary","ts":1735689600}
