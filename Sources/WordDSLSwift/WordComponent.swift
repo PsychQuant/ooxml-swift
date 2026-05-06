@@ -1,7 +1,7 @@
-// Phase 7 placeholder.
+// Phase 4 placeholder.
 // Full type design lives in `openspec/specs/mdocx-grammar/spec.md`
 // (Spectra change `mdocx-syntax`). Implementation is the responsibility of
-// `word-aligned-state-sync` Phase 7.
+// `word-aligned-state-sync` Phase 4 (Script transcoder).
 
 /// Protocol for user-defined DSL components. Each `WordComponent` instance
 /// emits a paired `BeginComponent` / `EndComponent` op-log envelope around

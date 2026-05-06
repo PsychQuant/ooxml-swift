@@ -1,7 +1,7 @@
-// Phase 7 placeholder.
+// Phase 4 placeholder.
 // Full type design lives in `openspec/specs/mdocx-grammar/spec.md`
 // (Spectra change `mdocx-syntax`). Implementation is the responsibility of
-// `word-aligned-state-sync` Phase 7.
+// `word-aligned-state-sync` Phase 4 (Script transcoder).
 
 /// Paragraph result-builder container. Maps to OOXML `<w:p>`. Style references
 /// (heading levels, list items, etc.) are passed via `style:` parameter
