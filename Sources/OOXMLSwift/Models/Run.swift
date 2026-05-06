@@ -14,9 +14,32 @@ public struct RawElement: Equatable {
     }
 }
 
-public struct Run: Equatable {
-    public var text: String
-    public var properties: RunProperties
+public struct Run {
+    /// v0.31.1+ (Spectra `sibling-types-tree-projection-impl`,
+    /// `word-aligned-state-sync` Phase 1 task 2.2): when non-nil, this Run is
+    /// a tree-backed view over the wrapped `<w:r>` element. Getters walk
+    /// `xmlNode.children` at access time; the `text` setter mutates the tree
+    /// directly (Phase 1 stub) and calls `xmlNode.markDirty()` so the writer
+    /// re-serializes from typed fields. When nil (legacy detached mode),
+    /// getters/setters operate on the legacy stored buffers below.
+    /// `XmlNode` is a class, so two value-copies of the same tree-backed Run
+    /// share the same underlying tree state. Mirrors the pattern shipped for
+    /// `Paragraph` in v0.31.0 (`paragraph-tree-projection-impl`).
+    public var xmlNode: XmlNode?
+
+    /// Legacy stored backing for `text` used in detached mode.
+    /// In tree-backed mode the public `text` accessor walks `xmlNode.children`
+    /// instead and this buffer is ignored. Renamed from the previous public
+    /// `text` stored property in v0.31.1.
+    internal var _legacyText: String = ""
+
+    /// Legacy stored backing for `properties` used in detached mode.
+    /// In tree-backed mode the public `properties` accessor returns the
+    /// `RunProperties()` Phase 1 stub default; the setter ghost-writes here
+    /// (full tree-walking parser arrives in Phase 2). Renamed from the
+    /// previous public `properties` stored property in v0.31.1.
+    internal var _legacyProperties: RunProperties = RunProperties()
+
     public var drawing: Drawing?  // 圖片繪圖元素
     public var rawXML: String?    // 原始 XML（用於欄位代碼、SDT 等進階功能）
     public var semantic: SemanticAnnotation?  // 語義標註
@@ -55,11 +78,187 @@ public struct Run: Equatable {
     public var position: Int? = nil
 
     public init(text: String, properties: RunProperties = RunProperties()) {
-        self.text = text
-        self.properties = properties
+        self._legacyText = text
+        self._legacyProperties = properties
         self.drawing = nil
         self.rawXML = nil
         self.semantic = nil
+    }
+
+    /// v0.31.1+ Tree-backed initializer. Wraps an existing `<w:r>` xmlNode so
+    /// getters walk its children and the `text` setter mutates the tree
+    /// directly.
+    ///
+    /// The legacy stored fields (`_legacyText`, `_legacyProperties`,
+    /// `drawing`, `rawXML`, `semantic`, `rawElements`, `revisionId`,
+    /// `formatChangeRevisionId`, `position`) are initialized to their empty
+    /// defaults; in tree-backed mode `text` and `properties` are shadowed by
+    /// computed accessors that read from `xmlNode.children`. Callers MUST NOT
+    /// rely on those stored fields when `xmlNode != nil`.
+    ///
+    /// Semantic validation (asserting the node is a `<w:r>` element) is left
+    /// to callers; this initializer accepts any element xmlNode so unit tests
+    /// can synthesize fixtures without paying the schema-check cost.
+    public init(xmlNode: XmlNode) {
+        self.xmlNode = xmlNode
+        // All legacy stored fields keep their default values; the computed
+        // `text` / `properties` accessors below shadow them when tree-backed.
+    }
+
+    /// v0.31.1+ Stable identifier for this run.
+    ///
+    /// - Tree-backed: returns `xmlNode.stableID` if any OOXML stable-ID
+    ///   attribute is present (e.g. `"w:id=42"` for revision runs); otherwise
+    ///   falls back to `"lib:<UUID>"` when the reader assigned a
+    ///   library-generated UUID; otherwise `nil`.
+    /// - Detached (legacy): always returns `nil`.
+    ///
+    /// `<w:r>` does not natively carry `w14:paraId` / `w:bookmarkId`; the
+    /// `XmlNode.stableID` precedence list still resolves `w:id` (Run revision
+    /// IDs) and `r:id` (relationship-bearing wrappers). The op log addresses
+    /// runs by these surrogate IDs or the `lib:` UUID fallback.
+    public var id: String? {
+        guard let node = xmlNode else { return nil }
+        if let stable = node.stableID { return stable }
+        if let lib = node.libraryUUID { return "lib:\(lib.uuidString)" }
+        return nil
+    }
+
+    /// v0.31.1+ Mode-aware view of the run's plain-text content.
+    ///
+    /// - Tree-backed getter: concatenates `textContent` of every `<w:t>`
+    ///   direct child of the wrapped `<w:r>` xmlNode, in document order.
+    ///   No caching — re-walks on every access.
+    /// - Detached getter: returns the legacy stored `_legacyText`.
+    ///
+    /// Tree-backed setter (Phase 1 stub): replaces the wrapped `<w:r>`'s
+    /// existing `<w:t>` direct children with a single new `<w:t>X</w:t>`
+    /// element while preserving every non-`<w:t>` sibling (`<w:rPr>`,
+    /// `<w:tab>`, `<w:br>`, `<w:drawing>`, …). Calls `xmlNode.markDirty()`
+    /// so `XmlTreeWriter` re-serializes the run from typed fields. Phase 2
+    /// of `word-aligned-state-sync` (target v0.32.0) routes this through the
+    /// op log to preserve formatting more faithfully.
+    ///
+    /// Detached setter: writes to `_legacyText` directly (matches pre-v0.31.1
+    /// behavior).
+    public var text: String {
+        get {
+            if let node = xmlNode {
+                var out = ""
+                for child in node.children where child.kind == .element && child.localName == "t" {
+                    for grand in child.children where grand.kind == .text {
+                        out += grand.textContent
+                    }
+                }
+                return out
+            }
+            return _legacyText
+        }
+        set {
+            if let node = xmlNode {
+                // Build the replacement <w:t>X</w:t>.
+                let textNode = XmlNode.text(newValue)
+                let wt = XmlNode.element(prefix: "w", localName: "t", children: [textNode])
+                // Preserve every non-<w:t> sibling (<w:rPr>, <w:tab>, <w:br>, …)
+                // and replace the existing <w:t> children with the new one.
+                // Per spec: "the wrapped xmlNode's children SHALL contain
+                // exactly one <w:t>New</w:t> element among any non-<w:t>
+                // siblings preserved".
+                var rebuilt: [XmlNode] = []
+                var inserted = false
+                for child in node.children {
+                    if child.kind == .element && child.localName == "t" {
+                        if !inserted {
+                            rebuilt.append(wt)
+                            inserted = true
+                        }
+                        // Drop additional <w:t> children — only one new one survives.
+                    } else {
+                        rebuilt.append(child)
+                    }
+                }
+                if !inserted {
+                    // No pre-existing <w:t> child: append the new one at the end.
+                    rebuilt.append(wt)
+                }
+                node.children = rebuilt
+                node.markDirty()
+            } else {
+                _legacyText = newValue
+            }
+        }
+    }
+
+    /// v0.31.1+ Mode-aware view of the run's `<w:rPr>` properties.
+    ///
+    /// - Tree-backed getter: **Phase 1 stub** — returns the default
+    ///   `RunProperties()` regardless of the wrapped `<w:rPr>` child contents.
+    ///   Full `<w:rPr>` tree-walking parser is deferred to Phase 2 because
+    ///   `RunProperties` is a 14+ field struct whose round-trip parser already
+    ///   exists in `DocxReader` and is non-trivial to mirror here.
+    /// - Detached getter: returns the legacy stored `_legacyProperties`.
+    ///
+    /// Tree-backed setter (Phase 1 stub): ghost-writes to `_legacyProperties`
+    /// (no tree mutation). Phase 2 op-log routing replaces this with proper
+    /// `<w:rPr>` reconstruction.
+    ///
+    /// Detached setter: writes to `_legacyProperties` directly.
+    public var properties: RunProperties {
+        get {
+            if xmlNode != nil {
+                return RunProperties()
+            }
+            return _legacyProperties
+        }
+        set {
+            // Ghost-write in both modes; Phase 1 limitation documented above.
+            _legacyProperties = newValue
+        }
+    }
+}
+
+// MARK: - Equatable (mode-aware identity vs content)
+
+extension Run: Equatable {
+    /// v0.31.1+ Custom Equatable replacing auto-synthesized conformance per
+    /// `sibling-types-tree-projection-impl` Decision 5.
+    ///
+    /// Behavior depends on the storage mode of both sides:
+    ///
+    /// 1. **Both tree-backed**: identity equality on the wrapped `xmlNode`
+    ///    reference (`===`). Op-log addresses runs by id (== identity);
+    ///    content equality on different elements would silently merge log
+    ///    entries that target different runs.
+    /// 2. **Both detached**: content equality across the legacy stored fields,
+    ///    preserving pre-v0.31.1 auto-synthesized behavior the che-word-mcp
+    ///    test suite depends on.
+    /// 3. **Mixed (one tree-backed, one detached)**: always `false`. The two
+    ///    storage modes are not interchangeable; comparing across them is
+    ///    almost certainly a caller mistake worth surfacing.
+    public static func == (lhs: Run, rhs: Run) -> Bool {
+        switch (lhs.xmlNode, rhs.xmlNode) {
+        case let (a?, b?):
+            return a === b
+        case (nil, nil):
+            return contentEquals(lhs, rhs)
+        default:
+            return false
+        }
+    }
+
+    /// Detached-mode content equality across all legacy stored fields.
+    /// Mirrors what auto-synthesized `Equatable` would have compared on the
+    /// pre-v0.31.1 struct shape.
+    private static func contentEquals(_ lhs: Run, _ rhs: Run) -> Bool {
+        return lhs._legacyText == rhs._legacyText
+            && lhs._legacyProperties == rhs._legacyProperties
+            && lhs.drawing == rhs.drawing
+            && lhs.rawXML == rhs.rawXML
+            && lhs.semantic == rhs.semantic
+            && lhs.rawElements == rhs.rawElements
+            && lhs.revisionId == rhs.revisionId
+            && lhs.formatChangeRevisionId == rhs.formatChangeRevisionId
+            && lhs.position == rhs.position
     }
 }
 

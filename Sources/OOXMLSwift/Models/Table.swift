@@ -2,7 +2,22 @@ import Foundation
 
 /// 表格 (Table) - Word 文件中的表格結構
 public struct Table: Equatable {
-    public var rows: [TableRow]
+    /// v0.31.1+ (Spectra `sibling-types-tree-projection-impl`,
+    /// `word-aligned-state-sync` Phase 1 task 2.3): when non-nil, this Table
+    /// is a tree-backed view over the wrapped `<w:tbl>` element. Getters walk
+    /// `xmlNode.children` at access time; setters are Phase 1 ghost-writes to
+    /// the legacy buffer below (proper tree-mutating routing arrives with the
+    /// op-log path in Phase 2). When nil (legacy detached mode), getters /
+    /// setters operate on the stored properties below. `XmlNode` is a class,
+    /// so two value-copies of the same tree-backed Table share the same
+    /// underlying tree state.
+    public var xmlNode: XmlNode?
+
+    /// Legacy stored backing for `rows` used in detached mode.
+    /// In tree-backed mode the public `rows` accessor walks `xmlNode.children`
+    /// instead and this buffer is ignored. Renamed from the previous public
+    /// `rows` stored property in v0.31.1 (`sibling-types-tree-projection-impl`).
+    internal var _legacyRows: [TableRow] = []
     public var properties: TableProperties
 
     /// v0.17.0+ (#49): conditional formatting blocks (firstRow / lastRow / banded etc.)
@@ -17,16 +32,75 @@ public struct Table: Equatable {
     public var explicitLayout: TableLayout?
 
     public init(rows: [TableRow] = [], properties: TableProperties = TableProperties()) {
-        self.rows = rows
+        self._legacyRows = rows
         self.properties = properties
     }
 
     /// 便利初始化器：建立指定行列的空表格
     public init(rowCount: Int, columnCount: Int, properties: TableProperties = TableProperties()) {
         self.properties = properties
-        self.rows = (0..<rowCount).map { _ in
+        self._legacyRows = (0..<rowCount).map { _ in
             TableRow(cells: (0..<columnCount).map { _ in TableCell() })
         }
+    }
+
+    /// v0.31.1+ Tree-backed initializer. Wraps an existing `<w:tbl>` xmlNode
+    /// so getters walk its children and setters mutate the tree directly.
+    ///
+    /// The legacy stored fields (`_legacyRows`, `properties`,
+    /// `conditionalStyles`, `tableIndent`, `explicitLayout`) are initialized
+    /// to their empty defaults; in tree-backed mode they are shadowed by
+    /// computed accessors that read from `xmlNode.children`. Callers MUST
+    /// NOT rely on those stored fields when `xmlNode != nil`.
+    ///
+    /// Semantic validation (asserting the node is a `<w:tbl>` element) is
+    /// left to callers; this initializer accepts any element xmlNode so
+    /// unit tests can synthesize fixtures without paying the schema-check
+    /// cost.
+    public init(xmlNode: XmlNode) {
+        self.xmlNode = xmlNode
+        self.properties = TableProperties()
+    }
+
+    /// v0.31.1+ Mode-aware view of `<w:tr>` rows.
+    ///
+    /// - Tree-backed: walks `xmlNode.children` at every access and returns
+    ///   one `TableRow(xmlNode:)` per `<w:tr>` direct child in document
+    ///   order. No caching — re-walks on every access so direct tree
+    ///   mutations are observable immediately.
+    /// - Detached: returns the legacy stored buffer.
+    ///
+    /// Setter writes to `_legacyRows` in both modes (Phase 1 ghost-write
+    /// per Decision 4 of `sibling-types-tree-projection-impl`). In
+    /// tree-backed mode the write is not visible through the getter;
+    /// proper tree-mutating routing arrives with the op-log path in
+    /// Phase 2.
+    public var rows: [TableRow] {
+        get {
+            guard let node = xmlNode else { return _legacyRows }
+            return node.children.compactMap { child -> TableRow? in
+                guard child.kind == .element, child.localName == "tr" else { return nil }
+                return TableRow(xmlNode: child)
+            }
+        }
+        set { _legacyRows = newValue }
+    }
+
+    /// v0.31.1+ Stable identifier for this table.
+    ///
+    /// - Tree-backed: returns `xmlNode.stableID` if any OOXML stable-ID
+    ///   attribute is present; otherwise falls back to `"lib:<UUID>"` when
+    ///   the reader assigned a library-generated UUID; otherwise `nil`.
+    /// - Detached (legacy): always returns `nil`.
+    ///
+    /// Note: `<w:tbl>` does not natively carry `w14:paraId`; its stable IDs
+    /// come from `w:id` (revision tracking), `r:id` (relationship), or the
+    /// `lib:` UUID fallback assigned by the reader.
+    public var id: String? {
+        guard let node = xmlNode else { return nil }
+        if let stable = node.stableID { return stable }
+        if let lib = node.libraryUUID { return "lib:\(lib.uuidString)" }
+        return nil
     }
 
     /// 取得表格純文字
@@ -40,16 +114,119 @@ public struct Table: Equatable {
 
 }
 
+// MARK: - Equatable (mode-aware identity vs content)
+
+extension Table {
+    /// v0.31.1+ Custom Equatable replacing auto-synthesized conformance per
+    /// `sibling-types-tree-projection-impl` Decision 5.
+    ///
+    /// Behavior depends on the storage mode of both sides:
+    ///
+    /// 1. **Both tree-backed**: identity equality on the wrapped `xmlNode`
+    ///    reference (`===`). Op-log addresses tables by id (== identity);
+    ///    content equality on different elements would silently merge log
+    ///    entries that target different tables.
+    /// 2. **Both detached**: content equality across the legacy stored
+    ///    fields, preserving pre-v0.31.1 auto-synthesized behavior.
+    /// 3. **Mixed (one tree-backed, one detached)**: always `false`. The
+    ///    two storage modes are not interchangeable; comparing across them
+    ///    is almost certainly a caller mistake worth surfacing.
+    public static func == (lhs: Table, rhs: Table) -> Bool {
+        switch (lhs.xmlNode, rhs.xmlNode) {
+        case let (a?, b?):
+            return a === b
+        case (nil, nil):
+            return contentEquals(lhs, rhs)
+        default:
+            return false
+        }
+    }
+
+    /// Detached-mode content equality across all legacy stored fields.
+    /// Mirrors what auto-synthesized `Equatable` would have compared.
+    private static func contentEquals(_ lhs: Table, _ rhs: Table) -> Bool {
+        return lhs._legacyRows == rhs._legacyRows
+            && lhs.properties == rhs.properties
+            && lhs.conditionalStyles == rhs.conditionalStyles
+            && lhs.tableIndent == rhs.tableIndent
+            && lhs.explicitLayout == rhs.explicitLayout
+    }
+}
+
 // MARK: - Table Row
 
 /// 表格行
 public struct TableRow: Equatable {
-    public var cells: [TableCell]
+    /// v0.31.1+ Tree-backed view marker; see `Table.xmlNode` for the same
+    /// contract.
+    public var xmlNode: XmlNode?
+
+    /// Legacy stored backing for `cells` used in detached mode.
+    /// In tree-backed mode the public `cells` accessor walks
+    /// `xmlNode.children` instead and this buffer is ignored.
+    internal var _legacyCells: [TableCell] = []
     public var properties: TableRowProperties
 
     public init(cells: [TableCell] = [], properties: TableRowProperties = TableRowProperties()) {
-        self.cells = cells
+        self._legacyCells = cells
         self.properties = properties
+    }
+
+    /// v0.31.1+ Tree-backed initializer wrapping an existing `<w:tr>` xmlNode.
+    /// Legacy stored fields (`_legacyCells`, `properties`) initialize to
+    /// their empty defaults; in tree-backed mode they are shadowed by the
+    /// computed `cells` accessor.
+    public init(xmlNode: XmlNode) {
+        self.xmlNode = xmlNode
+        self.properties = TableRowProperties()
+    }
+
+    /// v0.31.1+ Mode-aware view of `<w:tc>` cells.
+    ///
+    /// - Tree-backed: walks `xmlNode.children` at every access and returns
+    ///   one `TableCell(xmlNode:)` per `<w:tc>` direct child in document
+    ///   order.
+    /// - Detached: returns the legacy stored buffer.
+    ///
+    /// Setter writes to `_legacyCells` in both modes (Phase 1 ghost-write).
+    public var cells: [TableCell] {
+        get {
+            guard let node = xmlNode else { return _legacyCells }
+            return node.children.compactMap { child -> TableCell? in
+                guard child.kind == .element, child.localName == "tc" else { return nil }
+                return TableCell(xmlNode: child)
+            }
+        }
+        set { _legacyCells = newValue }
+    }
+
+    /// v0.31.1+ Stable identifier for this row. Same fallback chain as
+    /// `Table.id`: `xmlNode.stableID` → `"lib:<UUID>"` → nil.
+    public var id: String? {
+        guard let node = xmlNode else { return nil }
+        if let stable = node.stableID { return stable }
+        if let lib = node.libraryUUID { return "lib:\(lib.uuidString)" }
+        return nil
+    }
+}
+
+extension TableRow {
+    /// v0.31.1+ Custom Equatable replacing auto-synthesized conformance per
+    /// `sibling-types-tree-projection-impl` Decision 5.
+    public static func == (lhs: TableRow, rhs: TableRow) -> Bool {
+        switch (lhs.xmlNode, rhs.xmlNode) {
+        case let (a?, b?):
+            return a === b
+        case (nil, nil):
+            return contentEquals(lhs, rhs)
+        default:
+            return false
+        }
+    }
+
+    private static func contentEquals(_ lhs: TableRow, _ rhs: TableRow) -> Bool {
+        return lhs._legacyCells == rhs._legacyCells
+            && lhs.properties == rhs.properties
     }
 }
 
@@ -74,33 +251,125 @@ public enum HeightRule: String, Codable {
 
 /// 表格儲存格
 public struct TableCell: Equatable {
-    public var paragraphs: [Paragraph]
+    /// v0.31.1+ Tree-backed view marker; see `Table.xmlNode` for the same
+    /// contract.
+    public var xmlNode: XmlNode?
+
+    /// Legacy stored backing for `paragraphs` used in detached mode.
+    /// In tree-backed mode the public `paragraphs` accessor walks
+    /// `xmlNode.children` instead and this buffer is ignored.
+    internal var _legacyParagraphs: [Paragraph] = []
     public var properties: TableCellProperties
 
+    /// Legacy stored backing for `nestedTables` used in detached mode.
+    /// In tree-backed mode the public `nestedTables` accessor walks
+    /// `xmlNode.children` instead and this buffer is ignored.
+    ///
     /// v0.17.0+ (#49): nested tables inside this cell (depth-limited to 5
     /// at parser layer per design.md decision 1). Distinct from `paragraphs`
     /// so the writer can emit `<w:tbl>` siblings of `<w:p>` correctly.
-    public var nestedTables: [Table] = []
+    internal var _legacyNestedTables: [Table] = []
 
     public init() {
-        self.paragraphs = [Paragraph()]
+        self._legacyParagraphs = [Paragraph()]
         self.properties = TableCellProperties()
     }
 
     public init(paragraphs: [Paragraph], properties: TableCellProperties = TableCellProperties()) {
-        self.paragraphs = paragraphs.isEmpty ? [Paragraph()] : paragraphs
+        self._legacyParagraphs = paragraphs.isEmpty ? [Paragraph()] : paragraphs
         self.properties = properties
     }
 
     /// 便利初始化器：用文字建立儲存格
     public init(text: String) {
-        self.paragraphs = [Paragraph(text: text)]
+        self._legacyParagraphs = [Paragraph(text: text)]
         self.properties = TableCellProperties()
+    }
+
+    /// v0.31.1+ Tree-backed initializer wrapping an existing `<w:tc>` xmlNode.
+    /// Legacy stored fields (`_legacyParagraphs`, `properties`,
+    /// `_legacyNestedTables`) initialize to their empty defaults; in
+    /// tree-backed mode they are shadowed by the computed `paragraphs` /
+    /// `nestedTables` accessors.
+    public init(xmlNode: XmlNode) {
+        self.xmlNode = xmlNode
+        self.properties = TableCellProperties()
+    }
+
+    /// v0.31.1+ Mode-aware view of `<w:p>` paragraphs.
+    ///
+    /// - Tree-backed: walks `xmlNode.children` at every access and returns
+    ///   one `Paragraph(xmlNode:)` per `<w:p>` direct child in document
+    ///   order. The returned `Paragraph` values are themselves tree-backed
+    ///   (uses the v0.31.0 `Paragraph(xmlNode:)` constructor).
+    /// - Detached: returns the legacy stored buffer.
+    ///
+    /// Setter writes to `_legacyParagraphs` in both modes (Phase 1
+    /// ghost-write).
+    public var paragraphs: [Paragraph] {
+        get {
+            guard let node = xmlNode else { return _legacyParagraphs }
+            return node.children.compactMap { child -> Paragraph? in
+                guard child.kind == .element, child.localName == "p" else { return nil }
+                return Paragraph(xmlNode: child)
+            }
+        }
+        set { _legacyParagraphs = newValue }
+    }
+
+    /// v0.31.1+ Mode-aware view of `<w:tbl>` nested tables.
+    ///
+    /// - Tree-backed: walks `xmlNode.children` at every access and returns
+    ///   one `Table(xmlNode:)` per `<w:tbl>` direct child in document
+    ///   order.
+    /// - Detached: returns the legacy stored buffer.
+    ///
+    /// Setter writes to `_legacyNestedTables` in both modes (Phase 1
+    /// ghost-write).
+    public var nestedTables: [Table] {
+        get {
+            guard let node = xmlNode else { return _legacyNestedTables }
+            return node.children.compactMap { child -> Table? in
+                guard child.kind == .element, child.localName == "tbl" else { return nil }
+                return Table(xmlNode: child)
+            }
+        }
+        set { _legacyNestedTables = newValue }
+    }
+
+    /// v0.31.1+ Stable identifier for this cell. Same fallback chain as
+    /// `Table.id`: `xmlNode.stableID` → `"lib:<UUID>"` → nil.
+    public var id: String? {
+        guard let node = xmlNode else { return nil }
+        if let stable = node.stableID { return stable }
+        if let lib = node.libraryUUID { return "lib:\(lib.uuidString)" }
+        return nil
     }
 
     /// 取得儲存格純文字
     public func getText() -> String {
         return paragraphs.map { $0.getText() }.joined(separator: "\n")
+    }
+}
+
+extension TableCell {
+    /// v0.31.1+ Custom Equatable replacing auto-synthesized conformance per
+    /// `sibling-types-tree-projection-impl` Decision 5.
+    public static func == (lhs: TableCell, rhs: TableCell) -> Bool {
+        switch (lhs.xmlNode, rhs.xmlNode) {
+        case let (a?, b?):
+            return a === b
+        case (nil, nil):
+            return contentEquals(lhs, rhs)
+        default:
+            return false
+        }
+    }
+
+    private static func contentEquals(_ lhs: TableCell, _ rhs: TableCell) -> Bool {
+        return lhs._legacyParagraphs == rhs._legacyParagraphs
+            && lhs.properties == rhs.properties
+            && lhs._legacyNestedTables == rhs._legacyNestedTables
     }
 }
 
