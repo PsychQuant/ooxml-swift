@@ -41,6 +41,26 @@ import XCTest
 ///   - Reading `paragraph.text` after a setter reflects the post-op state
 ///   - Time-travel via `OperationLog.replay(at:)`
 ///
+// MARK: - Compile gate
+//
+// The tests below intentionally reference `Paragraph(xmlNode:)` and
+// `paragraph.id` — APIs that DO NOT YET EXIST in `Sources/OOXMLSwift/Models/Paragraph.swift`.
+// They are the RED scaffold pinning the API surface for `word-aligned-state-sync`
+// Phase 1 task 2.1.
+//
+// Until that task lands, these tests cannot compile. We gate the whole class
+// behind `#if false` so the test target builds. The implementer of task 2.1
+// will:
+//   1. Add `Paragraph(xmlNode:)` and `paragraph.id` to `Sources/OOXMLSwift/Models/Paragraph.swift`.
+//   2. Flip `#if false` → `#if true` (or remove the guard entirely).
+//   3. Run the tests; expect RED → GREEN as the implementation satisfies each scenario.
+//
+// All test bodies and design-pinning doc comments below are preserved verbatim
+// so step 1 has the API surface contract, step 2 is a one-line change, and
+// step 3 is a clean transition from compile-gated RED to runtime-pass GREEN.
+
+#if false
+
 final class ParagraphTreeProjectionTests: XCTestCase {
 
     // MARK: - Helpers
@@ -197,3 +217,5 @@ final class ParagraphTreeProjectionTests: XCTestCase {
             "Two Paragraphs wrapping DIFFERENT xmlNodes with identical content MUST NOT be equal — id is the equality key")
     }
 }
+
+#endif
