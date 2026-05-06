@@ -8,6 +8,77 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.31.1] - 2026-05-07
+
+### Added — Phase 1 sibling typed views become tree projections
+
+Continues the tree-backed view refactor started in v0.31.0 (Spectra change
+`paragraph-tree-projection-impl`). Applies the same pattern to the remaining
+typed views in scope for `word-aligned-state-sync` Phase 1 tasks 2.2 + 2.3 +
+2.4 (Spectra change `sibling-types-tree-projection-impl`). Public API surface
+preserved as a strict superset — no rename, no signature change, no removal.
+
+#### What landed
+
+- `Run(xmlNode: XmlNode)` constructor + `run.id: String?` computed property +
+  mode-aware `text` getter (concatenates `<w:t>` direct children) and setter
+  (Phase 1 stub: replaces the `<w:t>` children with one new `<w:t>X</w:t>`,
+  preserving `<w:rPr>` / `<w:tab>` / `<w:br>` / `<w:drawing>` siblings; calls
+  `markDirty()`). `properties` is mode-aware computed (tree-backed returns
+  `RunProperties()` Phase 1 stub; `<w:rPr>` parsing arrives in Phase 2).
+- `Table(xmlNode:)`, `TableRow(xmlNode:)`, `TableCell(xmlNode:)` constructors
+  on all three structs in `Table.swift`. `id: String?` computed on each.
+  Tree-backed accessors: `Table.rows` walks `<w:tr>` children, `TableRow.cells`
+  walks `<w:tc>` children, `TableCell.paragraphs` walks `<w:p>` children
+  returning the v0.31.0 tree-backed `Paragraph(xmlNode:)`,
+  `TableCell.nestedTables` walks `<w:tbl>` children. Setters are Phase 1
+  ghost-writes to legacy buffers (Phase 2 op log will route them properly).
+- `SectionProperties(xmlNode:)` constructor + `id: String?` computed property.
+  **Phase 1 stub**: tree-backed mode is identity-only — the 12+ structured
+  fields (`pageSize`, `pageMargins`, `orientation`, `columns`, `docGrid`,
+  `headerReferences`, `footerReferences`, `lineNumbers`, `verticalAlignment`,
+  `pageNumberFormat`, `pageNumberStartValue`, `titlePageDistinct`,
+  `sectionBreakType`) remain as legacy stored properties. Reads return the
+  `SectionProperties()` defaults. Full tree-walking parsers for these fields
+  arrive in the follow-up change `section-properties-tree-walking-impl`.
+
+#### Changed — identity-based `Equatable` for all five sibling types
+
+Auto-synthesized `Equatable` replaced with mode-aware implementations matching
+the pattern in `Paragraph` (v0.31.0):
+
+- Both tree-backed → identity equality on the wrapped `xmlNode` (`===`)
+- Both detached → content equality across all legacy stored fields
+- Mixed (one tree-backed, one detached) → always `false`
+
+#### Tests
+
+- `RunTreeProjectionTests` — 8 tests pinning Run constructor, id derivation,
+  text concatenation, setter sibling-preservation + dirty flag, identity
+  equality, legacy detached compatibility.
+- `TableTreeProjectionTests` — 9 tests pinning all three Table constructors,
+  id derivation, tree-walking rows/cells/paragraphs, identity equality.
+- `SectionPropertiesTreeProjectionTests` — 5 tests pinning constructor, id
+  fallback, identity equality, **Phase 1 stub default-field behavior**,
+  legacy detached compatibility.
+- Total ooxml-swift: **950 tests pass**, 1 skipped (pre-existing `.note`
+  fixture skip), 0 failures (v0.31.0 baseline 928 + 22 new = 950).
+- Downstream regression gate: che-word-mcp **297 tests pass** / 9 skipped /
+  0 failures against v0.31.1.
+
+#### Out of scope (deferred follow-up changes)
+
+- `Settings` refactor (`word-aligned-state-sync` Phase 1 task 2.5) — no
+  `Settings` struct exists in the codebase; settings handling lives inside
+  `Document.swift`. Follow-up change `settings-extraction-impl` extracts the
+  struct first; then `settings-tree-projection-impl` applies the pattern.
+- Full SectionProperties tree-walking parsers (12+ structured fields) —
+  follow-up change `section-properties-tree-walking-impl`.
+- `DocxReader` rewiring to produce tree-backed values — task 2.6 of
+  `word-aligned-state-sync`, separate change.
+- Op-log routing on setters — Phase 2 of `word-aligned-state-sync`, target
+  ooxml-swift v0.32.0.
+
 ## [0.31.0] - 2026-05-07
 
 ### Added — Phase 1 (partial) of word-aligned-state-sync: tree-backed `Paragraph` view

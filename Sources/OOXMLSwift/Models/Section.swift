@@ -3,7 +3,25 @@ import Foundation
 // MARK: - Section Properties
 
 /// 分節屬性（頁面設定）
-public struct SectionProperties: Equatable {
+public struct SectionProperties {
+    /// v0.31.1+ (Spectra `sibling-types-tree-projection-impl`,
+    /// `word-aligned-state-sync` Phase 1 task 2.4): when non-nil, this
+    /// SectionProperties is a tree-backed view over the wrapped `<w:sectPr>`
+    /// element, used by the op log to address sections by identity.
+    ///
+    /// **Phase 1 stub (Decision 6)**: tree-backed mode is identity-only.
+    /// The 12+ structured fields below (`pageSize`, `pageMargins`, etc.)
+    /// remain as legacy stored properties; tree-backed mode does NOT
+    /// auto-populate them from `<w:sectPr>` children. Reading a structured
+    /// field on a tree-backed `SectionProperties` returns the same default
+    /// that `SectionProperties()` would give. A separate Spectra change
+    /// (`section-properties-tree-walking-impl`) will add full tree-walking
+    /// parsers for those fields.
+    ///
+    /// `XmlNode` is a class, so two value-copies of the same tree-backed
+    /// SectionProperties share the same underlying tree state.
+    public var xmlNode: XmlNode?
+
     public var pageSize: PageSize
     public var pageMargins: PageMargins
     public var orientation: PageOrientation
@@ -36,6 +54,92 @@ public struct SectionProperties: Equatable {
         self.footerReference = footerReference
         self.columns = columns
         self.docGrid = docGrid
+    }
+
+    /// v0.31.1+ Tree-backed initializer. Wraps an existing `<w:sectPr>` xmlNode
+    /// so the op log can address this section by identity.
+    ///
+    /// **Phase 1 stub (Decision 6)**: the 12+ structured fields are NOT parsed
+    /// from `<w:sectPr>` children — they are initialized to the same defaults
+    /// `SectionProperties()` produces. Callers that need full structured-field
+    /// access should continue to use Reader-produced detached values.
+    /// `section-properties-tree-walking-impl` (a follow-up Spectra change) will
+    /// add tree-walking parsers for those fields.
+    ///
+    /// Semantic validation (asserting the node is a `<w:sectPr>` element) is
+    /// left to callers; this initializer accepts any element xmlNode so unit
+    /// tests can synthesize fixtures without paying the schema-check cost.
+    public init(xmlNode: XmlNode) {
+        // Delegate to the no-arg convenience init so all 12+ structured fields
+        // pick up the same defaults a detached `SectionProperties()` would.
+        self.init()
+        self.xmlNode = xmlNode
+    }
+
+    /// v0.31.1+ Stable identifier for this section.
+    ///
+    /// - Tree-backed: returns `xmlNode.stableID` if any OOXML stable-ID attribute
+    ///   is present; otherwise falls back to `"lib:<UUID>"` when the reader
+    ///   assigned a library-generated UUID; otherwise `nil`.
+    /// - Detached (legacy): always returns `nil`.
+    ///
+    /// `<w:sectPr>` does not natively carry `w14:paraId` / `w:bookmarkId`; its
+    /// stable ID typically comes from the `lib:` UUID fallback per Decision 2.
+    public var id: String? {
+        guard let node = xmlNode else { return nil }
+        if let stable = node.stableID { return stable }
+        if let lib = node.libraryUUID { return "lib:\(lib.uuidString)" }
+        return nil
+    }
+}
+
+// MARK: - Equatable (mode-aware identity vs content)
+
+extension SectionProperties: Equatable {
+    /// v0.31.1+ Custom Equatable replacing auto-synthesized conformance per
+    /// `sibling-types-tree-projection-impl` Decision 5.
+    ///
+    /// Behavior depends on the storage mode of both sides:
+    ///
+    /// 1. **Both tree-backed**: identity equality on the wrapped `xmlNode`
+    ///    reference (`===`). Op-log addresses sections by id (== identity);
+    ///    content equality on different elements would silently merge log
+    ///    entries that target different sections.
+    /// 2. **Both detached**: content equality across the legacy stored fields,
+    ///    preserving pre-v0.31.1 auto-synthesized behavior the che-word-mcp
+    ///    test suite depends on.
+    /// 3. **Mixed (one tree-backed, one detached)**: always `false`. The two
+    ///    storage modes are not interchangeable; comparing across them is
+    ///    almost certainly a caller mistake worth surfacing.
+    public static func == (lhs: SectionProperties, rhs: SectionProperties) -> Bool {
+        switch (lhs.xmlNode, rhs.xmlNode) {
+        case let (a?, b?):
+            return a === b
+        case (nil, nil):
+            return contentEquals(lhs, rhs)
+        default:
+            return false
+        }
+    }
+
+    /// Detached-mode content equality across all legacy stored fields.
+    /// Mirrors what auto-synthesized `Equatable` would have compared.
+    private static func contentEquals(_ lhs: SectionProperties, _ rhs: SectionProperties) -> Bool {
+        return lhs.pageSize == rhs.pageSize
+            && lhs.pageMargins == rhs.pageMargins
+            && lhs.orientation == rhs.orientation
+            && lhs.headerReference == rhs.headerReference
+            && lhs.footerReference == rhs.footerReference
+            && lhs.columns == rhs.columns
+            && lhs.docGrid == rhs.docGrid
+            && lhs.headerReferences == rhs.headerReferences
+            && lhs.footerReferences == rhs.footerReferences
+            && lhs.lineNumbers == rhs.lineNumbers
+            && lhs.verticalAlignment == rhs.verticalAlignment
+            && lhs.pageNumberFormat == rhs.pageNumberFormat
+            && lhs.pageNumberStartValue == rhs.pageNumberStartValue
+            && lhs.titlePageDistinct == rhs.titlePageDistinct
+            && lhs.sectionBreakType == rhs.sectionBreakType
     }
 }
 
