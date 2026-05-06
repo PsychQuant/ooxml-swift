@@ -2,7 +2,21 @@ import Foundation
 
 /// 段落 (Paragraph) - Word 文件的基本結構單元
 public struct Paragraph: Equatable {
-    public var runs: [Run]
+    /// v0.31.0+ (Spectra `paragraph-tree-projection-impl`, `word-aligned-state-sync`
+    /// Phase 1 task 2.1): when non-nil, this Paragraph is a tree-backed view
+    /// over the wrapped `<w:p>` element. Getters walk `xmlNode.children` at
+    /// access time; setters mutate the tree directly (Phase 1 stub) and call
+    /// `xmlNode.markDirty()` so the writer re-serializes from typed fields.
+    /// When nil (legacy detached mode), getters/setters operate on the stored
+    /// properties below. `XmlNode` is a class, so two value-copies of the
+    /// same tree-backed Paragraph share the same underlying tree state.
+    public var xmlNode: XmlNode?
+
+    /// Legacy stored backing for `runs` used in detached mode.
+    /// In tree-backed mode the public `runs` accessor walks `xmlNode.children`
+    /// instead and this buffer is ignored. Renamed from the previous public
+    /// `runs` stored property in v0.31.0 (`paragraph-tree-projection-impl`).
+    internal var _legacyRuns: [Run] = []
     public var properties: ParagraphProperties
     public var hasPageBreak: Bool = false      // 是否為分頁符段落
     public var bookmarks: [Bookmark] = []      // 段落內的書籤
@@ -113,14 +127,122 @@ public struct Paragraph: Equatable {
     public var w14TextId: String?
 
     public init(runs: [Run] = [], properties: ParagraphProperties = ParagraphProperties()) {
-        self.runs = runs
+        self._legacyRuns = runs
         self.properties = properties
     }
 
     /// 便利初始化器：直接用文字建立段落
     public init(text: String, properties: ParagraphProperties = ParagraphProperties()) {
-        self.runs = [Run(text: text)]
+        self._legacyRuns = [Run(text: text)]
         self.properties = properties
+    }
+
+    /// v0.31.0+ Tree-backed initializer. Wraps an existing `<w:p>` xmlNode
+    /// so getters walk its children and setters mutate the tree directly.
+    ///
+    /// The legacy stored fields (`_legacyRuns`, `properties`, `bookmarks`, …)
+    /// are initialized to their empty defaults; in tree-backed mode they are
+    /// shadowed by computed accessors that read from `xmlNode.children`.
+    /// Callers MUST NOT rely on those stored fields when `xmlNode != nil`.
+    ///
+    /// Semantic validation (asserting the node is a `<w:p>` element) is left
+    /// to callers; this initializer accepts any element xmlNode so unit tests
+    /// can synthesize fixtures without paying the schema-check cost.
+    public init(xmlNode: XmlNode) {
+        self.xmlNode = xmlNode
+        self.properties = ParagraphProperties()
+    }
+
+    /// v0.31.0+ Mode-aware view of `<w:r>` runs.
+    ///
+    /// - Tree-backed: walks `xmlNode.children` at every access and returns one
+    ///   `Run` per `<w:r>` child in document order, with `text` populated by
+    ///   concatenating the `<w:t>` descendants. **Phase 1 stub:** the returned
+    ///   `Run` values are NOT themselves tree-backed — task 2.2 of
+    ///   `word-aligned-state-sync` adds `Run(xmlNode:)` and rewires this getter
+    ///   so further accessors propagate freshly. Existing tests only assert on
+    ///   `count`, so this stub is sufficient for Phase 1.
+    /// - Detached: returns the legacy stored buffer.
+    ///
+    /// Setter writes to `_legacyRuns` in both modes. In tree-backed mode the
+    /// write is a "ghost" buffer (not visible through the getter); proper
+    /// tree-mutating routing arrives with the op-log path in Phase 2.
+    public var runs: [Run] {
+        get {
+            guard let node = xmlNode else { return _legacyRuns }
+            return node.children.compactMap { child -> Run? in
+                guard child.kind == .element, child.localName == "r" else { return nil }
+                let text = Self.concatenatedText(in: child)
+                return Run(text: text)
+            }
+        }
+        set { _legacyRuns = newValue }
+    }
+
+    /// v0.31.0+ Mode-aware view of the paragraph's plain-text content.
+    ///
+    /// - Tree-backed getter: concatenates `textContent` of every `<w:t>`
+    ///   descendant inside each `<w:r>` child of the wrapped `<w:p>`, in
+    ///   document order. No caching — re-walks on every access.
+    /// - Detached getter: joins `_legacyRuns.map { $0.text }`.
+    ///
+    /// The setter is finalized in task 1.4 — see the dedicated implementation
+    /// below for the Phase 1 stub semantics (tree-mutating in tree-backed
+    /// mode, replace-runs in detached mode).
+    public var text: String {
+        get {
+            if let node = xmlNode {
+                return node.children
+                    .filter { $0.kind == .element && $0.localName == "r" }
+                    .map { Self.concatenatedText(in: $0) }
+                    .joined()
+            }
+            return _legacyRuns.map { $0.text }.joined()
+        }
+        set {
+            if let node = xmlNode {
+                let textNode = XmlNode.text(newValue)
+                let wt = XmlNode.element(prefix: "w", localName: "t", children: [textNode])
+                let wr = XmlNode.element(prefix: "w", localName: "r", children: [wt])
+                node.children = [wr]
+                node.markDirty()
+            } else {
+                _legacyRuns = [Run(text: newValue)]
+            }
+        }
+    }
+
+    /// Helper: concatenate every `<w:t>` descendant text inside a `<w:r>`
+    /// xmlNode (or any element whose subtree contains `<w:t>` text leaves).
+    /// Walks the immediate children only — `<w:r>` children are typically
+    /// `<w:t>`, `<w:rPr>`, `<w:tab>`, `<w:br>`, etc.
+    private static func concatenatedText(in runNode: XmlNode) -> String {
+        var out = ""
+        for child in runNode.children where child.kind == .element && child.localName == "t" {
+            for grand in child.children where grand.kind == .text {
+                out += grand.textContent
+            }
+        }
+        return out
+    }
+
+    /// v0.31.0+ Stable identifier for this paragraph.
+    ///
+    /// - Tree-backed: returns `xmlNode.stableID` if any OOXML stable-ID attribute
+    ///   is present (e.g. `"w14:paraId=0ABC1234"`); otherwise falls back to
+    ///   `"lib:<UUID>"` when the reader assigned a library-generated UUID;
+    ///   otherwise `nil`.
+    /// - Detached (legacy): always returns `nil`.
+    ///
+    /// Format note: `XmlNode.stableID` already prefixes with the attribute name
+    /// (e.g. `"w14:paraId=..."`), so we pass it through verbatim. Library
+    /// UUIDs get the `"lib:"` prefix here so consumers can distinguish them
+    /// from native OOXML stable IDs at the Paragraph layer.
+    public var id: String? {
+        guard let node = xmlNode else { return nil }
+        if let stable = node.stableID { return stable }
+        if let lib = node.libraryUUID { return "lib:\(lib.uuidString)" }
+        return nil
     }
 
     /// 取得段落純文字。
@@ -148,6 +270,69 @@ public struct Paragraph: Equatable {
     /// rather than relying on the legacy pre-#43 behavior.
     public func getText() -> String {
         return flattenedDisplayText()
+    }
+}
+
+// MARK: - Equatable (mode-aware identity vs content)
+
+extension Paragraph {
+    /// v0.31.0+ Custom Equatable replacing auto-synthesized conformance per
+    /// `paragraph-tree-projection-impl` Decision 5.
+    ///
+    /// Behavior depends on the storage mode of both sides:
+    ///
+    /// 1. **Both tree-backed**: identity equality on the wrapped `xmlNode`
+    ///    reference (`===`). Op-log addresses paragraphs by id (== identity);
+    ///    content equality on different elements would silently merge log
+    ///    entries that target different paragraphs.
+    /// 2. **Both detached**: content equality across the legacy stored fields,
+    ///    preserving pre-v0.31 auto-synthesized behavior the che-word-mcp
+    ///    test suite depends on.
+    /// 3. **Mixed (one tree-backed, one detached)**: always `false`. The two
+    ///    storage modes are not interchangeable; comparing across them is
+    ///    almost certainly a caller mistake worth surfacing.
+    public static func == (lhs: Paragraph, rhs: Paragraph) -> Bool {
+        switch (lhs.xmlNode, rhs.xmlNode) {
+        case let (a?, b?):
+            return a === b
+        case (nil, nil):
+            return contentEquals(lhs, rhs)
+        default:
+            return false
+        }
+    }
+
+    /// Detached-mode content equality across all legacy stored fields.
+    /// Mirrors what auto-synthesized `Equatable` would have compared.
+    /// `commentIds` is included for behavioral parity even though it is
+    /// deprecated (the existing warning is consistent with Document.swift's
+    /// other call sites; the field is slated for removal in v0.22).
+    private static func contentEquals(_ lhs: Paragraph, _ rhs: Paragraph) -> Bool {
+        return lhs._legacyRuns == rhs._legacyRuns
+            && lhs.properties == rhs.properties
+            && lhs.hasPageBreak == rhs.hasPageBreak
+            && lhs.bookmarks == rhs.bookmarks
+            && lhs.hyperlinks == rhs.hyperlinks
+            && lhs.commentIds == rhs.commentIds
+            && lhs.footnoteIds == rhs.footnoteIds
+            && lhs.endnoteIds == rhs.endnoteIds
+            && lhs.revisions == rhs.revisions
+            && lhs.semantic == rhs.semantic
+            && lhs.paragraphFormatChangeRevisionId == rhs.paragraphFormatChangeRevisionId
+            && lhs.previousProperties == rhs.previousProperties
+            && lhs.contentControls == rhs.contentControls
+            && lhs.bookmarkMarkers == rhs.bookmarkMarkers
+            && lhs.fieldSimples == rhs.fieldSimples
+            && lhs.alternateContents == rhs.alternateContents
+            && lhs.commentRangeMarkers == rhs.commentRangeMarkers
+            && lhs.permissionRangeMarkers == rhs.permissionRangeMarkers
+            && lhs.proofErrorMarkers == rhs.proofErrorMarkers
+            && lhs.smartTags == rhs.smartTags
+            && lhs.customXmlBlocks == rhs.customXmlBlocks
+            && lhs.bidiOverrides == rhs.bidiOverrides
+            && lhs.unrecognizedChildren == rhs.unrecognizedChildren
+            && lhs.w14ParaId == rhs.w14ParaId
+            && lhs.w14TextId == rhs.w14TextId
     }
 }
 

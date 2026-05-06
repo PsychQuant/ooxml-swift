@@ -8,6 +8,71 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-05-07
+
+### Added — Phase 1 (partial) of word-aligned-state-sync: tree-backed `Paragraph` view
+
+Tree-backed `Paragraph` view over the lossless `XmlNode` DOM landed in v0.30.0
+(Spectra change `paragraph-tree-projection-impl`, which is the production-code
+half of `word-aligned-state-sync` Phase 1 task 2.1). Public Paragraph API is
+preserved as a strict superset — no rename, no signature change, no removal.
+
+#### What landed
+
+- `Paragraph(xmlNode: XmlNode)` — new constructor. Wraps an existing `<w:p>`
+  xmlNode so getters walk the tree and setters mutate it directly. Co-exists
+  with the legacy `Paragraph(runs:, properties:)` constructor that produces
+  detached paragraphs (Reader still produces detached paragraphs in this
+  release; tree-backed paragraphs are opt-in for downstream library code).
+- `paragraph.id: String?` — new computed property. Returns `xmlNode.stableID`
+  (e.g. `"w14:paraId=0ABC1234"`) when the wrapped node has any OOXML stable
+  ID; falls back to `"lib:<UUID>"` when only `libraryUUID` is set; returns
+  `nil` for detached paragraphs.
+- `paragraph.text` — new computed property with mode-aware getter and setter.
+  Tree-backed getter concatenates `<w:t>` content from `<w:r>` children at
+  every access (no caching). Tree-backed setter (Phase 1 stub) replaces the
+  wrapped xmlNode's children with one new `<w:r><w:t>X</w:t></w:r>` element
+  and calls `markDirty()`. Detached mode replaces `_legacyRuns` with a
+  single `Run(text: …)`.
+- `paragraph.runs` — converted from stored to mode-aware computed. Tree-backed
+  getter returns one `Run` per `<w:r>` child; detached getter returns the
+  legacy stored buffer. Setter writes to the legacy buffer in both modes
+  (tree-backed setter is a "ghost write" until Phase 2's op-log routing).
+
+#### Changed — identity-based `Equatable` for tree-backed paragraphs
+
+Auto-synthesized `Equatable` replaced with a mode-aware implementation:
+- Both tree-backed → identity equality on the wrapped `xmlNode` reference (`===`).
+- Both detached → content equality across all legacy stored fields (preserves
+  pre-v0.31 auto-synthesized behavior che-word-mcp's 297 tests depend on).
+- Mixed (one tree-backed, one detached) → always `false`.
+
+#### Tests
+
+- `ParagraphTreeProjectionTests` — 9 tests exercising the new API surface
+  (constructor, id derivation, libraryUUID fallback, tree-walking getters,
+  tree-mutating setter, dirty-flag flip, identity equality). Originally landed
+  as a `#if false`-gated RED scaffold in commit `c97de51` (2026-05-06); this
+  release lifts the gate and the tests pass GREEN against the new
+  implementation.
+- Total ooxml-swift: **928 tests pass**, 1 skipped (pre-existing `.note`
+  fixture skip), 0 failures.
+- Downstream regression gate: che-word-mcp **297 tests pass**, 9 skipped, 0
+  failures — public Paragraph API surface is preserved byte-equivalent.
+
+#### Out of scope (deferred to sibling Phase 1 tasks)
+
+- `Run`, `Table`, `TableRow`, `TableCell`, `SectionProperties`, `Settings`
+  remain stored-property structs; `word-aligned-state-sync` Phase 1 tasks
+  2.2-2.5 refactor those siblings using the same pattern this change
+  establishes.
+- Reader continues to produce detached paragraphs. Tree-backed paragraphs
+  arrive when the Reader is rewired in a later Phase 1 task.
+- Phase 2 of `word-aligned-state-sync` (target ooxml-swift v0.32.0) replaces
+  the Phase 1 stub setter with op-log routing that preserves run formatting
+  via `setText` operations. Phase 1 explicitly accepts the destructive
+  behavior (formatting on existing runs is lost).
+
 ## [0.30.0] - 2026-05-05
 
 ### Added — Phase 0 of word-aligned-state-sync (`Tree/` module, internal-only)
