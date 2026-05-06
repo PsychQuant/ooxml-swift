@@ -1,0 +1,5 @@
+{"op":"DefineStyle","id":"titleBrown","font":"Noto Serif TC","fontSize":36,"color":"#663300","bold":true,"ts":1735689600}
+{"op":"InsertParagraph","id":"h1","style":"titleBrown","in":"main","at":0,"ts":1735689600}
+{"op":"SetRuns","id":"h1","runs":[{"text":"Title"}],"ts":1735689600}
+{"op":"InsertParagraph","id":"h2","style":"titleBrown","in":"main","at":1,"ts":1735689600}
+{"op":"SetRuns","id":"h2","runs":[{"text":"Subtitle"}],"ts":1735689600}

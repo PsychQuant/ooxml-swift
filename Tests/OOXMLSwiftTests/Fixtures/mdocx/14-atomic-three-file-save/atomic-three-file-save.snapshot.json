@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "snapshotTakenAt": "2026-01-01T00:00:00Z",
+  "tree": {
+    "kind": "element",
+    "prefix": "w",
+    "localName": "document",
+    "attributes": [
+      {"prefix": "xmlns", "localName": "w", "value": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"},
+      {"prefix": "xmlns", "localName": "w14", "value": "http://schemas.microsoft.com/office/word/2010/wordml"}
+    ],
+    "children": [
+      {
+        "kind": "element",
+        "prefix": "w",
+        "localName": "body",
+        "children": [
+          {
+            "kind": "element",
+            "prefix": "w",
+            "localName": "p",
+            "stableID": "main:p1",
+            "attributes": [{"prefix": "w14", "localName": "paraId", "value": "00000001"}],
+            "children": [
+              {
+                "kind": "element",
+                "prefix": "w",
+                "localName": "r",
+                "children": [
+                  {
+                    "kind": "element",
+                    "prefix": "w",
+                    "localName": "t",
+                    "attributes": [{"prefix": "xml", "localName": "space", "value": "preserve"}],
+                    "children": [{"kind": "text", "textContent": "Atomic save smoke content."}]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "element",
+            "prefix": "w",
+            "localName": "sectPr",
+            "children": [
+              {
+                "kind": "element",
+                "prefix": "w",
+                "localName": "pgSz",
+                "attributes": [
+                  {"prefix": "w", "localName": "w", "value": "12240"},
+                  {"prefix": "w", "localName": "h", "value": "15840"}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

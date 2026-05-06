@@ -90,9 +90,10 @@ final class MdocxFixtureCorpusTests: XCTestCase {
     private static let reverseSourceEligibleRequirements: Set<Int> = [15]
 
     /// Requirements that legitimately use `<slug>.oplog.jsonl`.
-    /// Per spec, Requirements 7 (component envelope) and 9 (define-on-first-use
-    /// ordering) constrain op-log shape.
-    private static let oplogEligibleRequirements: Set<Int> = [7, 9]
+    /// Per spec, Requirement 7 (component envelope), 9 (define-on-first-use
+    /// ordering), and 14 (atomic three-file save — the oplog is one of the
+    /// three files atomically written) constrain op-log shape.
+    private static let oplogEligibleRequirements: Set<Int> = [7, 9, 14]
 
     // MARK: - Fixture root resolution
 
