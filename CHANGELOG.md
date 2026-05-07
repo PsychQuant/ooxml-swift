@@ -8,6 +8,100 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.31.4] - 2026-05-07
+
+### Added — OperationReducer (Phase 2b — tasks 3.9-3.14)
+
+Phase 2b of `word-aligned-state-sync`: pure-replay reducer that consumes the
+v0.31.3 OpLog data structures and materializes `XmlTree` state by replaying
+log entries in source-array order. Spectra change `operation-reducer-impl`.
+Ships as v0.31.4 (additive minor patch); v0.32.0 GA tag waits for Phase 2c
+(`operation-log-setter-wiring-impl`) which wires typed-view setters to emit
+ops + adds sidecar persistence.
+
+**Zero public-API risk** — every new type lives in `Sources/OOXMLSwift/OpLog/`;
+the only modifications to existing v0.30.0 files are `internal`-visibility
+additions (`XmlNode.deepClone()` / `XmlTree.deepCopy()`).
+
+#### What landed
+
+- `OperationReducer` enum-namespace (`OpLog/OperationReducer.swift`) — five
+  `public static func` entry points:
+  - `materialize(log:base:) throws -> XmlTree` — pure function; replays every
+    `log.entries` on a deep-clone of `base`. Caller's tree is never mutated.
+  - `state(log:base:at:) throws -> XmlTree` — time-travel snapshot via the new
+    `ReplayPoint` enum (`.latest` / `.index(Int)` / `.timestamp(Date)`).
+  - `undo(_:log:base:) throws -> XmlTree` — replays the log with the targeted
+    op replaced by its inverse (Phase 2b inverse coverage: `setText` and
+    `setParagraphStyle` only; other ops throw `.cannotUndo`).
+  - `redo(_:log:base:) throws -> XmlTree` — replays the log, skipping the
+    `.undo` entry that references the target opID.
+  - `blame(elementID:log:) -> LogEntry?` — backwards walk; returns the most
+    recent entry whose op references the given ElementID.
+- `ReplayPoint` enum — `Equatable, Sendable` time-travel point. Cases:
+  `.latest` (replay all), `.index(Int)` (replay first N), `.timestamp(Date)`
+  (replay every entry with `timestamp <= cutoff`, in source-array order).
+  `.index(0)` returns base unchanged; `.index(log.entries.count)` is
+  equivalent to `.latest`; out-of-range index throws `.malformedOp`.
+- `ReducerError` typed error enum — four cases:
+  `.elementNotFound(opID:elementID:)`, `.malformedOp(opID:reason:)`,
+  `.cannotRedo(targetOpID:)`, `.cannotUndo(targetOpID:)`. The reducer never
+  swallows errors — every failure surfaces to the caller.
+- `OperationReducerCache` actor (`OpLog/OperationReducerCache.swift`) —
+  `public actor` exposing `materialize(log:base:) async throws -> XmlTree`.
+  Stores the last `(logLength, materializedTree)` pair keyed by
+  `ObjectIdentifier(base.root)`. On hit (`cached.logLength <= log.entries.count`),
+  replays only the tail (`log.entries[cached.logLength..<log.entries.count]`)
+  on a deep-clone of the cached tree. Implicit invalidation only — no public
+  `invalidate()` API. Process-local; disk-backed sidecar caching is a
+  Phase 2c concern.
+
+#### Changed — internal additions to v0.30.0 types
+
+- `XmlNode.deepClone() -> XmlNode` (internal extension in `Tree/XmlNode.swift`)
+  — recursive clone; copies attributes, libraryUUID, namespaceURI; sets
+  `sourceRange = nil` and `isDirty = true` on every cloned node (synthesized
+  nodes are dirty by definition per the v0.30.0 contract).
+- `XmlTree.deepCopy() -> XmlTree` (internal method on `Tree/XmlTree.swift`)
+  — pairs the deep-cloned root with the same `sourceBytes` (Data is value-
+  typed; safe to share).
+
+Both methods are `internal`-visibility additions; the public v0.30.0 API
+surface is unchanged.
+
+#### Apply scope (Phase 2b — narrow on purpose)
+
+The reducer's `apply` dispatch implements only `setText`, `setParagraphStyle`,
+`batchBegin/End` (no-op markers), `undo` (interpreted), and `unknown` (opaque
+no-op). Other op kinds throw `ReducerError.malformedOp` with reason
+`"Phase 2c implements this op"`. Phase 2c (`operation-log-setter-wiring-impl`)
+implements the remaining ops when its own typed-view setter wiring exercises
+them.
+
+#### Tests
+
+- New `Tests/OOXMLSwiftTests/OperationReducerTests.swift` — 13 XCTestCase
+  methods pinning the spec scenarios:
+  `testMaterialize_pureFunction`, `testMaterialize_doesNotMutateBase`,
+  `testMaterialize_appliesSetText`, `testState_indexZeroReturnsBaseUnchanged`,
+  `testState_indexEqualToCountIsLatest`, `testState_timestampFilters`,
+  `testState_outOfRangeIndexThrows`, `testUndo_setTextReverts`,
+  `testUndo_unsupportedOpThrows`, `testRedo_restoresOriginalOpEffect`,
+  `testBlame_returnsMostRecentTouchingOp`, `testCache_tailReplayOnHit`,
+  `testReducerError_elementNotFoundOnMissingTarget`. All GREEN from first
+  build.
+- Full ooxml-swift suite: 979 tests / 1 skipped (`.note` baseline) /
+  0 failures (v0.31.3 baseline was 966 → +13 new tests, no regressions).
+
+#### Out of scope (deferred)
+
+- Typed-view setter wiring (Paragraph/Run/Table setters emit ops automatically)
+  — Phase 2c, change `operation-log-setter-wiring-impl`.
+- Sidecar `<docx>.snapshot.json` persistence — Phase 2c.
+- Phase 2b apply scope expansion to insert/remove ops, table cell ops, run
+  format, bookmarks, comments — Phase 2c.
+- v0.32.0 GA tag — waits until `operation-log-setter-wiring-impl` archives.
+
 ## [0.31.3] - 2026-05-07
 
 ### Added — OpLog scaffold (Phase 2a — tasks 3.1-3.8)
