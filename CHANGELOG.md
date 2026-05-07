@@ -8,6 +8,85 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.31.3] - 2026-05-07
+
+### Added — OpLog scaffold (Phase 2a — tasks 3.1-3.8)
+
+Phase 2a of `word-aligned-state-sync`: data structures for the operation log
+that Phase 2b (reducer) and Phase 2c (typed-view setter wiring + sidecar
+persistence) build on. Spectra change `operation-log-scaffold-impl`. Ships
+as v0.31.3 (additive minor patch); v0.32.0 GA tag waits for the full Phase 2
+bundle (2a + 2b + 2c) to land.
+
+**Zero behavioral risk on existing surface** — every type added lives in a
+NEW module directory (`Sources/OOXMLSwift/OpLog/`) mirroring the existing
+`Tree/` layout. No existing source file is modified.
+
+#### What landed
+
+- `Operation` enum (`OpLog/Operation.swift`) — 21 cases covering the full
+  Phase 2 mutation surface: 16 element-level (insertParagraphAfter/Before,
+  removeParagraph, setText, setParagraphStyle, insertTable, removeTable,
+  setCellText, insertRun, setRunFormat, insertBookmark, insertComment, undo,
+  redo, batchBegin, batchEnd) + 4 tree-node-level fallback (insertNode,
+  removeNode, updateAttribute, moveNode) + 1 forward-compat fallback
+  (`unknown(opType:payload:)` preserves any unrecognized op_type byte-equal
+  through encode → decode → encode cycles).
+- Payload value types (`ParagraphPayload`, `TablePayload`, `RunPayload`,
+  `RunFormatPayload`) — minimal field sets needed by the typed-setter ops.
+  Future formatting fields are additive (decode-tolerance handles missing
+  fields).
+- `JSONValue` indirect enum — Equatable + Sendable + Codable representation
+  of arbitrary JSON, used as the `unknown` op's payload type. Preserves
+  forward-compat without resorting to `[String: Any]`.
+- `ElementID` value type (`OpLog/ElementID.swift`) — byte-aligned with
+  `XmlNode.stableID` format. Three initializers: `init?(node:)` walks the
+  priority chain (`w14:paraId` → `w:bookmarkId` → `w:id` → `r:id` →
+  `w14:textId` → `libraryUUID` → nil), `init(libraryUUID:)`, and
+  `init(rawString:)` for JSONL decoding.
+- `OperationLog` value type (`OpLog/OperationLog.swift`) — append-only via
+  `private(set) entries`, with `append(_:source:opID:at:)` and
+  `batch(_:label:_:)` mutating methods. The batch helper sandwiches body
+  appends in `batchBegin(label:)` / `batchEnd` markers; rollback is NOT a
+  data-structure concern (Phase 2b reducer territory).
+- `LogEntry` and `OpSource` (in `OperationLog.swift`) — per-entry metadata
+  carrying `opID: UUID` (v4), `source` (`.swift` / `.word`), and
+  `timestamp: Date`.
+- JSONL serialization (`OpLog/OperationLog+JSONL.swift`) —
+  `OperationLog.encodeJSONL() -> Data` / `decodeJSONL(_:) throws ->
+  OperationLog`. One JSON object per line, separated by Unix LF, with four
+  required discriminator fields (`op_id`, `ts`, `source`, `op_type`) in
+  fixed order, op-specific fields next in declaration order, and
+  unknown-op payload keys merged sorted lexicographically. Custom Codable
+  for `Operation` and `LogEntry` co-located here (auto-synth doesn't apply
+  to enums with associated-value cases).
+- `OperationLogJSONLError.malformedLine(lineIndex:)` — typed error thrown
+  when a line lacks any of the four required discriminator fields.
+
+#### Tests
+
+- `OperationLogTests` — 9 tests covering Operation case construction +
+  pattern match, ElementID derivation (paraId / libraryUUID / nil),
+  OperationLog append + batch, JSONL round-trip on known ops, JSONL
+  forward-compat on unknown op_type, and bonus malformed-line throws.
+- ooxml-swift suite: **966 tests pass** / 1 skipped (pre-existing `.note`
+  skip) / 0 failures (v0.31.2 baseline 957 + 9 new = 966).
+- Downstream regression gate: che-word-mcp **297 tests pass** / 9 skipped /
+  0 failures against v0.31.3 (zero risk; new module, no existing code
+  modified).
+
+#### Out of scope (deferred follow-up Spectra changes)
+
+- OperationReducer / replay / time-travel / undo-redo logic
+  (`word-aligned-state-sync` tasks 3.9-3.14) — follow-up
+  `operation-reducer-impl`.
+- Typed-view setter wiring to op log (task 3.15) — follow-up
+  `operation-log-setter-wiring-impl`.
+- Sidecar file management (`<docx>.oplog.jsonl` + `<docx>.snapshot.json`,
+  task 3.16) — same follow-up.
+- v0.32.0 GA tag (task 3.17) — waits for the Phase 2 bundle (2a + 2b + 2c)
+  to ship together.
+
 ## [0.31.2] - 2026-05-07
 
 ### Added — Reader xmlTrees + opt-in tree-backed wiring (Phase 1 task 2.6)
