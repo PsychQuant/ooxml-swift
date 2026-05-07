@@ -8,6 +8,78 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [0.31.2] - 2026-05-07
+
+### Added — Reader xmlTrees + opt-in tree-backed wiring (Phase 1 task 2.6)
+
+`DocxReader` now builds the lossless `XmlTree` for every primary OOXML part it
+loads, alongside the existing typed model. New opt-in mode wires body-level
+`Paragraph` and `Table` typed values to their corresponding `<w:p>` / `<w:tbl>`
+xmlNode so Phase 2's op log can address Reader-produced documents by
+`ElementID`. Spectra change `reader-tree-loading-impl`. Implements
+`word-aligned-state-sync` Phase 1 task 2.6.
+
+#### What landed
+
+- `WordDocument.xmlTrees: [String: XmlTree]` — public read-only stored property
+  keyed by OOXML part path. Internally settable so `DocxReader` populates it.
+- `WordDocument.partTree(at: String) -> XmlTree?` — convenience accessor.
+- `DocxReader.read(from: URL, wireTreeBackedViews: Bool = false)` — new
+  defaulted parameter. The existing `DocxReader.read(from: url)` call form
+  compiles unchanged.
+- xmlTrees population covers: `word/document.xml`, `word/styles.xml`,
+  `word/numbering.xml`, `word/settings.xml` (newly loaded — Reader did not
+  consume this part before this release), `word/comments.xml`,
+  `word/footnotes.xml`, `word/endnotes.xml`, every `word/header*.xml`, every
+  `word/footer*.xml`. Relationship parts (`*.rels`, `[Content_Types].xml`)
+  are intentionally out of scope.
+- When `wireTreeBackedViews: true`, after the typed model is constructed,
+  Reader walks the `<w:body>` direct children of the loaded document tree
+  and position-matches against `body.children`. Each body-level Paragraph and
+  Table gets `xmlNode` set to its source-position-matched element. Nested
+  structure (cells, runs) auto-propagates via the v0.31.1 mode-aware computed
+  accessors at access time — no additional Reader-side wiring needed.
+
+#### Default behavior preserved
+
+`DocxReader.read(from: url)` (no `wireTreeBackedViews:` argument) keeps every
+Reader-produced typed value detached, byte-equivalent to v0.31.1. che-word-mcp
+call sites (which do not pass the new parameter) hit this default-mode path,
+so the 297-test regression gate continues to validate that `xmlTrees`
+population does not leak into observable behavior.
+
+#### Updated `WordDocument.Equatable` doc comment
+
+The existing manual `WordDocument` `==` already used inclusion-list semantics
+(implicitly excluding `preservedArchive` and `modifiedParts`). The doc comment
+is updated to call out that `xmlTrees` is also intentionally excluded.
+
+#### Tests
+
+- `ReaderTreeLoadingTests` — 7 tests pinning xmlTrees population, partTree
+  accessor behavior, WordDocument equality ignoring xmlTrees, default-mode
+  detached-typed-view preservation, and opt-in wireTreeBackedViews behavior
+  for body Paragraphs and body Tables.
+- Total ooxml-swift: **957 tests pass**, 1 skipped (pre-existing `.note`
+  fixture skip), 0 failures (v0.31.1 baseline 950 + 7 new = 957).
+- Downstream regression gate: che-word-mcp **297 tests pass** / 9 skipped /
+  0 failures against v0.31.2.
+
+#### Out of scope (deferred follow-up changes)
+
+- Wiring nested typed views in Reader — propagates from body-level wiring via
+  v0.31.1 mode-aware computed accessors (no Reader-side code needed).
+- Wiring header / footer / footnote / endnote / comment typed values to
+  their xmlNodes — separate follow-up `header-footer-tree-wiring-impl`.
+- `customXml/*.xml` parts in `xmlTrees` — separate follow-up if needed.
+- Replacing legacy `XMLDocument` parser path with tree-walking — Phase 5 of
+  `word-aligned-state-sync` (target ooxml-swift v1.0.0).
+- Op-log routing on Reader-produced typed views — Phase 2 of
+  `word-aligned-state-sync` (target ooxml-swift v0.32.0).
+- Per-parser unknown-child preservation (`word-aligned-state-sync` task 2.7)
+  and revision tree round-trip (tasks 2.8-2.10) — separate follow-ups
+  `reader-unknown-child-coverage-impl` and `reader-revision-tree-impl`.
+
 ## [0.31.1] - 2026-05-07
 
 ### Added — Phase 1 sibling typed views become tree projections
