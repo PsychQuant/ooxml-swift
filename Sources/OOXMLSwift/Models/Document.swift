@@ -76,6 +76,23 @@ public struct WordDocument: Equatable {
     /// built-in styles not yet materialized as `<w:style>` blocks.
     public var latentStyles: [LatentStyle] = []
 
+    /// v0.31.2+ (Spectra `reader-tree-loading-impl`, `word-aligned-state-sync`
+    /// Phase 1 task 2.6): lossless `XmlTree` per OOXML part loaded by `DocxReader`.
+    /// Keyed by OOXML part path (e.g., `"word/document.xml"`, `"word/styles.xml"`).
+    /// Populated by Reader for every primary part it loads (relationship parts
+    /// `*.rels` and metadata `[Content_Types].xml` are out of scope and remain
+    /// handled by the existing `RelationshipsCollection` parser).
+    /// Excluded from `Equatable` (the manual `==` below ignores fields not in
+    /// its inclusion list) so two reads of the same source docx still compare
+    /// equal despite distinct `XmlTree` class instances.
+    public internal(set) var xmlTrees: [String: XmlTree] = [:]
+
+    /// v0.31.2+ Convenience accessor returning `xmlTrees[partPath]`.
+    /// Returns `nil` for any path not present in `xmlTrees`.
+    public func partTree(at partPath: String) -> XmlTree? {
+        return xmlTrees[partPath]
+    }
+
     /// v0.17.0+ (#51): document-level setting for `<w:evenAndOddHeaders/>` in
     /// settings.xml — when true, headers/footers of type `even` apply to even pages.
     public var evenAndOddHeaders: Bool = false
@@ -124,8 +141,11 @@ public struct WordDocument: Equatable {
         preservedArchive = nil
     }
 
-    /// Manual Equatable conformance excluding `preservedArchive`.
-    /// See doc comment on `preservedArchive` for rationale.
+    /// Manual Equatable conformance using inclusion-list semantics — only the
+    /// fields explicitly listed below participate in equality. Per-instance
+    /// round-trip state fields (`preservedArchive`, `modifiedParts`, `xmlTrees`)
+    /// are intentionally OMITTED so two reads of the same source docx still
+    /// compare equal even though their tempDirs and tree-class-instances differ.
     public static func == (lhs: WordDocument, rhs: WordDocument) -> Bool {
         return lhs.body == rhs.body
             && lhs.styles == rhs.styles

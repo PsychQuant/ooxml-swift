@@ -113,7 +113,16 @@ public struct DocxReader {
     }
 
     /// 讀取 .docx 檔案並解析為 WordDocument
-    public static func read(from url: URL) throws -> WordDocument {
+    ///
+    /// - Parameter url: source `.docx` URL
+    /// - Parameter wireTreeBackedViews: when `true`, after the typed model is
+    ///   constructed, body-level Paragraph and Table values in `body.children`
+    ///   are wired to their corresponding `<w:p>` / `<w:tbl>` `XmlNode` from
+    ///   `xmlTrees["word/document.xml"]`. Default `false` preserves the
+    ///   v0.31.1 detached-typed-view contract — every Reader-produced typed
+    ///   value has `xmlNode == nil`. Opt-in to `true` when downstream code
+    ///   needs `paragraph.id` / `table.id` for op-log addressing (Phase 2).
+    public static func read(from url: URL, wireTreeBackedViews: Bool = false) throws -> WordDocument {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw WordError.fileNotFound(url.path)
         }
@@ -151,6 +160,11 @@ public struct DocxReader {
         // 5. 讀取 styles.xml（先解析，用於語義標註）
         var document = WordDocument()
 
+        // v0.31.2+ (Spectra `reader-tree-loading-impl`): build the lossless
+        // XmlTree alongside the typed model so downstream code can address
+        // elements by ElementID via the op log (Phase 2 of word-aligned-state-sync).
+        document.xmlTrees["word/document.xml"] = try XmlTreeReader.parse(documentData)
+
         // 5a. v0.19.0+ (PsychQuant/che-word-mcp#56): preserve every attribute
         // (xmlns:* declarations, mc:Ignorable, anything else) on the source
         // <w:document> root so DocxWriter can rebuild the open tag verbatim
@@ -172,6 +186,7 @@ public struct DocxReader {
             let stylesXML = try XMLDocument(data: stylesData)
             document.styles = try parseStyles(from: stylesXML)
             document.latentStyles = parseLatentStyles(from: stylesXML)
+            document.xmlTrees["word/styles.xml"] = try XmlTreeReader.parse(stylesData)
         }
 
         // 6. 讀取 numbering.xml（可選，用於清單語義標註）
@@ -181,6 +196,19 @@ public struct DocxReader {
             try Self.rejectDTD(numberingData, part: "word/numbering.xml")
             let numberingXML = try XMLDocument(data: numberingData)
             document.numbering = try parseNumbering(from: numberingXML)
+            document.xmlTrees["word/numbering.xml"] = try XmlTreeReader.parse(numberingData)
+        }
+
+        // v0.31.2+ Settings.xml — Reader does not currently consume this part
+        // for the typed model (Settings handling is inlined in Document mutation
+        // helpers), but the spec requires loading it into xmlTrees so Phase 2's
+        // op log can address settings elements by id. Pure xmlTrees population
+        // path; no typed model side effect.
+        let settingsURL = tempDir.appendingPathComponent("word/settings.xml")
+        if FileManager.default.fileExists(atPath: settingsURL.path) {
+            let settingsData = try Data(contentsOf: settingsURL)
+            try Self.rejectDTD(settingsData, part: "word/settings.xml")
+            document.xmlTrees["word/settings.xml"] = try XmlTreeReader.parse(settingsData)
         }
 
         // 7. 解析文件內容（傳入 styles 和 numbering 用於語義標註）
@@ -228,6 +256,7 @@ public struct DocxReader {
             let headerData = try Data(contentsOf: headerURL)
             try Self.rejectDTD(headerData, part: "word/\(rel.target)")
             let headerXML = try XMLDocument(data: headerData)
+            document.xmlTrees["word/\(rel.target)"] = try XmlTreeReader.parse(headerData)
             // v0.19.5+ (#56 R5-CONT P1 #8): load per-container rels
             // (`word/_rels/header*.xml.rels`) and merge with document-scope
             // rels so hyperlinks inside the header resolve their URLs via
@@ -285,6 +314,7 @@ public struct DocxReader {
             let footerData = try Data(contentsOf: footerURL)
             try Self.rejectDTD(footerData, part: "word/\(rel.target)")
             let footerXML = try XMLDocument(data: footerData)
+            document.xmlTrees["word/\(rel.target)"] = try XmlTreeReader.parse(footerData)
             // v0.19.5+ (#56 R5-CONT P1 #8): per-container rels — see header parse.
             // Container rels prepended for first-match correctness.
             let footerRelsURL = tempDir
@@ -316,6 +346,7 @@ public struct DocxReader {
             let footnotesData = try Data(contentsOf: footnotesURL)
             try Self.rejectDTD(footnotesData, part: "word/footnotes.xml")
             let footnotesXML = try XMLDocument(data: footnotesData)
+            document.xmlTrees["word/footnotes.xml"] = try XmlTreeReader.parse(footnotesData)
             // v0.19.5+ (#56 R5-CONT P1 #8): per-collection rels for the
             // footnotes part. See header parse comment for full rationale.
             let footnotesRels = try Self.parseRelationshipsFile(
@@ -369,6 +400,7 @@ public struct DocxReader {
             let endnotesData = try Data(contentsOf: endnotesURL)
             try Self.rejectDTD(endnotesData, part: "word/endnotes.xml")
             let endnotesXML = try XMLDocument(data: endnotesData)
+            document.xmlTrees["word/endnotes.xml"] = try XmlTreeReader.parse(endnotesData)
             // v0.19.5+ (#56 R5-CONT P1 #8): per-collection rels for endnotes.
             let endnotesRels = try Self.parseRelationshipsFile(
                 at: tempDir.appendingPathComponent("word/_rels/endnotes.xml.rels")
@@ -431,6 +463,7 @@ public struct DocxReader {
             document.comments = try Self.withWhitespaceContext(commentsWsContext) {
                 try parseComments(from: commentsXML)
             }
+            document.xmlTrees["word/comments.xml"] = try XmlTreeReader.parse(commentsData)
         }
 
         // 9. Link comment paragraphIndex from paragraph commentRangeMarkers
@@ -598,6 +631,51 @@ public struct DocxReader {
         // until process exit; macOS reclaims `/tmp` on reboot).
         document.preservedArchive = PreservedArchive(tempDir: tempDir)
         transferOwnership = true
+
+        // v0.31.2+ (Spectra `reader-tree-loading-impl` task 1.3): opt-in
+        // body-level wiring of typed Paragraph / Table values to their
+        // corresponding `<w:p>` / `<w:tbl>` xmlNode. Walks `<w:body>` direct
+        // children of the loaded document tree and position-matches against
+        // `body.children`. Unknown `<w:body>` children (e.g., `<w:sectPr>`,
+        // unexpected revision wrappers) are skipped without advancing the
+        // cursor — the existing parser produces `body.children` entries only
+        // for `<w:p>` and `<w:tbl>` so the cursor stays in sync.
+        if wireTreeBackedViews, let docTree = document.xmlTrees["word/document.xml"] {
+            let bodyNode = docTree.root.children.first {
+                $0.kind == .element && $0.localName == "body"
+            }
+            if let bodyNode = bodyNode {
+                var cursor = 0
+                for child in bodyNode.children where child.kind == .element {
+                    switch child.localName {
+                    case "p":
+                        if cursor < document.body.children.count,
+                           case .paragraph(var p) = document.body.children[cursor] {
+                            p.xmlNode = child
+                            document.body.children[cursor] = .paragraph(p)
+                            cursor += 1
+                        } else if cursor < document.body.children.count {
+                            cursor += 1
+                        }
+                    case "tbl":
+                        if cursor < document.body.children.count,
+                           case .table(var t) = document.body.children[cursor] {
+                            t.xmlNode = child
+                            document.body.children[cursor] = .table(t)
+                            cursor += 1
+                        } else if cursor < document.body.children.count {
+                            cursor += 1
+                        }
+                    default:
+                        // sectPr / unknown element kinds: not represented in
+                        // body.children; skip without advancing cursor so the
+                        // next <w:p> / <w:tbl> still matches the next typed
+                        // entry.
+                        continue
+                    }
+                }
+            }
+        }
 
         // v0.13.0+: clear modifiedParts to empty as the final step before returning.
         // Guarantees freshly loaded documents start with `modifiedParts.isEmpty == true`,
