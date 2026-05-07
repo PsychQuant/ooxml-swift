@@ -275,6 +275,59 @@ public final class XmlNode {
     }
 }
 
+// MARK: - Deep clone (v0.31.4+)
+//
+// `deepClone()` recursively constructs a new XmlNode tree with no shared
+// class identity to the source. Used by `OperationReducer` (Phase 2b of
+// `word-aligned-state-sync`) to ensure the reducer's pure-function
+// contract — `materialize(log:base:)` operates on a clone of `base` so
+// the caller's tree is never mutated as a side effect.
+//
+// Cloning rules:
+// - Children are deep-cloned recursively.
+// - Attributes are copied (XmlAttribute is a value type; array copy gives
+//   a fresh attribute array independent of the source).
+// - `libraryUUID` is copied by value (UUID is value type).
+// - `sourceRange` is set to `nil` and `isDirty` is `true` on every node in
+//   the clone (synthesized nodes are by definition dirty per the v0.30.0
+//   contract — they have no source bytes the writer can copy verbatim).
+// - `namespaceURI` is copied (derived metadata; doesn't mark dirty per
+//   existing contract).
+
+extension XmlNode {
+    internal func deepClone() -> XmlNode {
+        switch kind {
+        case .element:
+            let cloned = XmlNode.element(
+                prefix: prefix,
+                localName: localName,
+                namespaceURI: namespaceURI,
+                attributes: attributes,
+                children: children.map { $0.deepClone() },
+                sourceRange: nil
+            )
+            cloned.libraryUUID = libraryUUID
+            return cloned
+        case .text:
+            let cloned = XmlNode.text(textContent, sourceRange: nil)
+            cloned.libraryUUID = libraryUUID
+            return cloned
+        case .comment:
+            let cloned = XmlNode.comment(textContent, sourceRange: nil)
+            cloned.libraryUUID = libraryUUID
+            return cloned
+        case .processingInstruction:
+            let cloned = XmlNode.processingInstruction(
+                target: processingInstructionTarget,
+                data: textContent,
+                sourceRange: nil
+            )
+            cloned.libraryUUID = libraryUUID
+            return cloned
+        }
+    }
+}
+
 // MARK: - Equatable / Hashable by identity
 
 extension XmlNode: Equatable {

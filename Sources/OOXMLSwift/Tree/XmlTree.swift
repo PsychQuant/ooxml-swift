@@ -33,4 +33,14 @@ public struct XmlTree {
     public static func synthesized(root: XmlNode) -> XmlTree {
         XmlTree(root: root, sourceBytes: Data())
     }
+
+    /// v0.31.4+ Deep-clone this tree by recursively cloning every XmlNode
+    /// in the tree so the result shares no class identity with the source.
+    /// `sourceBytes` is preserved by value (Data is value-typed). Used by
+    /// `OperationReducer` (Phase 2b of `word-aligned-state-sync`) to ensure
+    /// pure-function semantics — the reducer mutates the clone, never the
+    /// caller's input.
+    internal func deepCopy() -> XmlTree {
+        return XmlTree(root: root.deepClone(), sourceBytes: sourceBytes)
+    }
 }
