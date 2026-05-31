@@ -61,39 +61,54 @@ extension WordDocument {
             newOps.append(contentsOf: ops)
         }
 
-        // 2. Build accumulated log = old log + new ops
+        // 2. Generate stable opIDs ONCE — shared between persisted log and
+        //    per-op materialization log. Critical for replay determinism:
+        //    the Reducer derives new-node libraryUUIDs from entry.opID (per
+        //    Phase 2c convention), so if newLog and the materialize log used
+        //    DIFFERENT opIDs, re-materializing the persisted log would
+        //    produce different IDs than the freshly-applied tree.
+        let opIDs: [UUID] = newOps.map { _ in UUID() }
+
+        // 3. Build accumulated log = old log + new ops (with shared opIDs).
         //    OperationLog enforces append-only semantics; we copy + extend.
         var newLog = self.operationLog
-        for op in newOps {
-            newLog.append(op, source: .swift)
+        for (op, opID) in zip(newOps, opIDs) {
+            newLog.append(op, source: .swift, opID: opID)
         }
 
-        // 3. Materialize affected XmlTrees from current trees + new ops
+        // 4. Materialize ops per-part: each op is replayed only against the
+        //    part its target lives in.
         //
-        //    Strategy: build a temp log containing ONLY the new ops, then
-        //    replay against current trees. The persistent log (newLog above)
-        //    accumulates full history for audit/JSONL export; the temp log
-        //    is the materialize input for incremental update.
+        //    Per-op rather than per-part-batched because subsequent ops may
+        //    reference nodes created by earlier ops (Phase 2c determinism:
+        //    new node's libraryUUID == entry.opID). The chain works because
+        //    newTrees is mutated in place after each op, so the next op's
+        //    partContaining lookup sees the in-flight state.
         //
-        //    Alternative considered: replay full newLog against original
-        //    base trees. Rejected — WordDocument doesn't retain base trees
-        //    after first apply, so this would require an additional field.
-        var tempLog = OperationLog()
-        for op in newOps {
-            tempLog.append(op, source: .swift)
-        }
-
+        //    macdoc#110 fix: replaces the §2 scaffold's "apply tempLog to
+        //    every tree" pattern which threw elementNotFound on parts that
+        //    didn't contain the op's target.
         var newTrees = self.xmlTrees
-        // For §2 scaffold simplicity: materialize ALL trees against tempLog.
-        // OperationReducer.materialize is a no-op for trees that no operation
-        // touches (the reducer's per-op apply skips unaffected nodes).
-        // Performance follow-up (§10.2 benchmark) will introduce per-part
-        // selective replay if needed.
-        for (partPath, currentTree) in newTrees {
+        for (op, opID) in zip(newOps, opIDs) {
+            guard let partPath = OperationReducer.partContaining(op: op, in: newTrees) else {
+                // No part contains the op's target. Surface as
+                // operationLogFailure (PHASED #4 — upfront pathNotFound
+                // validation lands later).
+                throw EditError.operationLogFailure(
+                    underlying: "No XmlTree part contains any ElementID referenced by op: \(op)"
+                )
+            }
+
+            // Build a single-op log carrying the SHARED opID. The Reducer
+            // sees entry.opID == opID, so the new node's libraryUUID derives
+            // from the same UUID that's persisted in newLog above.
+            var singleOpLog = OperationLog()
+            singleOpLog.append(op, source: .swift, opID: opID)
+
             do {
                 let materialized = try OperationReducer.materialize(
-                    log: tempLog,
-                    base: currentTree
+                    log: singleOpLog,
+                    base: newTrees[partPath]!
                 )
                 newTrees[partPath] = materialized
             } catch {
@@ -103,9 +118,9 @@ extension WordDocument {
             }
         }
 
-        // 4. Construct new WordDocument with updated log + trees
+        // 5. Construct new WordDocument with updated log + trees.
         //    Typed views (body/styles/etc.) carried over from self — STALE
-        //    relative to new xmlTrees. See limitation comment above.
+        //    relative to new xmlTrees. Resync tracked in macdoc#110.
         var newDocument = self
         newDocument.operationLog = newLog
         newDocument.xmlTrees = newTrees
