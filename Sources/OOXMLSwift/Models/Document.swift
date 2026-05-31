@@ -15,6 +15,23 @@ public struct WordDocument: Equatable {
     public var revisions: RevisionsCollection = RevisionsCollection() // 修訂集合
     public var footnotes: FootnotesCollection = FootnotesCollection() // 腳註集合
     public var endnotes: EndnotesCollection = EndnotesCollection()    // 尾註集合
+
+    /// Append-only edit log (Phase 2 of PsychQuant/macdoc#99 architectural foundation).
+    ///
+    /// Set by `WordDocument.apply(_ edit:)` — each Edit's emitted Operations
+    /// are appended here before being materialized into `xmlTrees` via
+    /// `OperationReducer.materialize`. Sidecar persistence happens via
+    /// `OperationLog+JSONL` (out of WordDocument's scope).
+    ///
+    /// **Excluded from Equatable** by the custom `==` impl below — two
+    /// WordDocuments are "content-equal" iff their typed fields are equal;
+    /// edit-history equality is a separate concept (compare logs explicitly
+    /// via `doc1.operationLog == doc2.operationLog` when needed).
+    ///
+    /// Initial value is empty `OperationLog()` — DocxReader doesn't seed
+    /// log entries (the log starts when callers begin invoking `apply`).
+    public var operationLog: OperationLog = OperationLog()
+
     internal var nextBookmarkId: Int = 1       // 書籤 ID 計數器
     private var nextHyperlinkId: Int = 1      // 超連結 ID 計數器
 
