@@ -210,8 +210,19 @@ public enum OperationReducer {
             // Should not reach here — undo is interpreted in applyOrInterpret.
             return
 
-        // Phase 2b unsupported op kinds — Phase 2c implements these.
-        case .insertParagraphAfter, .insertParagraphBefore, .removeParagraph,
+        case .insertParagraphAfter(let after, let payload):
+            // Find target + parent + position.
+            guard let (parent, idx) = findParentAndIndex(targetID: after, in: tree.root) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: after)
+            }
+            let newP = makeParagraph(text: payload.text, styleId: payload.styleId)
+            // Deterministic ID derivation: new paragraph's libraryUUID == entry.opID.
+            // This makes log replay produce the same tree every time.
+            newP.libraryUUID = entry.opID
+            parent.children.insert(newP, at: idx + 1)
+
+        // Phase 2b unsupported op kinds — Phase 2c implements these incrementally.
+        case .insertParagraphBefore, .removeParagraph,
              .insertTable, .removeTable, .setCellText,
              .insertRun, .setRunFormat,
              .insertBookmark, .insertComment,
@@ -222,6 +233,55 @@ public enum OperationReducer {
                 reason: "Phase 2c implements this op"
             )
         }
+    }
+
+    // MARK: - Phase 2c helpers
+
+    /// Walks the tree from `root` looking for a node whose ElementID matches
+    /// `targetID`. Returns the target's parent and its index in
+    /// `parent.children`. Returns `nil` if target not found.
+    ///
+    /// Root cannot be the target (root has no parent) — if `targetID` matches
+    /// `root` itself, returns nil. That's a limitation: ops can't target the
+    /// document root, only nested elements (which is fine for OOXML — body
+    /// children and below are the only meaningful targets).
+    internal static func findParentAndIndex(
+        targetID: ElementID,
+        in root: XmlNode
+    ) -> (XmlNode, Int)? {
+        for (idx, child) in root.children.enumerated() {
+            if let id = ElementID(node: child), id == targetID {
+                return (root, idx)
+            }
+            if let found = findParentAndIndex(targetID: targetID, in: child) {
+                return found
+            }
+        }
+        return nil
+    }
+
+    /// Constructs a fresh `<w:p>` element with one `<w:r><w:t>text</w:t></w:r>`
+    /// child run. Optional `<w:pPr><w:pStyle w:val="styleId"/></w:pPr>` is
+    /// prepended when `styleId` is non-nil and non-empty.
+    ///
+    /// The returned paragraph has NO libraryUUID — caller is responsible for
+    /// assigning one (typically `entry.opID` for deterministic-replay).
+    /// Child Run is anonymous (no libraryUUID) — future Operations addressing
+    /// the run must use path-based addressing (entry.opID + child path index).
+    internal static func makeParagraph(text: String, styleId: String?) -> XmlNode {
+        let textNode = XmlNode.text(text)
+        let wt = XmlNode.element(prefix: "w", localName: "t", children: [textNode])
+        let wr = XmlNode.element(prefix: "w", localName: "r", children: [wt])
+
+        var children: [XmlNode] = []
+        if let styleId = styleId, !styleId.isEmpty {
+            let pStyle = XmlNode.element(prefix: "w", localName: "pStyle")
+            pStyle.setAttribute(prefix: "w", localName: "val", value: styleId)
+            let pPr = XmlNode.element(prefix: "w", localName: "pPr", children: [pStyle])
+            children.append(pPr)
+        }
+        children.append(wr)
+        return XmlNode.element(prefix: "w", localName: "p", children: children)
     }
 
     /// Applies the INVERSE of an entry's op (used by `undo` and by `.undo`
