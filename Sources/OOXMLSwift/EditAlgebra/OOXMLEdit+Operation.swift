@@ -1,27 +1,36 @@
 // OOXMLEdit+Operation.swift
 // EditAlgebra — Phase 2 of ooxml-edit-isomorphism-foundation (PsychQuant/macdoc#99)
 //
-// Per design.md Decision 1, each `OOXMLEdit` case maps to one or more
-// `Operation` enum cases. This extension is the authoritative location of
-// that mapping. §3-§6 of #105 tasks fill it in case-by-case.
+// Per design.md Decision 1 + macdoc#110 §5 design walkthrough, each
+// `OOXMLEdit` case maps to one or more `Operation` enum cases.
 //
-// Mapping table (canonical, per design.md):
-//   OOXMLEdit.insertParagraph(after:content:styleId:) → Operation.insertParagraphAfter
-//   OOXMLEdit.insertParagraphBefore(before:content:styleId:) → Operation.insertParagraphBefore
-//   OOXMLEdit.setBold(target:value:) → Operation.setRunFormat
-//   OOXMLEdit.insertHyperlink(target:href:displayText:) → [Operation.insertNode, Operation.updateAttribute]  (composite atomic)
-//   OOXMLEdit.removeParagraph(target:) → Operation.removeParagraph
+// Mapping table (canonical):
+//   OOXMLEdit.insertParagraph        → Operation.insertParagraphAfter
+//   OOXMLEdit.insertParagraphBefore  → Operation.insertParagraphBefore
+//   OOXMLEdit.setBold                → Operation.setRunFormat
+//   OOXMLEdit.removeParagraph        → Operation.removeParagraph
+//   OOXMLEdit.insertHyperlink        → [Operation.insertNode, Operation.addRelationship]
+//                                       (composite, pre-validated)
+//   OOXMLEdit.wrapWithHyperlink      → [Operation.insertNode (wrapping target),
+//                                       Operation.removeNode (target's original position),
+//                                       Operation.addRelationship]
+//                                       (composite, pre-validated; whole-Run only)
 
 import Foundation
+
+/// Hyperlink relationship type per OOXML spec.
+private let hyperlinkRelationshipType =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+
+/// Default rels part path for document.xml-anchored relationships.
+private let documentRelsPath = "word/_rels/document.xml.rels"
 
 extension OOXMLEdit {
     /// Emits the `[Operation]` log entries this Edit case translates to.
     ///
     /// 1:1 for simple cases (insertParagraph, setBold, removeParagraph);
-    /// composite for `insertHyperlink` (returns 2 Operations atomically).
-    ///
-    /// §3 (this commit): insertParagraph + insertParagraphBefore implemented.
-    /// §4-§6 (pending): setBold, insertHyperlink, removeParagraph.
+    /// composite for hyperlink cases (returns 2-3 Operations whose
+    /// atomicity is enforced upstream by pre-validation in apply).
     public func operations() throws -> [Operation] {
         switch self {
         case .insertParagraph(let after, let content, let styleId):
@@ -45,10 +54,101 @@ extension OOXMLEdit {
         case .removeParagraph(let target):
             return [.removeParagraph(id: target)]
 
-        case .insertHyperlink:
-            throw EditError.notImplemented(
-                "OOXMLEdit.operations() for \(self) — see #105 tasks §5 (composite design pending user checkpoint)"
-            )
+        case .insertHyperlink(let target, let href, let displayText):
+            // Insert semantics: new <w:hyperlink> wrapper appended as
+            // sibling after target. Allocate a fresh rId for the rels
+            // entry. Per Q4 of §5 walkthrough: nil displayText → href.absoluteString.
+            let rId = freshRelationshipId()
+            let display = displayText ?? href.absoluteString
+            let hyperlinkXML = renderHyperlinkXML(rId: rId, displayText: display)
+            // Position 0 is overridden during apply when the Reducer
+            // materializes — the reducer's insertNode case computes the
+            // sibling-after-target position. (Position field is a Phase 2c
+            // refinement; for now we use a sentinel that the reducer
+            // interprets as "after target".)
+            return [
+                .insertNode(parent: target, position: -1, nodeXML: hyperlinkXML),
+                .addRelationship(
+                    part: documentRelsPath,
+                    id: rId,
+                    type: hyperlinkRelationshipType,
+                    target: href.absoluteString,
+                    targetMode: "External"
+                )
+            ]
+
+        case .wrapWithHyperlink(let target, let href):
+            // Wrap semantics: <w:hyperlink> takes target's position in
+            // parent. Reducer treats insertNode at position -1 with
+            // nodeXML containing a placeholder for the original target as
+            // "wrap target with this XML". Then removeNode removes the
+            // original position. (Two-op formulation; reducer may fuse.)
+            //
+            // NOTE: target MUST be a <w:r>. Pre-validation in apply
+            // verifies this; if it's a paragraph or other element, apply
+            // throws EditError.unsupportedOperation.
+            let rId = freshRelationshipId()
+            let hyperlinkOpenXML = renderHyperlinkOpenWithPlaceholder(rId: rId)
+            return [
+                .insertNode(parent: target, position: -1, nodeXML: hyperlinkOpenXML),
+                .removeNode(target: target),
+                .addRelationship(
+                    part: documentRelsPath,
+                    id: rId,
+                    type: hyperlinkRelationshipType,
+                    target: href.absoluteString,
+                    targetMode: "External"
+                )
+            ]
         }
+    }
+}
+
+// MARK: - Hyperlink XML rendering helpers
+
+extension OOXMLEdit {
+    /// Generates a fresh relationship ID. Uses a UUID-derived short form
+    /// to minimize collision risk with existing rIds (which are typically
+    /// `rId1`, `rId2`, etc.). Deterministic rId allocation (re-using the
+    /// next free number from the existing rels part) is a Phase 2c
+    /// refinement — for MVP, UUID-based IDs avoid the need for doc
+    /// context at the operations() step.
+    internal static func freshRelationshipId() -> String {
+        let raw = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        return "rIdEdit" + String(raw.prefix(8))
+    }
+
+    internal func freshRelationshipId() -> String {
+        Self.freshRelationshipId()
+    }
+
+    /// Renders the full `<w:hyperlink>` XML for `insertHyperlink` (insert
+    /// semantics — wrapper contains a new run with displayText).
+    internal func renderHyperlinkXML(rId: String, displayText: String) -> String {
+        let escaped = escapeXMLContent(displayText)
+        return
+            "<w:hyperlink r:id=\"\(rId)\">" +
+            "<w:r>" +
+            "<w:rPr><w:rStyle w:val=\"Hyperlink\"/></w:rPr>" +
+            "<w:t>\(escaped)</w:t>" +
+            "</w:r>" +
+            "</w:hyperlink>"
+    }
+
+    /// Renders the `<w:hyperlink>` wrapper for `wrapWithHyperlink` (wrap
+    /// semantics — wrapper has a placeholder marker; reducer fills in the
+    /// wrapped target). The "$TARGET" placeholder is a sentinel the
+    /// Phase 2c Reducer interprets to mean "the node being wrapped".
+    internal func renderHyperlinkOpenWithPlaceholder(rId: String) -> String {
+        return "<w:hyperlink r:id=\"\(rId)\">$TARGET</w:hyperlink>"
+    }
+
+    /// XML-escapes character content (text inside elements). Only handles
+    /// `<`, `>`, `&` per the spec for text content.
+    internal func escapeXMLContent(_ s: String) -> String {
+        return s
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 }

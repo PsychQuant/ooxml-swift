@@ -139,24 +139,28 @@ public enum WordEdit: Edit, Equatable, Sendable {
             return []
 
         case .applyLink(let range, let url):
-            // Single-Run case: 1:1 to OOXMLEdit.insertHyperlink. Note that
-            // OOXMLEdit.insertHyperlink itself is STUBBED pending §5
-            // composite design checkpoint — calling doc.apply(applyLink)
-            // will throw notImplemented at the operations() step, not here.
-            // That's the correct error-surfacing layer.
+            // Per macdoc#110 §5 design walkthrough Q1 verdict: WordEdit
+            // semantic-layer applyLink matches Word UI Cmd-K (wrap
+            // existing run), so it lowers to OOXMLEdit.wrapWithHyperlink
+            // (Design Y wrap-existing primitive).
             //
-            // displayText: nil — lower() can't extract the substring from
-            // startRun.text[startOffset..<endOffset] without doc context.
-            // The §5 design will resolve nil → use href as displayed text,
-            // or require displayText to be passed explicitly by the caller.
+            // Single-Run case (startRun == endRun): wrap that run.
+            // wrapWithHyperlink requires whole-Run target (MVP); partial-
+            // Run wrap (selection covers part of run's text) needs
+            // run-splitting which is out of scope here. lower() can't
+            // detect partial-Run from offsets alone — startOffset/endOffset
+            // would need to be checked against startRun's text length,
+            // which requires doc context (per §7 lower() context constraint).
+            // Pre-validation in apply() pipeline catches partial-Run by
+            // checking the run's actual text length post-lower (currently
+            // PHASED — pre-validation hasn't shipped, so partial-Run will
+            // produce a hyperlink wrapping the whole Run regardless of
+            // offset).
             if range.startRun == range.endRun {
-                return [.insertHyperlink(
-                    target: range.startRun,
-                    href: url,
-                    displayText: nil
-                )]
+                return [.wrapWithHyperlink(target: range.startRun, href: url)]
             }
-            // Multi-Run case: same constraint as applyBold above.
+            // Multi-Run case: same constraint as applyBold above —
+            // intermediate Runs can't be enumerated without doc context.
             return []
 
         case .applyInsertParagraph(let after, let content):

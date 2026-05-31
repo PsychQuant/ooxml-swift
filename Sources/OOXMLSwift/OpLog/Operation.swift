@@ -48,6 +48,25 @@ public enum Operation: Equatable, Sendable {
     case updateAttribute(target: ElementID, prefix: String?, localName: String, value: String?)
     case moveNode(source: ElementID, destinationParent: ElementID, destinationIndex: Int)
 
+    // MARK: Rels-part operations (typed)
+
+    /// Adds a `<Relationship Id="..." Type="..." Target="..." TargetMode="..."/>`
+    /// entry to the specified rels part (e.g., "word/_rels/document.xml.rels").
+    ///
+    /// Rels-part xml has a rigid, well-known structure: a single
+    /// `<Relationships>` root with `<Relationship>` children. Treating it
+    /// as arbitrary XML mutation (via insertNode + updateAttribute) invites
+    /// round-trip bugs because rels parts use a different namespace,
+    /// attribute spelling, and validation rules than document.xml. This
+    /// typed operation captures the rels-specific shape.
+    ///
+    /// Used by OOXMLEdit.insertHyperlink / wrapWithHyperlink composite
+    /// emission to register the URL target on the rels side.
+    ///
+    /// `targetMode`: typically "External" for hyperlinks; nil omits the
+    /// attribute. See macdoc#110 §5 design walkthrough Q3.
+    case addRelationship(part: String, id: String, type: String, target: String, targetMode: String?)
+
     // MARK: Forward-compat fallback (preserves unrecognized op_type byte-equal)
 
     /// Carries any op_type the local code does not declare so the JSONL log

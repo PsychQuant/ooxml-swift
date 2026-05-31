@@ -262,7 +262,8 @@ public enum OperationReducer {
              .insertRun,
              .insertBookmark, .insertComment,
              .redo,
-             .insertNode, .removeNode, .updateAttribute, .moveNode:
+             .insertNode, .removeNode, .updateAttribute, .moveNode,
+             .addRelationship:
             throw ReducerError.malformedOp(
                 opID: entry.opID,
                 reason: "Phase 2c implements this op"
@@ -456,6 +457,12 @@ public enum OperationReducer {
         case .removeNode(let target): return [target]
         case .updateAttribute(let target, _, _, _): return [target]
         case .moveNode(let source, let dest, _): return [source, dest]
+        case .addRelationship:
+            // Rels-part operations don't address an ElementID in any tree —
+            // they target a part by path. WordDocument.apply's per-op
+            // scoping treats this as a special case: returns nil from
+            // partContaining → fallback to direct part lookup by name.
+            return []
         case .undo, .redo, .batchBegin, .batchEnd, .unknown: return []
         }
     }
@@ -510,6 +517,7 @@ public enum OperationReducer {
         case .removeNode(let target): return target == elementID
         case .updateAttribute(let target, _, _, _): return target == elementID
         case .moveNode(let source, let dest, _): return source == elementID || dest == elementID
+        case .addRelationship: return false  // rels-part operation, not element-addressed
         case .unknown: return false
         }
     }

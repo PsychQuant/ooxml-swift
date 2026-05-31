@@ -143,14 +143,21 @@ final class NaturalityTests: XCTestCase {
                            "\(sampleContext): naturality of content — Path A xmlTrees ≠ Path B xmlTrees")
         }
 
-        // If both failed, both should be EditError.notImplemented (the
-        // observed failure mode for applyLink-involved pairs in the
-        // current §5-stubbed state).
+        // If both failed: naturality of error requires both throws to be the
+        // SAME EditError variant. Pre-§5: both were notImplemented (the
+        // OOXMLEdit-layer stub). Post-§5 emission: both are
+        // operationLogFailure (Reducer Phase 2c not implemented yet for
+        // insertNode/addRelationship). Either way, the naturality assertion
+        // is "same case variant", not "same specific case".
         if let eA = errorA, let eB = errorB {
-            if case EditError.notImplemented = eA, case EditError.notImplemented = eB {
-                // Naturality of error case holds — both throw same error type
-            } else {
-                XCTFail("\(sampleContext): naturality of error type — Path A=\(eA), Path B=\(eB)")
+            let aIsNI = { if case EditError.notImplemented = eA { return true } else { return false } }()
+            let bIsNI = { if case EditError.notImplemented = eB { return true } else { return false } }()
+            let aIsOLF = { if case EditError.operationLogFailure = eA { return true } else { return false } }()
+            let bIsOLF = { if case EditError.operationLogFailure = eB { return true } else { return false } }()
+            let bothNI = aIsNI && bIsNI
+            let bothOLF = aIsOLF && bIsOLF
+            if !bothNI && !bothOLF {
+                XCTFail("\(sampleContext): naturality of error type — Path A=\(eA), Path B=\(eB) (expected both .notImplemented or both .operationLogFailure)")
             }
         }
     }

@@ -20,8 +20,10 @@ final class OperationLogTests: XCTestCase {
 
     // MARK: - 1. Operation enum exhaustive case coverage
 
-    /// **Decision pinned**: `Operation` has 21 cases (16 element-level + 4
-    /// tree-node-level + 1 unknown). Each constructs and pattern-matches.
+    /// **Decision pinned**: `Operation` has 22 cases (16 element-level + 4
+    /// tree-node-level + 1 rels-part + 1 unknown). Each constructs and
+    /// pattern-matches. Updated in macdoc#110 §5 to add `addRelationship`
+    /// for typed rels-part mutations (see Operation.swift docstring).
     func testOperationEnumEachCaseConstructsAndMatches() {
         let id = ElementID(rawString: "w14:paraId=A")
         let id2 = ElementID(rawString: "w14:paraId=B")
@@ -48,10 +50,17 @@ final class OperationLogTests: XCTestCase {
             .removeNode(target: id),
             .updateAttribute(target: id, prefix: "w", localName: "id", value: "5"),
             .moveNode(source: id, destinationParent: id2, destinationIndex: 0),
+            .addRelationship(
+                part: "word/_rels/document.xml.rels",
+                id: "rId99",
+                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+                target: "https://example.com",
+                targetMode: "External"
+            ),
             .unknown(opType: "future", payload: JSONValue.object(["k": JSONValue.int(1)]))
         ]
 
-        XCTAssertEqual(cases.count, 21, "Operation MUST have exactly 21 cases enumerated in the test")
+        XCTAssertEqual(cases.count, 22, "Operation MUST have exactly 22 cases enumerated in the test")
 
         // Pattern-match: each case maps to its expected discriminator.
         for op in cases {
@@ -64,6 +73,7 @@ final class OperationLogTests: XCTestCase {
                  .undo, .redo,
                  .batchBegin, .batchEnd,
                  .insertNode, .removeNode, .updateAttribute, .moveNode,
+                 .addRelationship,
                  .unknown:
                 break // matched
             }

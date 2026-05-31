@@ -230,6 +230,14 @@ internal enum JSONLLineCoder {
                 ("destinationParent", jsonString(destinationParent.raw)),
                 ("destinationIndex", String(destinationIndex))
             ])
+        case .addRelationship(let part, let id, let type, let target, let targetMode):
+            return ("addRelationship", [
+                ("part", jsonString(part)),
+                ("id", jsonString(id)),
+                ("type", jsonString(type)),
+                ("target", jsonString(target)),
+                ("targetMode", targetMode.map(jsonString) ?? "null")
+            ])
         case .unknown(let opType, let payload):
             // Merge payload keys sorted lexicographically. Required fields
             // (op_id, ts, source, op_type) are already emitted upstream — the
@@ -332,6 +340,14 @@ internal enum JSONLLineCoder {
             )
         case "moveNode":
             return .moveNode(source: try eid("source"), destinationParent: try eid("destinationParent"), destinationIndex: try int("destinationIndex"))
+        case "addRelationship":
+            return .addRelationship(
+                part: try str("part"),
+                id: try str("id"),
+                type: try str("type"),
+                target: try str("target"),
+                targetMode: optStr("targetMode")
+            )
         default:
             // Unknown op_type — preserve the full payload (everything except
             // the four required fields) byte-equal in a JSONValue object.
