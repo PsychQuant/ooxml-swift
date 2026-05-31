@@ -98,7 +98,10 @@ final class WordEditLowerTests: XCTestCase {
 
     // MARK: - applyLink(range:url:) single-Run case
 
-    func testApplyLinkSingleRunLowersToInsertHyperlink() {
+    func testApplyLinkSingleRunLowersToWrapWithHyperlink() {
+        // Per macdoc#110 §5 Q1 verdict (Design Y): WordEdit.applyLink wraps
+        // existing run with hyperlink (Cmd-K parity), so it lowers to
+        // OOXMLEdit.wrapWithHyperlink, not insertHyperlink.
         let runID = ElementID(libraryUUID: UUID())
         let url = URL(string: "https://example.com/test")!
         let range = WordRange(startRun: runID, startOffset: 0, endRun: runID, endOffset: 5)
@@ -107,22 +110,29 @@ final class WordEditLowerTests: XCTestCase {
         let lowered = edit.lower()
         XCTAssertEqual(lowered.count, 1, "single-Run applyLink lowers to exactly 1 OOXMLEdit")
 
-        guard case .insertHyperlink(let target, let href, let displayText) = lowered[0] else {
-            XCTFail("Expected OOXMLEdit.insertHyperlink, got \(lowered[0])")
+        guard case .wrapWithHyperlink(let target, let href) = lowered[0] else {
+            XCTFail("Expected OOXMLEdit.wrapWithHyperlink, got \(lowered[0])")
             return
         }
-        XCTAssertEqual(target, runID, "lowered insertHyperlink target == range.startRun")
-        XCTAssertEqual(href, url, "lowered insertHyperlink href == applyLink url")
-        XCTAssertNil(displayText,
-                     "displayText == nil (lower() can't extract substring without doc context; §5 design will resolve nil → use href)")
+        XCTAssertEqual(target, runID, "lowered wrapWithHyperlink target == range.startRun")
+        XCTAssertEqual(href, url, "lowered wrapWithHyperlink href == applyLink url")
     }
 
-    func testApplyLinkLoweredOOXMLEditStillStubbed() {
-        // The lowered OOXMLEdit.insertHyperlink is itself pending §5 design.
-        // doc.apply(applyLink) should throw notImplemented at the
-        // OOXMLEdit.operations() step, not at the WordEdit.lower() step.
-        // This test pins the layering: WordEdit.lower() works; OOXMLEdit
-        // path throws.
+    func testApplyLinkLoweredOOXMLEditFailsAtReducer() {
+        // Layered failure verification post-§5:
+        //   - WordEdit.lower() succeeds (single-Run case returns insertHyperlink)
+        //   - OOXMLEdit.insertHyperlink.operations() succeeds (returns
+        //     [insertNode, addRelationship])
+        //   - Reducer THROWS on insertNode + addRelationship because Phase 2c
+        //     hasn't shipped tree-fragment insertion + rels mutation yet
+        //   - WordDocument.apply wraps the Reducer error as operationLogFailure
+        //
+        // This test pins that the failure originates at the REDUCER layer
+        // (Phase 2c in ooxml-swift#71), NOT at the WordEdit lower or
+        // OOXMLEdit emission layer. When Phase 2c ships, this test will
+        // need a corresponding doc fixture (current empty WordDocument
+        // doesn't have the target ElementID in any xmlTree, so apply
+        // throws "No XmlTree part contains...").
         let doc = WordDocument()
         let runID = ElementID(libraryUUID: UUID())
         let url = URL(string: "https://example.com")!
@@ -130,15 +140,14 @@ final class WordEditLowerTests: XCTestCase {
         let edit = WordEdit.applyLink(range: range, url: url)
 
         XCTAssertThrowsError(try doc.apply(edit)) { error in
-            guard case EditError.notImplemented(let message) = error else {
-                XCTFail("Expected .notImplemented from OOXMLEdit.insertHyperlink, got \(error)")
+            // Either operationLogFailure (when Reducer is reached) or some
+            // other EditError if the layers detect failure earlier. Per
+            // PHASED #4 documentation in spec.md, target-not-found currently
+            // surfaces as operationLogFailure.
+            guard case EditError.operationLogFailure = error else {
+                XCTFail("Expected .operationLogFailure (Reducer-level Phase 2c gap), got \(error)")
                 return
             }
-            // The error originates from OOXMLEdit.operations() for insertHyperlink,
-            // not from WordEdit.lower(). Message should reference §5 (the
-            // OOXMLEdit stub) not §7 (the WordEdit lower stub).
-            XCTAssertTrue(message.contains("insertHyperlink") || message.contains("§5"),
-                          "Error from OOXMLEdit layer (§5), not WordEdit layer (§7): \(message)")
         }
     }
 

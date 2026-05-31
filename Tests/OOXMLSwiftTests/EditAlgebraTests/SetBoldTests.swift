@@ -78,22 +78,5 @@ final class SetBoldTests: XCTestCase {
         XCTAssertEqual(lowered[0], edit, "OOXMLEdit.lower() returns self verbatim")
     }
 
-    // MARK: - Remaining stubs still throw
-    //
-    // removeParagraph landed in §6 — coverage in RemoveParagraphTests.
-    // insertHyperlink is the only remaining stub (§5).
-
-    func testInsertHyperlinkStillThrowsAfterSetBoldImplemented() {
-        let edit = OOXMLEdit.insertHyperlink(
-            target: ElementID(libraryUUID: UUID()),
-            href: URL(string: "https://example.com")!,
-            displayText: "click"
-        )
-        XCTAssertThrowsError(try edit.operations()) { error in
-            guard case EditError.notImplemented = error else {
-                XCTFail("Expected .notImplemented, got \(error)")
-                return
-            }
-        }
-    }
+    // MARK: - Stub-mechanism tests removed (no stubs remain after §5 shipped)
 }

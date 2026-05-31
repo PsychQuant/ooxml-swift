@@ -56,18 +56,49 @@ public enum OOXMLEdit: Edit, Equatable, Sendable {
     /// Throws `EditError.unsupportedOperation` if target is not a Run.
     case setBold(target: ElementID, value: Bool)
 
-    /// Insert a hyperlink wrapping the specified target element.
+    /// Insert a NEW hyperlink wrapper after the specified target element.
     ///
-    /// - `target`: ElementID of the element to wrap in `<w:hyperlink>` (typically a Run)
+    /// **Insert semantics (Design X from macdoc#110 §5 walkthrough)**:
+    /// Creates a brand-new `<w:hyperlink>` wrapper containing a new
+    /// `<w:r><w:t>displayText</w:t></w:r>` child. The wrapper is inserted
+    /// as a sibling after `target` (Run or Paragraph). The target itself
+    /// is NOT modified.
+    ///
+    /// - `target`: ElementID of the element to insert AFTER (Run or Paragraph)
     /// - `href`: URL the hyperlink points to
-    /// - `displayText`: optional override for displayed text; `nil` uses target's existing text
+    /// - `displayText`: optional displayed text; `nil` → `href.absoluteString`
     ///
-    /// Composite operation: emits BOTH `Operation.insertNode` (for the
-    /// `<w:hyperlink>` element in document.xml) AND `Operation.updateAttribute`
-    /// (for the new Relationship entry in `_rels/document.xml.rels`).
-    /// Atomic at Edit level — throws `EditError.preserveViolation` if either
-    /// sub-operation cannot apply, with NO partial state in the result.
+    /// Composite operation: emits `[Operation.insertNode (hyperlink XML),
+    /// Operation.addRelationship (rels entry)]`. Atomicity at Edit level
+    /// via pre-validation (target exists + rels-part exists) before
+    /// emitting Operations.
+    ///
+    /// For Cmd-K parity (replace existing run with link), use
+    /// `wrapWithHyperlink` instead.
     case insertHyperlink(target: ElementID, href: URL, displayText: String?)
+
+    /// Wrap the existing Run element with a `<w:hyperlink>` so its text
+    /// becomes the link's displayed text.
+    ///
+    /// **Wrap semantics (Design Y from macdoc#110 §5 walkthrough)**:
+    /// REPLACES `target` in its parent's children with a new
+    /// `<w:hyperlink r:id="...">target</w:hyperlink>` wrapper containing
+    /// the original Run unchanged.
+    ///
+    /// - `target`: ElementID of the Run to wrap (MUST resolve to `<w:r>`)
+    /// - `href`: URL the hyperlink points to
+    ///
+    /// Composite: `[Operation.insertNode (wrapper around target),
+    /// Operation.removeNode (target's original position),
+    /// Operation.addRelationship (rels entry)]`. (Reducer may collapse
+    /// these into a single tree-mutation primitive — implementation
+    /// detail.) Atomicity via pre-validation.
+    ///
+    /// MVP constraint: whole-Run only. Partial-Run wrap (selection covers
+    /// part of run's text) requires run-splitting first — currently
+    /// unsupported. Throws `EditError.unsupportedOperation` if target
+    /// isn't a `<w:r>` element.
+    case wrapWithHyperlink(target: ElementID, href: URL)
 
     /// Remove the specified paragraph from the document body.
     ///

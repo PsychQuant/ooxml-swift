@@ -58,27 +58,13 @@ final class DocumentApplyTests: XCTestCase {
                        "Empty apply doesn't append to log")
     }
 
-    func testApplyPropagatesNotImplementedFromOperationsStub() {
-        // §2 apply pipeline should surface notImplemented errors from
-        // OOXMLEdit.operations() through lower → operations. Uses the LAST
-        // remaining stubbed case so this test survives each impl batch.
-        // DELETE once §5 insertHyperlink ships (no stubs left).
-        let doc = WordDocument()
-        let edit = OOXMLEdit.insertHyperlink(
-            target: ElementID(libraryUUID: UUID()),
-            href: URL(string: "https://example.com")!,
-            displayText: nil
-        )
-
-        XCTAssertThrowsError(try doc.apply(edit)) { error in
-            guard case EditError.notImplemented(let message) = error else {
-                XCTFail("Expected .notImplemented (from §5 stub), got \(error)")
-                return
-            }
-            XCTAssertTrue(message.contains("§5"),
-                          "Stub error message references remaining task batch: \(message)")
-        }
-    }
+    // §5 (insertHyperlink + wrapWithHyperlink emission) shipped — no OOXMLEdit
+    // case stubs remain at operations(). The stub-mechanism test
+    // (testApplyPropagatesNotImplementedFromOperationsStub) has been deleted
+    // per its original "DELETE once §5 ships" instruction. Error-pipeline
+    // coverage continues via testApplyWrapsElementNotFoundAsOperationLogFailure
+    // (Reducer-level error wrap, lines below) and the WordEdit empty-lower
+    // guard test (next method).
 
     func testApplyThrowsOnStubWordEditEmptyLower() {
         // §1 WordEdit.lower() returns [] — defensive check in WordDocument.apply
@@ -155,43 +141,41 @@ final class DocumentApplyTests: XCTestCase {
         XCTAssertEqual(doc, result, "Empty sequence apply is identity")
     }
 
-    func testApplySingleEditViaSequence() {
+    func testApplySingleEditViaSequence() throws {
         // Single-element sequence should match single-edit apply behavior.
-        // Uses last-remaining-stub case for cascade survival. DELETE once §5
-        // ships (no stubs left).
-        let doc = WordDocument()
-        let edit = OOXMLEdit.insertHyperlink(
-            target: ElementID(libraryUUID: UUID()),
-            href: URL(string: "https://example.com")!,
-            displayText: nil
-        )
+        // Both succeed on insertParagraph through a single-part doc.
+        let paraUUID = UUID()
+        let wt = XmlNode.element(prefix: "w", localName: "t",
+                                  children: [XmlNode.text("existing")])
+        let wr = XmlNode.element(prefix: "w", localName: "r", children: [wt])
+        let wp = XmlNode.element(prefix: "w", localName: "p", children: [wr])
+        wp.libraryUUID = paraUUID
+        let body = XmlNode.element(prefix: "w", localName: "body", children: [wp])
+        let root = XmlNode.element(prefix: "w", localName: "document",
+                                    children: [body])
 
-        // Sequence apply path
-        XCTAssertThrowsError(try doc.apply([edit] as [any Edit])) { seqError in
-            guard case EditError.notImplemented = seqError else {
-                XCTFail("Expected .notImplemented from sequence apply, got \(seqError)")
-                return
-            }
-        }
+        var doc = WordDocument()
+        doc.xmlTrees["word/document.xml"] = XmlTree.synthesized(root: root)
+        let paraID = ElementID(libraryUUID: paraUUID)
+        let edit = OOXMLEdit.insertParagraph(after: paraID, content: "new", styleId: nil)
 
-        // Single apply path (separately)
-        XCTAssertThrowsError(try doc.apply(edit)) { singleError in
-            guard case EditError.notImplemented = singleError else {
-                XCTFail("Expected .notImplemented from single apply, got \(singleError)")
-                return
-            }
-        }
+        let viaSequence = try doc.apply([edit] as [any Edit])
+        let viaSingle = try doc.apply(edit)
+        XCTAssertEqual(viaSequence, viaSingle,
+                       "Sequence apply with one element ≡ single apply (content-equal)")
     }
 
     // MARK: - Immutability tests
 
     func testApplyDoesNotMutateInput() throws {
-        // Even on error, input doc should be unchanged
+        // Even on error, input doc should be unchanged. We use a target
+        // ElementID that doesn't resolve in the (empty) doc → apply throws
+        // operationLogFailure (PHASED #4 — Reducer wraps elementNotFound).
         let doc = WordDocument()
         let initialLogCount = doc.operationLog.entries.count
 
         let edit = OOXMLEdit.removeParagraph(target: ElementID(libraryUUID: UUID()))
-        _ = try? doc.apply(edit)  // expected to throw notImplemented
+        _ = try? doc.apply(edit)  // expected to throw (no tree to address)
 
         XCTAssertEqual(doc.operationLog.entries.count, initialLogCount,
                        "Input doc's log is unchanged after failed apply")

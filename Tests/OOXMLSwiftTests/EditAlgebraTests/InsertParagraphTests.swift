@@ -91,23 +91,16 @@ final class InsertParagraphTests: XCTestCase {
         XCTAssertEqual(payload.styleId, "Quote")
     }
 
-    // MARK: - Stub still throws for unimplemented cases
+    // MARK: - Stub-mechanism tests removed
     //
-    // setBold landed in §4 — assertion in SetBoldTests.
-    // removeParagraph landed in §6 — assertion in RemoveParagraphTests.
-    // insertHyperlink is the only remaining stub (§5 pending).
-
-    func testInsertHyperlinkStillThrowsNotImplemented() {
-        let edit = OOXMLEdit.insertHyperlink(
-            target: ElementID(libraryUUID: UUID()),
-            href: URL(string: "https://example.com")!,
-            displayText: "click"
-        )
-        XCTAssertThrowsError(try edit.operations()) { error in
-            guard case EditError.notImplemented = error else {
-                XCTFail("Expected .notImplemented, got \(error)")
-                return
-            }
-        }
-    }
+    // §5 (insertHyperlink + wrapWithHyperlink emission) shipped in macdoc#110
+    // — no OOXMLEdit case stubs remain at the operations() layer. The
+    // stub-mechanism tests that asserted "case X still throws notImplemented"
+    // served their purpose during incremental §3-§6 development and are
+    // intentionally deleted now.
+    //
+    // Remaining error-path coverage:
+    //   - DocumentApplyTests covers apply pipeline error wrapping
+    //   - WordEditLowerTests covers the OOXMLEdit-layer vs WordEdit-layer
+    //     error origination
 }
