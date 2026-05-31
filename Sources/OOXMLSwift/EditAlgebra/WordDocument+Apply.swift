@@ -40,16 +40,16 @@ extension WordDocument {
         //    OOXMLEdit+Operation.swift (per design.md Decision 1).
         let ooxmlEdits = edit.lower()
 
-        // Defensive: detect stub Edits that silently lower to []. OOXMLEdit's
+        // Defensive: detect Edits that silently lower to []. OOXMLEdit's
         // lower() always returns [self] (identity), so empty here means a
-        // non-OOXMLEdit (typically a stub WordEdit case) returned []. Without
-        // this check, doc.apply(stubWordEdit) would return the input doc
-        // unchanged — a silent no-op that masks the unimplemented case. §7
-        // of macdoc#105 ships WordEdit.lower() per-case implementations; this
-        // guard becomes dormant once real cases return non-empty [OOXMLEdit].
+        // non-OOXMLEdit (typically WordEdit) returned []. This happens in two
+        // scenarios: (1) unimplemented stub case, (2) input combination that
+        // lower() can't resolve without document context (e.g., cross-
+        // paragraph WordRange in applyBold — see WordEdit.swift). Both
+        // surface as notImplemented since the apply call can't proceed.
         if ooxmlEdits.isEmpty && !(edit is OOXMLEdit) {
             throw EditError.notImplemented(
-                "Edit of type \(type(of: edit)) returned empty lower() — likely a stub case. Per-case WordEdit.lower() implementations land in §7 of PsychQuant/macdoc#105."
+                "Edit of type \(type(of: edit)) returned empty lower(). Either the case is not yet implemented (see macdoc#110 / macdoc#105 §7), or the input combination requires document context that the non-throwing no-arg lower() protocol can't access (e.g., cross-paragraph WordRange)."
             )
         }
 
