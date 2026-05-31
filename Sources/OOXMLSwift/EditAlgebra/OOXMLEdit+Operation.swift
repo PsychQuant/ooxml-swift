@@ -20,11 +20,26 @@ extension OOXMLEdit {
     /// 1:1 for simple cases (insertParagraph, setBold, removeParagraph);
     /// composite for `insertHyperlink` (returns 2 Operations atomically).
     ///
-    /// Stub in §1 scaffold — per-case implementation lands in §3-§6 of #105
-    /// tasks. Throws `EditError.notImplemented` for unimplemented cases.
+    /// §3 (this commit): insertParagraph + insertParagraphBefore implemented.
+    /// §4-§6 (pending): setBold, insertHyperlink, removeParagraph.
     public func operations() throws -> [Operation] {
-        throw EditError.notImplemented(
-            "OOXMLEdit.operations() per-case mapping pending — see #105 tasks §3-§6"
-        )
+        switch self {
+        case .insertParagraph(let after, let content, let styleId):
+            return [.insertParagraphAfter(
+                after: after,
+                paragraph: ParagraphPayload(text: content, styleId: styleId)
+            )]
+
+        case .insertParagraphBefore(let before, let content, let styleId):
+            return [.insertParagraphBefore(
+                before: before,
+                paragraph: ParagraphPayload(text: content, styleId: styleId)
+            )]
+
+        case .setBold, .insertHyperlink, .removeParagraph:
+            throw EditError.notImplemented(
+                "OOXMLEdit.operations() for \(self) — see #105 tasks §4-§6"
+            )
+        }
     }
 }

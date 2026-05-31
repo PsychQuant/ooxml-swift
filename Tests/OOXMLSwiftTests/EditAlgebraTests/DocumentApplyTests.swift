@@ -31,7 +31,7 @@ final class DocumentApplyTests: XCTestCase {
         // Two WordDocuments with identical content but different logs should
         // still be Equatable-equal (per design.md Decision 3).
         var doc1 = WordDocument()
-        var doc2 = WordDocument()
+        let doc2 = WordDocument()
 
         let elementID = ElementID(libraryUUID: UUID())
         doc1.operationLog.append(
@@ -69,8 +69,8 @@ final class DocumentApplyTests: XCTestCase {
                 XCTFail("Expected .notImplemented (from §1 stub), got \(error)")
                 return
             }
-            XCTAssertTrue(message.contains("§3-§6"),
-                          "Stub error message references task batch: \(message)")
+            XCTAssertTrue(message.contains("§4-§6"),
+                          "Stub error message references remaining task batch: \(message)")
         }
     }
 
