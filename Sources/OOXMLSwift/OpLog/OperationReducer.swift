@@ -431,6 +431,64 @@ public enum OperationReducer {
         return nil
     }
 
+    /// Extracts the ElementIDs an Operation references in its payload. Used
+    /// by WordDocument.apply for per-op part scoping (locate the part whose
+    /// tree contains the op's target so we don't replay the op against every
+    /// part in the document).
+    ///
+    /// Control ops (.undo/.redo/.batchBegin/.batchEnd/.unknown) have no
+    /// referenced ElementIDs and return [].
+    internal static func referencedElementIDs(in op: Operation) -> [ElementID] {
+        switch op {
+        case .insertParagraphAfter(let after, _): return [after]
+        case .insertParagraphBefore(let before, _): return [before]
+        case .removeParagraph(let id): return [id]
+        case .setText(let target, _): return [target]
+        case .setParagraphStyle(let target, _): return [target]
+        case .insertTable(let at, _): return [at]
+        case .removeTable(let id): return [id]
+        case .setCellText(let table, _, _, _): return [table]
+        case .insertRun(let parent, _, _): return [parent]
+        case .setRunFormat(let target, _): return [target]
+        case .insertBookmark(let at, _, _): return [at]
+        case .insertComment(let anchor, _, _, _): return [anchor]
+        case .insertNode(let parent, _, _): return [parent]
+        case .removeNode(let target): return [target]
+        case .updateAttribute(let target, _, _, _): return [target]
+        case .moveNode(let source, let dest, _): return [source, dest]
+        case .undo, .redo, .batchBegin, .batchEnd, .unknown: return []
+        }
+    }
+
+    /// Returns the path of the part in `trees` whose tree contains a node
+    /// referenced by `op`. Returns nil if no part contains any referenced
+    /// node (caller should treat as elementNotFound — the op cannot be
+    /// applied).
+    ///
+    /// Used by WordDocument.apply to scope per-op materialization: each op
+    /// is replayed only against the part its target lives in, not against
+    /// every part in the document (which would throw elementNotFound for
+    /// non-target parts).
+    internal static func partContaining(
+        op: Operation,
+        in trees: [String: XmlTree]
+    ) -> String? {
+        let targetIDs = referencedElementIDs(in: op)
+        guard !targetIDs.isEmpty else {
+            // Control op (batch markers, undo/redo, unknown) — no target part.
+            // Caller's responsibility to handle (typically: skip materialize).
+            return nil
+        }
+        for (path, tree) in trees {
+            for targetID in targetIDs {
+                if findNode(elementID: targetID, in: tree) != nil {
+                    return path
+                }
+            }
+        }
+        return nil
+    }
+
     /// Returns true if the op references the given ElementID in any of its
     /// associated values. `.unknown` ops are opaque and never count.
     private static func touchesElement(_ op: Operation, elementID: ElementID) -> Bool {
