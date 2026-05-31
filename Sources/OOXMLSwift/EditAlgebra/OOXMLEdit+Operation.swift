@@ -36,9 +36,15 @@ extension OOXMLEdit {
                 paragraph: ParagraphPayload(text: content, styleId: styleId)
             )]
 
-        case .setBold, .insertHyperlink, .removeParagraph:
+        case .setBold(let target, let value):
+            return [.setRunFormat(
+                target: target,
+                format: RunFormatPayload(bold: value)
+            )]
+
+        case .insertHyperlink, .removeParagraph:
             throw EditError.notImplemented(
-                "OOXMLEdit.operations() for \(self) — see #105 tasks §4-§6"
+                "OOXMLEdit.operations() for \(self) — see #105 tasks §5-§6"
             )
         }
     }

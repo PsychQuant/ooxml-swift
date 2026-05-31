@@ -69,7 +69,7 @@ final class DocumentApplyTests: XCTestCase {
                 XCTFail("Expected .notImplemented (from §1 stub), got \(error)")
                 return
             }
-            XCTAssertTrue(message.contains("§4-§6"),
+            XCTAssertTrue(message.contains("§5-§6"),
                           "Stub error message references remaining task batch: \(message)")
         }
     }
