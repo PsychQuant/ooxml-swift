@@ -39,21 +39,5 @@ final class RemoveParagraphTests: XCTestCase {
         XCTAssertEqual(lowered[0], edit, "OOXMLEdit.lower() is identity")
     }
 
-    // MARK: - Insertions remain stubbed (insertHyperlink only — §5 pending)
-
-    func testInsertHyperlinkStillThrowsAfterRemoveParagraphImplemented() {
-        let edit = OOXMLEdit.insertHyperlink(
-            target: ElementID(libraryUUID: UUID()),
-            href: URL(string: "https://example.com")!,
-            displayText: "click"
-        )
-        XCTAssertThrowsError(try edit.operations()) { error in
-            guard case EditError.notImplemented(let msg) = error else {
-                XCTFail("Expected .notImplemented, got \(error)")
-                return
-            }
-            XCTAssertTrue(msg.contains("§5"),
-                          "Error references composite design pending: \(msg)")
-        }
-    }
+    // MARK: - Stub-mechanism tests removed (no stubs remain after §5 shipped)
 }
