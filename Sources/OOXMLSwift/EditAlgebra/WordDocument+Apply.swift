@@ -4,11 +4,11 @@
 // Public apply API per design.md Decision 3 (Option A: WordDocument owns log).
 // Routes Edit → OOXMLEdit → Operation → OperationLog → OperationReducer.materialize.
 //
-// CURRENT LIMITATION (§2 scaffold): typed views (body/styles/etc.) are NOT
-// re-synced from new xmlTrees after apply. xmlTrees and operationLog ARE
-// correctly updated. End-to-end tests (§3+) inspect xmlTrees directly for
-// canonical-identity assertions. Typed-view re-sync lands in a follow-up
-// task once all OOXMLEdit case implementations exist.
+// CURRENT LIMITATION: typed views (body/styles/etc.) are NOT re-synced
+// from new xmlTrees after apply. xmlTrees and operationLog ARE correctly
+// updated. End-to-end tests inspect xmlTrees directly for canonical-
+// identity assertions. Typed-view re-sync tracked as item #8 of macdoc#110
+// (separate from the multi-part scoping fix that landed in PR #74).
 
 import Foundation
 
@@ -27,11 +27,12 @@ extension WordDocument {
     /// - Throws `EditError.preserveViolation` when defensive check fires
     /// - Wraps OperationReducer errors as `EditError.operationLogFailure`
     ///
-    /// **§2 scaffold limitation**: typed views (body/styles/headers/etc.)
-    /// are NOT re-synced from new xmlTrees after apply. xmlTrees +
-    /// operationLog ARE correct. For end-to-end tests, inspect xmlTrees
-    /// directly via `result.xmlTrees["word/document.xml"]`. Typed-view
-    /// re-sync is a follow-up sub-task.
+    /// **Known limitation**: typed views (body/styles/headers/etc.) are NOT
+    /// re-synced from new xmlTrees after apply. xmlTrees + operationLog ARE
+    /// correct. For end-to-end tests, inspect xmlTrees directly via
+    /// `result.xmlTrees["word/document.xml"]`. Typed-view re-sync tracked
+    /// as item #8 of macdoc#110 (NOT the multi-part scoping fix in PR #74
+    /// which already shipped).
     public func apply(_ edit: any Edit) throws -> WordDocument {
         // 1. Lower edit → OOXMLEdit chain → Operations
         //    WordEdit.lower() returns [OOXMLEdit]; OOXMLEdit.lower() returns [self].
@@ -120,7 +121,9 @@ extension WordDocument {
 
         // 5. Construct new WordDocument with updated log + trees.
         //    Typed views (body/styles/etc.) carried over from self — STALE
-        //    relative to new xmlTrees. Resync tracked in macdoc#110.
+        //    relative to new xmlTrees. Resync tracked as item #8 of
+        //    macdoc#110 (SEPARATE from the multi-part scoping fix shipped
+        //    here — don't conflate them when chasing #110).
         var newDocument = self
         newDocument.operationLog = newLog
         newDocument.xmlTrees = newTrees

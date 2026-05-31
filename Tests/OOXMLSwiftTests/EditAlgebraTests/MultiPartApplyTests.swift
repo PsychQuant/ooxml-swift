@@ -186,6 +186,29 @@ final class MultiPartApplyTests: XCTestCase {
                        "Replayed log produces same paragraph IDs as freshly-applied doc")
     }
 
+    // MARK: - partContaining returns nil (no part contains op's target)
+
+    func testApplyThrowsWhenNoPartContainsTarget() {
+        // Hardens the contract: if an op's target ElementID resolves in NO
+        // part of the doc (stale ID, wrong doc, etc.), apply throws
+        // operationLogFailure with the "No XmlTree part contains..." message
+        // (PHASED behavior #4 — upfront pathNotFound validation lands later).
+        let (doc, _) = makeMultiPartDoc()
+
+        // Edit references a bogus ElementID that exists in no part
+        let bogusID = ElementID(libraryUUID: UUID())
+        let edit = OOXMLEdit.insertParagraph(after: bogusID, content: "x", styleId: nil)
+
+        XCTAssertThrowsError(try doc.apply(edit)) { error in
+            guard case EditError.operationLogFailure(let underlying) = error else {
+                XCTFail("Expected .operationLogFailure, got \(error)")
+                return
+            }
+            XCTAssertTrue(underlying.contains("No XmlTree part contains"),
+                          "Error message identifies the partContaining-nil branch: \(underlying)")
+        }
+    }
+
     // MARK: - Sequential apply through a chain (in-flight created IDs)
 
     func testApplySequenceChainsThroughCreatedIDs() throws {
