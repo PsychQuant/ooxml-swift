@@ -80,10 +80,13 @@ final class DocumentApplyTests: XCTestCase {
         }
     }
 
-    func testApplyPropagatesNotImplementedFromWordEditLowerStub() {
-        // §1 WordEdit.lower() returns [] — empty list → no ops → no error.
-        // This documents the current stub behavior (will change in §7 when
-        // WordEdit.lower() returns real translations).
+    func testApplyThrowsOnStubWordEditEmptyLower() {
+        // §1 WordEdit.lower() returns [] — defensive check in WordDocument.apply
+        // detects non-OOXMLEdit returning empty list and throws notImplemented.
+        // This prevents the silent no-op trap that would let callers think
+        // their applyBold succeeded when actually nothing happened.
+        // §7 of macdoc#105 ships per-case WordEdit.lower() implementations;
+        // this guard becomes dormant for real cases.
         let doc = WordDocument()
         let range = WordRange(
             startRun: ElementID(libraryUUID: UUID()),
@@ -93,11 +96,55 @@ final class DocumentApplyTests: XCTestCase {
         )
         let edit = WordEdit.applyBold(range: range)
 
-        // Currently stub: WordEdit.lower() returns [] → no operations() called.
-        // §7 will make this throw notImplemented for the actual OOXMLEdit.
-        let result = try? doc.apply(edit)
-        XCTAssertNotNil(result, "Stub WordEdit.lower() empty list → no-op apply (will change in §7)")
-        XCTAssertEqual(doc, result, "Stub WordEdit apply is identity")
+        XCTAssertThrowsError(try doc.apply(edit)) { error in
+            guard case EditError.notImplemented(let message) = error else {
+                XCTFail("Expected .notImplemented on stub WordEdit, got \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("WordEdit") || message.contains("stub"),
+                          "Error references WordEdit/stub: \(message)")
+            XCTAssertTrue(message.contains("§7") || message.contains("macdoc#105"),
+                          "Error references task batch: \(message)")
+        }
+    }
+
+    func testApplyWrapsElementNotFoundAsOperationLogFailure() throws {
+        // Per spec.md "WordDocument.apply Public Method" item #4 (PHASED):
+        // target-not-found surfaces via Reducer-wrapping as
+        // EditError.operationLogFailure (until Phase 2c follow-up ships
+        // upfront EditError.pathNotFound validation).
+        //
+        // Build a WordDocument with a known paragraph, then issue an
+        // insertParagraph against a NON-EXISTENT ElementID. The Reducer
+        // throws elementNotFound, which WordDocument.apply wraps.
+        let paraUUID = UUID()
+        let textNode = XmlNode.text("present")
+        let wt = XmlNode.element(prefix: "w", localName: "t", children: [textNode])
+        let wr = XmlNode.element(prefix: "w", localName: "r", children: [wt])
+        let wp = XmlNode.element(prefix: "w", localName: "p", children: [wr])
+        wp.libraryUUID = paraUUID
+        let body = XmlNode.element(prefix: "w", localName: "body", children: [wp])
+        let root = XmlNode.element(prefix: "w", localName: "document", children: [body])
+        var doc = WordDocument()
+        doc.xmlTrees["word/document.xml"] = XmlTree.synthesized(root: root)
+
+        // Edit references an ElementID NOT in the doc
+        let bogusID = ElementID(libraryUUID: UUID())
+        let edit = OOXMLEdit.insertParagraph(after: bogusID, content: "new", styleId: nil)
+
+        XCTAssertThrowsError(try doc.apply(edit)) { error in
+            // Pin the CASE — spec.md PHASED behavior #4 says target-not-found
+            // surfaces as operationLogFailure (NOT as pathNotFound until Phase
+            // 2c upfront-validation lands). The wrapped `underlying` string
+            // format is intentionally not pinned (Swift's default
+            // localizedDescription is locale-dependent and the structured
+            // ElementID is lost in the wrap — a documented limitation of the
+            // PHASED contract; Phase 2c follow-up restores structured info).
+            guard case EditError.operationLogFailure = error else {
+                XCTFail("Expected .operationLogFailure (PHASED behavior per spec.md #4), got \(error)")
+                return
+            }
+        }
     }
 
     // MARK: - Sequence-folding apply
