@@ -42,9 +42,12 @@ extension OOXMLEdit {
                 format: RunFormatPayload(bold: value)
             )]
 
-        case .insertHyperlink, .removeParagraph:
+        case .removeParagraph(let target):
+            return [.removeParagraph(id: target)]
+
+        case .insertHyperlink:
             throw EditError.notImplemented(
-                "OOXMLEdit.operations() for \(self) — see #105 tasks §5-§6"
+                "OOXMLEdit.operations() for \(self) — see #105 tasks §5 (composite design pending user checkpoint)"
             )
         }
     }

@@ -139,8 +139,15 @@ final class EditProtocolTests: XCTestCase {
     // MARK: - OOXMLEdit+Operation extension
 
     func testOperationsExtensionThrowsNotImplemented() {
-        // §1.4 placeholder — per-case operations() impl lands in §3-§6.
-        let edit = OOXMLEdit.removeParagraph(target: ElementID(libraryUUID: UUID()))
+        // §1.4 stub-mechanism test — uses the LAST remaining stubbed case so
+        // it survives each impl batch (§3, §4, §6 already shipped; §5
+        // insertHyperlink is the only remaining stub). DELETE this test
+        // once §5 ships (no stubs left).
+        let edit = OOXMLEdit.insertHyperlink(
+            target: ElementID(libraryUUID: UUID()),
+            href: URL(string: "https://example.com")!,
+            displayText: nil
+        )
         XCTAssertThrowsError(try edit.operations()) { error in
             guard case EditError.notImplemented = error else {
                 XCTFail("Expected .notImplemented, got \(error)")

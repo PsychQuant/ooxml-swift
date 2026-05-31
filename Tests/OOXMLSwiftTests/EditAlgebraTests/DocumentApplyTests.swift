@@ -59,17 +59,23 @@ final class DocumentApplyTests: XCTestCase {
     }
 
     func testApplyPropagatesNotImplementedFromOperationsStub() {
-        // §1 scaffold has OOXMLEdit.operations() throwing notImplemented.
-        // §2 apply pipeline should surface that error through lower → operations.
+        // §2 apply pipeline should surface notImplemented errors from
+        // OOXMLEdit.operations() through lower → operations. Uses the LAST
+        // remaining stubbed case so this test survives each impl batch.
+        // DELETE once §5 insertHyperlink ships (no stubs left).
         let doc = WordDocument()
-        let edit = OOXMLEdit.removeParagraph(target: ElementID(libraryUUID: UUID()))
+        let edit = OOXMLEdit.insertHyperlink(
+            target: ElementID(libraryUUID: UUID()),
+            href: URL(string: "https://example.com")!,
+            displayText: nil
+        )
 
         XCTAssertThrowsError(try doc.apply(edit)) { error in
             guard case EditError.notImplemented(let message) = error else {
-                XCTFail("Expected .notImplemented (from §1 stub), got \(error)")
+                XCTFail("Expected .notImplemented (from §5 stub), got \(error)")
                 return
             }
-            XCTAssertTrue(message.contains("§5-§6"),
+            XCTAssertTrue(message.contains("§5"),
                           "Stub error message references remaining task batch: \(message)")
         }
     }
@@ -104,12 +110,14 @@ final class DocumentApplyTests: XCTestCase {
 
     func testApplySingleEditViaSequence() {
         // Single-element sequence should match single-edit apply behavior.
-        // Both throw the same notImplemented stub error (asserted separately
-        // to avoid nested XCTAssertThrowsError — Swift's throwing-closure
-        // type contract doesn't allow a throwing `try` inside the non-throwing
-        // ErrorHandler closure of the outer XCTAssertThrowsError).
+        // Uses last-remaining-stub case for cascade survival. DELETE once §5
+        // ships (no stubs left).
         let doc = WordDocument()
-        let edit = OOXMLEdit.removeParagraph(target: ElementID(libraryUUID: UUID()))
+        let edit = OOXMLEdit.insertHyperlink(
+            target: ElementID(libraryUUID: UUID()),
+            href: URL(string: "https://example.com")!,
+            displayText: nil
+        )
 
         // Sequence apply path
         XCTAssertThrowsError(try doc.apply([edit] as [any Edit])) { seqError in

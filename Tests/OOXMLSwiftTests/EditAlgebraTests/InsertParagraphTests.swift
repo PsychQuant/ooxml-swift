@@ -93,18 +93,9 @@ final class InsertParagraphTests: XCTestCase {
 
     // MARK: - Stub still throws for unimplemented cases
     //
-    // setBold landed in §4 — assertion moved to SetBoldTests.
-    // removeParagraph + insertHyperlink remain in §5-§6 (still stubs).
-
-    func testRemoveParagraphStillThrowsNotImplemented() {
-        let edit = OOXMLEdit.removeParagraph(target: ElementID(libraryUUID: UUID()))
-        XCTAssertThrowsError(try edit.operations()) { error in
-            guard case EditError.notImplemented = error else {
-                XCTFail("Expected .notImplemented, got \(error)")
-                return
-            }
-        }
-    }
+    // setBold landed in §4 — assertion in SetBoldTests.
+    // removeParagraph landed in §6 — assertion in RemoveParagraphTests.
+    // insertHyperlink is the only remaining stub (§5 pending).
 
     func testInsertHyperlinkStillThrowsNotImplemented() {
         let edit = OOXMLEdit.insertHyperlink(

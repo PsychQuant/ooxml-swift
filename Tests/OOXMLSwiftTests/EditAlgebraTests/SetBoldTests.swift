@@ -79,18 +79,9 @@ final class SetBoldTests: XCTestCase {
     }
 
     // MARK: - Remaining stubs still throw
-
-    func testRemoveParagraphStillThrowsAfterSetBoldImplemented() {
-        let edit = OOXMLEdit.removeParagraph(target: ElementID(libraryUUID: UUID()))
-        XCTAssertThrowsError(try edit.operations()) { error in
-            guard case EditError.notImplemented(let msg) = error else {
-                XCTFail("Expected .notImplemented, got \(error)")
-                return
-            }
-            XCTAssertTrue(msg.contains("§5-§6"),
-                          "Stub error references remaining task batch: \(msg)")
-        }
-    }
+    //
+    // removeParagraph landed in §6 — coverage in RemoveParagraphTests.
+    // insertHyperlink is the only remaining stub (§5).
 
     func testInsertHyperlinkStillThrowsAfterSetBoldImplemented() {
         let edit = OOXMLEdit.insertHyperlink(
