@@ -60,4 +60,20 @@ public struct ElementID: Equatable, Hashable, Sendable, Codable {
     public init(rawString: String) {
         self.raw = rawString
     }
+
+    /// Extracts the library-generated UUID if this ElementID's `raw` string is
+    /// in `"lib:<UUID>"` form (i.e., was constructed via `init(libraryUUID:)`
+    /// or matched a node whose `stableID` was nil and used `libraryUUID`
+    /// fallback). Returns `nil` for native-ID forms (`"w14:paraId=..."`,
+    /// `"w:id=..."`, etc.) — those have no UUID to extract.
+    ///
+    /// Used by OperationReducer Phase 2c when materializing tree-mutating ops:
+    /// the new node's `libraryUUID` is derived deterministically from the
+    /// entry's `opID`, so the Reducer needs to construct an ElementID with
+    /// that UUID and address the new node via it.
+    public var libraryUUID: UUID? {
+        guard raw.hasPrefix("lib:") else { return nil }
+        let uuidString = String(raw.dropFirst("lib:".count))
+        return UUID(uuidString: uuidString)
+    }
 }
