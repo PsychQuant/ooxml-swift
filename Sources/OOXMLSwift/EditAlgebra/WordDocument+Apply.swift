@@ -139,14 +139,85 @@ extension WordDocument {
         }
 
         // 5. Construct new WordDocument with updated log + trees.
-        //    Typed views (body/styles/etc.) carried over from self — STALE
-        //    relative to new xmlTrees. Resync tracked as item #8 of
-        //    macdoc#110 (SEPARATE from the multi-part scoping fix shipped
-        //    here — don't conflate them when chasing #110).
+        //    body.children typed view is NOT auto-resynced — calling
+        //    resync would create new Paragraph(xmlNode:) instances whose
+        //    xmlNode references are different from any other path's
+        //    deep-copied tree, breaking the reference-equality Paragraph
+        //    Equatable (which downstream comparisons like Naturality tests
+        //    depend on). Callers who need a fresh body.children call
+        //    `newDocument.resyncBodyFromDocumentTree()` explicitly.
+        //
+        //    Per macdoc#110 item #8: the resync mechanism ships here as
+        //    opt-in. Future architectural work (content-based Paragraph
+        //    Equatable, or always-tree-backed Paragraph that re-reads on
+        //    every access) could enable auto-resync — out of scope here.
         var newDocument = self
         newDocument.operationLog = newLog
         newDocument.xmlTrees = newTrees
         return newDocument
+    }
+
+    /// Rebuilds `body.children` from the current `xmlTrees["word/document.xml"]`
+    /// tree. Walks the `<w:body>` direct children and constructs tree-backed
+    /// `Paragraph(xmlNode:)` / `Table(xmlNode:)` values. Non-paragraph /
+    /// non-table body elements are dropped from the typed view (see scope
+    /// notes below).
+    ///
+    /// **Opt-in design**: this method is NOT called automatically by
+    /// `apply()` because tree-backed Paragraph uses reference equality
+    /// (`Paragraph.==` compares `xmlNode === xmlNode`). Auto-resync after
+    /// apply would create new XmlNode instances on every apply call,
+    /// breaking downstream equality comparisons (notably NaturalityTests
+    /// which assert two apply paths produce equal docs). Callers who want
+    /// fresh body.children after apply call this method explicitly.
+    ///
+    /// **Narrow scope** (documented limitations):
+    /// - Only `<w:p>` and `<w:tbl>` become typed body children. Other
+    ///   body-level elements (`<w:sdt>`, `<w:bookmarkStart>`/End, vendor
+    ///   extensions) are NOT re-typed; they remain in xmlTrees but
+    ///   disappear from body.children. If your doc has these and you
+    ///   rely on body.children to round-trip them, prefer reading from
+    ///   xmlTrees directly.
+    /// - Only document.xml's body is resynced. styles, headers, footers,
+    ///   numbering, footnotes, endnotes remain stale relative to new
+    ///   xmlTrees.
+    ///
+    /// Safe to call multiple times — each call rebuilds from scratch.
+    ///
+    /// macdoc#110 item #8 tracker. Full auto-resync would require a
+    /// downstream refactor of Paragraph Equatable semantics (out of
+    /// scope here).
+    public mutating func resyncBodyFromDocumentTree() {
+        guard let docTree = self.xmlTrees["word/document.xml"] else { return }
+        guard let bodyNode = docTree.root.children.first(where: {
+            $0.kind == .element && $0.localName == "body"
+        }) else { return }
+
+        var newChildren: [BodyChild] = []
+        var newTables: [Table] = []
+
+        for child in bodyNode.children where child.kind == .element {
+            switch child.localName {
+            case "p":
+                newChildren.append(.paragraph(Paragraph(xmlNode: child)))
+            case "tbl":
+                let t = Table(xmlNode: child)
+                newChildren.append(.table(t))
+                newTables.append(t)
+            case "sectPr":
+                // Parsed separately into sectionProperties; skip from body
+                continue
+            default:
+                // Other body-level elements (sdt, bookmarkMarker, vendor
+                // extensions) are not currently re-typed by apply(). They
+                // remain in xmlTrees for byte-equivalent round-trip but
+                // disappear from body.children typed view. See scope notes.
+                continue
+            }
+        }
+
+        self.body.children = newChildren
+        self.body.tables = newTables
     }
 
     /// Apply a sequence of Edits in order, folding each result into the next
