@@ -106,12 +106,67 @@ public enum WordEdit: Edit, Equatable, Sendable {
         throw EditError.notImplemented("WordEdit.apply requires Document.apply(_:) wiring (§2 of #105 tasks)")
     }
 
-    /// Lower this WordEdit to its `[OOXMLEdit]` translation. Stub in §1
-    /// scaffold — full implementations land in §7 of #105 tasks.
+    /// Lower this WordEdit to its `[OOXMLEdit]` translation.
+    ///
+    /// Per macdoc#105 design.md Decision 2 + spec.md "WordEdit Enum with 3
+    /// Canonical Cases". `lower()` is non-throwing and takes no document
+    /// context (per the `Edit` protocol). Cases that require doc context to
+    /// resolve (e.g., cross-paragraph WordRange in applyBold needs to
+    /// enumerate intermediate Runs) return `[]`, which triggers the silent-
+    /// noop guard in `WordDocument.apply` → throws `notImplemented` with a
+    /// message identifying the unsupported input combination.
     public func lower() -> [OOXMLEdit] {
-        // §7 will implement per-case logic. Returning empty is intentional
-        // scaffold marker — naturality tests in §9 will fail on stubs, which
-        // is the correct signal that implementation is pending.
-        []
+        switch self {
+
+        case .applyBold(let range):
+            // Single-Run case (startRun == endRun): 1:1 mapping to
+            // OOXMLEdit.setBold(target: startRun, value: true). The offsets
+            // are ignored at this layer — the OOXMLEdit applies bold to the
+            // ENTIRE run, not a substring. Partial-Run bold (offsets cover
+            // only part of the run's text) requires run-splitting, which is
+            // a separate OOXMLEdit case pending design (file ooxml-swift
+            // issue if needed).
+            if range.startRun == range.endRun {
+                return [.setBold(target: range.startRun, value: true)]
+            }
+            // Multi-Run / cross-paragraph case: lower() can't enumerate the
+            // runs between startRun and endRun without document context.
+            // Returning [] triggers the silent-noop guard in
+            // WordDocument.apply → throws notImplemented. Resolution
+            // requires either (a) Edit protocol amendment to pass doc to
+            // lower(), or (b) a pre-lower step that resolves the range to
+            // a list of (runID) on the document side. Tracked in macdoc#110.
+            return []
+
+        case .applyLink(let range, let url):
+            // Single-Run case: 1:1 to OOXMLEdit.insertHyperlink. Note that
+            // OOXMLEdit.insertHyperlink itself is STUBBED pending §5
+            // composite design checkpoint — calling doc.apply(applyLink)
+            // will throw notImplemented at the operations() step, not here.
+            // That's the correct error-surfacing layer.
+            //
+            // displayText: nil — lower() can't extract the substring from
+            // startRun.text[startOffset..<endOffset] without doc context.
+            // The §5 design will resolve nil → use href as displayed text,
+            // or require displayText to be passed explicitly by the caller.
+            if range.startRun == range.endRun {
+                return [.insertHyperlink(
+                    target: range.startRun,
+                    href: url,
+                    displayText: nil
+                )]
+            }
+            // Multi-Run case: same constraint as applyBold above.
+            return []
+
+        case .applyInsertParagraph(let after, let content):
+            // Simplest case: 1:1 mapping. ParagraphRef wraps an ElementID
+            // that's already in the right shape for OOXMLEdit.
+            return [.insertParagraph(
+                after: after.elementID,
+                content: content,
+                styleId: nil
+            )]
+        }
     }
 }
