@@ -90,14 +90,33 @@ extension WordDocument {
         //    every tree" pattern which threw elementNotFound on parts that
         //    didn't contain the op's target.
         var newTrees = self.xmlTrees
+
+        // Single-part fast path: when the doc has exactly one part, skip the
+        // partContaining tree walk. materialize will throw elementNotFound
+        // if the target isn't in the tree (we wrap that as
+        // operationLogFailure same as the multi-part error path). Saves
+        // ~3-5µs per op on synthesized fixtures where partContaining's
+        // findNode walk was significant overhead.
+        //
+        // Most real-world docs are multi-part (document.xml + styles.xml +
+        // comments.xml + ...), but synthesized fixtures + simple cases hit
+        // this fast path.
+        let singlePartPath: String? = newTrees.count == 1 ? newTrees.keys.first : nil
+
         for (op, opID) in zip(newOps, opIDs) {
-            guard let partPath = OperationReducer.partContaining(op: op, in: newTrees) else {
-                // No part contains the op's target. Surface as
-                // operationLogFailure (PHASED #4 — upfront pathNotFound
-                // validation lands later).
-                throw EditError.operationLogFailure(
-                    underlying: "No XmlTree part contains any ElementID referenced by op: \(op)"
-                )
+            let partPath: String
+            if let single = singlePartPath {
+                partPath = single
+            } else {
+                guard let found = OperationReducer.partContaining(op: op, in: newTrees) else {
+                    // No part contains the op's target. Surface as
+                    // operationLogFailure (PHASED #4 — upfront pathNotFound
+                    // validation lands later).
+                    throw EditError.operationLogFailure(
+                        underlying: "No XmlTree part contains any ElementID referenced by op: \(op)"
+                    )
+                }
+                partPath = found
             }
 
             // Build a single-op log carrying the SHARED opID. The Reducer
