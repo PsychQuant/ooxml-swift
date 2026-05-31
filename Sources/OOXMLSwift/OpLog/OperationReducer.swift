@@ -210,10 +210,56 @@ public enum OperationReducer {
             // Should not reach here — undo is interpreted in applyOrInterpret.
             return
 
-        // Phase 2b unsupported op kinds — Phase 2c implements these.
-        case .insertParagraphAfter, .insertParagraphBefore, .removeParagraph,
-             .insertTable, .removeTable, .setCellText,
-             .insertRun, .setRunFormat,
+        case .insertParagraphAfter(let after, let payload):
+            // Find target + parent + position.
+            guard let (parent, idx) = findParentAndIndex(targetID: after, in: tree.root) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: after)
+            }
+            let newP = makeParagraph(text: payload.text, styleId: payload.styleId)
+            // Deterministic ID derivation: new paragraph's libraryUUID == entry.opID.
+            // This makes log replay produce the same tree every time.
+            newP.libraryUUID = entry.opID
+            parent.children.insert(newP, at: idx + 1)
+
+        case .insertParagraphBefore(let before, let payload):
+            guard let (parent, idx) = findParentAndIndex(targetID: before, in: tree.root) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: before)
+            }
+            let newP = makeParagraph(text: payload.text, styleId: payload.styleId)
+            newP.libraryUUID = entry.opID
+            parent.children.insert(newP, at: idx)
+
+        case .removeParagraph(let target):
+            guard let (parent, idx) = findParentAndIndex(targetID: target, in: tree.root) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
+            }
+            parent.children.remove(at: idx)
+            // MVP: removed paragraph's cross-part refs (comments, footnotes,
+            // bookmarks pointing TO this paragraph) are left dangling. A
+            // follow-up should add orphan-collection — file issue if needed.
+
+        case .setRunFormat(let target, let format):
+            // MVP: bold only (sufficient for OOXMLEdit.setBold). Other
+            // fields throw malformedOp — add italic/underline/fontSize/color
+            // when corresponding OOXMLEdit cases appear.
+            if format.italic != nil || format.underline != nil
+               || format.fontSizeHalfPoints != nil || format.color != nil {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "Phase 2c MVP supports RunFormatPayload.bold only — italic/underline/fontSizeHalfPoints/color pending"
+                )
+            }
+            guard let node = findNode(elementID: target, in: tree) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
+            }
+            if let bold = format.bold {
+                try setOrRemoveBold(runNode: node, value: bold)
+            }
+            // bold == nil → no-op (leave unchanged)
+
+        // Phase 2c remaining unsupported op kinds — implemented incrementally.
+        case .insertTable, .removeTable, .setCellText,
+             .insertRun,
              .insertBookmark, .insertComment,
              .redo,
              .insertNode, .removeNode, .updateAttribute, .moveNode:
@@ -222,6 +268,87 @@ public enum OperationReducer {
                 reason: "Phase 2c implements this op"
             )
         }
+    }
+
+    // MARK: - Phase 2c helpers
+
+    /// Walks the tree from `root` looking for a node whose ElementID matches
+    /// `targetID`. Returns the target's parent and its index in
+    /// `parent.children`. Returns `nil` if target not found.
+    ///
+    /// Root cannot be the target (root has no parent) — if `targetID` matches
+    /// `root` itself, returns nil. That's a limitation: ops can't target the
+    /// document root, only nested elements (which is fine for OOXML — body
+    /// children and below are the only meaningful targets).
+    internal static func findParentAndIndex(
+        targetID: ElementID,
+        in root: XmlNode
+    ) -> (XmlNode, Int)? {
+        for (idx, child) in root.children.enumerated() {
+            if let id = ElementID(node: child), id == targetID {
+                return (root, idx)
+            }
+            if let found = findParentAndIndex(targetID: targetID, in: child) {
+                return found
+            }
+        }
+        return nil
+    }
+
+    /// Sets or removes `<w:b/>` inside a `<w:r>`'s `<w:rPr>` to reflect the
+    /// boolean bold value. `value == true` ensures `<w:b/>` is present;
+    /// `value == false` removes any existing `<w:b/>` element (relies on
+    /// style inheritance for the "not bold" default).
+    ///
+    /// Creates `<w:rPr>` if needed; removes empty `<w:rPr>` if it becomes
+    /// childless after the operation (keeps tree minimal).
+    private static func setOrRemoveBold(runNode: XmlNode, value: Bool) throws {
+        // Find or create <w:rPr>. Per OOXML schema, rPr is the FIRST child of <w:r>.
+        let rPr: XmlNode
+        if let existing = runNode.children.first(where: { $0.kind == .element && $0.localName == "rPr" }) {
+            rPr = existing
+        } else if value {
+            rPr = XmlNode.element(prefix: "w", localName: "rPr")
+            runNode.children = [rPr] + runNode.children
+        } else {
+            // value is false and there's no rPr — already not-bold via inheritance.
+            return
+        }
+        // Remove existing <w:b>.
+        rPr.children = rPr.children.filter { !($0.kind == .element && $0.localName == "b") }
+        // Add <w:b/> if value is true.
+        if value {
+            let b = XmlNode.element(prefix: "w", localName: "b")
+            rPr.children.append(b)
+        }
+        // If rPr is now empty, remove it (tree minimization).
+        if rPr.children.isEmpty {
+            runNode.children = runNode.children.filter { $0 !== rPr }
+        }
+    }
+
+    /// Constructs a fresh `<w:p>` element with one `<w:r><w:t>text</w:t></w:r>`
+    /// child run. Optional `<w:pPr><w:pStyle w:val="styleId"/></w:pPr>` is
+    /// prepended when `styleId` is non-nil and non-empty.
+    ///
+    /// The returned paragraph has NO libraryUUID — caller is responsible for
+    /// assigning one (typically `entry.opID` for deterministic-replay).
+    /// Child Run is anonymous (no libraryUUID) — future Operations addressing
+    /// the run must use path-based addressing (entry.opID + child path index).
+    internal static func makeParagraph(text: String, styleId: String?) -> XmlNode {
+        let textNode = XmlNode.text(text)
+        let wt = XmlNode.element(prefix: "w", localName: "t", children: [textNode])
+        let wr = XmlNode.element(prefix: "w", localName: "r", children: [wt])
+
+        var children: [XmlNode] = []
+        if let styleId = styleId, !styleId.isEmpty {
+            let pStyle = XmlNode.element(prefix: "w", localName: "pStyle")
+            pStyle.setAttribute(prefix: "w", localName: "val", value: styleId)
+            let pPr = XmlNode.element(prefix: "w", localName: "pPr", children: [pStyle])
+            children.append(pPr)
+        }
+        children.append(wr)
+        return XmlNode.element(prefix: "w", localName: "p", children: children)
     }
 
     /// Applies the INVERSE of an entry's op (used by `undo` and by `.undo`
