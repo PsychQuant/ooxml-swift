@@ -190,6 +190,214 @@ final class OperationReducerPhase2cTests: XCTestCase {
         }
     }
 
+    // MARK: - insertParagraphBefore (symmetric)
+
+    func testInsertParagraphBeforePrependsBeforeTarget() throws {
+        let (base, paraIDs) = makeBodyWithParagraphs(["second"])
+
+        var log = OperationLog()
+        log.append(
+            .insertParagraphBefore(
+                before: paraIDs[0],
+                paragraph: ParagraphPayload(text: "first", styleId: nil)
+            ),
+            source: .swift
+        )
+
+        let result = try OperationReducer.materialize(log: log, base: base)
+        XCTAssertEqual(extractAllText(result), ["first", "second"],
+                       "New paragraph appears BEFORE target in document order")
+    }
+
+    func testInsertParagraphBeforeNewParagraphIDDerivesFromOpID() throws {
+        let (base, paraIDs) = makeBodyWithParagraphs(["second"])
+        let determinedOpID = UUID()
+
+        var log = OperationLog()
+        log.append(
+            .insertParagraphBefore(
+                before: paraIDs[0],
+                paragraph: ParagraphPayload(text: "first", styleId: nil)
+            ),
+            source: .swift,
+            opID: determinedOpID
+        )
+
+        let result = try OperationReducer.materialize(log: log, base: base)
+        let resultIDs = extractParagraphIDs(result)
+        XCTAssertEqual(resultIDs[0], determinedOpID,
+                       "New paragraph (inserted before) has libraryUUID == entry.opID")
+    }
+
+    func testInsertParagraphBeforeTargetNotFoundThrows() {
+        let (base, _) = makeBodyWithParagraphs(["one"])
+
+        var log = OperationLog()
+        log.append(
+            .insertParagraphBefore(
+                before: ElementID(libraryUUID: UUID()),
+                paragraph: ParagraphPayload(text: "before", styleId: nil)
+            ),
+            source: .swift
+        )
+
+        XCTAssertThrowsError(try OperationReducer.materialize(log: log, base: base)) { error in
+            guard case ReducerError.elementNotFound = error else {
+                XCTFail("Expected .elementNotFound, got \(error)")
+                return
+            }
+        }
+    }
+
+    // MARK: - setRunFormat (bold only — sufficient for OOXMLEdit.setBold)
+
+    private func makeBodyWithSingleRun(text: String) -> (XmlTree, ElementID) {
+        let runUUID = UUID()
+        let textNode = XmlNode.text(text)
+        let wt = XmlNode.element(prefix: "w", localName: "t", children: [textNode])
+        let wr = XmlNode.element(prefix: "w", localName: "r", children: [wt])
+        wr.libraryUUID = runUUID
+        let wp = XmlNode.element(prefix: "w", localName: "p", children: [wr])
+        let body = XmlNode.element(prefix: "w", localName: "body", children: [wp])
+        let doc = XmlNode.element(prefix: "w", localName: "document", children: [body])
+        return (XmlTree.synthesized(root: doc), ElementID(libraryUUID: runUUID))
+    }
+
+    /// Walks tree finding the run with given ElementID, returns true if it has
+    /// <w:rPr><w:b/></w:rPr> (i.e., bold is on).
+    private func runIsBold(_ tree: XmlTree, runID: ElementID) -> Bool {
+        guard let run = OperationReducer.findNode(elementID: runID, in: tree) else {
+            return false
+        }
+        guard let rPr = run.children.first(where: { $0.kind == .element && $0.localName == "rPr" }) else {
+            return false
+        }
+        return rPr.children.contains { $0.kind == .element && $0.localName == "b" }
+    }
+
+    func testSetRunFormatBoldTrueAddsBoldElement() throws {
+        let (base, runID) = makeBodyWithSingleRun(text: "hello")
+        XCTAssertFalse(runIsBold(base, runID: runID), "Baseline: run is not bold")
+
+        var log = OperationLog()
+        log.append(
+            .setRunFormat(target: runID, format: RunFormatPayload(bold: true)),
+            source: .swift
+        )
+
+        let result = try OperationReducer.materialize(log: log, base: base)
+        XCTAssertTrue(runIsBold(result, runID: runID),
+                      "After setRunFormat(bold: true), run has <w:b/> in rPr")
+    }
+
+    func testSetRunFormatBoldFalseRemovesBoldElement() throws {
+        // First add bold, then remove it via a second op.
+        let (base, runID) = makeBodyWithSingleRun(text: "hello")
+
+        var log = OperationLog()
+        log.append(.setRunFormat(target: runID, format: RunFormatPayload(bold: true)), source: .swift)
+        log.append(.setRunFormat(target: runID, format: RunFormatPayload(bold: false)), source: .swift)
+
+        let result = try OperationReducer.materialize(log: log, base: base)
+        XCTAssertFalse(runIsBold(result, runID: runID),
+                       "After setRunFormat(bold: false), <w:b/> removed from rPr")
+    }
+
+    func testSetRunFormatBoldNilLeavesUnchanged() throws {
+        // First set bold true. Then send payload with all nil (no-op).
+        let (base, runID) = makeBodyWithSingleRun(text: "hello")
+
+        var log = OperationLog()
+        log.append(.setRunFormat(target: runID, format: RunFormatPayload(bold: true)), source: .swift)
+        log.append(.setRunFormat(target: runID, format: RunFormatPayload()), source: .swift)
+
+        let result = try OperationReducer.materialize(log: log, base: base)
+        XCTAssertTrue(runIsBold(result, runID: runID),
+                      "After setRunFormat with all-nil payload, bold stays true (nil = leave unchanged)")
+    }
+
+    func testSetRunFormatTargetNotFoundThrows() {
+        let (base, _) = makeBodyWithSingleRun(text: "hello")
+
+        var log = OperationLog()
+        log.append(
+            .setRunFormat(target: ElementID(libraryUUID: UUID()),
+                          format: RunFormatPayload(bold: true)),
+            source: .swift
+        )
+
+        XCTAssertThrowsError(try OperationReducer.materialize(log: log, base: base)) { error in
+            guard case ReducerError.elementNotFound = error else {
+                XCTFail("Expected .elementNotFound, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testSetRunFormatUnsupportedFieldThrows() {
+        // MVP: only bold is implemented. italic/underline/fontSize/color
+        // throw malformedOp("Phase 2c MVP supports bold only ...").
+        let (base, runID) = makeBodyWithSingleRun(text: "hello")
+
+        var log = OperationLog()
+        log.append(
+            .setRunFormat(target: runID, format: RunFormatPayload(italic: true)),
+            source: .swift
+        )
+
+        XCTAssertThrowsError(try OperationReducer.materialize(log: log, base: base)) { error in
+            guard case ReducerError.malformedOp = error else {
+                XCTFail("Expected .malformedOp for unsupported italic field, got \(error)")
+                return
+            }
+        }
+    }
+
+    // MARK: - removeParagraph
+
+    func testRemoveParagraphRemovesTargetFromBody() throws {
+        let (base, paraIDs) = makeBodyWithParagraphs(["a", "b", "c"])
+
+        var log = OperationLog()
+        log.append(.removeParagraph(id: paraIDs[1]), source: .swift)  // remove "b"
+
+        let result = try OperationReducer.materialize(log: log, base: base)
+        XCTAssertEqual(extractAllText(result), ["a", "c"],
+                       "Target paragraph removed; siblings preserved in order")
+    }
+
+    func testRemoveParagraphPreservesSiblingIDs() throws {
+        let (base, paraIDs) = makeBodyWithParagraphs(["a", "b", "c"])
+        let aID = paraIDs[0].libraryUUID
+        let cID = paraIDs[2].libraryUUID
+
+        var log = OperationLog()
+        log.append(.removeParagraph(id: paraIDs[1]), source: .swift)
+
+        let result = try OperationReducer.materialize(log: log, base: base)
+        let resultIDs = extractParagraphIDs(result)
+
+        XCTAssertEqual(resultIDs.count, 2)
+        XCTAssertEqual(resultIDs[0], aID, "Sibling 'a' libraryUUID unchanged")
+        XCTAssertEqual(resultIDs[1], cID, "Sibling 'c' libraryUUID unchanged")
+    }
+
+    func testRemoveParagraphTargetNotFoundThrows() {
+        let (base, _) = makeBodyWithParagraphs(["a"])
+
+        var log = OperationLog()
+        log.append(.removeParagraph(id: ElementID(libraryUUID: UUID())), source: .swift)
+
+        XCTAssertThrowsError(try OperationReducer.materialize(log: log, base: base)) { error in
+            guard case ReducerError.elementNotFound = error else {
+                XCTFail("Expected .elementNotFound, got \(error)")
+                return
+            }
+        }
+    }
+
+    // MARK: - insertParagraphAfter additional (multiple-case chaining)
+
     func testInsertParagraphAfterMultipleCases() throws {
         // Sequence: start with [a], insert "b" after a → [a, b]; insert "c" after b → [a, b, c].
         let (base, paraIDs) = makeBodyWithParagraphs(["a"])
