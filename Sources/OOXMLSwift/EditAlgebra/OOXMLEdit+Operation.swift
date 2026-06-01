@@ -78,20 +78,19 @@ extension OOXMLEdit {
             ]
 
         case .wrapWithHyperlink(let target, let href):
-            // Wrap semantics: <w:hyperlink> takes target's position in
-            // parent. Reducer treats insertNode at position -1 with
-            // nodeXML containing a placeholder for the original target as
-            // "wrap target with this XML". Then removeNode removes the
-            // original position. (Two-op formulation; reducer may fuse.)
+            // Wrap semantics: Reducer wraps target with
+            // <w:hyperlink r:id=\"rId\">target</w:hyperlink> as a single
+            // atomic operation (Operation.wrapWithHyperlink typed primitive,
+            // ooxml-swift#71 Phase 2c slice 3). Plus addRelationship for
+            // the rels-part entry.
             //
-            // NOTE: target MUST be a <w:r>. Pre-validation in apply
-            // verifies this; if it's a paragraph or other element, apply
-            // throws EditError.unsupportedOperation.
+            // Updated from the original placeholder-substitution design
+            // ([insertNode + removeNode] with \$TARGET sentinel) to the
+            // cleaner typed primitive — Reducer constructs the wrapper
+            // internally with the deep-cloned target as its child.
             let rId = freshRelationshipId()
-            let hyperlinkOpenXML = renderHyperlinkOpenWithPlaceholder(rId: rId)
             return [
-                .insertNode(parent: target, position: -1, nodeXML: hyperlinkOpenXML),
-                .removeNode(target: target),
+                .wrapWithHyperlink(target: target, rId: rId),
                 .addRelationship(
                     part: documentRelsPath,
                     id: rId,
@@ -133,14 +132,6 @@ extension OOXMLEdit {
             "<w:t>\(escaped)</w:t>" +
             "</w:r>" +
             "</w:hyperlink>"
-    }
-
-    /// Renders the `<w:hyperlink>` wrapper for `wrapWithHyperlink` (wrap
-    /// semantics — wrapper has a placeholder marker; reducer fills in the
-    /// wrapped target). The "$TARGET" placeholder is a sentinel the
-    /// Phase 2c Reducer interprets to mean "the node being wrapped".
-    internal func renderHyperlinkOpenWithPlaceholder(rId: String) -> String {
-        return "<w:hyperlink r:id=\"\(rId)\">$TARGET</w:hyperlink>"
     }
 
     /// XML-escapes character content (text inside elements). Only handles
