@@ -285,6 +285,28 @@ public enum OperationReducer {
                 )
             }
 
+        case .wrapWithHyperlink(let target, let rId):
+            // Wrap target with <w:hyperlink r:id="rId">...</w:hyperlink>.
+            // Cmd-K semantics: target stays in place but is now nested
+            // inside a hyperlink wrapper at target's original position.
+            // Used by OOXMLEdit.wrapWithHyperlink (via WordEdit.applyLink
+            // single-Run case).
+            guard let (parent, idx) = findParentAndIndex(targetID: target, in: tree.root) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
+            }
+            // Deep-clone target so the wrapper child is structurally
+            // separate from the original (we'll remove the original
+            // implicitly by replacing it in parent.children).
+            let clone = parent.children[idx].deepClone()
+            // Build <w:hyperlink r:id="rId">
+            let wrapper = XmlNode.element(prefix: "w", localName: "hyperlink")
+            wrapper.setAttribute(prefix: "r", localName: "id", value: rId)
+            wrapper.children = [clone]
+            // Replace target's position with the wrapper. (deepClone
+            // preserves target's libraryUUID, so future ops addressing
+            // target now resolve to the clone inside the wrapper.)
+            parent.children[idx] = wrapper
+
         case .addRelationship(let part, let id, let type, let target, let targetMode):
             // Append a <Relationship> entry to the specified rels part.
             // Rels-part xml has a fixed structure: <Relationships> root
@@ -545,6 +567,7 @@ public enum OperationReducer {
         case .updateAttribute(let target, _, _, _): return [target]
         case .moveNode(let source, let dest, _): return [source, dest]
         case .insertSiblingAfter(let after, _): return [after]
+        case .wrapWithHyperlink(let target, _): return [target]
         case .addRelationship:
             // Rels-part operations don't address an ElementID in any tree —
             // they target a part by path. WordDocument.apply's per-op
@@ -606,6 +629,7 @@ public enum OperationReducer {
         case .updateAttribute(let target, _, _, _): return target == elementID
         case .moveNode(let source, let dest, _): return source == elementID || dest == elementID
         case .insertSiblingAfter(let after, _): return after == elementID
+        case .wrapWithHyperlink(let target, _): return target == elementID
         case .addRelationship: return false  // rels-part operation, not element-addressed
         case .unknown: return false
         }
