@@ -58,16 +58,16 @@ extension OOXMLEdit {
             // Insert semantics: new <w:hyperlink> wrapper appended as
             // sibling after target. Allocate a fresh rId for the rels
             // entry. Per Q4 of §5 walkthrough: nil displayText → href.absoluteString.
+            //
+            // Updated in ooxml-swift#71 Phase 2c: uses the new typed
+            // Operation.insertSiblingAfter primitive (was insertNode with
+            // position=-1 sentinel, which was semantically incorrect since
+            // target is the previous-sibling reference, not the parent).
             let rId = freshRelationshipId()
             let display = displayText ?? href.absoluteString
             let hyperlinkXML = renderHyperlinkXML(rId: rId, displayText: display)
-            // Position 0 is overridden during apply when the Reducer
-            // materializes — the reducer's insertNode case computes the
-            // sibling-after-target position. (Position field is a Phase 2c
-            // refinement; for now we use a sentinel that the reducer
-            // interprets as "after target".)
             return [
-                .insertNode(parent: target, position: -1, nodeXML: hyperlinkXML),
+                .insertSiblingAfter(after: target, nodeXML: hyperlinkXML),
                 .addRelationship(
                     part: documentRelsPath,
                     id: rId,
