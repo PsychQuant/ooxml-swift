@@ -149,25 +149,77 @@ final class InsertHyperlinkE2ETests: XCTestCase {
                        "Nil displayText falls back to href.absoluteString per §5 Q4 verdict")
     }
 
-    // MARK: - WordEdit.applyLink stays gated on wrapWithHyperlink Reducer
+    // MARK: - wrapWithHyperlink end-to-end (via OOXMLEdit + via WordEdit.applyLink)
 
-    func testApplyLinkStillThrowsAtWrapReducer() {
-        // WordEdit.applyLink lowers to OOXMLEdit.wrapWithHyperlink (per
-        // Design Y), whose Reducer support is NOT in this PR. End-to-end
-        // applyLink continues to fail at the Reducer step — but the
-        // FAILURE MODE differs from insertHyperlink: wrapWithHyperlink's
-        // emission produces removeNode + addRelationship + a placeholder
-        // insertNode, all of which still throw malformedOp("Phase 2c").
+    func testWrapWithHyperlinkReplacesTargetWithWrappedRun() throws {
         let (doc, runID) = makeFixture()
-        let url = URL(string: "https://example.com")!
+        let url = URL(string: "https://example.com/wrap")!
+
+        let edit = OOXMLEdit.wrapWithHyperlink(target: runID, href: url)
+        let result = try doc.apply(edit)
+
+        // The paragraph now contains the hyperlink wrapper directly
+        // (not as a sibling — Wrap REPLACES target's position).
+        let docTree = result.xmlTrees["word/document.xml"]!
+        let para = docTree.root
+            .children.first { $0.kind == .element && $0.localName == "body" }!
+            .children.first { $0.kind == .element && $0.localName == "p" }!
+
+        let paraChildren = para.children.filter { $0.kind == .element }
+        XCTAssertEqual(paraChildren.count, 1,
+                       "After wrap: paragraph has exactly 1 element child (the hyperlink wrapper)")
+        XCTAssertEqual(paraChildren[0].localName, "hyperlink",
+                       "That child IS the hyperlink wrapper, not a sibling Run")
+
+        // Wrapper's r:id matches the rels entry's Id (referential integrity)
+        let wrapper = paraChildren[0]
+        let wrapperRId = wrapper.attributeValue(prefix: "r", localName: "id")
+        XCTAssertNotNil(wrapperRId)
+
+        let relsTree = result.xmlTrees["word/_rels/document.xml.rels"]
+        XCTAssertNotNil(relsTree, "Rels part auto-created")
+        let relationship = relsTree?.root.children.first {
+            $0.kind == .element && $0.localName == "Relationship"
+        }
+        let relsId = relationship?.attributeValue(prefix: nil, localName: "Id")
+        XCTAssertEqual(wrapperRId, relsId,
+                       "Wrapper's r:id matches rels Relationship's Id (referential integrity)")
+
+        // The wrapped run is INSIDE the hyperlink and preserves the original text
+        let innerRun = wrapper.children.first { $0.kind == .element && $0.localName == "r" }
+        XCTAssertNotNil(innerRun, "Hyperlink wraps a <w:r>")
+        let innerText = innerRun?.children.first { $0.kind == .element && $0.localName == "t" }?
+            .children.first { $0.kind == .text }?.textContent
+        XCTAssertEqual(innerText, "before",
+                       "Wrapped run preserves the original run's text content")
+    }
+
+    func testWordEditApplyLinkSingleRunEndToEnd() throws {
+        // WordEdit.applyLink lowers to OOXMLEdit.wrapWithHyperlink (Design Y).
+        // With wrapWithHyperlink Reducer now functional, applyLink works
+        // end-to-end. This proves the full chain: WordEdit semantic-layer →
+        // lower → OOXMLEdit syntactic-layer → operations → log → materialize.
+        let (doc, runID) = makeFixture()
+        let url = URL(string: "https://example.com/applylink")!
         let range = WordRange(startRun: runID, startOffset: 0, endRun: runID, endOffset: 6)
         let edit = WordEdit.applyLink(range: range, url: url)
 
-        XCTAssertThrowsError(try doc.apply(edit)) { error in
-            guard case EditError.operationLogFailure = error else {
-                XCTFail("Expected .operationLogFailure (wrapWithHyperlink Reducer pending), got \(error)")
-                return
-            }
+        let result = try doc.apply(edit)
+
+        // Verify the wrap happened
+        let docTree = result.xmlTrees["word/document.xml"]!
+        let para = docTree.root
+            .children.first { $0.kind == .element && $0.localName == "body" }!
+            .children.first { $0.kind == .element && $0.localName == "p" }!
+        let hyperlink = para.children.first { $0.kind == .element && $0.localName == "hyperlink" }
+        XCTAssertNotNil(hyperlink, "applyLink produced <w:hyperlink> wrapping the run")
+
+        // Rels entry exists with the right URL
+        let relsTree = result.xmlTrees["word/_rels/document.xml.rels"]
+        let rel = relsTree?.root.children.first {
+            $0.kind == .element && $0.localName == "Relationship"
         }
+        XCTAssertEqual(rel?.attributeValue(prefix: nil, localName: "Target"),
+                       "https://example.com/applylink")
     }
 }

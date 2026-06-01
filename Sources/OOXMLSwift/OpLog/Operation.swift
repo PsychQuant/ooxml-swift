@@ -62,6 +62,23 @@ public enum Operation: Equatable, Sendable {
     /// fragment wrapped with namespace declarations).
     case insertSiblingAfter(after: ElementID, nodeXML: String)
 
+    /// Wraps `target` element with a `<w:hyperlink r:id="rId">` wrapper.
+    /// The Reducer:
+    ///   1. Finds target's parent + index
+    ///   2. Deep-clones target
+    ///   3. Builds `<w:hyperlink r:id="rId">` element with the clone as child
+    ///   4. Replaces parent.children[idx] with the wrapper
+    ///
+    /// Atomic single-op — avoids the placeholder substitution problem of
+    /// `[insertNode + removeNode]` decomposition. Used by
+    /// `OOXMLEdit.wrapWithHyperlink` and (downstream) by
+    /// `WordEdit.applyLink` for Cmd-K parity.
+    ///
+    /// `rId` must match the Id in a paired `addRelationship` op (caller's
+    /// responsibility) for referential integrity between document.xml
+    /// and the rels part.
+    case wrapWithHyperlink(target: ElementID, rId: String)
+
     // MARK: Rels-part operations (typed)
 
     /// Adds a `<Relationship Id="..." Type="..." Target="..." TargetMode="..."/>`

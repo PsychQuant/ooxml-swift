@@ -235,6 +235,11 @@ internal enum JSONLLineCoder {
                 ("after", jsonString(after.raw)),
                 ("nodeXML", jsonString(nodeXML))
             ])
+        case .wrapWithHyperlink(let target, let rId):
+            return ("wrapWithHyperlink", [
+                ("target", jsonString(target.raw)),
+                ("rId", jsonString(rId))
+            ])
         case .addRelationship(let part, let id, let type, let target, let targetMode):
             return ("addRelationship", [
                 ("part", jsonString(part)),
@@ -347,6 +352,8 @@ internal enum JSONLLineCoder {
             return .moveNode(source: try eid("source"), destinationParent: try eid("destinationParent"), destinationIndex: try int("destinationIndex"))
         case "insertSiblingAfter":
             return .insertSiblingAfter(after: try eid("after"), nodeXML: try str("nodeXML"))
+        case "wrapWithHyperlink":
+            return .wrapWithHyperlink(target: try eid("target"), rId: try str("rId"))
         case "addRelationship":
             return .addRelationship(
                 part: try str("part"),
