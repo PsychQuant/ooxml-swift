@@ -20,10 +20,11 @@ final class OperationLogTests: XCTestCase {
 
     // MARK: - 1. Operation enum exhaustive case coverage
 
-    /// **Decision pinned**: `Operation` has 22 cases (16 element-level + 4
-    /// tree-node-level + 1 rels-part + 1 unknown). Each constructs and
-    /// pattern-matches. Updated in macdoc#110 §5 to add `addRelationship`
-    /// for typed rels-part mutations (see Operation.swift docstring).
+    /// **Decision pinned**: `Operation` has 23 cases (16 element-level + 4
+    /// tree-node-level + 1 sibling-relative + 1 rels-part + 1 unknown).
+    /// Each constructs and pattern-matches. Updated in ooxml-swift#71
+    /// Phase 2c to add `insertSiblingAfter` (typed sibling primitive used
+    /// by OOXMLEdit.insertHyperlink — see Operation.swift docstring).
     func testOperationEnumEachCaseConstructsAndMatches() {
         let id = ElementID(rawString: "w14:paraId=A")
         let id2 = ElementID(rawString: "w14:paraId=B")
@@ -50,6 +51,7 @@ final class OperationLogTests: XCTestCase {
             .removeNode(target: id),
             .updateAttribute(target: id, prefix: "w", localName: "id", value: "5"),
             .moveNode(source: id, destinationParent: id2, destinationIndex: 0),
+            .insertSiblingAfter(after: id, nodeXML: "<w:t>x</w:t>"),
             .addRelationship(
                 part: "word/_rels/document.xml.rels",
                 id: "rId99",
@@ -60,7 +62,7 @@ final class OperationLogTests: XCTestCase {
             .unknown(opType: "future", payload: JSONValue.object(["k": JSONValue.int(1)]))
         ]
 
-        XCTAssertEqual(cases.count, 22, "Operation MUST have exactly 22 cases enumerated in the test")
+        XCTAssertEqual(cases.count, 23, "Operation MUST have exactly 23 cases enumerated in the test")
 
         // Pattern-match: each case maps to its expected discriminator.
         for op in cases {
@@ -73,6 +75,7 @@ final class OperationLogTests: XCTestCase {
                  .undo, .redo,
                  .batchBegin, .batchEnd,
                  .insertNode, .removeNode, .updateAttribute, .moveNode,
+                 .insertSiblingAfter,
                  .addRelationship,
                  .unknown:
                 break // matched

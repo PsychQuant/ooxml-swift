@@ -262,12 +262,60 @@ public enum OperationReducer {
              .insertRun,
              .insertBookmark, .insertComment,
              .redo,
-             .insertNode, .removeNode, .updateAttribute, .moveNode,
-             .addRelationship:
+             .insertNode, .removeNode, .updateAttribute, .moveNode:
             throw ReducerError.malformedOp(
                 opID: entry.opID,
                 reason: "Phase 2c implements this op"
             )
+
+        case .insertSiblingAfter(let after, let nodeXML):
+            // Find target's parent + index, parse XML fragment, insert as
+            // next sibling. Used by OOXMLEdit.insertHyperlink to insert
+            // <w:hyperlink> wrapper after a Run.
+            guard let (parent, idx) = findParentAndIndex(targetID: after, in: tree.root) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: after)
+            }
+            do {
+                let newNode = try parseXMLFragment(nodeXML)
+                parent.children.insert(newNode, at: idx + 1)
+            } catch {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "Failed to parse insertSiblingAfter nodeXML: \(error.localizedDescription)"
+                )
+            }
+
+        case .addRelationship(let part, let id, let type, let target, let targetMode):
+            // Append a <Relationship> entry to the specified rels part.
+            // Rels-part xml has a fixed structure: <Relationships> root
+            // with <Relationship> children. We append to the root's
+            // children.
+            //
+            // The rels part is addressed by path, not ElementID — different
+            // from element-addressed ops. Reducer's `apply(entry:to:)`
+            // takes a single tree, but addRelationship needs to mutate
+            // a SPECIFIC rels tree. The caller (WordDocument.apply) must
+            // route this op to the rels part's tree before calling apply.
+            //
+            // Convention: when addRelationship is applied to a tree whose
+            // root is <Relationships>, we append. If the root isn't a
+            // relationships container, we throw — this is a routing error
+            // (caller passed wrong tree).
+            guard tree.root.kind == .element,
+                  tree.root.localName == "Relationships" else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "addRelationship requires tree root to be <Relationships> element, got \(tree.root.localName); did caller route this op to the rels part? (part='\(part)')"
+                )
+            }
+            let rel = XmlNode.element(localName: "Relationship")
+            rel.setAttribute(prefix: nil, localName: "Id", value: id)
+            rel.setAttribute(prefix: nil, localName: "Type", value: type)
+            rel.setAttribute(prefix: nil, localName: "Target", value: target)
+            if let targetMode = targetMode {
+                rel.setAttribute(prefix: nil, localName: "TargetMode", value: targetMode)
+            }
+            tree.root.children.append(rel)
         }
     }
 
@@ -294,6 +342,45 @@ public enum OperationReducer {
             }
         }
         return nil
+    }
+
+    /// Parses an XML fragment string into an XmlNode by wrapping it in a
+    /// synthetic root with all common OOXML namespace declarations and
+    /// then stripping the synthetic root.
+    ///
+    /// Used by Phase 2c Reducer cases (insertSiblingAfter, insertNode)
+    /// to materialize the nodeXML payload into a real tree node.
+    ///
+    /// Throws if the fragment is malformed XML or doesn't contain exactly
+    /// one root element after parsing.
+    internal static func parseXMLFragment(_ fragment: String) throws -> XmlNode {
+        // Wrap the fragment in a synthetic root carrying common OOXML
+        // namespace declarations. XmlTreeReader requires a fully-formed
+        // document, so we synthesize one.
+        let wrappedXML =
+            "<__wrap__ " +
+            "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" " +
+            "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" " +
+            "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\">" +
+            fragment +
+            "</__wrap__>"
+        guard let data = wrappedXML.data(using: .utf8) else {
+            throw NSError(
+                domain: "OperationReducer.parseXMLFragment",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to encode fragment as UTF-8"]
+            )
+        }
+        let tree = try XmlTreeReader.parse(data)
+        // The synthetic root's first element child IS the parsed fragment.
+        guard let parsed = tree.root.children.first(where: { $0.kind == .element }) else {
+            throw NSError(
+                domain: "OperationReducer.parseXMLFragment",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Fragment contained no element"]
+            )
+        }
+        return parsed
     }
 
     /// Sets or removes `<w:b/>` inside a `<w:r>`'s `<w:rPr>` to reflect the
@@ -457,6 +544,7 @@ public enum OperationReducer {
         case .removeNode(let target): return [target]
         case .updateAttribute(let target, _, _, _): return [target]
         case .moveNode(let source, let dest, _): return [source, dest]
+        case .insertSiblingAfter(let after, _): return [after]
         case .addRelationship:
             // Rels-part operations don't address an ElementID in any tree —
             // they target a part by path. WordDocument.apply's per-op
@@ -517,6 +605,7 @@ public enum OperationReducer {
         case .removeNode(let target): return target == elementID
         case .updateAttribute(let target, _, _, _): return target == elementID
         case .moveNode(let source, let dest, _): return source == elementID || dest == elementID
+        case .insertSiblingAfter(let after, _): return after == elementID
         case .addRelationship: return false  // rels-part operation, not element-addressed
         case .unknown: return false
         }

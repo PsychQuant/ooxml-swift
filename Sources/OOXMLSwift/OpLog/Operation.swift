@@ -48,6 +48,20 @@ public enum Operation: Equatable, Sendable {
     case updateAttribute(target: ElementID, prefix: String?, localName: String, value: String?)
     case moveNode(source: ElementID, destinationParent: ElementID, destinationIndex: Int)
 
+    /// Inserts a new XML node as the next sibling of `after` (i.e., into
+    /// after's parent at after's index + 1). Cleaner primitive than
+    /// `insertNode` for sibling-relative insertion — caller doesn't need
+    /// to resolve the parent and position; Reducer walks the tree to find
+    /// after's parent and computes the index.
+    ///
+    /// Used by `OOXMLEdit.insertHyperlink` to insert the `<w:hyperlink>`
+    /// wrapper after a target Run, and other "after X" sibling insertions
+    /// where the caller has the sibling ID but not the parent ID.
+    ///
+    /// `nodeXML` is parsed at Reducer time (via XmlTreeReader on a
+    /// fragment wrapped with namespace declarations).
+    case insertSiblingAfter(after: ElementID, nodeXML: String)
+
     // MARK: Rels-part operations (typed)
 
     /// Adds a `<Relationship Id="..." Type="..." Target="..." TargetMode="..."/>`

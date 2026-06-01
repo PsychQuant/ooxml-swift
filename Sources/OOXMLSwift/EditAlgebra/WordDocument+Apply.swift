@@ -105,7 +105,18 @@ extension WordDocument {
 
         for (op, opID) in zip(newOps, opIDs) {
             let partPath: String
-            if let single = singlePartPath {
+
+            // Part-addressed ops (addRelationship) carry their target part
+            // path in the payload — route directly without partContaining
+            // walk. addRelationship needs the rels part tree to exist; if
+            // not, we create it on-demand (rels parts often don't exist
+            // in synthesized fixtures).
+            if case .addRelationship(let part, _, _, _, _) = op {
+                partPath = part
+                if newTrees[part] == nil {
+                    newTrees[part] = makeEmptyRelationshipsTree()
+                }
+            } else if let single = singlePartPath {
                 partPath = single
             } else {
                 guard let found = OperationReducer.partContaining(op: op, in: newTrees) else {
@@ -155,6 +166,22 @@ extension WordDocument {
         newDocument.operationLog = newLog
         newDocument.xmlTrees = newTrees
         return newDocument
+    }
+
+    /// Constructs an empty `<Relationships>` XmlTree suitable for
+    /// addRelationship operations. Used when apply() encounters an
+    /// addRelationship op on a doc whose rels part doesn't exist yet
+    /// (common in synthesized fixtures).
+    ///
+    /// The namespace `http://schemas.openxmlformats.org/package/2006/relationships`
+    /// is the standard rels-part namespace per ECMA-376.
+    internal func makeEmptyRelationshipsTree() -> XmlTree {
+        let root = XmlNode.element(
+            prefix: nil,
+            localName: "Relationships",
+            namespaceURI: "http://schemas.openxmlformats.org/package/2006/relationships"
+        )
+        return XmlTree.synthesized(root: root)
     }
 
     /// Rebuilds `body.children` from the current `xmlTrees["word/document.xml"]`
