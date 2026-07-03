@@ -110,6 +110,15 @@ public struct WordDocument: Equatable {
         return xmlTrees[partPath]
     }
 
+    /// word-aligned-state-sync Phase 1 task 2.6: XML parts the generic tree
+    /// sweep could not parse, keyed by part path with a human-readable error
+    /// description. Loud-diagnostic channel — a malformed part outside the
+    /// typed model must not abort `DocxReader.read`, because its bytes are
+    /// still preserved verbatim by the overlay save path; but the failure
+    /// must not be swallowed silently either. Excluded from `Equatable`
+    /// (same rationale as `xmlTrees`).
+    public internal(set) var xmlTreeLoadFailures: [String: String] = [:]
+
     /// v0.17.0+ (#51): document-level setting for `<w:evenAndOddHeaders/>` in
     /// settings.xml — when true, headers/footers of type `even` apply to even pages.
     public var evenAndOddHeaders: Bool = false
