@@ -199,16 +199,28 @@ public struct DocxReader {
             document.xmlTrees["word/numbering.xml"] = try XmlTreeReader.parse(numberingData)
         }
 
-        // v0.31.2+ Settings.xml — Reader does not currently consume this part
-        // for the typed model (Settings handling is inlined in Document mutation
-        // helpers), but the spec requires loading it into xmlTrees so Phase 2's
-        // op log can address settings elements by id. Pure xmlTrees population
-        // path; no typed model side effect.
+        // v0.31.2+ Settings.xml — loaded into xmlTrees so Phase 2's op log can
+        // address settings elements by id, and (task 2.5, #69) so the writer
+        // can serialize dirty settings from the tree instead of a template.
         let settingsURL = tempDir.appendingPathComponent("word/settings.xml")
         if FileManager.default.fileExists(atPath: settingsURL.path) {
             let settingsData = try Data(contentsOf: settingsURL)
             try Self.rejectDTD(settingsData, part: "word/settings.xml")
             document.xmlTrees["word/settings.xml"] = try XmlTreeReader.parse(settingsData)
+
+            // word-aligned-state-sync Phase 1 task 2.5 (#69): typed settings
+            // flags are tree-backed. Populate them from the parsed tree so
+            // writer-side flag sync (DocxWriter.writeSettings) reflects what
+            // the source document — possibly Word itself — already enabled,
+            // instead of silently reverting flags the typed model never saw.
+            if let settingsRoot = document.xmlTrees["word/settings.xml"]?.root {
+                document.revisions.settings.enabled = settingsRoot.children.contains {
+                    $0.kind == .element && $0.localName == "trackChanges" && $0.settingsOnOffValue
+                }
+                document.evenAndOddHeaders = settingsRoot.children.contains {
+                    $0.kind == .element && $0.localName == "evenAndOddHeaders" && $0.settingsOnOffValue
+                }
+            }
         }
 
         // 7. 解析文件內容（傳入 styles 和 numbering 用於語義標註）

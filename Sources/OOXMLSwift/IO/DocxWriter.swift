@@ -121,7 +121,7 @@ public struct DocxWriter {
             try writeStyles(document.styles, latentStyles: document.latentStyles, to: tempDir)
         }
         if !overlayMode || dirty.contains("word/settings.xml") {
-            try writeSettings(to: tempDir)
+            try writeSettings(document, to: tempDir)
         }
         if !overlayMode || dirty.contains("word/fontTable.xml") {
             try writeFontTable(to: tempDir)
@@ -909,11 +909,72 @@ public struct DocxWriter {
 
     // MARK: - Settings
 
-    private static func writeSettings(to baseURL: URL) throws {
+    /// CT_Settings is an xsd:sequence — a synced flag must be inserted before
+    /// the first present element that follows it in the schema order. Each set
+    /// lists the schema successors of one flag; when none is present the flag
+    /// is appended at the end of `<w:settings>` (Word tolerates trailing
+    /// position better than a wrong mid-sequence position).
+    private static let trackChangesSuccessors: Set<String> = [
+        "doNotTrackMoves", "doNotTrackFormatting", "documentProtection",
+        "autoFormatOverride", "styleLockTheme", "styleLockQFSet",
+        "defaultTabStop", "autoHyphenation", "consecutiveHyphenLimit",
+        "hyphenationZone", "doNotHyphenateCaps", "showEnvelope",
+        "summaryLength", "clickAndTypeStyle", "defaultTableStyle",
+        "evenAndOddHeaders", "bookFoldRevPrinting", "bookFoldPrinting",
+        "bookFoldPrintingSheets", "drawingGridHorizontalSpacing",
+        "drawingGridVerticalSpacing", "doNotShadeFormData",
+        "noPunctuationKerning", "characterSpacingControl", "printTwoOnOne",
+        "savePreviewPicture", "updateFields", "hdrShapeDefaults",
+        "footnotePr", "endnotePr", "compat", "rsids", "mathPr",
+        "themeFontLang", "clrSchemeMapping", "shapeDefaults",
+        "decimalSymbol", "listSeparator",
+    ]
+
+    private static let evenAndOddHeadersSuccessors: Set<String> = [
+        "bookFoldRevPrinting", "bookFoldPrinting", "bookFoldPrintingSheets",
+        "drawingGridHorizontalSpacing", "drawingGridVerticalSpacing",
+        "displayHorizontalDrawingGridEvery", "displayVerticalDrawingGridEvery",
+        "doNotShadeFormData", "noPunctuationKerning",
+        "characterSpacingControl", "printTwoOnOne", "savePreviewPicture",
+        "updateFields", "hdrShapeDefaults", "footnotePr", "endnotePr",
+        "compat", "rsids", "mathPr", "themeFontLang", "clrSchemeMapping",
+        "shapeDefaults", "decimalSymbol", "listSeparator",
+    ]
+
+    /// word-aligned-state-sync Phase 1 task 2.5 (PsychQuant/ooxml-swift#69):
+    /// settings.xml is tree-backed. When the document carries a parsed
+    /// settings tree, dirty-settings serialization starts from that tree —
+    /// preserving every child the typed model does not understand — and only
+    /// syncs the two typed flags (`<w:trackChanges/>`,
+    /// `<w:evenAndOddHeaders/>`) whose mutation APIs are the only way
+    /// settings.xml becomes dirty. Scratch mode (no source archive, hence no
+    /// tree) falls back to the minimal template plus the enabled flags.
+    private static func writeSettings(_ document: WordDocument, to baseURL: URL) throws {
+        let url = baseURL.appendingPathComponent("word/settings.xml")
+
+        if let tree = document.xmlTrees["word/settings.xml"] {
+            let copy = tree.deepCopy()
+            syncSettingsFlag(
+                on: copy.root, localName: "trackChanges",
+                enabled: document.revisions.settings.enabled,
+                successors: trackChangesSuccessors)
+            syncSettingsFlag(
+                on: copy.root, localName: "evenAndOddHeaders",
+                enabled: document.evenAndOddHeaders,
+                successors: evenAndOddHeadersSuccessors)
+            let data = try XmlTreeWriter.serialize(copy)
+            try data.write(to: url)
+            return
+        }
+
+        let trackChangesLine = document.revisions.settings.enabled
+            ? "\n    <w:trackChanges/>" : ""
+        let evenAndOddLine = document.evenAndOddHeaders
+            ? "\n    <w:evenAndOddHeaders/>" : ""
         let xml = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-            <w:defaultTabStop w:val="720"/>
+        <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\(trackChangesLine)
+            <w:defaultTabStop w:val="720"/>\(evenAndOddLine)
             <w:characterSpacingControl w:val="doNotCompress"/>
             <w:compat>
                 <w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>
@@ -921,8 +982,46 @@ public struct DocxWriter {
         </w:settings>
         """
 
-        let url = baseURL.appendingPathComponent("word/settings.xml")
         try xml.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Idempotent flag sync on a `<w:settings>` root: presence-with-true ↔
+    /// `enabled`. Leaves the tree untouched when the flag already matches, so
+    /// the no-op path keeps every node clean and serialization stays
+    /// byte-equal via source-range blob copy.
+    private static func syncSettingsFlag(
+        on root: XmlNode,
+        localName: String,
+        enabled: Bool,
+        successors: Set<String>
+    ) {
+        let existingIdx = root.children.firstIndex {
+            $0.kind == .element && $0.localName == localName
+        }
+
+        if enabled {
+            if let idx = existingIdx {
+                let node = root.children[idx]
+                if !node.settingsOnOffValue {
+                    // e.g. <w:trackChanges w:val="false"/> → drop val so bare
+                    // presence means enabled.
+                    node.attributes.removeAll { $0.localName == "val" }
+                }
+                return
+            }
+            let flag = XmlNode.element(
+                prefix: "w", localName: localName,
+                namespaceURI: "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+            if let insertAt = root.children.firstIndex(where: {
+                $0.kind == .element && successors.contains($0.localName)
+            }) {
+                root.children.insert(flag, at: insertAt)
+            } else {
+                root.children.append(flag)
+            }
+        } else if let idx = existingIdx {
+            root.children.remove(at: idx)
+        }
     }
 
     // MARK: - Font Table
@@ -1080,5 +1179,21 @@ public struct DocxWriter {
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&apos;")
+    }
+}
+
+// MARK: - Settings flag helpers (word-aligned-state-sync Phase 1 task 2.5)
+
+extension XmlNode {
+    /// OOXML `CT_OnOff` semantics for a settings flag element: bare presence
+    /// means `true`; an explicit `val` of `"false"` / `"0"` / `"off"` means
+    /// `false`. Shared by `DocxReader` (populate typed flags from the settings
+    /// tree) and `DocxWriter.syncSettingsFlag` (flip a `val="false"` flag when
+    /// the typed state enables it).
+    var settingsOnOffValue: Bool {
+        if let val = attributes.first(where: { $0.localName == "val" })?.value {
+            return !(val == "false" || val == "0" || val == "off")
+        }
+        return true
     }
 }
