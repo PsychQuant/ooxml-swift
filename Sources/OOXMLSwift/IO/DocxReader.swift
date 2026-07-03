@@ -689,6 +689,39 @@ public struct DocxReader {
             }
         }
 
+        // word-aligned-state-sync Phase 1 task 2.6 (`docx-container-parsing`
+        // Requirement "All parts preserved via XmlNode tree alongside typed
+        // views"): generic sweep loading every remaining XML part of the
+        // package into `xmlTrees` so the Phase 2 op log can address parts the
+        // typed model does not consume (customXml/*, word/theme/*,
+        // word/fontTable.xml, word/webSettings.xml, docProps/*, glossary/…).
+        // Skipped: relationship parts (`_rels/*.rels` — RelationshipsCollection
+        // owns them), `[Content_Types].xml` (package metadata with a dedicated
+        // overlay), and non-XML (binary) parts. A part that fails to parse is
+        // recorded in `xmlTreeLoadFailures` and does NOT abort the read — its
+        // bytes still round-trip verbatim via the overlay save path.
+        if let sweep = FileManager.default.enumerator(
+            at: tempDir, includingPropertiesForKeys: [.isDirectoryKey]) {
+            let tempBase = tempDir.resolvingSymlinksInPath().path
+            for case let fileURL as URL in sweep {
+                let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                if isDir { continue }
+                guard fileURL.pathExtension.lowercased() == "xml" else { continue }
+                let partPath = String(
+                    fileURL.resolvingSymlinksInPath().path.dropFirst(tempBase.count + 1))
+                if partPath == "[Content_Types].xml" { continue }
+                if partPath.hasPrefix("_rels/") || partPath.contains("/_rels/") { continue }
+                if document.xmlTrees[partPath] != nil { continue }
+                do {
+                    let partData = try Data(contentsOf: fileURL)
+                    try Self.rejectDTD(partData, part: partPath)
+                    document.xmlTrees[partPath] = try XmlTreeReader.parse(partData)
+                } catch {
+                    document.xmlTreeLoadFailures[partPath] = String(describing: error)
+                }
+            }
+        }
+
         // v0.13.0+: clear modifiedParts to empty as the final step before returning.
         // Guarantees freshly loaded documents start with `modifiedParts.isEmpty == true`,
         // so DocxWriter overlay mode skips every typed-part writer until the caller
