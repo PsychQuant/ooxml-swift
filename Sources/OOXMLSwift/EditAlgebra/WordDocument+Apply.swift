@@ -62,6 +62,18 @@ extension WordDocument {
             newOps.append(contentsOf: ops)
         }
 
+        var newDocument = self
+        try newDocument.appendAndMaterialize(newOps)
+        return newDocument
+    }
+
+    /// Shared op-application core: appends `newOps` to the log with fresh
+    /// (shared) opIDs and materializes each op against the part containing
+    /// its target. Extracted from `apply(_ edit:)` so the Phase 2 typed
+    /// setters (task 3.15, `WordDocument+TypedSetters.swift`) route through
+    /// the exact same log + reducer path instead of duplicating it.
+    internal mutating func appendAndMaterialize(_ newOps: [Operation]) throws {
+
         // 2. Generate stable opIDs ONCE — shared between persisted log and
         //    per-op materialization log. Critical for replay determinism:
         //    the Reducer derives new-node libraryUUIDs from entry.opID (per
@@ -149,23 +161,21 @@ extension WordDocument {
             }
         }
 
-        // 5. Construct new WordDocument with updated log + trees.
+        // 5. Commit updated log + trees onto self.
         //    body.children typed view is NOT auto-resynced — calling
         //    resync would create new Paragraph(xmlNode:) instances whose
         //    xmlNode references are different from any other path's
         //    deep-copied tree, breaking the reference-equality Paragraph
         //    Equatable (which downstream comparisons like Naturality tests
         //    depend on). Callers who need a fresh body.children call
-        //    `newDocument.resyncBodyFromDocumentTree()` explicitly.
+        //    `resyncBodyFromDocumentTree()` explicitly.
         //
         //    Per macdoc#110 item #8: the resync mechanism ships here as
         //    opt-in. Future architectural work (content-based Paragraph
         //    Equatable, or always-tree-backed Paragraph that re-reads on
         //    every access) could enable auto-resync — out of scope here.
-        var newDocument = self
-        newDocument.operationLog = newLog
-        newDocument.xmlTrees = newTrees
-        return newDocument
+        self.operationLog = newLog
+        self.xmlTrees = newTrees
     }
 
     /// Constructs an empty `<Relationships>` XmlTree suitable for

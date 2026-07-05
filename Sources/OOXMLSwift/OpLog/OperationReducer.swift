@@ -180,15 +180,31 @@ public enum OperationReducer {
             guard let node = findNode(elementID: target, in: tree) else {
                 throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
             }
-            // Replace <w:t> direct children with one new <w:t>X</w:t>.
             let textChild = XmlNode.text(text)
             let wt = XmlNode.element(prefix: "w", localName: "t", children: [textChild])
-            // Filter out existing <w:t> children, append the new one.
-            // Other children (e.g., <w:rPr>) are preserved.
-            let nonTextChildren = node.children.filter {
-                !($0.kind == .element && $0.localName == "t")
+            if node.kind == .element && node.localName == "p" {
+                // Paragraph target (the design's canonical case — setText
+                // addresses the paragraph via w14:paraId): full-text-replace
+                // semantics. Keep <w:pPr> (paragraph formatting), replace
+                // every content child (<w:r>, <w:hyperlink>, stray <w:t>,
+                // field wrappers, …) with one fresh <w:r><w:t>text</w:t></w:r>.
+                // Pre-fix behavior appended <w:t> directly under <w:p> —
+                // schema-invalid and invisible to the runs-based typed view
+                // (caught by TypedSetterOpLogTests, task 3.15).
+                let wr = XmlNode.element(prefix: "w", localName: "r", children: [wt])
+                let keptChildren = node.children.filter {
+                    $0.kind == .element && $0.localName == "pPr"
+                }
+                node.children = keptChildren + [wr]
+            } else {
+                // Run-shaped target: replace <w:t> direct children with one
+                // new <w:t>X</w:t>. Other children (e.g., <w:rPr>) are
+                // preserved.
+                let nonTextChildren = node.children.filter {
+                    !($0.kind == .element && $0.localName == "t")
+                }
+                node.children = nonTextChildren + [wt]
             }
-            node.children = nonTextChildren + [wt]
 
         case .setParagraphStyle(let target, let styleId):
             guard let node = findNode(elementID: target, in: tree) else {
