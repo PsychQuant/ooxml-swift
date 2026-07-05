@@ -72,7 +72,9 @@ extension WordDocument {
     /// its target. Extracted from `apply(_ edit:)` so the Phase 2 typed
     /// setters (task 3.15, `WordDocument+TypedSetters.swift`) route through
     /// the exact same log + reducer path instead of duplicating it.
-    internal mutating func appendAndMaterialize(_ newOps: [Operation]) throws {
+    internal mutating func appendAndMaterialize(
+        _ newOps: [Operation], source: OpSource = .swift
+    ) throws {
 
         // 2. Generate stable opIDs ONCE — shared between persisted log and
         //    per-op materialization log. Critical for replay determinism:
@@ -86,7 +88,7 @@ extension WordDocument {
         //    OperationLog enforces append-only semantics; we copy + extend.
         var newLog = self.operationLog
         for (op, opID) in zip(newOps, opIDs) {
-            newLog.append(op, source: .swift, opID: opID)
+            newLog.append(op, source: source, opID: opID)
         }
 
         // 4. Materialize ops per-part: each op is replayed only against the
@@ -146,7 +148,7 @@ extension WordDocument {
             // sees entry.opID == opID, so the new node's libraryUUID derives
             // from the same UUID that's persisted in newLog above.
             var singleOpLog = OperationLog()
-            singleOpLog.append(op, source: .swift, opID: opID)
+            singleOpLog.append(op, source: source, opID: opID)
 
             do {
                 let materialized = try OperationReducer.materialize(

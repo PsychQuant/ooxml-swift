@@ -37,13 +37,19 @@ public struct SyncSnapshot: Codable, Equatable {
     /// `normalizedFingerprint()` per part path, for cheap changed-part
     /// detection on import (identity noise like rsids already excluded).
     public let partFingerprints: [String: String]
+    /// Serialized `word/document.xml` at snapshot time — the baseline tree
+    /// `SyncOrchestrator` diffs Word saves against across sessions
+    /// (Phase 3 task 4.7). Optional for backward compatibility with
+    /// pre-Phase-3 snapshot files.
+    public let documentXML: String?
 
     public init(docxSHA256: String, savedAt: Date, opCount: Int,
-                partFingerprints: [String: String]) {
+                partFingerprints: [String: String], documentXML: String? = nil) {
         self.docxSHA256 = docxSHA256
         self.savedAt = savedAt
         self.opCount = opCount
         self.partFingerprints = partFingerprints
+        self.documentXML = documentXML
     }
 }
 
@@ -122,11 +128,17 @@ extension WordDocument {
         for (partPath, tree) in xmlTrees {
             fingerprints[partPath] = tree.root.normalizedFingerprint()
         }
+        var documentXML: String?
+        if let docTree = xmlTrees["word/document.xml"],
+           let serialized = try? XmlTreeWriter.serialize(docTree) {
+            documentXML = String(decoding: serialized, as: UTF8.self)
+        }
         let snapshot = SyncSnapshot(
             docxSHA256: SidecarStore.sha256Hex(of: docxData),
             savedAt: Date(),
             opCount: operationLog.entries.count,
-            partFingerprints: fingerprints)
+            partFingerprints: fingerprints,
+            documentXML: documentXML)
         try SidecarStore.saveSnapshot(snapshot, alongside: url)
     }
 
