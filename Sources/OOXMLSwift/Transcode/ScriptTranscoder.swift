@@ -47,9 +47,9 @@ public enum TranscodeError: Error, Equatable {
 /// Predefined pairs follow the spec's own example (`Heading1` ↔ `.heading1`);
 /// everything else maps verbatim (member name == styleId) when the styleId
 /// is a valid Swift identifier that doesn't collide with a predefined member.
-enum WordStyleMap {
+public enum WordStyleMap {
 
-    static let predefined: [String: String] = {
+    public static let predefined: [String: String] = {
         var map: [String: String] = [:]   // member -> styleId
         for i in 1...9 { map["heading\(i)"] = "Heading\(i)" }
         map["quote"] = "Quote"
@@ -62,14 +62,14 @@ enum WordStyleMap {
     private static let identifierPattern = try! NSRegularExpression(
         pattern: "^[A-Za-z_][A-Za-z0-9_]*$")
 
-    static func isIdentifier(_ s: String) -> Bool {
+    public static func isIdentifier(_ s: String) -> Bool {
         identifierPattern.firstMatch(
             in: s, range: NSRange(s.startIndex..., in: s)) != nil
     }
 
     /// styleId → `.member` name, or nil when the styleId has no lossless
     /// DSL spelling (caller falls back to the raw `// @op` escape).
-    static func member(forStyleId styleId: String) -> String? {
+    public static func member(forStyleId styleId: String) -> String? {
         if let hit = predefined.first(where: { $0.value == styleId }) {
             return hit.key
         }
@@ -82,7 +82,7 @@ enum WordStyleMap {
     }
 
     /// `.member` name → verbatim styleId.
-    static func styleId(forMember member: String) -> String {
+    public static func styleId(forMember member: String) -> String {
         predefined[member] ?? member
     }
 }

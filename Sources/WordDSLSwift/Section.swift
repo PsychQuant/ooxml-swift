@@ -1,12 +1,21 @@
-// Phase 4 placeholder.
-// Full type design lives in `openspec/specs/mdocx-grammar/spec.md`
-// (Spectra change `mdocx-syntax`). Implementation is the responsibility of
-// `word-aligned-state-sync` Phase 4 (Script transcoder).
+// Section.swift
+// word-aligned-state-sync Phase 4 task 5.3.
 
-/// Section container in the DSL. Compiler inverts container syntax into the
-/// OOXML `<w:sectPr>` marker pattern at serialization time
-/// (see Decision 6 in design.md).
+/// Section container in the DSL (`mdocx-grammar`: "Section as DSL container
+/// with compile-time marker inversion"). v0.34 slice: single-section body of
+/// paragraphs; section-property serialization (`<w:sectPr>` marker inversion,
+/// `type:` parameter) activates with multi-section support in 5.5.
 public struct Section {
     public let id: String
-    public init(id: String) { self.id = id }
+    public let paragraphs: [Paragraph]
+
+    public init(id: String, @WordBuilder content: () -> [Paragraph]) {
+        self.id = id
+        self.paragraphs = content()
+    }
+
+    public init(id: String) {
+        self.id = id
+        self.paragraphs = []
+    }
 }
