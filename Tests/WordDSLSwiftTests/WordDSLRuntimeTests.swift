@@ -23,7 +23,7 @@ final class WordDSLRuntimeTests: XCTestCase {
                 }
             }
         }
-        let log = document.buildLog()
+        let log = try document.buildLog()
 
         XCTAssertEqual(log.entries.count, 1)
         guard case .appendParagraph(let container, let p) = log.entries[0].op else {
@@ -44,7 +44,7 @@ final class WordDSLRuntimeTests: XCTestCase {
                 Paragraph(id: "h2", style: .heading1) { "Subtitle" }
             }
         }
-        let log = document.buildLog()
+        let log = try document.buildLog()
 
         let defineCount = log.entries.filter {
             if case .defineStyle = $0.op { return true } else { return false }
@@ -73,7 +73,7 @@ final class WordDSLRuntimeTests: XCTestCase {
                 }
             }
         }
-        let log = document.buildLog()
+        let log = try document.buildLog()
 
         XCTAssertEqual(log.entries.count, 2, "appendParagraph + setRuns")
         guard case .setRuns(let target, let runs) = log.entries[1].op else {
@@ -96,7 +96,7 @@ final class WordDSLRuntimeTests: XCTestCase {
                 }
             }
         }
-        let log = document.buildLog()
+        let log = try document.buildLog()
         XCTAssertEqual(log.entries.count, 3, "appendParagraph + insertTab + insertBreak")
         guard case .insertTab(let t) = log.entries[1].op else {
             return XCTFail("expected insertTab")
@@ -216,7 +216,7 @@ final class WordDSLRuntimeTests: XCTestCase {
         XCTAssertEqual(p.text, "本章探討意識本質的議題。")
 
         // Cross-check: the fixture's semantics == the inline DSL's semantics.
-        let inline = WordDocument {
+        let inline = try WordDocument {
             Section(id: "main") {
                 Paragraph(id: "p1") {
                     "本章探討"
@@ -284,5 +284,161 @@ extension WordDSLRuntimeTests {
         if case .paragraph(let p2) = reread.body.children.dropFirst().first {
             XCTAssertEqual(p2.text, "Title")
         } else { XCTFail("paragraph 2 lost") }
+    }
+}
+
+// MARK: - 5.5 structural coverage (component envelope + compile-only types)
+
+/// Fixture 07's component definition, verbatim shape.
+private struct Summary: WordComponent {
+    let id: String
+    let body: () -> WordDSLSwift.Paragraph
+    init(id: String, @WordBuilder body: @escaping () -> WordDSLSwift.Paragraph) {
+        self.id = id
+        self.body = body
+    }
+}
+
+extension WordStyle {
+    fileprivate static let summaryFrame = WordStyle(styleId: "SummaryFrame")
+}
+
+final class StructuralCoverageTests: XCTestCase {
+
+    func testComponentEnvelopeEmission() throws {
+        // Fixture 07 syntax, verbatim.
+        let document = WordDocument {
+            Section(id: "main") {
+                Summary(id: "ch1-summary") {
+                    Paragraph(id: "sum-frame", style: .summaryFrame) {
+                        "note text"
+                    }
+                }
+            }
+        }
+        let log = try document.buildLog()
+
+        guard case .beginComponent(let type, let cid) = log.entries[0].op else {
+            return XCTFail("first op must be beginComponent, got \(log.entries[0].op)")
+        }
+        XCTAssertEqual(type, "Summary")
+        XCTAssertEqual(cid.raw, "ch1-summary")
+        guard case .endComponent(let eid) = log.entries.last?.op else {
+            return XCTFail("last op must be endComponent")
+        }
+        XCTAssertEqual(eid.raw, "ch1-summary")
+        // Envelope contains defineStyle + appendParagraph for the body.
+        XCTAssertTrue(log.entries.contains {
+            if case .appendParagraph(_, let p) = $0.op { return p.paraId == "sum-frame" }
+            return false
+        })
+    }
+
+    func testComponentEnvelopeProducesNoOOXMLArtifact() throws {
+        // mdocx-grammar scenario "component metadata produces no OOXML artifact".
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("component-save-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("component.docx")
+
+        try WordDocument {
+            Section(id: "main") {
+                Summary(id: "ch1-summary") {
+                    Paragraph(id: "sum-frame") { "note text" }
+                }
+            }
+        }.save(to: url)
+
+        let reread = try DocxReader.read(from: url)
+        XCTAssertEqual(reread.body.children.count, 1, "one paragraph, no component artifact")
+        if case .paragraph(let p) = reread.body.children.first {
+            XCTAssertEqual(p.text, "note text")
+        }
+    }
+
+    func testComponentRoundTripsThroughTranscoderAsDSLForm() throws {
+        let document = WordDocument {
+            Section(id: "main") {
+                Summary(id: "ch1-summary") {
+                    Paragraph(id: "sum-frame") { "note text" }
+                }
+            }
+        }
+        let log = try document.buildLog()
+        let script = ScriptExporter.exportSwift(log: log)
+
+        XCTAssertTrue(script.contains("Summary(id: \"ch1-summary\") {"),
+                      "exporter reconstructs the component invocation, got:\n\(script)")
+        XCTAssertFalse(script.contains("@op {\"op_type\":\"beginComponent\""),
+                       "envelope must be DSL-form, not raw escape")
+
+        let reconstructed = try ScriptImporter.parse(source: script)
+        XCTAssertEqual(reconstructed.entries.count, log.entries.count)
+        for (a, b) in zip(log.entries, reconstructed.entries) {
+            XCTAssertEqual(a.op, b.op)
+        }
+    }
+
+    func testTableAndBookmarkAndHyperlinkTypesCompile() throws {
+        // Fixtures 10a / 12 / 13a syntax — COMPILING these bodies is the
+        // v0.34 acceptance for the structural types; emission channels are
+        // loud-throw pending taxonomy/reducer increments.
+        let tableDoc = WordDocument {
+            Section(id: "main") {
+                Table(id: "tbl1") {
+                    TableRow(id: "tbl1-r0") {
+                        TableCell(id: "tbl1-r0-c0") {
+                            Paragraph(id: "tbl1-r0-c0-p0") { "cell content" }
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertThrowsError(try tableDoc.buildLog()) { error in
+            guard case DSLEmissionError.unsupportedElement(let element, _) = error else {
+                return XCTFail("expected loud DSLEmissionError, got \(error)")
+            }
+            XCTAssertTrue(element.contains("Table"))
+        }
+
+        let bookmarkDoc = WordDocument {
+            Section(id: "main") {
+                Paragraph(id: "p1") {
+                    Bookmark(id: "intro_text") { "本章探討" }
+                }
+            }
+        }
+        XCTAssertThrowsError(try bookmarkDoc.buildLog())
+
+        let hyperlinkDoc = WordDocument {
+            Section(id: "main") {
+                Paragraph(id: "p1") {
+                    "see "
+                    Hyperlink(to: .anchor("ch1-intro")) { "Chapter 1" }
+                }
+            }
+        }
+        XCTAssertThrowsError(try hyperlinkDoc.buildLog())
+    }
+
+    func testRealFixture10aAnd13aSyntaxParseability() throws {
+        // The real fixture FILES for table/bookmark use containers outside
+        // the importer's v0.34 canonical subset — importer must reject them
+        // loudly (not silently mis-parse). DSL-form import for these rides
+        // with the taxonomy increment.
+        let base = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("OOXMLSwiftTests/Fixtures/mdocx")
+        let table = base.appendingPathComponent("10a-table-1x1/table-1x1.mdocx.swift")
+        guard FileManager.default.fileExists(atPath: table.path) else {
+            throw XCTSkip("fixture corpus not present")
+        }
+        let source = try String(contentsOf: table, encoding: .utf8)
+        XCTAssertThrowsError(try ScriptImporter.parse(source: source)) { error in
+            guard case TranscodeError.unsupportedSyntax = error else {
+                return XCTFail("expected unsupportedSyntax for out-of-subset container")
+            }
+        }
     }
 }

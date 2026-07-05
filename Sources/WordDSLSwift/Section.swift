@@ -7,15 +7,15 @@
 /// `type:` parameter) activates with multi-section support in 5.5.
 public struct Section {
     public let id: String
-    public let paragraphs: [Paragraph]
+    public let children: [SectionChild]
 
-    public init(id: String, @WordBuilder content: () -> [Paragraph]) {
+    public init(id: String, @SectionBuilder content: () -> [SectionChild]) {
         self.id = id
-        self.paragraphs = content()
+        self.children = content()
     }
 
     public init(id: String) {
         self.id = id
-        self.paragraphs = []
+        self.children = []
     }
 }

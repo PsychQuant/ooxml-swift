@@ -6,6 +6,13 @@
 import Foundation
 import OOXMLSwift
 
+/// Loud emission failure — a DSL element whose op-log channel doesn't exist
+/// yet must fail the build, never silently drop content ("apply errors are
+/// reported, not swallowed" discipline).
+public enum DSLEmissionError: Error, Equatable {
+    case unsupportedElement(element: String, reason: String)
+}
+
 /// Root container of an `.mdocx` script.
 public struct WordDocument {
 
@@ -41,12 +48,48 @@ public struct WordDocument {
     ///   paragraph, so an atom interleaved BETWEEN runs serializes after
     ///   them; declaration order inside the log is preserved for the
     ///   reverse transcoder either way.
-    public func buildLog() -> OperationLog {
+    public func buildLog() throws -> OperationLog {
         var log = OperationLog()
         var definedStyles = Set<String>()
 
         for section in sections {
-            for paragraph in section.paragraphs {
+            for child in section.children {
+                switch child {
+                case .paragraph(let paragraph):
+                    try emit(paragraph: paragraph, into: &log, definedStyles: &definedStyles)
+                case .component(let type, let id, let body):
+                    // mdocx-grammar "Component-aware op log": paired envelope
+                    // bracketing the body's operations. Body paragraphs append
+                    // to the document body (in: nil) — the component id is an
+                    // envelope identity, not a tree node (reducer treats the
+                    // markers as no-ops).
+                    log.append(.beginComponent(type: type,
+                                               id: ElementID(rawString: id)), source: .swift)
+                    for paragraph in body {
+                        try emit(paragraph: paragraph, into: &log, definedStyles: &definedStyles)
+                    }
+                    log.append(.endComponent(id: ElementID(rawString: id)), source: .swift)
+                case .table(let table):
+                    throw DSLEmissionError.unsupportedElement(
+                        element: "Table(id: \(table.id))",
+                        reason: "table emission awaits an appendTable authoring op + reducer support (post-v0.34 taxonomy increment); the DSL type compiles so scripts stay source-stable")
+                case .bookmarkStart(let marker):
+                    throw DSLEmissionError.unsupportedElement(
+                        element: "BookmarkStart(id: \(marker.id))",
+                        reason: "cross-paragraph bookmark emission awaits the reducer's insertBookmark implementation (Phase 2c residue)")
+                case .bookmarkEnd(let marker):
+                    throw DSLEmissionError.unsupportedElement(
+                        element: "BookmarkEnd(id: \(marker.id))",
+                        reason: "cross-paragraph bookmark emission awaits the reducer's insertBookmark implementation (Phase 2c residue)")
+                }
+            }
+        }
+        return log
+    }
+
+    /// Emits one paragraph's ops (define-on-first-use + append + runs + atoms).
+    private func emit(paragraph: Paragraph, into log: inout OperationLog,
+                      definedStyles: inout Set<String>) throws {
                 if let style = paragraph.style, !definedStyles.contains(style.styleId) {
                     definedStyles.insert(style.styleId)
                     log.append(.defineStyle(payload: style.payload), source: .swift)
@@ -83,12 +126,17 @@ public struct WordDocument {
                     case .tab: log.append(.insertTab(in: target), source: .swift)
                     case .lineBreak: log.append(.insertBreak(in: target), source: .swift)
                     case .noBreakHyphen: log.append(.insertNoBreakHyphen(in: target), source: .swift)
+                    case .bookmark(let b):
+                        throw DSLEmissionError.unsupportedElement(
+                            element: "Bookmark(id: \(b.id))",
+                            reason: "bookmark emission awaits the reducer's insertBookmark implementation (Phase 2c residue); the DSL type compiles so scripts stay source-stable")
+                    case .hyperlink:
+                        throw DSLEmissionError.unsupportedElement(
+                            element: "Hyperlink",
+                            reason: "hyperlink emission awaits an authoring-op channel (EditAlgebra lowering not yet reachable from buildLog)")
                     default: break
                     }
                 }
-            }
-        }
-        return log
     }
 
     // MARK: - save(to:) atomic three-file write (mdocx-grammar requirement)
@@ -108,7 +156,7 @@ public struct WordDocument {
             throw SyncError.fileLockedByWord(lockURL: WordLock.lockFileURL(for: url))
         }
 
-        let log = buildLog()
+        let log = try buildLog()
         var doc = OOXMLSwift.WordDocument.emptyAuthoringDocument()
         try doc.apply(operations: log.entries.map(\.op), source: .swift)
 
