@@ -41,6 +41,40 @@ public enum Operation: Equatable, Sendable {
     case batchBegin(label: String?)
     case batchEnd
 
+    // MARK: Authoring operations (word-aligned-state-sync §4b, macdoc#128)
+    // Additive; names + payload fields mirror ECMA-376 WordprocessingML per
+    // the `ooxml-operation-log` requirement "Authoring operations extend the
+    // taxonomy additively with OOXML-mirror naming".
+
+    /// Appends a paragraph as the last block-level child of the container
+    /// addressed by `in` (`nil` = the document body). Construction-order
+    /// authoring anchor: the first paragraph in an empty body has no sibling
+    /// to anchor on; subsequent inserts use `insertParagraphAfter`.
+    case appendParagraph(in: ElementID?, paragraph: ParagraphPayload)
+
+    /// Replaces the addressed paragraph's inline content with the given runs
+    /// (`<w:pPr>` preserved). Formatting fields live on `RunPayload`
+    /// (bold ↔ `<w:b>`, italic ↔ `<w:i>`, color ↔ `<w:color w:val>`).
+    case setRuns(target: ElementID, runs: [RunPayload])
+
+    /// Registers a style definition in `word/styles.xml` (define-on-first-use;
+    /// replay of a duplicate `styleId` is an idempotent no-op).
+    case defineStyle(payload: StylePayload)
+
+    /// Component envelope markers — documented exception to OOXML-mirror
+    /// naming: op-log metadata only (batch-marker pattern), zero OOXML output.
+    case beginComponent(type: String, id: ElementID)
+    case endComponent(id: ElementID)
+
+    /// Inline atoms (`<w:tab/>` / `<w:br/>` / `<w:noBreakHyphen/>`), appended
+    /// in construction order. `in:` addresses a run; a paragraph target makes
+    /// the reducer synthesize a wrapping `<w:r>` (atoms are schema-invalid
+    /// outside runs). Bare `<w:br/>` is the text-wrapping break; page/column
+    /// variants await a future additive `type:` parameter.
+    case insertTab(in: ElementID)
+    case insertBreak(in: ElementID)
+    case insertNoBreakHyphen(in: ElementID)
+
     // MARK: Tree-node-level fallback operations (typed)
 
     case insertNode(parent: ElementID, position: Int, nodeXML: String)
@@ -114,10 +148,16 @@ public enum Operation: Equatable, Sendable {
 public struct ParagraphPayload: Equatable, Sendable, Codable {
     public var text: String
     public var styleId: String?
+    /// §4b (#128): explicit stable id (↔ `w14:paraId`) carrying the mdocx
+    /// DSL's mandatory identifier. When present the reducer stamps it on the
+    /// created `<w:p>`; when absent the opID-derived libraryUUID behavior
+    /// applies unchanged.
+    public var paraId: String?
 
-    public init(text: String, styleId: String? = nil) {
+    public init(text: String, styleId: String? = nil, paraId: String? = nil) {
         self.text = text
         self.styleId = styleId
+        self.paraId = paraId
     }
 }
 
@@ -137,9 +177,44 @@ public struct TablePayload: Equatable, Sendable, Codable {
 /// in the reducer. Carries text-only; formatting goes through `setRunFormat`.
 public struct RunPayload: Equatable, Sendable, Codable {
     public var text: String
+    /// §4b (#128) `setRuns` formatting fields (bold ↔ `<w:b>`,
+    /// italic ↔ `<w:i>` — spelled `italic` for cross-payload consistency
+    /// with `RunFormatPayload.italic`; ECMA-376 titles the element
+    /// "Italics" — color ↔ `<w:color w:val>`). Optional so pre-#128 JSONL
+    /// decodes unchanged.
+    public var bold: Bool?
+    public var italic: Bool?
+    public var color: String?
 
-    public init(text: String) {
+    public init(text: String, bold: Bool? = nil, italic: Bool? = nil, color: String? = nil) {
         self.text = text
+        self.bold = bold
+        self.italic = italic
+        self.color = color
+    }
+}
+
+/// Style definition carried by `defineStyle` (§4b, #128). `styleId` mirrors
+/// `<w:style w:styleId>`; `fontSize` is in points.
+public struct StylePayload: Equatable, Sendable, Codable {
+    public var styleId: String
+    public var name: String?
+    public var font: String?
+    public var fontSize: Int?
+    public var color: String?
+    public var bold: Bool?
+    public var italic: Bool?
+
+    public init(styleId: String, name: String? = nil, font: String? = nil,
+                fontSize: Int? = nil, color: String? = nil,
+                bold: Bool? = nil, italic: Bool? = nil) {
+        self.styleId = styleId
+        self.name = name
+        self.font = font
+        self.fontSize = fontSize
+        self.color = color
+        self.bold = bold
+        self.italic = italic
     }
 }
 

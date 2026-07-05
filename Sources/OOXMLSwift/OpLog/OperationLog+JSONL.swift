@@ -248,6 +248,31 @@ internal enum JSONLLineCoder {
                 ("target", jsonString(target)),
                 ("targetMode", targetMode.map(jsonString) ?? "null")
             ])
+        case .appendParagraph(let container, let paragraph):
+            return ("appendParagraph", [
+                ("in", container.map { jsonString($0.raw) } ?? "null"),
+                ("paragraph", encodeCodable(paragraph))
+            ])
+        case .setRuns(let target, let runs):
+            return ("setRuns", [
+                ("target", jsonString(target.raw)),
+                ("runs", encodeCodable(runs))
+            ])
+        case .defineStyle(let payload):
+            return ("defineStyle", [("payload", encodeCodable(payload))])
+        case .beginComponent(let type, let id):
+            return ("beginComponent", [
+                ("type", jsonString(type)),
+                ("id", jsonString(id.raw))
+            ])
+        case .endComponent(let id):
+            return ("endComponent", [("id", jsonString(id.raw))])
+        case .insertTab(let c):
+            return ("insertTab", [("in", jsonString(c.raw))])
+        case .insertBreak(let c):
+            return ("insertBreak", [("in", jsonString(c.raw))])
+        case .insertNoBreakHyphen(let c):
+            return ("insertNoBreakHyphen", [("in", jsonString(c.raw))])
         case .unknown(let opType, let payload):
             // Merge payload keys sorted lexicographically. Required fields
             // (op_id, ts, source, op_type) are already emitted upstream — the
@@ -354,6 +379,23 @@ internal enum JSONLLineCoder {
             return .insertSiblingAfter(after: try eid("after"), nodeXML: try str("nodeXML"))
         case "wrapWithHyperlink":
             return .wrapWithHyperlink(target: try eid("target"), rId: try str("rId"))
+        case "appendParagraph":
+            let container = optStr("in").map { ElementID(rawString: $0) }
+            return .appendParagraph(in: container, paragraph: try payload("paragraph", ParagraphPayload.self))
+        case "setRuns":
+            return .setRuns(target: try eid("target"), runs: try payload("runs", [RunPayload].self))
+        case "defineStyle":
+            return .defineStyle(payload: try payload("payload", StylePayload.self))
+        case "beginComponent":
+            return .beginComponent(type: try str("type"), id: try eid("id"))
+        case "endComponent":
+            return .endComponent(id: try eid("id"))
+        case "insertTab":
+            return .insertTab(in: try eid("in"))
+        case "insertBreak":
+            return .insertBreak(in: try eid("in"))
+        case "insertNoBreakHyphen":
+            return .insertNoBreakHyphen(in: try eid("in"))
         case "addRelationship":
             return .addRelationship(
                 part: try str("part"),

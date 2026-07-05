@@ -125,10 +125,28 @@ extension WordDocument {
             // walk. addRelationship needs the rels part tree to exist; if
             // not, we create it on-demand (rels parts often don't exist
             // in synthesized fixtures).
+            // §4b (#128): log-only markers / opaque ops append to the log but
+            // have no materialization target — skip the per-part apply.
+            switch op {
+            case .batchBegin, .batchEnd, .beginComponent, .endComponent, .unknown:
+                continue
+            default:
+                break
+            }
+
             if case .addRelationship(let part, _, _, _, _) = op {
                 partPath = part
                 if newTrees[part] == nil {
                     newTrees[part] = makeEmptyRelationshipsTree()
+                }
+            } else if case .defineStyle = op {
+                // §4b (#128): part-addressed like addRelationship — styles
+                // live in word/styles.xml (created on demand for synthesized
+                // fixtures). Must precede the single-part fast path so a
+                // document-only doc doesn't misroute the style definition.
+                partPath = "word/styles.xml"
+                if newTrees[partPath] == nil {
+                    newTrees[partPath] = makeEmptyStylesTree()
                 }
             } else if let single = singlePartPath {
                 partPath = single
@@ -187,6 +205,20 @@ extension WordDocument {
     ///
     /// The namespace `http://schemas.openxmlformats.org/package/2006/relationships`
     /// is the standard rels-part namespace per ECMA-376.
+    /// Constructs an empty `<w:styles>` XmlTree for defineStyle operations
+    /// on documents whose styles part doesn't exist yet (§4b, #128).
+    internal func makeEmptyStylesTree() -> XmlTree {
+        let root = XmlNode.element(
+            prefix: "w",
+            localName: "styles",
+            namespaceURI: "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+            attributes: [XmlAttribute(
+                prefix: "xmlns", localName: "w",
+                value: "http://schemas.openxmlformats.org/wordprocessingml/2006/main")]
+        )
+        return XmlTree.synthesized(root: root)
+    }
+
     internal func makeEmptyRelationshipsTree() -> XmlTree {
         let root = XmlNode.element(
             prefix: nil,
