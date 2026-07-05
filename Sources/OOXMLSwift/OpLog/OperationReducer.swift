@@ -217,6 +217,150 @@ public enum OperationReducer {
             // semantics (rollback, group undo) are out of scope here.
             return
 
+        case .appendParagraph(let container, let payload):
+            // §4b (#128): append as last block-level child of the container
+            // (nil = <w:body>). Explicit paraId stamps w14:paraId; absent
+            // paraId keeps the opID-derived libraryUUID convention.
+            let parent: XmlNode
+            if let containerID = container {
+                guard let node = findNode(elementID: containerID, in: tree) else {
+                    throw ReducerError.elementNotFound(opID: entry.opID, elementID: containerID)
+                }
+                parent = node
+            } else {
+                guard let body = tree.root.children.first(where: {
+                    $0.kind == .element && $0.localName == "body"
+                }) else {
+                    throw ReducerError.malformedOp(
+                        opID: entry.opID, reason: "appendParagraph(in: nil) requires a <w:body>")
+                }
+                parent = body
+            }
+            let newP = makeParagraph(text: payload.text, styleId: payload.styleId)
+            if let paraId = payload.paraId, !paraId.isEmpty {
+                newP.setAttribute(prefix: "w14", localName: "paraId", value: paraId)
+            } else {
+                newP.libraryUUID = entry.opID
+            }
+            // Insert before a trailing body-level <w:sectPr> so the section
+            // marker stays last (OOXML body shape).
+            if let sectIdx = parent.children.firstIndex(where: {
+                $0.kind == .element && $0.localName == "sectPr"
+            }) {
+                parent.children.insert(newP, at: sectIdx)
+            } else {
+                parent.children.append(newP)
+            }
+
+        case .setRuns(let target, let runs):
+            // §4b (#128): replace inline content, keep <w:pPr>.
+            guard let node = findNode(elementID: target, in: tree) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
+            }
+            let kept = node.children.filter {
+                $0.kind == .element && $0.localName == "pPr"
+            }
+            let runNodes: [XmlNode] = runs.map { run in
+                var rChildren: [XmlNode] = []
+                var rPrChildren: [XmlNode] = []
+                if run.bold == true {
+                    rPrChildren.append(XmlNode.element(prefix: "w", localName: "b"))
+                }
+                if run.italic == true {
+                    rPrChildren.append(XmlNode.element(prefix: "w", localName: "i"))
+                }
+                if let color = run.color {
+                    let c = XmlNode.element(prefix: "w", localName: "color")
+                    c.setAttribute(prefix: "w", localName: "val", value: color)
+                    rPrChildren.append(c)
+                }
+                if !rPrChildren.isEmpty {
+                    rChildren.append(XmlNode.element(prefix: "w", localName: "rPr", children: rPrChildren))
+                }
+                rChildren.append(XmlNode.element(
+                    prefix: "w", localName: "t", children: [XmlNode.text(run.text)]))
+                return XmlNode.element(prefix: "w", localName: "r", children: rChildren)
+            }
+            node.children = kept + runNodes
+
+        case .defineStyle(let payload):
+            // §4b (#128): define-on-first-use into <w:styles>; duplicate
+            // styleId is an idempotent no-op. The apply() pipeline routes
+            // this op to the word/styles.xml part.
+            let root = tree.root
+            let exists = root.children.contains { child in
+                child.kind == .element && child.localName == "style"
+                    && child.attributes.contains {
+                        $0.prefix == "w" && $0.localName == "styleId" && $0.value == payload.styleId
+                    }
+            }
+            if exists { return }
+            var styleChildren: [XmlNode] = []
+            let nameEl = XmlNode.element(prefix: "w", localName: "name")
+            nameEl.setAttribute(prefix: "w", localName: "val", value: payload.name ?? payload.styleId)
+            styleChildren.append(nameEl)
+            var rPrChildren: [XmlNode] = []
+            if let font = payload.font {
+                let rFonts = XmlNode.element(prefix: "w", localName: "rFonts")
+                rFonts.setAttribute(prefix: "w", localName: "ascii", value: font)
+                rFonts.setAttribute(prefix: "w", localName: "eastAsia", value: font)
+                rPrChildren.append(rFonts)
+            }
+            if payload.bold == true {
+                rPrChildren.append(XmlNode.element(prefix: "w", localName: "b"))
+            }
+            if payload.italic == true {
+                rPrChildren.append(XmlNode.element(prefix: "w", localName: "i"))
+            }
+            if let color = payload.color {
+                let c = XmlNode.element(prefix: "w", localName: "color")
+                c.setAttribute(prefix: "w", localName: "val", value: color)
+                rPrChildren.append(c)
+            }
+            if let fontSize = payload.fontSize {
+                let sz = XmlNode.element(prefix: "w", localName: "sz")
+                // w:sz is half-points; StylePayload.fontSize is points.
+                sz.setAttribute(prefix: "w", localName: "val", value: String(fontSize * 2))
+                rPrChildren.append(sz)
+            }
+            if !rPrChildren.isEmpty {
+                styleChildren.append(XmlNode.element(prefix: "w", localName: "rPr", children: rPrChildren))
+            }
+            let style = XmlNode.element(prefix: "w", localName: "style", children: styleChildren)
+            style.setAttribute(prefix: "w", localName: "type", value: "paragraph")
+            style.setAttribute(prefix: "w", localName: "styleId", value: payload.styleId)
+            root.children.append(style)
+
+        case .beginComponent, .endComponent:
+            // §4b (#128): log-metadata markers (batch-marker pattern) —
+            // zero tree mutation, zero OOXML output.
+            return
+
+        case .insertTab(let containerID), .insertBreak(let containerID),
+             .insertNoBreakHyphen(let containerID):
+            // §4b (#128): run-scoped inline atoms. A paragraph target gets a
+            // synthesized wrapping <w:r> (atoms are schema-invalid outside runs).
+            guard let node = findNode(elementID: containerID, in: tree) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: containerID)
+            }
+            let atomName: String
+            switch entry.op {
+            case .insertTab: atomName = "tab"
+            case .insertBreak: atomName = "br"
+            default: atomName = "noBreakHyphen"
+            }
+            let atom = XmlNode.element(prefix: "w", localName: atomName)
+            if node.kind == .element && node.localName == "r" {
+                node.children.append(atom)
+            } else if node.kind == .element && node.localName == "p" {
+                let wrapper = XmlNode.element(prefix: "w", localName: "r", children: [atom])
+                node.children.append(wrapper)
+            } else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "inline atom target must be a <w:r> or <w:p>, got <\(node.localName)>")
+            }
+
         case .unknown:
             // Opaque op — Phase 2b reducer treats as no-op. Phase 2b spec
             // explicitly accepts this: log warning, pass through to next op.
@@ -590,6 +734,18 @@ public enum OperationReducer {
             // scoping treats this as a special case: returns nil from
             // partContaining → fallback to direct part lookup by name.
             return []
+        case .appendParagraph(let container, _): return container.map { [$0] } ?? []
+        case .setRuns(let target, _): return [target]
+        case .insertTab(let c): return [c]
+        case .insertBreak(let c): return [c]
+        case .insertNoBreakHyphen(let c): return [c]
+        case .defineStyle:
+            // Part-addressed (word/styles.xml) — routed by the apply pipeline,
+            // same pattern as addRelationship.
+            return []
+        case .beginComponent, .endComponent:
+            // Log-metadata markers; the component id is not a tree node.
+            return []
         case .undo, .redo, .batchBegin, .batchEnd, .unknown: return []
         }
     }
@@ -639,6 +795,14 @@ public enum OperationReducer {
         case .setRunFormat(let target, _): return target == elementID
         case .insertBookmark(let at, _, _): return at == elementID
         case .insertComment(let anchor, _, _, _): return anchor == elementID
+        case .appendParagraph(let container, _): return container == elementID
+        case .setRuns(let target, _): return target == elementID
+        case .insertTab(let c): return c == elementID
+        case .insertBreak(let c): return c == elementID
+        case .insertNoBreakHyphen(let c): return c == elementID
+        case .defineStyle: return false
+        case .beginComponent(_, let id): return id == elementID
+        case .endComponent(let id): return id == elementID
         case .undo, .redo, .batchBegin, .batchEnd: return false
         case .insertNode(let parent, _, _): return parent == elementID
         case .removeNode(let target): return target == elementID

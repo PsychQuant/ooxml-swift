@@ -61,10 +61,19 @@ final class OperationLogTests: XCTestCase {
                 target: "https://example.com",
                 targetMode: "External"
             ),
-            .unknown(opType: "future", payload: JSONValue.object(["k": JSONValue.int(1)]))
+            .unknown(opType: "future", payload: JSONValue.object(["k": JSONValue.int(1)])),
+            // §4b authoring ops (word-aligned-state-sync, macdoc#128)
+            .appendParagraph(in: nil, paragraph: ParagraphPayload(text: "x")),
+            .setRuns(target: id, runs: [RunPayload(text: "x", bold: true)]),
+            .defineStyle(payload: StylePayload(styleId: "s1")),
+            .beginComponent(type: "Summary", id: id),
+            .endComponent(id: id),
+            .insertTab(in: id),
+            .insertBreak(in: id),
+            .insertNoBreakHyphen(in: id)
         ]
 
-        XCTAssertEqual(cases.count, 24, "Operation MUST have exactly 24 cases enumerated in the test")
+        XCTAssertEqual(cases.count, 32, "Operation MUST have exactly 32 cases enumerated in the test")
 
         // Pattern-match: each case maps to its expected discriminator.
         for op in cases {
@@ -80,7 +89,10 @@ final class OperationLogTests: XCTestCase {
                  .insertSiblingAfter,
                  .wrapWithHyperlink,
                  .addRelationship,
-                 .unknown:
+                 .unknown,
+                 .appendParagraph, .setRuns, .defineStyle,
+                 .beginComponent, .endComponent,
+                 .insertTab, .insertBreak, .insertNoBreakHyphen:
                 break // matched
             }
         }
