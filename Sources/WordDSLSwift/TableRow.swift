@@ -1,11 +1,9 @@
-// Phase 4 placeholder.
-// Full type design lives in `openspec/specs/mdocx-grammar/spec.md`
-// (Spectra change `mdocx-syntax`). Implementation is the responsibility of
-// `word-aligned-state-sync` Phase 4 (Script transcoder).
-
-/// Table row result-builder container. Maps to OOXML `<w:tr>`. Children
-/// are `TableCell` instances.
+// TableRow.swift — `TableRow` ↔ <w:tr> (see Table.swift).
 public struct TableRow {
     public let id: String
-    public init(id: String) { self.id = id }
+    public let cells: [TableCell]
+    public init(id: String, @WordBuilder content: () -> [TableCell]) {
+        self.id = id
+        self.cells = content()
+    }
 }

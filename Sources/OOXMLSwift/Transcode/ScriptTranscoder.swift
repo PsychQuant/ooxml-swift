@@ -96,16 +96,52 @@ public enum ScriptExporter {
     public static func exportSwift(log: OperationLog) -> String {
         var body: [String] = []
 
-        for entry in log.entries {
+        var i = 0
+        let entries = log.entries
+        while i < entries.count {
+            let entry = entries[i]
+
+            // Component envelope projection: beginComponent … endComponent
+            // becomes `<Type>(id: "…") { … }` (mdocx-grammar "reverse
+            // direction reconstructs component invocation"). Nested
+            // envelopes fall back to raw lines (post-v0.34 refinement).
+            if case .beginComponent(let type, let id) = entry.op,
+               entry.source == .swift,
+               WordStyleMap.isIdentifier(type),
+               let endIdx = entries[(i + 1)...].firstIndex(where: {
+                   if case .endComponent(let eid) = $0.op { return eid == id }
+                   return false
+               }),
+               !entries[(i + 1)..<endIdx].contains(where: {
+                   if case .beginComponent = $0.op { return true }
+                   return false
+               }) {
+                body.append("        \(type)(id: \(quote(id.raw))) {")
+                for inner in entries[(i + 1)..<endIdx] {
+                    if case .appendParagraph(let c, let payload) = inner.op,
+                       c == nil, inner.source == .swift,
+                       let paraId = payload.paraId, !paraId.isEmpty,
+                       let block = paragraphBlock(payload: payload, paraId: paraId, indent: 12) {
+                        body.append(contentsOf: block)
+                    } else {
+                        body.append("            " + rawOpLine(entry: inner))
+                    }
+                }
+                body.append("        }")
+                i = endIdx + 1
+                continue
+            }
+
             if case .appendParagraph(let container, let payload) = entry.op,
                container == nil,
                entry.source == .swift,
                let paraId = payload.paraId, !paraId.isEmpty,
-               let block = paragraphBlock(payload: payload, paraId: paraId) {
+               let block = paragraphBlock(payload: payload, paraId: paraId, indent: 8) {
                 body.append(contentsOf: block)
             } else {
                 body.append("        " + rawOpLine(entry: entry))
             }
+            i += 1
         }
 
         var out: [String] = []
@@ -124,16 +160,18 @@ public enum ScriptExporter {
 
     /// DSL-form paragraph block, or nil when the payload has no lossless
     /// DSL spelling (non-identifier styleId etc.).
-    private static func paragraphBlock(payload: ParagraphPayload, paraId: String) -> [String]? {
-        var head = "        Paragraph(id: \(quote(paraId))"
+    private static func paragraphBlock(payload: ParagraphPayload, paraId: String,
+                                       indent: Int) -> [String]? {
+        let pad = String(repeating: " ", count: indent)
+        var head = "\(pad)Paragraph(id: \(quote(paraId))"
         if let styleId = payload.styleId {
             guard let member = WordStyleMap.member(forStyleId: styleId) else { return nil }
             head += ", style: .\(member)"
         }
         head += ") {"
         return [head,
-                "            \(quote(payload.text))",
-                "        }"]
+                "\(pad)    \(quote(payload.text))",
+                "\(pad)}"]
     }
 
     /// `// @op {"op_type":...,"source":...,<op fields>}` — canonical raw
@@ -171,7 +209,7 @@ public enum ScriptExporter {
 
 public enum ScriptImporter {
 
-    private enum Scope { case top, document, section, paragraph }
+    private enum Scope: Equatable { case top, document, section, component(id: String), paragraph }
 
     private struct ParagraphState {
         var paraId: String
@@ -232,6 +270,9 @@ public enum ScriptImporter {
                     }
                     paragraph = nil
                     if scopeStack.last == .paragraph { scopeStack.removeLast() }
+                } else if case .component(let cid)? = scopeStack.last {
+                    log.append(.endComponent(id: ElementID(rawString: cid)), source: .swift)
+                    scopeStack.removeLast()
                 } else if scopeStack.count > 1 {
                     scopeStack.removeLast()
                 } else {
@@ -253,8 +294,23 @@ public enum ScriptImporter {
                 continue
             }
 
+            // Component invocation: `<Type>(id: "…") {` with a non-reserved
+            // capitalized identifier inside a Section (mdocx-grammar
+            // component reconstruction).
+            if scopeStack.last == .section,
+               let m = match(line, #"^([A-Z][A-Za-z0-9_]*)\(id: "((?:[^"\\]|\\.)*)"\) \{$"#),
+               !["Paragraph", "Section", "Table", "TableRow", "TableCell",
+                 "Hyperlink", "Bookmark", "WordDocument", "Run"].contains(m[0]) {
+                let componentID = unescape(m[1])
+                log.append(.beginComponent(type: m[0],
+                                           id: ElementID(rawString: componentID)),
+                           source: .swift)
+                scopeStack.append(.component(id: componentID))
+                continue
+            }
+
             if line.hasPrefix("Paragraph") {
-                guard scopeStack.last == .section else {
+                guard scopeStack.last == .section || isComponentScope(scopeStack.last) else {
                     throw TranscodeError.unsupportedSyntax(
                         line: lineNo, column: column, reason: "Paragraph must appear inside a Section")
                 }
@@ -336,6 +392,11 @@ public enum ScriptImporter {
         } catch {
             throw TranscodeError.malformedRawOp(line: line, reason: "cannot decode op '\(opType)': \(error)")
         }
+    }
+
+    private static func isComponentScope(_ scope: Scope?) -> Bool {
+        if case .component = scope { return true }
+        return false
     }
 
     /// First-match capture groups (regex anchored by caller's pattern).

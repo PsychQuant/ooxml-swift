@@ -1,11 +1,20 @@
-// Phase 4 placeholder.
-// Full type design lives in `openspec/specs/mdocx-grammar/spec.md`
-// (Spectra change `mdocx-syntax`). Implementation is the responsibility of
-// `word-aligned-state-sync` Phase 4 (Script transcoder).
+// Hyperlink.swift
+// mdocx-grammar: "Hyperlinks are containers with target enum". v0.34: DSL
+// types compile (fixture 12); op emission awaits an authoring-op channel
+// (the hyperlink lowering path lives in EditAlgebra, not yet reachable from
+// buildLog) — buildLog throws loudly rather than dropping the link.
 
-/// Hyperlink result-builder container. Maps to OOXML `<w:hyperlink>`.
-/// Target is discriminated by `HyperlinkTarget` enum (`.url` / `.anchor` /
-/// `.mailto`). Body contains inline content.
+public enum HyperlinkTarget: Equatable, Sendable {
+    case url(String)
+    case anchor(String)
+    case mailto(String)
+}
+
 public struct Hyperlink {
-    public init() {}
+    public let target: HyperlinkTarget
+    public let children: [InlineChild]
+    public init(to target: HyperlinkTarget, @WordBuilder content: () -> [InlineChild]) {
+        self.target = target
+        self.children = content()
+    }
 }
