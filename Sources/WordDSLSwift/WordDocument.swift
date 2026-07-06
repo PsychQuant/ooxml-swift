@@ -162,7 +162,15 @@ public struct WordDocument {
 
         let fm = FileManager.default
         let targets = [url, SidecarStore.oplogURL(for: url), SidecarStore.snapshotURL(for: url)]
-        let backups: [Data?] = targets.map { try? Data(contentsOf: $0) }
+        // Backup capture distinguishes "absent" (nil — rollback removes the
+        // freshly created file) from "present but unreadable" (throw — abort
+        // the save BEFORE any write; `try?` here conflated the two, and a
+        // transient read failure at backup time would have let rollback
+        // DELETE the user's pre-existing file. 7.5 verify panel P1.)
+        let backups: [Data?] = try targets.map { target in
+            guard fm.fileExists(atPath: target.path) else { return nil }
+            return try Data(contentsOf: target)
+        }
 
         do {
             try doc.writeAuthoringPackage(to: url)
