@@ -191,6 +191,13 @@ public enum XmlTreeWriter {
             case "<": result.append("&lt;")
             case ">": result.append("&gt;")
             case "\"": result.append("&quot;")
+            // XML 1.0 §3.3.3: a conformant reader normalizes literal
+            // whitespace in attribute values to spaces — re-escape control
+            // chars as character references so the value survives libxml2
+            // (the v1.0 read projection's typed-parse consumer).
+            case "\n": result.append("&#10;")
+            case "\r": result.append("&#13;")
+            case "\t": result.append("&#9;")
             default: result.append(c)
             }
         }
