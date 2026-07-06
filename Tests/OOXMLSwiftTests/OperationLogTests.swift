@@ -251,3 +251,27 @@ final class OperationLogTests: XCTestCase {
         }
     }
 }
+
+extension OperationLogTests {
+
+    /// moveNode's payload field is `sourceNode` — `source` would collide
+    /// with the envelope's OpSource key in the flat JSONL line and one of
+    /// the two values is silently dropped (JSON duplicate key). Regression
+    /// pin for the v0.34.1 wire fix.
+    func testJSONLMoveNodeRoundTripsWithoutEnvelopeCollision() throws {
+        var log = OperationLog()
+        log.append(.moveNode(source: ElementID(rawString: "w14:paraId=SRC"),
+                             destinationParent: ElementID(rawString: "w14:paraId=DST"),
+                             destinationIndex: 2), source: .word)
+
+        let decoded = try OperationLog.decodeJSONL(log.encodeJSONL())
+        XCTAssertEqual(decoded.entries.count, 1)
+        XCTAssertEqual(decoded.entries[0].source, .word, "envelope OpSource survives")
+        guard case .moveNode(let src, let parent, let idx) = decoded.entries[0].op else {
+            return XCTFail("expected moveNode")
+        }
+        XCTAssertEqual(src.raw, "w14:paraId=SRC", "payload ElementID survives")
+        XCTAssertEqual(parent.raw, "w14:paraId=DST")
+        XCTAssertEqual(idx, 2)
+    }
+}

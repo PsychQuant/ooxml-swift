@@ -225,8 +225,14 @@ internal enum JSONLLineCoder {
                 ("value", value.map(jsonString) ?? "null")
             ])
         case .moveNode(let source, let destinationParent, let destinationIndex):
+            // Field name `sourceNode`, NOT `source`: the flat JSONL line
+            // already carries the envelope's `source` (OpSource) key, and a
+            // duplicate JSON key silently loses one of the two values
+            // (pre-v0.34.1 moveNode lines are corrupt for this reason).
+            // New op payload fields MUST NOT collide with the envelope keys
+            // op_id / ts / source / op_type.
             return ("moveNode", [
-                ("source", jsonString(source.raw)),
+                ("sourceNode", jsonString(source.raw)),
                 ("destinationParent", jsonString(destinationParent.raw)),
                 ("destinationIndex", String(destinationIndex))
             ])
@@ -374,7 +380,14 @@ internal enum JSONLLineCoder {
                 value: optStr("value")
             )
         case "moveNode":
-            return .moveNode(source: try eid("source"), destinationParent: try eid("destinationParent"), destinationIndex: try int("destinationIndex"))
+            // `sourceNode` since v0.34.1; pre-fix lines carried a duplicate
+            // `source` key whose ElementID value was already lost at encode
+            // time — the fallback keeps decode from throwing on those lines.
+            let movedSource = (fullObject["sourceNode"] as? String) ?? (fullObject["source"] as? String)
+            guard let movedSourceRaw = movedSource else {
+                throw OperationLogJSONLError.malformedLine(lineIndex: lineIndex)
+            }
+            return .moveNode(source: ElementID(rawString: movedSourceRaw), destinationParent: try eid("destinationParent"), destinationIndex: try int("destinationIndex"))
         case "insertSiblingAfter":
             return .insertSiblingAfter(after: try eid("after"), nodeXML: try str("nodeXML"))
         case "wrapWithHyperlink":
