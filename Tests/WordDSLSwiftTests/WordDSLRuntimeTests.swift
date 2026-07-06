@@ -442,3 +442,33 @@ final class StructuralCoverageTests: XCTestCase {
         }
     }
 }
+
+extension WordDSLRuntimeTests {
+
+    /// 7.5 verify panel P1 — a pre-existing target that EXISTS but cannot be
+    /// read at backup-capture time must abort the save before any write;
+    /// with the old `try?` capture, rollback would have deleted the file.
+    func testUnreadableExistingTargetAbortsSaveWithoutDataLoss() throws {
+        let dir = try scratchDirForRobustness()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("precious.docx")
+        try Data("user's original bytes".utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: url.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path) }
+
+        XCTAssertThrowsError(try WordDocument {
+            Section(id: "main") { Paragraph(id: "p1") { "new" } }
+        }.save(to: url), "unreadable existing target must abort the save")
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+        XCTAssertEqual(try Data(contentsOf: url), Data("user's original bytes".utf8),
+                       "the pre-existing file must be untouched after the aborted save")
+    }
+
+    private func scratchDirForRobustness() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsl-robust-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+}
