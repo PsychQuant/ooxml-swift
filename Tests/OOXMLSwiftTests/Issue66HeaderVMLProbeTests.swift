@@ -3,7 +3,13 @@ import XCTest
 
 final class Issue66HeaderVMLProbeTests: XCTestCase {
     func testHeaderVMLPictParsedIntoRawElements() throws {
-        let raw = URL(fileURLWithPath: "/Users/che/Library/CloudStorage/Dropbox/che_workspace/teaching/2025/0821 guo/docs/20260401-臺北大學-統研所-郭嘉員-碩士論文_raw.docx")
+        // Local-only real-world fixture (path via env — a third party's document
+        // name does not belong in the repo; see the repo privacy discipline).
+        guard let fixturePath = ProcessInfo.processInfo.environment["OOXML_LOCAL_THESIS_FIXTURE"],
+              FileManager.default.fileExists(atPath: fixturePath) else {
+            throw XCTSkip("set OOXML_LOCAL_THESIS_FIXTURE to a local thesis docx to run this probe")
+        }
+        let raw = URL(fileURLWithPath: fixturePath)
         let doc = try DocxReader.read(from: raw)
         XCTAssertGreaterThan(doc.headers.count, 0, "expected at least one header")
         var foundPict = false
@@ -27,7 +33,13 @@ final class Issue66HeaderVMLProbeTests: XCTestCase {
     }
 
     func testHeaderRoundTripPreservesVML() throws {
-        let raw = URL(fileURLWithPath: "/Users/che/Library/CloudStorage/Dropbox/che_workspace/teaching/2025/0821 guo/docs/20260401-臺北大學-統研所-郭嘉員-碩士論文_raw.docx")
+        // Local-only real-world fixture (path via env — a third party's document
+        // name does not belong in the repo; see the repo privacy discipline).
+        guard let fixturePath = ProcessInfo.processInfo.environment["OOXML_LOCAL_THESIS_FIXTURE"],
+              FileManager.default.fileExists(atPath: fixturePath) else {
+            throw XCTSkip("set OOXML_LOCAL_THESIS_FIXTURE to a local thesis docx to run this probe")
+        }
+        let raw = URL(fileURLWithPath: fixturePath)
         let out = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("issue66_repro.docx")
         try? FileManager.default.removeItem(at: out)
 

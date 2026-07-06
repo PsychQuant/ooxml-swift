@@ -25,6 +25,9 @@ public enum XmlTreeReaderError: Error, Equatable {
     case invalidEntityReference(reference: String, at: Int)
     case invalidNumericReference(reference: String, at: Int)
     case unexpectedTrailingContent(at: Int)
+    /// Element nesting exceeded the hostile-input guard (v1.0.1 — verify
+    /// 7.1 finding: unbounded recursion was an uncatchable stack overflow).
+    case nestingTooDeep(limit: Int, at: Int)
 }
 
 /// Parses a UTF-8 XML document into a lossless `XmlTree`.
@@ -94,6 +97,12 @@ private struct Parser {
     // MARK: - Prolog (XML decl + leading PI / comment / whitespace)
 
     mutating func skipProlog() throws {
+        // UTF-8 BOM (EF BB BF): emitted by some tools (LibreOffice et al.);
+        // skip it — total parse failure here rejected otherwise-valid parts
+        // (v1.0.1 — verify 7.1 finding).
+        if bytes.count >= 3, bytes[0] == 0xEF, bytes[1] == 0xBB, bytes[2] == 0xBF {
+            position = max(position, 3)
+        }
         skipWhitespace()
         // Optional XML declaration: <?xml ... ?>
         if peekString("<?xml") {
@@ -132,7 +141,19 @@ private struct Parser {
 
     // MARK: - Element
 
+    /// Hostile-input guard. Word-authored content nests a handful of levels
+    /// (tables ≤5); 1024 leaves enormous headroom while keeping the recursion
+    /// safely inside the stack. Exceeding it throws (catchable) instead of
+    /// overflowing (SIGSEGV).
+    static let maxElementDepth = 1024
+    var elementDepth = 0
+
     mutating func parseElement() throws -> XmlNode {
+        elementDepth += 1
+        defer { elementDepth -= 1 }
+        guard elementDepth <= Self.maxElementDepth else {
+            throw XmlTreeReaderError.nestingTooDeep(limit: Self.maxElementDepth, at: position)
+        }
         let elementStart = position
         guard consumeByte(0x3C /* '<' */) else { // expect '<'
             throw XmlTreeReaderError.unexpectedCharacter(currentCharacter() ?? "?", at: position)
