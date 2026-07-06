@@ -207,8 +207,10 @@ extension WordDocument {
         // Reducer-applied parts: the tree is now the authoritative content —
         // write serializes it directly (tree-first), and the part must be
         // re-emitted (dirty) in overlay mode.
-        self.treeFreshParts.formUnion(touchedParts)
+        // Order matters: marking dirty clears freshness (stale-shadow
+        // guard), so freshness must be granted AFTER the dirty mark.
         self.modifiedParts.formUnion(touchedParts)
+        self.treeFreshParts.formUnion(touchedParts)
     }
 
     /// Constructs an empty `<Relationships>` XmlTree suitable for

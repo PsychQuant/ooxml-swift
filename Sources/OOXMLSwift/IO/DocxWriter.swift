@@ -242,6 +242,19 @@ public struct DocxWriter {
         }
 
         try retreeXMLParts(typedWrittenParts, in: tempDir)
+
+        // v1.0.2 (7.6 verify P1): op-refreshed parts with NO typed-writer
+        // branch (customXml/*, theme, webSettings, …) would otherwise never
+        // reach the package. Idempotent for parts the branches above already
+        // emitted (same serialize output).
+        for part in document.treeFreshParts.sorted() {
+            guard !overlayMode || dirty.contains(part),
+                  let tree = document.xmlTrees[part] else { continue }
+            let fileURL = tempDir.appendingPathComponent(part)
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try XmlTreeWriter.serialize(tree).write(to: fileURL)
+        }
     }
 
     /// v1.0 — single-write-path finalization for one XML part. Call AFTER

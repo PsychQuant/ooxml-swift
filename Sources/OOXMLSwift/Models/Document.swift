@@ -71,6 +71,16 @@ public struct WordDocument: Equatable {
     /// criterion either — it is per-instance mutation tracking state.
     internal var modifiedParts: Set<String> = []
 
+    /// v1.0.2 (7.6 verify stale-shadow P1) — the ONE way typed-mutation
+    /// paths mark a part dirty. Clears tree freshness so a stale
+    /// reducer-era tree can never overwrite the typed change at write
+    /// time. The op pipeline (appendAndMaterialize) marks dirty + fresh
+    /// itself and must NOT route through this.
+    internal mutating func markTypedDirty(_ partPath: String) {
+        modifiedParts.insert(partPath)
+        treeFreshParts.remove(partPath)
+    }
+
     /// Read-only public accessor for `modifiedParts`. Used by tests and
     /// downstream consumers to verify which OOXML parts will be re-emitted on
     /// the next `DocxWriter.write()` call in overlay mode.
@@ -86,7 +96,7 @@ public struct WordDocument: Equatable {
     ///
     /// Idempotent — inserting the same path twice has no additional effect.
     public mutating func markPartDirty(_ partPath: String) {
-        modifiedParts.insert(partPath)
+        markTypedDirty(partPath)
     }
 
     /// v0.16.0+ (#44 §8): latentStyles for Quick Style Gallery defaults of
@@ -313,13 +323,13 @@ public struct WordDocument: Equatable {
 
     public mutating func appendParagraph(_ paragraph: Paragraph) {
         body.children.append(.paragraph(paragraph))
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     public mutating func insertParagraph(_ paragraph: Paragraph, at index: Int) {
         let clampedIndex = min(max(0, index), body.children.count)
         body.children.insert(.paragraph(paragraph), at: clampedIndex)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     public mutating func updateParagraph(at index: Int, text: String) throws {
@@ -337,7 +347,7 @@ public struct WordDocument: Equatable {
             para.runs = [Run(text: text)]
             body.children[actualIndex] = .paragraph(para)
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     public mutating func deleteParagraph(at index: Int) throws {
@@ -352,7 +362,7 @@ public struct WordDocument: Equatable {
 
         let actualIndex = paragraphIndices[index]
         body.children.remove(at: actualIndex)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// Replace occurrences of `find` with `replacement` across the document.
@@ -536,7 +546,7 @@ public struct WordDocument: Equatable {
 
         // Body / table replacements always touch document.xml (when count > 0)
         if count > 0 {
-            modifiedParts.insert("word/document.xml")
+            markTypedDirty("word/document.xml")
         }
 
         // Headers / footers / footnotes / endnotes — only under .all scope
@@ -561,7 +571,7 @@ public struct WordDocument: Equatable {
             )
             headers[i].bodyChildren = children
             if count > beforeCount {
-                modifiedParts.insert("word/\(headers[i].fileName)")
+                markTypedDirty("word/\(headers[i].fileName)")
             }
         }
         for i in 0..<footers.count {
@@ -572,7 +582,7 @@ public struct WordDocument: Equatable {
             )
             footers[i].bodyChildren = children
             if count > beforeCount {
-                modifiedParts.insert("word/\(footers[i].fileName)")
+                markTypedDirty("word/\(footers[i].fileName)")
             }
         }
         let beforeFootnotes = count
@@ -584,7 +594,7 @@ public struct WordDocument: Equatable {
             footnotes.footnotes[i].bodyChildren = children
         }
         if count > beforeFootnotes {
-            modifiedParts.insert("word/footnotes.xml")
+            markTypedDirty("word/footnotes.xml")
         }
         let beforeEndnotes = count
         for i in 0..<endnotes.endnotes.count {
@@ -595,7 +605,7 @@ public struct WordDocument: Equatable {
             endnotes.endnotes[i].bodyChildren = children
         }
         if count > beforeEndnotes {
-            modifiedParts.insert("word/endnotes.xml")
+            markTypedDirty("word/endnotes.xml")
         }
 
         return count
@@ -620,7 +630,7 @@ public struct WordDocument: Equatable {
             }
             body.children[actualIndex] = .paragraph(para)
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     public mutating func setParagraphFormat(at index: Int, properties: ParagraphProperties) throws {
@@ -638,7 +648,7 @@ public struct WordDocument: Equatable {
             para.properties.merge(with: properties)
             body.children[actualIndex] = .paragraph(para)
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     public mutating func applyStyle(at index: Int, style: String) throws {
@@ -656,7 +666,7 @@ public struct WordDocument: Equatable {
             para.properties.style = style
             body.children[actualIndex] = .paragraph(para)
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     // MARK: - Table Operations
@@ -664,14 +674,14 @@ public struct WordDocument: Equatable {
     public mutating func appendTable(_ table: Table) {
         body.children.append(.table(table))
         body.tables.append(table)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     public mutating func insertTable(_ table: Table, at index: Int) {
         let clampedIndex = min(max(0, index), body.children.count)
         body.children.insert(.table(table), at: clampedIndex)
         body.tables.append(table)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 取得所有表格
@@ -733,7 +743,7 @@ public struct WordDocument: Equatable {
                 body.tables[tableIndex] = table
             }
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 刪除表格
@@ -751,7 +761,7 @@ public struct WordDocument: Equatable {
         if tableIndex < body.tables.count {
             body.tables.remove(at: tableIndex)
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 合併儲存格（水平合併）
@@ -788,7 +798,7 @@ public struct WordDocument: Equatable {
                 body.tables[tableIndex] = table
             }
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 合併儲存格（垂直合併）
@@ -825,7 +835,7 @@ public struct WordDocument: Equatable {
                 body.tables[tableIndex] = table
             }
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 設定表格樣式（邊框）
@@ -844,7 +854,7 @@ public struct WordDocument: Equatable {
                 body.tables[tableIndex] = table
             }
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 設定儲存格底色
@@ -870,7 +880,7 @@ public struct WordDocument: Equatable {
                 body.tables[tableIndex] = table
             }
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     // MARK: - Style Management
@@ -892,7 +902,7 @@ public struct WordDocument: Equatable {
             throw WordError.invalidFormat("Style with id '\(style.id)' already exists")
         }
         styles.append(style)
-        modifiedParts.insert("word/styles.xml")
+        markTypedDirty("word/styles.xml")
     }
 
     /// 更新樣式
@@ -929,7 +939,7 @@ public struct WordDocument: Equatable {
         }
 
         styles[index] = style
-        modifiedParts.insert("word/styles.xml")
+        markTypedDirty("word/styles.xml")
     }
 
     /// 刪除樣式（不能刪除預設樣式）
@@ -950,7 +960,7 @@ public struct WordDocument: Equatable {
         }
 
         styles.remove(at: index)
-        modifiedParts.insert("word/styles.xml")
+        markTypedDirty("word/styles.xml")
     }
 
     // MARK: - List Operations
@@ -971,7 +981,7 @@ public struct WordDocument: Equatable {
         }
 
         // appendParagraph/insertParagraph already marked document.xml — add numbering.xml.
-        modifiedParts.insert("word/numbering.xml")
+        markTypedDirty("word/numbering.xml")
         return numId
     }
 
@@ -990,7 +1000,7 @@ public struct WordDocument: Equatable {
             }
         }
 
-        modifiedParts.insert("word/numbering.xml")
+        markTypedDirty("word/numbering.xml")
         return numId
     }
 
@@ -1018,7 +1028,7 @@ public struct WordDocument: Equatable {
             para.properties.numbering?.level = level
             body.children[actualIndex] = .paragraph(para)
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 將段落添加到現有清單
@@ -1037,7 +1047,7 @@ public struct WordDocument: Equatable {
             para.properties.numbering = NumberingInfo(numId: numId, level: level)
             body.children[actualIndex] = .paragraph(para)
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 移除段落的清單格式
@@ -1056,7 +1066,7 @@ public struct WordDocument: Equatable {
             para.properties.numbering = nil
             body.children[actualIndex] = .paragraph(para)
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     // MARK: - Page Settings
@@ -1064,7 +1074,7 @@ public struct WordDocument: Equatable {
     /// 設定頁面大小
     public mutating func setPageSize(_ size: PageSize) {
         sectionProperties.pageSize = size
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 設定頁面大小（使用名稱）
@@ -1073,13 +1083,13 @@ public struct WordDocument: Equatable {
             throw WordError.invalidParameter("pageSize", "Unknown page size: \(name). Valid options: letter, a4, legal, a3, a5, b5, executive")
         }
         sectionProperties.pageSize = size
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 設定頁邊距
     public mutating func setPageMargins(_ margins: PageMargins) {
         sectionProperties.pageMargins = margins
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 設定頁邊距（使用名稱）
@@ -1088,7 +1098,7 @@ public struct WordDocument: Equatable {
             throw WordError.invalidParameter("margins", "Unknown margin preset: \(name). Valid options: normal, narrow, moderate, wide")
         }
         sectionProperties.pageMargins = margins
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 設定頁邊距（使用具體數值，單位：twips）
@@ -1105,7 +1115,7 @@ public struct WordDocument: Equatable {
         if let left = left {
             sectionProperties.pageMargins.left = left
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 設定頁面方向
@@ -1118,7 +1128,7 @@ public struct WordDocument: Equatable {
         } else if orientation == .portrait && sectionProperties.pageSize.width > sectionProperties.pageSize.height {
             sectionProperties.pageSize = sectionProperties.pageSize.landscape
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 插入分頁符
@@ -1213,7 +1223,7 @@ public struct WordDocument: Equatable {
         for i in 0..<headers.count {
             if seen.contains(headers[i].fileName) {
                 headers[i].originalFileName = allocateHeaderFileName(for: headers[i].type)
-                modifiedParts.insert("word/\(headers[i].fileName)")
+                markTypedDirty("word/\(headers[i].fileName)")
                 renamed = true
             }
             seen.insert(headers[i].fileName)
@@ -1222,7 +1232,7 @@ public struct WordDocument: Equatable {
         for i in 0..<footers.count {
             if seenF.contains(footers[i].fileName) {
                 footers[i].originalFileName = allocateFooterFileName(for: footers[i].type)
-                modifiedParts.insert("word/\(footers[i].fileName)")
+                markTypedDirty("word/\(footers[i].fileName)")
                 renamed = true
             }
             seenF.insert(footers[i].fileName)
@@ -1237,8 +1247,8 @@ public struct WordDocument: Equatable {
         // [Content_Types].xml has Override entries for each container
         // by PartName too — same staleness risk on rename.
         if renamed {
-            modifiedParts.insert("word/_rels/document.xml.rels")
-            modifiedParts.insert("[Content_Types].xml")
+            markTypedDirty("word/_rels/document.xml.rels")
+            markTypedDirty("[Content_Types].xml")
         }
     }
 
@@ -1289,11 +1299,11 @@ public struct WordDocument: Equatable {
             sectionProperties.headerReference = id
         }
 
-        modifiedParts.insert("word/\(header.fileName)")
+        markTypedDirty("word/\(header.fileName)")
         // sectPr (in document.xml) + content-types + rels grow when we add a header.
-        modifiedParts.insert("word/document.xml")
-        modifiedParts.insert("[Content_Types].xml")
-        modifiedParts.insert("word/_rels/document.xml.rels")
+        markTypedDirty("word/document.xml")
+        markTypedDirty("[Content_Types].xml")
+        markTypedDirty("word/_rels/document.xml.rels")
         return header
     }
 
@@ -1309,10 +1319,10 @@ public struct WordDocument: Equatable {
             sectionProperties.headerReference = id
         }
 
-        modifiedParts.insert("word/\(header.fileName)")
-        modifiedParts.insert("word/document.xml")
-        modifiedParts.insert("[Content_Types].xml")
-        modifiedParts.insert("word/_rels/document.xml.rels")
+        markTypedDirty("word/\(header.fileName)")
+        markTypedDirty("word/document.xml")
+        markTypedDirty("[Content_Types].xml")
+        markTypedDirty("word/_rels/document.xml.rels")
         return header
     }
 
@@ -1325,7 +1335,7 @@ public struct WordDocument: Equatable {
         var header = headers[index]
         header.paragraphs = [Paragraph(text: text)]
         headers[index] = header
-        modifiedParts.insert("word/\(header.fileName)")
+        markTypedDirty("word/\(header.fileName)")
     }
 
     /// 新增頁尾
@@ -1342,10 +1352,10 @@ public struct WordDocument: Equatable {
             sectionProperties.footerReference = id
         }
 
-        modifiedParts.insert("word/\(footer.fileName)")
-        modifiedParts.insert("word/document.xml")
-        modifiedParts.insert("[Content_Types].xml")
-        modifiedParts.insert("word/_rels/document.xml.rels")
+        markTypedDirty("word/\(footer.fileName)")
+        markTypedDirty("word/document.xml")
+        markTypedDirty("[Content_Types].xml")
+        markTypedDirty("word/_rels/document.xml.rels")
         return footer
     }
 
@@ -1361,10 +1371,10 @@ public struct WordDocument: Equatable {
             sectionProperties.footerReference = id
         }
 
-        modifiedParts.insert("word/\(footer.fileName)")
-        modifiedParts.insert("word/document.xml")
-        modifiedParts.insert("[Content_Types].xml")
-        modifiedParts.insert("word/_rels/document.xml.rels")
+        markTypedDirty("word/\(footer.fileName)")
+        markTypedDirty("word/document.xml")
+        markTypedDirty("[Content_Types].xml")
+        markTypedDirty("word/_rels/document.xml.rels")
         return footer
     }
 
@@ -1377,7 +1387,7 @@ public struct WordDocument: Equatable {
         var footer = footers[index]
         footer.paragraphs = [Paragraph(text: text)]
         footers[index] = footer
-        modifiedParts.insert("word/\(footer.fileName)")
+        markTypedDirty("word/\(footer.fileName)")
     }
 
     // MARK: - Image Operations
@@ -1428,9 +1438,9 @@ public struct WordDocument: Equatable {
         }
 
         // append/insert already mark document.xml; new image bumps media + rels + content_types.
-        modifiedParts.insert("word/media/\(imageRef.fileName)")
-        modifiedParts.insert("word/_rels/document.xml.rels")
-        modifiedParts.insert("[Content_Types].xml")
+        markTypedDirty("word/media/\(imageRef.fileName)")
+        markTypedDirty("word/_rels/document.xml.rels")
+        markTypedDirty("[Content_Types].xml")
         return imageId
     }
 
@@ -1466,9 +1476,9 @@ public struct WordDocument: Equatable {
             appendParagraph(para)
         }
 
-        modifiedParts.insert("word/media/\(imageRef.fileName)")
-        modifiedParts.insert("word/_rels/document.xml.rels")
-        modifiedParts.insert("[Content_Types].xml")
+        markTypedDirty("word/media/\(imageRef.fileName)")
+        markTypedDirty("word/_rels/document.xml.rels")
+        markTypedDirty("[Content_Types].xml")
         return imageId
     }
 
@@ -1487,7 +1497,7 @@ public struct WordDocument: Equatable {
                         }
                         para.runs[j].drawing = drawing
                         body.children[i] = .paragraph(para)
-                        modifiedParts.insert("word/document.xml")
+                        markTypedDirty("word/document.xml")
                         return
                     }
                 }
@@ -1523,7 +1533,7 @@ public struct WordDocument: Equatable {
                         }
                         para.runs[j].drawing = drawing
                         body.children[i] = .paragraph(para)
-                        modifiedParts.insert("word/document.xml")
+                        markTypedDirty("word/document.xml")
                         return
                     }
                 }
@@ -1547,9 +1557,9 @@ public struct WordDocument: Equatable {
                 body.children[i] = .paragraph(para)
             }
         }
-        modifiedParts.insert("word/document.xml")
-        modifiedParts.insert("word/_rels/document.xml.rels")
-        modifiedParts.insert("[Content_Types].xml")
+        markTypedDirty("word/document.xml")
+        markTypedDirty("word/_rels/document.xml.rels")
+        markTypedDirty("[Content_Types].xml")
     }
 
     /// 取得所有圖片資訊
@@ -1636,8 +1646,8 @@ public struct WordDocument: Equatable {
             appendParagraph(para)
         }
 
-        modifiedParts.insert("word/document.xml")
-        modifiedParts.insert("word/_rels/document.xml.rels")
+        markTypedDirty("word/document.xml")
+        markTypedDirty("word/_rels/document.xml.rels")
         return hyperlinkId
     }
 
@@ -1678,7 +1688,7 @@ public struct WordDocument: Equatable {
             appendParagraph(para)
         }
 
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
         return hyperlinkId
     }
 
@@ -1707,13 +1717,13 @@ public struct WordDocument: Equatable {
         guard let partKey = applyToHyperlink(id: hyperlinkId, apply: mutator) else {
             throw WordError.invalidFormat("Hyperlink '\(hyperlinkId)' not found")
         }
-        modifiedParts.insert(partKey)
+        markTypedDirty(partKey)
 
         // Sync the matching Relationship URL into the owning part's rels.
         if let newUrl = url, let rId = capturedRId {
             let relsKey = relsPartKey(forBodyPartKey: partKey)
             updateHyperlinkRelTarget(rId: rId, newUrl: newUrl, partKey: partKey)
-            modifiedParts.insert(relsKey)
+            markTypedDirty(relsKey)
         }
     }
 
@@ -1781,12 +1791,12 @@ public struct WordDocument: Equatable {
         guard let partKey = removeHyperlink(id: hyperlinkId, captureRelationshipId: &capturedRId) else {
             throw WordError.invalidFormat("Hyperlink '\(hyperlinkId)' not found")
         }
-        modifiedParts.insert(partKey)
+        markTypedDirty(partKey)
 
         if let rId = capturedRId {
             let relsKey = relsPartKey(forBodyPartKey: partKey)
             removeHyperlinkRelTarget(rId: rId, partKey: partKey)
-            modifiedParts.insert(relsKey)
+            markTypedDirty(relsKey)
         }
     }
 
@@ -2131,7 +2141,7 @@ public struct WordDocument: Equatable {
             }
         }
 
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
         return bookmarkId
     }
 
@@ -2149,7 +2159,7 @@ public struct WordDocument: Equatable {
                     // the markers-only side of the model.
                     para.bookmarkMarkers.removeAll { $0.id == removed.id }
                     body.children[i] = .paragraph(para)
-                    modifiedParts.insert("word/document.xml")
+                    markTypedDirty("word/document.xml")
                     return
                 }
             }
@@ -2160,7 +2170,7 @@ public struct WordDocument: Equatable {
         // Pre-A-CONT-2 `getBookmarks()` could list these names but `deleteBookmark`
         // couldn't delete them (always threw `notFound`). Now they're symmetric.
         if Self.tryDeleteBodyLevelBookmark(name: name, from: &body.children) {
-            modifiedParts.insert("word/document.xml")
+            markTypedDirty("word/document.xml")
             return
         }
         for i in 0..<headers.count {
@@ -2170,26 +2180,26 @@ public struct WordDocument: Equatable {
                 // so we must insert the FULL PATH not the basename. Pre-A-CONT-3
                 // this inserted `headers[i].fileName` (basename `"header1.xml"`)
                 // which silently failed the dirty-gate → deletion lost on disk.
-                modifiedParts.insert("word/\(headers[i].fileName)")
+                markTypedDirty("word/\(headers[i].fileName)")
                 return
             }
         }
         for i in 0..<footers.count {
             if Self.tryDeleteBodyLevelBookmark(name: name, from: &footers[i].bodyChildren) {
                 // v0.19.9+ (#58 A-CONT-3 P0 #1): same correctness fix as headers.
-                modifiedParts.insert("word/\(footers[i].fileName)")
+                markTypedDirty("word/\(footers[i].fileName)")
                 return
             }
         }
         for i in 0..<footnotes.footnotes.count {
             if Self.tryDeleteBodyLevelBookmark(name: name, from: &footnotes.footnotes[i].bodyChildren) {
-                modifiedParts.insert("word/footnotes.xml")
+                markTypedDirty("word/footnotes.xml")
                 return
             }
         }
         for i in 0..<endnotes.endnotes.count {
             if Self.tryDeleteBodyLevelBookmark(name: name, from: &endnotes.endnotes[i].bodyChildren) {
-                modifiedParts.insert("word/endnotes.xml")
+                markTypedDirty("word/endnotes.xml")
                 return
             }
         }
@@ -2452,10 +2462,10 @@ public struct WordDocument: Equatable {
             body.children[actualIndex] = .paragraph(para)
         }
 
-        modifiedParts.insert("word/comments.xml")
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/comments.xml")
+        markTypedDirty("word/document.xml")
         if comments.hasExtendedComments {
-            modifiedParts.insert("word/commentsExtended.xml")
+            markTypedDirty("word/commentsExtended.xml")
         }
         return commentId
     }
@@ -2467,9 +2477,9 @@ public struct WordDocument: Equatable {
         }
 
         comments.comments[index].text = text
-        modifiedParts.insert("word/comments.xml")
+        markTypedDirty("word/comments.xml")
         if comments.hasExtendedComments {
-            modifiedParts.insert("word/commentsExtended.xml")
+            markTypedDirty("word/commentsExtended.xml")
         }
     }
 
@@ -2495,10 +2505,10 @@ public struct WordDocument: Equatable {
         }
 
         comments.comments.remove(at: index)
-        modifiedParts.insert("word/comments.xml")
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/comments.xml")
+        markTypedDirty("word/document.xml")
         if comments.hasExtendedComments {
-            modifiedParts.insert("word/commentsExtended.xml")
+            markTypedDirty("word/commentsExtended.xml")
         }
     }
 
@@ -2536,13 +2546,13 @@ public struct WordDocument: Equatable {
         revisions.settings.enabled = true
         revisions.settings.author = author
         revisions.settings.dateTime = Date()
-        modifiedParts.insert("word/settings.xml")
+        markTypedDirty("word/settings.xml")
     }
 
     /// 停用修訂追蹤
     public mutating func disableTrackChanges() {
         revisions.settings.enabled = false
-        modifiedParts.insert("word/settings.xml")
+        markTypedDirty("word/settings.xml")
     }
 
     /// 檢查修訂追蹤是否啟用
@@ -2673,7 +2683,7 @@ public struct WordDocument: Equatable {
         revisions.revisions.append(revision)
 
         body.children[bodyIdx] = .paragraph(paragraph)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
 
         return revisionId
     }
@@ -2763,7 +2773,7 @@ public struct WordDocument: Equatable {
         revisions.revisions.append(revision)
 
         body.children[bodyIdx] = .paragraph(paragraph)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
 
         return revisionId
     }
@@ -2903,7 +2913,7 @@ public struct WordDocument: Equatable {
 
         body.children[fromBodyIdx] = .paragraph(fromPara)
         body.children[toBodyIdx] = .paragraph(toPara)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
 
         return (fromId: fromId, toId: toId)
     }
@@ -2947,7 +2957,7 @@ public struct WordDocument: Equatable {
         revisions.revisions.append(revision)
 
         body.children[bodyIdx] = .paragraph(paragraph)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
 
         return revisionId
     }
@@ -2997,7 +3007,7 @@ public struct WordDocument: Equatable {
         revisions.revisions.append(revision)
 
         body.children[bodyIdx] = .paragraph(paragraph)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
 
         return revisionId
     }
@@ -3225,7 +3235,7 @@ public struct WordDocument: Equatable {
                 throw RevisionError.notFound(revisionId)
             }
             revisions.revisions.remove(at: index)
-            modifiedParts.insert(partKey)
+            markTypedDirty(partKey)
             return
         }
 
@@ -3311,7 +3321,7 @@ public struct WordDocument: Equatable {
 
         // 移除修訂記錄
         revisions.revisions.remove(at: index)
-        modifiedParts.insert(partKeyForDirty)
+        markTypedDirty(partKeyForDirty)
     }
 
     /// v0.19.5+ (#56 R5-CONT P0 #5): map a `RevisionSource` to the part
@@ -3503,7 +3513,7 @@ public struct WordDocument: Equatable {
                 throw RevisionError.notFound(revisionId)
             }
             revisions.revisions.remove(at: index)
-            modifiedParts.insert(partKey)
+            markTypedDirty(partKey)
             return
         }
 
@@ -3617,7 +3627,7 @@ public struct WordDocument: Equatable {
 
         // 移除修訂記錄
         revisions.revisions.remove(at: index)
-        modifiedParts.insert(partKeyForDirty)
+        markTypedDirty(partKeyForDirty)
     }
 
     /// 接受所有修訂（legacy non-throwing API; preserved for backward compat)
@@ -3712,8 +3722,8 @@ public struct WordDocument: Equatable {
             body.children[actualIndex] = .paragraph(para)
         }
 
-        modifiedParts.insert("word/footnotes.xml")
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/footnotes.xml")
+        markTypedDirty("word/document.xml")
         return footnoteId
     }
 
@@ -3739,8 +3749,8 @@ public struct WordDocument: Equatable {
         }
 
         footnotes.footnotes.remove(at: index)
-        modifiedParts.insert("word/footnotes.xml")
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/footnotes.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 列出所有腳註
@@ -3782,8 +3792,8 @@ public struct WordDocument: Equatable {
             body.children[actualIndex] = .paragraph(para)
         }
 
-        modifiedParts.insert("word/endnotes.xml")
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/endnotes.xml")
+        markTypedDirty("word/document.xml")
         return endnoteId
     }
 
@@ -3809,8 +3819,8 @@ public struct WordDocument: Equatable {
         }
 
         endnotes.endnotes.remove(at: index)
-        modifiedParts.insert("word/endnotes.xml")
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/endnotes.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// 列出所有尾註
@@ -3899,7 +3909,7 @@ extension WordDocument {
             // 預設插入到開頭
             body.children.insert(.paragraph(para), at: 0)
         }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     // MARK: - Form Controls
@@ -3928,7 +3938,7 @@ extension WordDocument {
                         para.runs.append(run)
                         body.children[i] = .paragraph(para)
                     }
-                    modifiedParts.insert("word/document.xml")
+                    markTypedDirty("word/document.xml")
                     return
                 }
                 childIndex += 1
@@ -3958,7 +3968,7 @@ extension WordDocument {
                         para.runs.append(run)
                         body.children[i] = .paragraph(para)
                     }
-                    modifiedParts.insert("word/document.xml")
+                    markTypedDirty("word/document.xml")
                     return
                 }
                 childIndex += 1
@@ -3989,7 +3999,7 @@ extension WordDocument {
                         para.runs.append(run)
                         body.children[i] = .paragraph(para)
                     }
-                    modifiedParts.insert("word/document.xml")
+                    markTypedDirty("word/document.xml")
                     return
                 }
                 childIndex += 1
@@ -4120,7 +4130,7 @@ extension WordDocument {
                                 para.runs.append(run)
                                 body.children[i] = .paragraph(para)
                             }
-                            modifiedParts.insert("word/document.xml")
+                            markTypedDirty("word/document.xml")
                             return
                         }
                         childIndex += 1
@@ -4147,7 +4157,7 @@ extension WordDocument {
                 if childIndex == paragraphIndex {
                     para.properties.border = border
                     body.children[i] = .paragraph(para)
-                    modifiedParts.insert("word/document.xml")
+                    markTypedDirty("word/document.xml")
                     return
                 }
                 childIndex += 1
@@ -4171,7 +4181,7 @@ extension WordDocument {
                 if childIndex == paragraphIndex {
                     para.properties.shading = CellShading(fill: fill, pattern: pattern)
                     body.children[i] = .paragraph(para)
-                    modifiedParts.insert("word/document.xml")
+                    markTypedDirty("word/document.xml")
                     return
                 }
                 childIndex += 1
@@ -4200,7 +4210,7 @@ extension WordDocument {
                         para.runs[j].properties.characterSpacing = charSpacing
                     }
                     body.children[i] = .paragraph(para)
-                    modifiedParts.insert("word/document.xml")
+                    markTypedDirty("word/document.xml")
                     return
                 }
                 childIndex += 1
@@ -4225,7 +4235,7 @@ extension WordDocument {
                         para.runs[j].properties.textEffect = effect
                     }
                     body.children[i] = .paragraph(para)
-                    modifiedParts.insert("word/document.xml")
+                    markTypedDirty("word/document.xml")
                     return
                 }
                 childIndex += 1
@@ -4251,7 +4261,7 @@ extension WordDocument {
                 if childIndex == paragraphIndex {
                     para.runs.append(drawingRun)
                     body.children[i] = .paragraph(para)
-                    modifiedParts.insert("word/document.xml")
+                    markTypedDirty("word/document.xml")
                     return
                 }
                 childIndex += 1
@@ -4262,7 +4272,7 @@ extension WordDocument {
         var newPara = Paragraph()
         newPara.runs = [drawingRun]
         body.children.append(.paragraph(newPara))
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     // MARK: - Field Code Operations
@@ -4284,7 +4294,7 @@ extension WordDocument {
                 if childIndex == paragraphIndex {
                     para.runs.append(fieldRun)
                     body.children[i] = .paragraph(para)
-                    modifiedParts.insert("word/document.xml")
+                    markTypedDirty("word/document.xml")
                     return
                 }
                 childIndex += 1
@@ -4295,7 +4305,7 @@ extension WordDocument {
         var newPara = Paragraph()
         newPara.runs = [fieldRun]
         body.children.append(.paragraph(newPara))
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     // MARK: - Content Control (SDT) Operations
@@ -4331,7 +4341,7 @@ extension WordDocument {
         }
 
         body.children.insert(.paragraph(sdtPara), at: insertPosition)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     // MARK: - Repeating Section Operations
@@ -4351,7 +4361,7 @@ extension WordDocument {
 
         // 插入到指定位置
         body.children.insert(.paragraph(sectionPara), at: min(index, body.children.count))
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     // MARK: - SDT ID Allocation (che-word-mcp-content-controls-read-write task 2.3)
@@ -4466,7 +4476,7 @@ extension WordDocument {
         }
         styles[pIdx].linkedStyleId = characterStyleId
         styles[cIdx].linkedStyleId = paragraphStyleId
-        modifiedParts.insert("word/styles.xml")
+        markTypedDirty("word/styles.xml")
     }
 
     /// Add or replace a localized name alias on a style.
@@ -4484,14 +4494,14 @@ extension WordDocument {
         } else {
             styles[idx].aliases.append(StyleAlias(lang: lang, name: name))
         }
-        modifiedParts.insert("word/styles.xml")
+        markTypedDirty("word/styles.xml")
     }
 
     /// Replace the document's `latentStyles` collection wholesale.
     /// Pass an empty array to remove the `<w:latentStyles>` block entirely.
     public mutating func setLatentStyles(_ entries: [LatentStyle]) {
         latentStyles = entries
-        modifiedParts.insert("word/styles.xml")
+        markTypedDirty("word/styles.xml")
     }
 
     // MARK: - Table / Hyperlink / Header Mutations (#44 tables-hyperlinks-headers-builtin)
@@ -4516,7 +4526,7 @@ extension WordDocument {
             if case .table = body.children[i] {
                 if seen == tableIndex {
                     body.children[i] = .table(newTable)
-                    modifiedParts.insert("word/document.xml")
+                    markTypedDirty("word/document.xml")
                     return
                 }
                 seen += 1
@@ -4622,7 +4632,7 @@ extension WordDocument {
             }
         }
         guard found else { throw WordError.hyperlinkNotFound(hyperlinkId) }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// Add a header part of the given type, returning the assigned filename
@@ -4651,15 +4661,15 @@ extension WordDocument {
         } else {
             headers.append(header)
         }
-        modifiedParts.insert("word/\(header.fileName)")
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/\(header.fileName)")
+        markTypedDirty("word/document.xml")
         return header.fileName
     }
 
     /// Toggle `<w:evenAndOddHeaders/>` in settings.xml.
     public mutating func setEvenAndOddHeaders(_ enabled: Bool) {
         evenAndOddHeaders = enabled
-        modifiedParts.insert("word/settings.xml")
+        markTypedDirty("word/settings.xml")
     }
 
     /// Clone the source header's content into a new header part of the given
@@ -4687,8 +4697,8 @@ extension WordDocument {
             originalFileName: "header\(nextIdx).xml"
         )
         headers.append(cloned)
-        modifiedParts.insert("word/\(cloned.fileName)")
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/\(cloned.fileName)")
+        markTypedDirty("word/document.xml")
         return cloned.fileName
     }
 
@@ -4724,7 +4734,7 @@ extension WordDocument {
     ) throws {
         guard sectionIndex == 0 else { throw WordError.invalidIndex(sectionIndex) }
         sectionProperties.lineNumbers = LineNumbers(countBy: countBy, start: start, restart: restart)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// Set the vertical alignment of section content.
@@ -4734,7 +4744,7 @@ extension WordDocument {
     ) throws {
         guard sectionIndex == 0 else { throw WordError.invalidIndex(sectionIndex) }
         sectionProperties.verticalAlignment = alignment
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// Set page number format (decimal / Roman / letter) and optional start value.
@@ -4746,7 +4756,7 @@ extension WordDocument {
         guard sectionIndex == 0 else { throw WordError.invalidIndex(sectionIndex) }
         sectionProperties.pageNumberFormat = format
         sectionProperties.pageNumberStartValue = start
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// Set section break type (nextPage / continuous / evenPage / oddPage).
@@ -4756,7 +4766,7 @@ extension WordDocument {
     ) throws {
         guard sectionIndex == 0 else { throw WordError.invalidIndex(sectionIndex) }
         sectionProperties.sectionBreakType = type
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// Toggle `<w:titlePg/>` in the section's properties.
@@ -4766,7 +4776,7 @@ extension WordDocument {
     ) throws {
         guard sectionIndex == 0 else { throw WordError.invalidIndex(sectionIndex) }
         sectionProperties.titlePageDistinct = enabled
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// Assign per-type header / footer rId references on a section.
@@ -4787,7 +4797,7 @@ extension WordDocument {
         if let f = footerDefault { sectionProperties.footerReferences.defaultRef = f }
         if let f = footerFirst { sectionProperties.footerReferences.firstRef = f }
         if let f = footerEven { sectionProperties.footerReferences.evenRef = f }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// Return one SectionInfo per section. Currently always one entry
@@ -4832,7 +4842,7 @@ extension WordDocument {
         let numId = numbering.nextNumId
         numbering.abstractNums.append(AbstractNum(abstractNumId: abstractNumId, levels: levels))
         numbering.nums.append(Num(numId: numId, abstractNumId: abstractNumId))
-        modifiedParts.insert("word/numbering.xml")
+        markTypedDirty("word/numbering.xml")
         return numId
     }
 
@@ -4849,7 +4859,7 @@ extension WordDocument {
         } else {
             numbering.nums[idx].lvlOverrides.append(LvlOverride(ilvl: level, startOverride: startValue))
         }
-        modifiedParts.insert("word/numbering.xml")
+        markTypedDirty("word/numbering.xml")
     }
 
     /// Attach a numId+level to the paragraph at the given top-level body index.
@@ -4876,8 +4886,8 @@ extension WordDocument {
             para.properties.numbering = NumberingInfo(numId: numId, level: level)
             body.children[actualIndex] = .paragraph(para)
         }
-        modifiedParts.insert("word/document.xml")
-        modifiedParts.insert("word/numbering.xml")
+        markTypedDirty("word/document.xml")
+        markTypedDirty("word/numbering.xml")
     }
 
     /// Continue an existing list — assign the same numId as a previously
@@ -4951,7 +4961,7 @@ extension WordDocument {
         let orphans = allNumIds.filter { !referenced.contains($0) }
         guard !orphans.isEmpty else { return [] }
         numbering.nums.removeAll { orphans.contains($0.numId) }
-        modifiedParts.insert("word/numbering.xml")
+        markTypedDirty("word/numbering.xml")
         return orphans
     }
 
@@ -4982,7 +4992,7 @@ extension WordDocument {
             }
         }
         guard result else { throw WordError.contentControlNotFound(id) }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// Replace the entire `<w:sdtContent>` region of a ContentControl with
@@ -5000,7 +5010,7 @@ extension WordDocument {
             control.content = contentXML
         }
         guard result else { throw WordError.contentControlNotFound(id) }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     /// Remove a ContentControl from the document tree.
@@ -5014,7 +5024,7 @@ extension WordDocument {
     public mutating func deleteContentControl(id: Int, keepContent: Bool = true) throws {
         let removed = removeContentControl(id: id, keepContent: keepContent, in: &body.children)
         guard removed else { throw WordError.contentControlNotFound(id) }
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
     }
 
     // MARK: - Content Control Mutation Helpers
