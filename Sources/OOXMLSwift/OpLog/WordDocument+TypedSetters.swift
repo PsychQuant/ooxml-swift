@@ -36,7 +36,6 @@ extension WordDocument {
     public mutating func setParagraphText(id: ElementID, _ text: String) throws {
         try appendAndMaterialize([.setText(target: id, text: text)])
         resyncBodyFromDocumentTree()
-        modifiedParts.insert("word/document.xml")
     }
 }
 

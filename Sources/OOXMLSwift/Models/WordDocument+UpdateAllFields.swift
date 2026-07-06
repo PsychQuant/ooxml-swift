@@ -224,11 +224,11 @@ var containerHeadingCount: [Int: Int] = isolatePerContainer ? [:] : currentHeadi
         }
 
         // Honest dirty-bit propagation — only mark parts that ACTUALLY mutated.
-        if bodyDirty { modifiedParts.insert("word/document.xml") }
-        for fileName in dirtyHeaderFiles { modifiedParts.insert("word/\(fileName)") }
-        for fileName in dirtyFooterFiles { modifiedParts.insert("word/\(fileName)") }
-        if footnotesDirty { modifiedParts.insert("word/footnotes.xml") }
-        if endnotesDirty { modifiedParts.insert("word/endnotes.xml") }
+        if bodyDirty { markTypedDirty("word/document.xml") }
+        for fileName in dirtyHeaderFiles { markTypedDirty("word/\(fileName)") }
+        for fileName in dirtyFooterFiles { markTypedDirty("word/\(fileName)") }
+        if footnotesDirty { markTypedDirty("word/footnotes.xml") }
+        if endnotesDirty { markTypedDirty("word/endnotes.xml") }
         return counters
     }
 

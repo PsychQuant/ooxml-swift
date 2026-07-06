@@ -64,7 +64,7 @@ extension WordDocument {
         }
 
         if !ctx.paragraphsModified.isEmpty {
-            modifiedParts.insert("word/document.xml")
+            markTypedDirty("word/document.xml")
             nextBookmarkId = ctx.nextBookmarkId
         }
 

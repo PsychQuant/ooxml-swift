@@ -83,7 +83,7 @@ extension WordDocument {
         )
 
         body.children[bodyChildIdx] = .paragraph(targetPara)
-        modifiedParts.insert("word/document.xml")
+        markTypedDirty("word/document.xml")
         return 1
     }
 

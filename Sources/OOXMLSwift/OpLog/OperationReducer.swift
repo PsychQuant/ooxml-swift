@@ -192,8 +192,17 @@ public enum OperationReducer {
                 // schema-invalid and invisible to the runs-based typed view
                 // (caught by TypedSetterOpLogTests, task 3.15).
                 let wr = XmlNode.element(prefix: "w", localName: "r", children: [wt])
+                // 7.3 verify P2: full-text-replace applies to CONTENT
+                // children only. Range markers and paragraph properties
+                // (<w:pPr>, bookmarkStart/End, commentRangeStart/End,
+                // proofErr, permStart/End) are structural siblings under
+                // CT_P and MUST survive; dropping them orphaned real
+                // bookmarks/comments.
+                let replacedContent: Set<String> = [
+                    "r", "hyperlink", "fldSimple", "sdt", "smartTag", "t",
+                ]
                 let keptChildren = node.children.filter {
-                    $0.kind == .element && $0.localName == "pPr"
+                    $0.kind == .element && !replacedContent.contains($0.localName)
                 }
                 node.children = keptChildren + [wr]
             } else {

@@ -149,6 +149,23 @@ public final class SyncOrchestrator {
         // importFromDisk calls without a preceding poll).
         baselineDocumentTree = diskTree.deepCopy()
         changeDetector = try DocxChangeDetector(url: docxURL)
+
+        // 7.4 verify P1: persist the advanced baseline. With only the log
+        // saved, reopening before flush() compared the docx against the
+        // STALE snapshot and replayed the same Word diff again.
+        let docxData = try Data(contentsOf: docxURL)
+        var fingerprints: [String: String] = [:]
+        for (partPath, tree) in onDisk.xmlTrees {
+            fingerprints[partPath] = tree.root.normalizedFingerprint()
+        }
+        let serializedBaseline = try? XmlTreeWriter.serialize(diskTree)
+        try SidecarStore.saveSnapshot(SyncSnapshot(
+            docxSHA256: SidecarStore.sha256Hex(of: docxData),
+            savedAt: Date(),
+            opCount: document.operationLog.entries.count,
+            partFingerprints: fingerprints,
+            documentXML: serializedBaseline.map { String(decoding: $0, as: UTF8.self) }),
+            alongside: docxURL)
         return resolved
     }
 

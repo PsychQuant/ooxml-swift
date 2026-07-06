@@ -120,6 +120,30 @@ extension WordDocument {
     /// `DocxWriter.write`), then persists the op log and a fresh snapshot
     /// alongside it. The docx itself carries zero sync metadata.
     public func saveWithSidecars(to url: URL) throws {
+        // 7.3 verify P2 (torn-write window): capture pre-state and roll all
+        // three files back on any failure. Absent -> nil (rollback removes
+        // the fresh file); present-but-unreadable -> throw BEFORE any write.
+        let fm = FileManager.default
+        let targets = [url, SidecarStore.oplogURL(for: url), SidecarStore.snapshotURL(for: url)]
+        let backups: [Data?] = try targets.map { target in
+            guard fm.fileExists(atPath: target.path) else { return nil }
+            return try Data(contentsOf: target)
+        }
+        do {
+            try saveWithSidecarsBody(to: url)
+        } catch {
+            for (i, target) in targets.enumerated() {
+                if let backup = backups[i] {
+                    try? backup.write(to: target)
+                } else {
+                    try? fm.removeItem(at: target)
+                }
+            }
+            throw error
+        }
+    }
+
+    private func saveWithSidecarsBody(to url: URL) throws {
         try DocxWriter.write(self, to: url)
         try SidecarStore.saveLog(operationLog, alongside: url)
 
