@@ -2666,21 +2666,10 @@ public struct DocxReader {
             // the outer rPr (which would cause double emission via Revision +
             // raw replay).
         ]
-        var collectedRpr: [RawElement] = []
-        for child in element.children ?? [] {
-            guard let childEl = child as? XMLElement,
-                  let localName = childEl.localName,
-                  !recognizedRprChildren.contains(localName) else {
-                continue
-            }
-            collectedRpr.append(
-                RawElement(name: localName, xml: childEl.xmlString)
-            )
-        }
-        if !collectedRpr.isEmpty {
-            props.rawChildren = collectedRpr
-        }
-
+        // v1.0 task 6.3: unrecognized <w:rPr> children are no longer captured
+        // onto the typed model (rawChildren removed) — the tree preserves
+        // them, and dirty parts refreshed by the reducer serialize the tree.
+        _ = recognizedRprChildren
         return props
     }
 

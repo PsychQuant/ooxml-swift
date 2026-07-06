@@ -526,7 +526,8 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
 
         // Round-trip: read → mark modified → write → re-read document.xml.
         var doc = try DocxReader.read(from: srcURL)
-        doc.modifiedParts.insert("word/document.xml")
+        try doc.apply(operations: [.appendParagraph(in: nil, paragraph: ParagraphPayload(
+            text: "", styleId: nil, paraId: "probe-p"))], source: .swift)
         let outURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("matrix-pin-\(UUID().uuidString).docx")
         defer { try? FileManager.default.removeItem(at: outURL) }
@@ -1781,7 +1782,8 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         try buildMinimalDocx(documentXML: documentXML, to: inURL)
 
         var doc = try DocxReader.read(from: inURL)
-        doc.modifiedParts.insert("word/document.xml")
+        try doc.apply(operations: [.appendParagraph(in: nil, paragraph: ParagraphPayload(
+            text: "v1.0 tree-path probe", styleId: nil, paraId: "probe-p"))], source: .swift)
         let outURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue60-w14-out-\(UUID().uuidString).docx")
         defer { try? FileManager.default.removeItem(at: outURL) }
@@ -1960,7 +1962,8 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
         try buildMinimalDocx(documentXML: documentXML, to: inURL)
 
         var doc = try DocxReader.read(from: inURL)
-        doc.modifiedParts.insert("word/document.xml")
+        try doc.apply(operations: [.appendParagraph(in: nil, paragraph: ParagraphPayload(
+            text: "v1.0 tree-path probe", styleId: nil, paraId: "probe-p"))], source: .swift)
         let outURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue65-pmark-w14-out-\(UUID().uuidString).docx")
         defer { try? FileManager.default.removeItem(at: outURL) }
