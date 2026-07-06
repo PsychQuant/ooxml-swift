@@ -347,3 +347,69 @@ extension ScriptTranscodeTests {
                        "exported source must be syntactically valid Swift: \(diag)")
     }
 }
+
+extension ScriptTranscodeTests {
+
+    /// 5.5 "Script export covers all operation types in the log" — EVERY
+    /// Operation case (all 32, same construction list as the enum pin in
+    /// OperationLogTests) must have a Swift representation that survives
+    /// export → import with op equivalence. DSL-form for the authoring
+    /// subset, `// @op` raw escape (the spec's comment-marker mechanism)
+    /// for everything else.
+    func testEveryOperationTypeRoundTripsThroughExport() throws {
+        let id = ElementID(rawString: "w14:paraId=A")
+        let id2 = ElementID(rawString: "w14:paraId=B")
+        let uuid = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+
+        let cases: [OOXMLSwift.Operation] = [
+            .insertParagraphAfter(after: id, paragraph: ParagraphPayload(text: "p")),
+            .insertParagraphBefore(before: id, paragraph: ParagraphPayload(text: "p")),
+            .removeParagraph(id: id),
+            .setText(target: id, text: "Hello"),
+            .setParagraphStyle(target: id, styleId: "Heading1"),
+            .insertTable(at: id, table: TablePayload(rows: 2, columns: 3)),
+            .removeTable(id: id),
+            .setCellText(table: id, row: 0, column: 1, text: "cell"),
+            .insertRun(in: id, position: 0, run: RunPayload(text: "r")),
+            .setRunFormat(target: id, format: RunFormatPayload(bold: true)),
+            .insertBookmark(at: id, bookmarkId: 7, name: "anchor"),
+            .insertComment(anchor: id, commentId: 3, text: "ct", author: "auth"),
+            .undo(targetOpID: uuid),
+            .redo(targetOpID: uuid),
+            .batchBegin(label: "rename"),
+            .batchEnd,
+            .insertNode(parent: id, position: 0, nodeXML: "<w:p/>"),
+            .removeNode(target: id),
+            .updateAttribute(target: id, prefix: "w", localName: "id", value: "5"),
+            .moveNode(source: id, destinationParent: id2, destinationIndex: 0),
+            .insertSiblingAfter(after: id, nodeXML: "<w:t>x</w:t>"),
+            .wrapWithHyperlink(target: id, rId: "rId99"),
+            .addRelationship(
+                part: "word/_rels/document.xml.rels",
+                id: "rId99",
+                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+                target: "https://example.com",
+                targetMode: "External"
+            ),
+            .unknown(opType: "future", payload: JSONValue.object(["k": JSONValue.int(1)])),
+            .appendParagraph(in: nil, paragraph: ParagraphPayload(
+                text: "x", styleId: nil, paraId: "P1")),
+            .setRuns(target: id, runs: [RunPayload(text: "x", bold: true)]),
+            .defineStyle(payload: StylePayload(styleId: "s1")),
+            .beginComponent(type: "Summary", id: id),
+            .endComponent(id: id),
+            .insertTab(in: id),
+            .insertBreak(in: id),
+            .insertNoBreakHyphen(in: id),
+        ]
+        XCTAssertEqual(cases.count, 32,
+                       "update this list when the Operation enum grows — every case must round-trip")
+
+        var l = OperationLog()
+        for op in cases { l.append(op, source: .swift) }
+
+        let script = ScriptExporter.exportSwift(log: l)
+        let reconstructed = try ScriptImporter.parse(source: script)
+        opsEquivalent(l, reconstructed)
+    }
+}
