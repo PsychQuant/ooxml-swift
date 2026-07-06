@@ -155,15 +155,19 @@ public struct DocxReader {
 
         let documentData = try Data(contentsOf: documentURL)
         try Self.rejectDTD(documentData, part: "word/document.xml")
-        let documentXML = try XMLDocument(data: documentData)
 
         // 5. 讀取 styles.xml（先解析，用於語義標註）
         var document = WordDocument()
 
-        // v0.31.2+ (Spectra `reader-tree-loading-impl`): build the lossless
-        // XmlTree alongside the typed model so downstream code can address
-        // elements by ElementID via the op log (Phase 2 of word-aligned-state-sync).
-        document.xmlTrees["word/document.xml"] = try XmlTreeReader.parse(documentData)
+        // v1.0 (word-aligned-state-sync task 6.1): the tree is the ONLY path
+        // that reads XML bytes from disk. The typed model parses the tree's
+        // serialization — typed views are structurally a projection of the
+        // tree (`typed = f(tree)`), and any tree lossless gap would surface
+        // immediately as a typed-parse difference in round-trip tests.
+        let documentTree = try XmlTreeReader.parse(documentData)
+        document.xmlTrees["word/document.xml"] = documentTree
+        let projectedDocumentData = try XmlTreeWriter.serialize(documentTree)
+        let documentXML = try XMLDocument(data: projectedDocumentData)
 
         // 5a. v0.19.0+ (PsychQuant/che-word-mcp#56): preserve every attribute
         // (xmlns:* declarations, mc:Ignorable, anything else) on the source
@@ -177,16 +181,17 @@ public struct DocxReader {
         // and silently drops xmlns:* prefixes that are not referenced in the
         // tree it can see — so to capture the source set verbatim we re-parse
         // the root open tag from raw bytes instead of relying on the DOM.
-        document.documentRootAttributes = try Self.parseDocumentRootAttributes(from: documentData)
+        document.documentRootAttributes = try Self.parseDocumentRootAttributes(from: projectedDocumentData)
 
         let stylesURL = tempDir.appendingPathComponent("word/styles.xml")
         if FileManager.default.fileExists(atPath: stylesURL.path) {
             let stylesData = try Data(contentsOf: stylesURL)
             try Self.rejectDTD(stylesData, part: "word/styles.xml")
-            let stylesXML = try XMLDocument(data: stylesData)
+            let stylesTree = try XmlTreeReader.parse(stylesData)
+            document.xmlTrees["word/styles.xml"] = stylesTree
+            let stylesXML = try XMLDocument(data: try XmlTreeWriter.serialize(stylesTree))
             document.styles = try parseStyles(from: stylesXML)
             document.latentStyles = parseLatentStyles(from: stylesXML)
-            document.xmlTrees["word/styles.xml"] = try XmlTreeReader.parse(stylesData)
         }
 
         // 6. 讀取 numbering.xml（可選，用於清單語義標註）
@@ -194,9 +199,10 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: numberingURL.path) {
             let numberingData = try Data(contentsOf: numberingURL)
             try Self.rejectDTD(numberingData, part: "word/numbering.xml")
-            let numberingXML = try XMLDocument(data: numberingData)
+            let numberingTree = try XmlTreeReader.parse(numberingData)
+            document.xmlTrees["word/numbering.xml"] = numberingTree
+            let numberingXML = try XMLDocument(data: try XmlTreeWriter.serialize(numberingTree))
             document.numbering = try parseNumbering(from: numberingXML)
-            document.xmlTrees["word/numbering.xml"] = try XmlTreeReader.parse(numberingData)
         }
 
         // v0.31.2+ Settings.xml — loaded into xmlTrees so Phase 2's op log can
@@ -267,8 +273,9 @@ public struct DocxReader {
             guard FileManager.default.fileExists(atPath: headerURL.path) else { continue }
             let headerData = try Data(contentsOf: headerURL)
             try Self.rejectDTD(headerData, part: "word/\(rel.target)")
-            let headerXML = try XMLDocument(data: headerData)
-            document.xmlTrees["word/\(rel.target)"] = try XmlTreeReader.parse(headerData)
+            let headerTree = try XmlTreeReader.parse(headerData)
+            document.xmlTrees["word/\(rel.target)"] = headerTree
+            let headerXML = try XMLDocument(data: try XmlTreeWriter.serialize(headerTree))
             // v0.19.5+ (#56 R5-CONT P1 #8): load per-container rels
             // (`word/_rels/header*.xml.rels`) and merge with document-scope
             // rels so hyperlinks inside the header resolve their URLs via
@@ -325,8 +332,9 @@ public struct DocxReader {
             guard FileManager.default.fileExists(atPath: footerURL.path) else { continue }
             let footerData = try Data(contentsOf: footerURL)
             try Self.rejectDTD(footerData, part: "word/\(rel.target)")
-            let footerXML = try XMLDocument(data: footerData)
-            document.xmlTrees["word/\(rel.target)"] = try XmlTreeReader.parse(footerData)
+            let footerTree = try XmlTreeReader.parse(footerData)
+            document.xmlTrees["word/\(rel.target)"] = footerTree
+            let footerXML = try XMLDocument(data: try XmlTreeWriter.serialize(footerTree))
             // v0.19.5+ (#56 R5-CONT P1 #8): per-container rels — see header parse.
             // Container rels prepended for first-match correctness.
             let footerRelsURL = tempDir
@@ -357,8 +365,9 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: footnotesURL.path) {
             let footnotesData = try Data(contentsOf: footnotesURL)
             try Self.rejectDTD(footnotesData, part: "word/footnotes.xml")
-            let footnotesXML = try XMLDocument(data: footnotesData)
-            document.xmlTrees["word/footnotes.xml"] = try XmlTreeReader.parse(footnotesData)
+            let footnotesTree = try XmlTreeReader.parse(footnotesData)
+            document.xmlTrees["word/footnotes.xml"] = footnotesTree
+            let footnotesXML = try XMLDocument(data: try XmlTreeWriter.serialize(footnotesTree))
             // v0.19.5+ (#56 R5-CONT P1 #8): per-collection rels for the
             // footnotes part. See header parse comment for full rationale.
             let footnotesRels = try Self.parseRelationshipsFile(
@@ -411,8 +420,9 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: endnotesURL.path) {
             let endnotesData = try Data(contentsOf: endnotesURL)
             try Self.rejectDTD(endnotesData, part: "word/endnotes.xml")
-            let endnotesXML = try XMLDocument(data: endnotesData)
-            document.xmlTrees["word/endnotes.xml"] = try XmlTreeReader.parse(endnotesData)
+            let endnotesTree = try XmlTreeReader.parse(endnotesData)
+            document.xmlTrees["word/endnotes.xml"] = endnotesTree
+            let endnotesXML = try XMLDocument(data: try XmlTreeWriter.serialize(endnotesTree))
             // v0.19.5+ (#56 R5-CONT P1 #8): per-collection rels for endnotes.
             let endnotesRels = try Self.parseRelationshipsFile(
                 at: tempDir.appendingPathComponent("word/_rels/endnotes.xml.rels")
@@ -460,7 +470,9 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: coreURL.path) {
             let coreData = try Data(contentsOf: coreURL)
             try Self.rejectDTD(coreData, part: "docProps/core.xml")
-            let coreXML = try XMLDocument(data: coreData)
+            let coreTree = try XmlTreeReader.parse(coreData)
+            document.xmlTrees["docProps/core.xml"] = coreTree
+            let coreXML = try XMLDocument(data: try XmlTreeWriter.serialize(coreTree))
             document.properties = try parseCoreProperties(from: coreXML)
         }
 
@@ -470,12 +482,13 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: commentsURL.path) {
             let commentsData = try Data(contentsOf: commentsURL)
             try Self.rejectDTD(commentsData, part: "word/comments.xml")
-            let commentsXML = try XMLDocument(data: commentsData)
+            let commentsTree = try XmlTreeReader.parse(commentsData)
+            document.xmlTrees["word/comments.xml"] = commentsTree
+            let commentsXML = try XMLDocument(data: try XmlTreeWriter.serialize(commentsTree))
             let commentsWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: commentsData))
             document.comments = try Self.withWhitespaceContext(commentsWsContext) {
                 try parseComments(from: commentsXML)
             }
-            document.xmlTrees["word/comments.xml"] = try XmlTreeReader.parse(commentsData)
         }
 
         // 9. Link comment paragraphIndex from paragraph commentRangeMarkers
@@ -582,7 +595,9 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: commentsExtURL.path) {
             let extData = try Data(contentsOf: commentsExtURL)
             try Self.rejectDTD(extData, part: "word/commentsExtended.xml")
-            let extXML = try XMLDocument(data: extData)
+            let extTree = try XmlTreeReader.parse(extData)
+            document.xmlTrees["word/commentsExtended.xml"] = extTree
+            let extXML = try XMLDocument(data: try XmlTreeWriter.serialize(extTree))
             try parseCommentsExtended(from: extXML, into: &document.comments)
         }
 
@@ -754,7 +769,10 @@ public struct DocxReader {
 
         let relsData = try Data(contentsOf: relsURL)
         try Self.rejectDTD(relsData, part: "word/_rels/document.xml.rels")
-        let relsXML = try XMLDocument(data: relsData)
+        // v1.0 task 6.1: rels parts go through the tree projection too —
+        // typed parse consumes the tree's serialization, never raw bytes.
+        let relsTree = try XmlTreeReader.parse(relsData)
+        let relsXML = try XMLDocument(data: try XmlTreeWriter.serialize(relsTree))
 
         // 取得所有 Relationship 節點
         let relNodes = try relsXML.nodes(forXPath: "//*[local-name()='Relationship']")
