@@ -145,3 +145,82 @@ final class VerifyPanelFixesTests: XCTestCase {
                           "importFromDisk must persist a fresh snapshot — a stale snapshot replays the same Word diff on reopen")
     }
 }
+
+extension VerifyPanelFixesTests {
+
+    /// 7.6 verify P0 (v100-correctness, reproduced pre-v1.0.2): op-based
+    /// apply followed by a LEGACY typed mutation on the same part — the
+    /// legacy edit must survive the save. Pre-fix, treeFreshParts gated out
+    /// the typed writer and the stale tree dropped "FROM-LEGACY" entirely.
+    func testLegacyMutationAfterOpApplySurvivesSave() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mixed-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("seed.docx")
+
+        var seed = WordDocument.emptyAuthoringDocument()
+        try seed.apply(operations: [.appendParagraph(in: nil, paragraph: ParagraphPayload(
+            text: "SEED", styleId: nil, paraId: "seed1"))], source: .swift)
+        try seed.writeAuthoringPackage(to: url)
+
+        var doc = try DocxReader.read(from: url)
+        try doc.apply(operations: [.appendParagraph(in: nil, paragraph: ParagraphPayload(
+            text: "FROM-OP", styleId: nil, paraId: "op1"))], source: .swift)
+        doc.appendParagraph(Paragraph(text: "FROM-LEGACY"))   // legacy typed API
+
+        let out = dir.appendingPathComponent("out.docx")
+        try DocxWriter.write(doc, to: out)
+        doc.close()
+
+        var reread = try DocxReader.read(from: out)
+        defer { reread.close() }
+        let texts = reread.body.children.compactMap { child -> String? in
+            if case .paragraph(let p) = child { return p.text } else { return nil }
+        }
+        XCTAssertTrue(texts.contains("FROM-LEGACY"),
+                      "a legacy typed edit after an op-based apply must survive the save; got \(texts)")
+        XCTAssertTrue(texts.contains("FROM-OP") && texts.contains("SEED"))
+    }
+}
+
+extension VerifyPanelFixesTests {
+
+    /// 7.2 verify P1 — `w:id` values are independently numbered per OOXML
+    /// feature; an op addressing an ambiguous "w:id=1" must fail LOUDLY
+    /// (elementNotFound), never silently mutate the first match.
+    func testAmbiguousWIdTargetRefusesInsteadOfFirstMatch() throws {
+        let ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        let bm = XmlNode.element(prefix: "w", localName: "bookmarkStart", namespaceURI: ns)
+        bm.setAttribute(prefix: "w", localName: "id", value: "1")
+        let ins = XmlNode.element(prefix: "w", localName: "ins", namespaceURI: ns)
+        ins.setAttribute(prefix: "w", localName: "id", value: "1")
+        let body = XmlNode.element(prefix: "w", localName: "body", namespaceURI: ns, children: [bm, ins])
+        let doc = XmlNode.element(prefix: "w", localName: "document", namespaceURI: ns, children: [body])
+
+        var log = OperationLog()
+        log.append(.setText(target: ElementID(rawString: "w:id=1"), text: "x"), source: .swift)
+
+        XCTAssertThrowsError(
+            try OperationReducer.materialize(log: log, base: XmlTree.synthesized(root: doc)),
+            "ambiguous w:id target must refuse loudly, not mutate the first match") { error in
+            guard case ReducerError.elementNotFound = error else {
+                return XCTFail("expected loud elementNotFound on ambiguity, got \(error)")
+            }
+        }
+    }
+
+    /// Unambiguous w:id targets still resolve.
+    func testUniqueWIdTargetStillResolves() throws {
+        let ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        let bm = XmlNode.element(prefix: "w", localName: "bookmarkStart", namespaceURI: ns)
+        bm.setAttribute(prefix: "w", localName: "id", value: "7")
+        let body = XmlNode.element(prefix: "w", localName: "body", namespaceURI: ns, children: [bm])
+        let doc = XmlNode.element(prefix: "w", localName: "document", namespaceURI: ns, children: [body])
+
+        var log = OperationLog()
+        log.append(.setText(target: ElementID(rawString: "w:id=7"), text: "found"), source: .swift)
+        // Resolving without throwing proves the unique target was found.
+        XCTAssertNoThrow(try OperationReducer.materialize(log: log, base: XmlTree.synthesized(root: doc)))
+    }
+}
