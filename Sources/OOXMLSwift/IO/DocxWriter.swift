@@ -88,6 +88,11 @@ public struct DocxWriter {
         let hasHeaders = !document.headers.isEmpty
         let hasFooters = !document.footers.isEmpty
         let dirty = document.modifiedParts
+        // v1.0 (word-aligned-state-sync task 6.2): every XML part emitted by
+        // a typed writer this save is re-treed at the end of this function —
+        // the bytes that reach the package always come out of
+        // XmlTreeWriter.serialize. Collect the paths as branches run.
+        var typedWrittenParts: [String] = []
 
         // v0.13.0+: in overlay mode every typed-part writer is gated by the
         // corresponding part path appearing in `dirty`. Scratch mode (no
@@ -105,41 +110,53 @@ public struct DocxWriter {
 
         if needsContentTypes {
             try writeContentTypes(to: tempDir, document: document, overlayMode: overlayMode)
+            typedWrittenParts.append(contentsOf: ["[Content_Types].xml"])
         }
         if !overlayMode {
             // Top-level _rels/.rels is read-only in overlay mode (preserved
             // verbatim from the source archive). Scratch mode emits a fresh one.
             try writeRelationships(to: tempDir)
+            typedWrittenParts.append(contentsOf: ["_rels/.rels"])
         }
         if needsDocumentRels {
             try writeDocumentRelationships(to: tempDir, document: document)
+            typedWrittenParts.append(contentsOf: ["word/_rels/document.xml.rels"])
         }
         if !overlayMode || dirty.contains("word/document.xml") {
             try writeDocument(document, to: tempDir)
+            typedWrittenParts.append(contentsOf: ["word/document.xml"])
         }
         if !overlayMode || dirty.contains("word/styles.xml") {
             try writeStyles(document.styles, latentStyles: document.latentStyles, to: tempDir)
+            typedWrittenParts.append(contentsOf: ["word/styles.xml"])
         }
         if !overlayMode || dirty.contains("word/settings.xml") {
             try writeSettings(document, to: tempDir)
+            typedWrittenParts.append(contentsOf: ["word/settings.xml"])
         }
         if !overlayMode || dirty.contains("word/fontTable.xml") {
             try writeFontTable(to: tempDir)
+            typedWrittenParts.append(contentsOf: ["word/fontTable.xml"])
         }
         if !overlayMode || dirty.contains("docProps/core.xml") {
             try writeCoreProperties(document.properties, to: tempDir)
+            typedWrittenParts.append(contentsOf: ["docProps/core.xml"])
         }
         if !overlayMode || dirty.contains("docProps/app.xml") {
             try writeAppProperties(to: tempDir)
+            typedWrittenParts.append(contentsOf: ["docProps/app.xml"])
         }
 
         if hasNumbering, !overlayMode || dirty.contains("word/numbering.xml") {
             try writeNumbering(document.numbering, to: tempDir)
+            typedWrittenParts.append(contentsOf: ["word/numbering.xml"])
         }
         if hasHeaders {
             for header in document.headers {
                 if !overlayMode || dirty.contains("word/\(header.fileName)") {
                     try writeHeader(header, to: tempDir)
+                    typedWrittenParts.append(contentsOf: [
+                        "word/\(header.fileName)", "word/_rels/\(header.fileName).rels"])
                 }
             }
         }
@@ -147,6 +164,8 @@ public struct DocxWriter {
             for footer in document.footers {
                 if !overlayMode || dirty.contains("word/\(footer.fileName)") {
                     try writeFooter(footer, to: tempDir)
+                    typedWrittenParts.append(contentsOf: [
+                        "word/\(footer.fileName)", "word/_rels/\(footer.fileName).rels"])
                 }
             }
         }
@@ -163,18 +182,40 @@ public struct DocxWriter {
         if !document.comments.comments.isEmpty,
            !overlayMode || dirty.contains("word/comments.xml") {
             try writeComments(document.comments, to: tempDir)
+            typedWrittenParts.append(contentsOf: ["word/comments.xml"])
         }
         if let extXML = document.comments.toExtendedXML(),
            !overlayMode || dirty.contains("word/commentsExtended.xml") {
             try writeCommentsExtended(extXML, to: tempDir)
+            typedWrittenParts.append(contentsOf: ["word/commentsExtended.xml"])
         }
         if !document.footnotes.footnotes.isEmpty,
            !overlayMode || dirty.contains("word/footnotes.xml") {
             try writeFootnotes(document.footnotes, to: tempDir)
+            typedWrittenParts.append(contentsOf: ["word/footnotes.xml", "word/_rels/footnotes.xml.rels"])
         }
         if !document.endnotes.endnotes.isEmpty,
            !overlayMode || dirty.contains("word/endnotes.xml") {
             try writeEndnotes(document.endnotes, to: tempDir)
+            typedWrittenParts.append(contentsOf: ["word/endnotes.xml", "word/_rels/endnotes.xml.rels"])
+        }
+
+        try retreeXMLParts(typedWrittenParts, in: tempDir)
+    }
+
+    /// v1.0 task 6.2 — the tree is the ONLY write path. Every XML part a
+    /// typed writer produced this save is round-tripped bytes -> XmlTree ->
+    /// serialize before packaging, so the package bytes always come out of
+    /// `XmlTreeWriter.serialize` (typed writers are materializers, not disk
+    /// writers). Preserved (non-dirty) parts are never touched — verbatim
+    /// preservation stays byte-exact.
+    private static func retreeXMLParts(_ parts: [String], in tempDir: URL) throws {
+        for part in Set(parts) {
+            let fileURL = tempDir.appendingPathComponent(part)
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { continue }
+            let bytes = try Data(contentsOf: fileURL)
+            let tree = try XmlTreeReader.parse(bytes)
+            try XmlTreeWriter.serialize(tree).write(to: fileURL)
         }
     }
 
