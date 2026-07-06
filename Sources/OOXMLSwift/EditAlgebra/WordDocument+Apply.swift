@@ -104,6 +104,7 @@ extension WordDocument {
         //    every tree" pattern which threw elementNotFound on parts that
         //    didn't contain the op's target.
         var newTrees = self.xmlTrees
+        var touchedParts: Set<String> = []
 
         // Single-part fast path: when the doc has exactly one part, skip the
         // partContaining tree walk. materialize will throw elementNotFound
@@ -174,6 +175,7 @@ extension WordDocument {
                     base: newTrees[partPath]!
                 )
                 newTrees[partPath] = materialized
+                touchedParts.insert(partPath)
             } catch {
                 throw EditError.operationLogFailure(
                     underlying: "OperationReducer.materialize failed on part '\(partPath)': \(error.localizedDescription)"
@@ -196,6 +198,11 @@ extension WordDocument {
         //    every access) could enable auto-resync — out of scope here.
         self.operationLog = newLog
         self.xmlTrees = newTrees
+        // Reducer-applied parts: the tree is now the authoritative content —
+        // write serializes it directly (tree-first), and the part must be
+        // re-emitted (dirty) in overlay mode.
+        self.treeFreshParts.formUnion(touchedParts)
+        self.modifiedParts.formUnion(touchedParts)
     }
 
     /// Constructs an empty `<Relationships>` XmlTree suitable for

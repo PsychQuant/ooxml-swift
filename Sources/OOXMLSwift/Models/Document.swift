@@ -104,6 +104,13 @@ public struct WordDocument: Equatable {
     /// equal despite distinct `XmlTree` class instances.
     public internal(set) var xmlTrees: [String: XmlTree] = [:]
 
+    /// v1.0 (word-aligned-state-sync 6.2/6.3 prerequisite): parts whose tree
+    /// was refreshed by the reducer pipeline since load. For these parts the
+    /// tree IS the authoritative content at write time (serialize(tree));
+    /// parts mutated through the legacy direct-typed surface are absent here
+    /// and re-emit through the typed writer + re-tree bridge instead.
+    public internal(set) var treeFreshParts: Set<String> = []
+
     /// v0.31.2+ Convenience accessor returning `xmlTrees[partPath]`.
     /// Returns `nil` for any path not present in `xmlTrees`.
     public func partTree(at partPath: String) -> XmlTree? {
