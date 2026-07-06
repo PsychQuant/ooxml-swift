@@ -34,9 +34,13 @@ public struct DocxChangeDetector {
     public mutating func poll() throws -> Bool {
         let mtime = Self.modificationDate(of: url)
         if mtime == lastModificationDate { return false }
-        lastModificationDate = mtime
 
+        // 7.4 verify P2: commit the mtime baseline only AFTER the content
+        // read succeeds — committing before a throwing read permanently
+        // masked the revision on retry (fast-path matched the advanced
+        // baseline while the hash was never taken).
         let hash = SidecarStore.sha256Hex(of: try Data(contentsOf: url))
+        lastModificationDate = mtime
         if hash == lastContentHash { return false }
         lastContentHash = hash
         return true

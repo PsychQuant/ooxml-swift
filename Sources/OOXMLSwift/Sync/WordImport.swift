@@ -115,7 +115,14 @@ public enum WordImport {
                 // Appeared in Word. Anchor after the preceding matched
                 // paragraph, or before the first upcoming matched one when
                 // Word inserted at the very top.
-                let payload = ParagraphPayload(text: concatenatedText(of: p))
+                // 7.4 verify P0: carry the Word-assigned w14:paraId into the
+                // payload — without it the reducer mints a libraryUUID and a
+                // later flush() erases Word's identity from disk.
+                let wordParaId = p.attributes.first {
+                    $0.prefix == "w14" && $0.localName == "paraId"
+                }?.value
+                let payload = ParagraphPayload(text: concatenatedText(of: p),
+                                               styleId: nil, paraId: wordParaId)
                 if let anchor = lastMatchedID {
                     operations.append(.insertParagraphAfter(after: anchor, paragraph: payload))
                 } else if let nextMatched = currParas.first(where: {

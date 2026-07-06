@@ -257,6 +257,13 @@ public enum OperationReducer {
             guard let node = findNode(elementID: target, in: tree) else {
                 throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
             }
+            // 7.4 verify P3: setRuns is paragraph-scoped — applying it to a
+            // non-<w:p> would silently replace that node's children.
+            guard node.localName == "p" else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "setRuns target must be a <w:p>, got <\(node.localName)>")
+            }
             let kept = node.children.filter {
                 $0.kind == .element && $0.localName == "pPr"
             }
@@ -376,9 +383,15 @@ public enum OperationReducer {
                 throw ReducerError.elementNotFound(opID: entry.opID, elementID: after)
             }
             let newP = makeParagraph(text: payload.text, styleId: payload.styleId)
-            // Deterministic ID derivation: new paragraph's libraryUUID == entry.opID.
-            // This makes log replay produce the same tree every time.
-            newP.libraryUUID = entry.opID
+            // 7.4 verify P0: a payload paraId (e.g. Word-assigned, carried by
+            // the import diff) is the paragraph's real identity — stamp it.
+            // Only ID-less payloads fall back to the deterministic
+            // libraryUUID == entry.opID replay convention.
+            if let paraId = payload.paraId, !paraId.isEmpty {
+                newP.setAttribute(prefix: "w14", localName: "paraId", value: paraId)
+            } else {
+                newP.libraryUUID = entry.opID
+            }
             parent.children.insert(newP, at: idx + 1)
 
         case .insertParagraphBefore(let before, let payload):
@@ -386,7 +399,11 @@ public enum OperationReducer {
                 throw ReducerError.elementNotFound(opID: entry.opID, elementID: before)
             }
             let newP = makeParagraph(text: payload.text, styleId: payload.styleId)
-            newP.libraryUUID = entry.opID
+            if let paraId = payload.paraId, !paraId.isEmpty {
+                newP.setAttribute(prefix: "w14", localName: "paraId", value: paraId)
+            } else {
+                newP.libraryUUID = entry.opID
+            }
             parent.children.insert(newP, at: idx)
 
         case .removeParagraph(let target):
