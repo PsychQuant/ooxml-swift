@@ -8,6 +8,65 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-07-06
+
+7.x release-verify panel, third fix batch.
+
+### Fixed
+- **ElementID cross-space collision guard** (7.2 panel P1): `w:id`/`r:id`
+  values are independently numbered per OOXML feature (bookmarks, footnote
+  references, revisions, …) yet derive identical ElementID raw strings. The
+  reducer's node lookup now collects matches for collision-prone ID forms and
+  refuses loudly (elementNotFound) on ambiguity instead of silently mutating
+  the first match. `w14:paraId`/`lib:` UUID forms keep the fast path.
+
+### Added
+- End-to-end pin for the mixed-generation mutation scenario (7.6 panel P0):
+  op-based `apply` followed by a legacy typed edit on the same part — the
+  legacy edit survives the save (fixed by v1.0.2's `markTypedDirty`; this
+  release adds the missing end-to-end regression test).
+
+## [1.0.2] - 2026-07-06
+
+7.x release-verify panel, second fix batch (sync/write fidelity).
+
+### Fixed
+- **[P0] Word-import paraId fidelity**: Word-added paragraphs keep their real
+  `w14:paraId` end-to-end (import payload + reducer stamp) — a flush no
+  longer erases Word's identity from disk.
+- **[P1] Stale-shadow guard**: all typed-mutation call sites route through
+  `markTypedDirty`, which clears tree freshness — a reducer-era tree can no
+  longer silently overwrite (or wholesale drop) a later direct typed change
+  at write time. This supersedes the v1.0.0 migration note's risk
+  description: mixing op-based and legacy edits on one part is now safe.
+- **[P1] Generic-part flush**: op-refreshed parts with no typed-writer branch
+  (customXml/theme/webSettings/…) now reach the package.
+- **[P1] Import snapshot persistence**: `importFromDisk` persists a fresh
+  snapshot — reopening before `flush()` no longer replays the same Word diff.
+- **[P1] `WordDSLSwift.save` backup capture**: a pre-existing target that is
+  unreadable at backup time aborts the save before any write (previously
+  rollback could delete the user's file).
+- **[P2]** `DocxChangeDetector.poll` baseline ordering; `setText` keeps
+  bookmark/commentRange/proofErr siblings; `saveWithSidecars` gains
+  backup/rollback across its three writes. **[P3]** `setRuns` validates its
+  target is a `<w:p>`.
+
+## [1.0.1] - 2026-07-06
+
+7.x release-verify panel, first fix batch (tree parser robustness).
+
+### Fixed
+- Recursion depth guard (limit 1024) — hostile nesting now throws catchable
+  `nestingTooDeep` instead of an uncatchable stack-overflow SIGSEGV.
+- UTF-8 BOM before the XML prolog is skipped (BOM-emitting tools' parts
+  parsed as total failures before).
+- Literal `\n`/`\r`/`\t` in attribute values re-escape as character
+  references — conformant readers no longer normalize them to spaces on the
+  dirty re-serialize path.
+- Test-suite privacy: personal-path fixture reference replaced with an
+  env-gated skip.
+
+
 ## [1.0.0] - 2026-07-06
 
 `word-aligned-state-sync` Phase 5 — the migration that began at v0.30.0

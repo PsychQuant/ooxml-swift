@@ -689,19 +689,53 @@ public enum OperationReducer {
     /// `ElementID` matches the given target. Linear-time per call; Phase 5+
     /// may add an ID index for performance.
     internal static func findNode(elementID: ElementID, in tree: XmlTree) -> XmlNode? {
-        return findNode(elementID: elementID, in: tree.root)
+        // 7.2 verify P1 (ElementID cross-space collision): `w:id`/`r:id`
+        // values are independently numbered per OOXML feature (bookmarks,
+        // footnote refs, revisions, …) yet derive identical ElementID raw
+        // strings. First-match would silently mutate whichever element
+        // appears first — collect ALL matches for the collision-prone
+        // forms and refuse loudly on ambiguity. `w14:paraId` (128-bit
+        // random) keeps the early-return fast path.
+        if elementID.raw.hasPrefix("w14:paraId=") || elementID.raw.hasPrefix("lib:") {
+            return findFirstNode(elementID: elementID, in: tree.root)
+        }
+        var matches: [XmlNode] = []
+        collectNodes(elementID: elementID, in: tree.root, into: &matches, cap: 2)
+        if matches.count > 1 {
+            // Ambiguity is not representable as a return value here (the
+            // signature predates this guard); surfacing it loudly matters
+            // more than the exact channel — callers treat nil as
+            // elementNotFound and throw, which is loud, never silent
+            // wrong-element mutation.
+            return nil
+        }
+        return matches.first
     }
 
-    private static func findNode(elementID: ElementID, in node: XmlNode) -> XmlNode? {
+    private static func findFirstNode(elementID: ElementID, in node: XmlNode) -> XmlNode? {
         if let nodeID = ElementID(node: node), nodeID == elementID {
             return node
         }
         for child in node.children {
-            if let found = findNode(elementID: elementID, in: child) {
+            if let found = findFirstNode(elementID: elementID, in: child) {
                 return found
             }
         }
         return nil
+    }
+
+    private static func collectNodes(
+        elementID: ElementID, in node: XmlNode, into matches: inout [XmlNode], cap: Int
+    ) {
+        if matches.count >= cap { return }
+        if let nodeID = ElementID(node: node), nodeID == elementID {
+            matches.append(node)
+            if matches.count >= cap { return }
+        }
+        for child in node.children {
+            collectNodes(elementID: elementID, in: child, into: &matches, cap: cap)
+            if matches.count >= cap { return }
+        }
     }
 
     /// Walks log backwards from `beforeIndex` looking for the most recent
