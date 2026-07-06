@@ -344,8 +344,6 @@ public struct RunProperties: Equatable {
     /// `<w14:scene3d>`, `<w14:props3d>`, `<w14:ligatures>`, `<w14:numForm>`,
     /// `<w14:numSpacing>`, `<w14:stylisticSets>`, `<w14:cntxtAlts>`. Same
     /// architectural pattern as `Run.rawElements` (v0.14.0+, #52).
-    public var rawChildren: [RawElement]?
-
     public init() {}
 
     public init(bold: Bool = false,
@@ -392,7 +390,6 @@ public struct RunProperties: Equatable {
         if other.noProof { self.noProof = true }
         if let kern = other.kern { self.kern = kern }
         if let lang = other.lang { self.lang = lang }
-        if let rawChildren = other.rawChildren { self.rawChildren = rawChildren }
     }
 }
 
@@ -699,13 +696,6 @@ extension RunProperties {
         //
         // Source-document insertion order is preserved within same-position
         // groups via the stable `sortKey` tie-break.
-        if let rawChildren = rawChildren {
-            for raw in rawChildren {
-                let pos = Self.canonicalRPrPosition[raw.name] ?? Self.unknownTailPosition
-                add(pos, raw.xml)
-            }
-        }
-
         // Stable sort by canonical position (sortKey breaks same-position ties).
         slots.sort { lhs, rhs in
             if lhs.pos != rhs.pos { return lhs.pos < rhs.pos }

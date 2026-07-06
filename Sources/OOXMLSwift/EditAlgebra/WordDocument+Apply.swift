@@ -140,6 +140,12 @@ extension WordDocument {
                 if newTrees[part] == nil {
                     newTrees[part] = makeEmptyRelationshipsTree()
                 }
+            } else if case .appendParagraph(let container, _) = op, container == nil {
+                // §4b appendParagraph with nil container targets the main
+                // body — route directly to word/document.xml. Multi-part
+                // docs would otherwise fail the partContaining walk (the op
+                // references no existing ElementID).
+                partPath = "word/document.xml"
             } else if case .defineStyle = op {
                 // §4b (#128): part-addressed like addRelationship — styles
                 // live in word/styles.xml (created on demand for synthesized

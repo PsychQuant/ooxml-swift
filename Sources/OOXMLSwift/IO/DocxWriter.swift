@@ -81,7 +81,12 @@ public struct DocxWriter {
     ///     `ContentTypesOverlay` to preserve original Override entries for
     ///     unknown parts (theme, webSettings, etc.). When `false`, all
     ///     part XMLs are emitted from typed model only (scratch mode).
-    private static func writeAllParts(_ document: WordDocument, to tempDir: URL, overlayMode: Bool) throws {
+    private static func writeAllParts(_ source: WordDocument, to tempDir: URL, overlayMode: Bool) throws {
+        // Local materialization copy: parts emitted through the typed-writer
+        // bridge get their fresh tree written back here so every part that
+        // reaches the package comes out of serialize(xmlTrees[part]). The
+        // caller's document is unchanged (same staleness contract as 0.x).
+        var document = source
         try createDirectoryStructure(at: tempDir)
 
         let hasNumbering = !document.numbering.abstractNums.isEmpty
@@ -129,32 +134,36 @@ public struct DocxWriter {
             // direct-typed surface re-emit via the typed writer + re-tree
             // bridge (rawChildren keeps their unknown rPr children alive
             // until that surface finishes migrating to ops).
-            if try !emitTreeFreshPart("word/document.xml", document: document, tempDir: tempDir) {
+            if !document.treeFreshParts.contains("word/document.xml") {
                 try writeDocument(document, to: tempDir)
                 typedWrittenParts.append(contentsOf: ["word/document.xml"])
             }
+            try finalizePartFromTree("word/document.xml", document: &document, tempDir: tempDir)
         }
         if !overlayMode || dirty.contains("word/styles.xml") {
-            if try !emitTreeFreshPart("word/styles.xml", document: document, tempDir: tempDir) {
+            if !document.treeFreshParts.contains("word/styles.xml") {
                 try writeStyles(document.styles, latentStyles: document.latentStyles, to: tempDir)
                 typedWrittenParts.append(contentsOf: ["word/styles.xml"])
             }
+            try finalizePartFromTree("word/styles.xml", document: &document, tempDir: tempDir)
         }
         if !overlayMode || dirty.contains("word/settings.xml") {
-            if try !emitTreeFreshPart("word/settings.xml", document: document, tempDir: tempDir) {
+            if !document.treeFreshParts.contains("word/settings.xml") {
                 try writeSettings(document, to: tempDir)
                 typedWrittenParts.append(contentsOf: ["word/settings.xml"])
             }
+            try finalizePartFromTree("word/settings.xml", document: &document, tempDir: tempDir)
         }
         if !overlayMode || dirty.contains("word/fontTable.xml") {
             try writeFontTable(to: tempDir)
             typedWrittenParts.append(contentsOf: ["word/fontTable.xml"])
         }
         if !overlayMode || dirty.contains("docProps/core.xml") {
-            if try !emitTreeFreshPart("docProps/core.xml", document: document, tempDir: tempDir) {
+            if !document.treeFreshParts.contains("docProps/core.xml") {
                 try writeCoreProperties(document.properties, to: tempDir)
                 typedWrittenParts.append(contentsOf: ["docProps/core.xml"])
             }
+            try finalizePartFromTree("docProps/core.xml", document: &document, tempDir: tempDir)
         }
         if !overlayMode || dirty.contains("docProps/app.xml") {
             try writeAppProperties(to: tempDir)
@@ -162,30 +171,33 @@ public struct DocxWriter {
         }
 
         if hasNumbering, !overlayMode || dirty.contains("word/numbering.xml") {
-            if try !emitTreeFreshPart("word/numbering.xml", document: document, tempDir: tempDir) {
+            if !document.treeFreshParts.contains("word/numbering.xml") {
                 try writeNumbering(document.numbering, to: tempDir)
                 typedWrittenParts.append(contentsOf: ["word/numbering.xml"])
             }
+            try finalizePartFromTree("word/numbering.xml", document: &document, tempDir: tempDir)
         }
         if hasHeaders {
             for header in document.headers {
                 if !overlayMode || dirty.contains("word/\(header.fileName)") {
-                    if try !emitTreeFreshPart("word/\(header.fileName)", document: document, tempDir: tempDir) {
+                    if !document.treeFreshParts.contains("word/\(header.fileName)") {
                         try writeHeader(header, to: tempDir)
                         typedWrittenParts.append(contentsOf: [
                             "word/\(header.fileName)", "word/_rels/\(header.fileName).rels"])
                     }
+                    try finalizePartFromTree("word/\(header.fileName)", document: &document, tempDir: tempDir)
                 }
             }
         }
         if hasFooters {
             for footer in document.footers {
                 if !overlayMode || dirty.contains("word/\(footer.fileName)") {
-                    if try !emitTreeFreshPart("word/\(footer.fileName)", document: document, tempDir: tempDir) {
+                    if !document.treeFreshParts.contains("word/\(footer.fileName)") {
                         try writeFooter(footer, to: tempDir)
                         typedWrittenParts.append(contentsOf: [
                             "word/\(footer.fileName)", "word/_rels/\(footer.fileName).rels"])
                     }
+                    try finalizePartFromTree("word/\(footer.fileName)", document: &document, tempDir: tempDir)
                 }
             }
         }
@@ -201,10 +213,11 @@ public struct DocxWriter {
         }
         if !document.comments.comments.isEmpty,
            !overlayMode || dirty.contains("word/comments.xml") {
-            if try !emitTreeFreshPart("word/comments.xml", document: document, tempDir: tempDir) {
+            if !document.treeFreshParts.contains("word/comments.xml") {
                 try writeComments(document.comments, to: tempDir)
                 typedWrittenParts.append(contentsOf: ["word/comments.xml"])
             }
+            try finalizePartFromTree("word/comments.xml", document: &document, tempDir: tempDir)
         }
         if let extXML = document.comments.toExtendedXML(),
            !overlayMode || dirty.contains("word/commentsExtended.xml") {
@@ -213,36 +226,49 @@ public struct DocxWriter {
         }
         if !document.footnotes.footnotes.isEmpty,
            !overlayMode || dirty.contains("word/footnotes.xml") {
-            if try !emitTreeFreshPart("word/footnotes.xml", document: document, tempDir: tempDir) {
+            if !document.treeFreshParts.contains("word/footnotes.xml") {
                 try writeFootnotes(document.footnotes, to: tempDir)
                 typedWrittenParts.append(contentsOf: ["word/footnotes.xml", "word/_rels/footnotes.xml.rels"])
             }
+            try finalizePartFromTree("word/footnotes.xml", document: &document, tempDir: tempDir)
         }
         if !document.endnotes.endnotes.isEmpty,
            !overlayMode || dirty.contains("word/endnotes.xml") {
-            if try !emitTreeFreshPart("word/endnotes.xml", document: document, tempDir: tempDir) {
+            if !document.treeFreshParts.contains("word/endnotes.xml") {
                 try writeEndnotes(document.endnotes, to: tempDir)
                 typedWrittenParts.append(contentsOf: ["word/endnotes.xml", "word/_rels/endnotes.xml.rels"])
             }
+            try finalizePartFromTree("word/endnotes.xml", document: &document, tempDir: tempDir)
         }
 
         try retreeXMLParts(typedWrittenParts, in: tempDir)
     }
 
-    /// v1.0 — emits a part straight from its reducer-refreshed tree when
-    /// the tree is authoritative for it (`treeFreshParts`). Returns false
-    /// when the caller should fall back to the typed writer + re-tree
-    /// bridge (legacy direct-typed mutations, tree-less scratch parts).
-    private static func emitTreeFreshPart(
-        _ part: String, document: WordDocument, tempDir: URL
-    ) throws -> Bool {
-        guard document.treeFreshParts.contains(part),
-              let tree = document.xmlTrees[part] else { return false }
+    /// v1.0 — single-write-path finalization for one XML part. Call AFTER
+    /// the typed writer ran (for non-tree-fresh parts):
+    /// - tree-fresh part (reducer-refreshed): serialize the live tree,
+    ///   overwriting whatever the typed writer produced.
+    /// - otherwise: MATERIALIZE the typed writer's file back into the tree
+    ///   (parse -> xmlTrees[part] -> mark fresh) and re-emit from the tree.
+    /// Either way the bytes that reach the package come out of
+    /// XmlTreeWriter.serialize and the local document copy's tree matches
+    /// what was written.
+    private static func finalizePartFromTree(
+        _ part: String, document: inout WordDocument, tempDir: URL
+    ) throws {
         let fileURL = tempDir.appendingPathComponent(part)
-        try FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if document.treeFreshParts.contains(part), let tree = document.xmlTrees[part] {
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try XmlTreeWriter.serialize(tree).write(to: fileURL)
+            return
+        }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        let bytes = try Data(contentsOf: fileURL)
+        let tree = try XmlTreeReader.parse(bytes)
+        document.xmlTrees[part] = tree
+        document.treeFreshParts.insert(part)
         try XmlTreeWriter.serialize(tree).write(to: fileURL)
-        return true
     }
 
     /// v1.0 task 6.2 — the tree is the ONLY write path. Every XML part a
