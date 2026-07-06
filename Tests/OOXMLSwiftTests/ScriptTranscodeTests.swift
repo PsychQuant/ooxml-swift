@@ -307,3 +307,43 @@ extension ScriptTranscodeTests {
         }
     }
 }
+
+extension ScriptTranscodeTests {
+
+    /// 5.1 "compiles as a Swift source file" — the exported source is piped
+    /// through `swiftc -parse` (syntax-level compile; imports not resolved).
+    /// The full semantic compile of this grammar is exercised by
+    /// WordDSLRuntimeTests, whose inline DSL bodies use identical syntax.
+    func testExportedSourceParsesUnderSwiftc() throws {
+        let swiftc = "/usr/bin/swiftc"
+        guard FileManager.default.fileExists(atPath: swiftc) else {
+            throw XCTSkip("swiftc not available")
+        }
+        let l: OperationLog = {
+            var log = OperationLog()
+            log.append(.appendParagraph(in: nil, paragraph: ParagraphPayload(
+                text: "本章探討", styleId: "Heading1", paraId: "P1")), source: .swift)
+            log.append(.setText(target: ElementID(rawString: "w14:paraId=P1"),
+                                text: "raw escape line"), source: .word)
+            return log
+        }()
+        let source = ScriptExporter.exportSwift(log: l)
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mdocx-parse-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("exported.mdocx.swift")
+        try source.write(to: file, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: swiftc)
+        process.arguments = ["-parse", file.path]
+        let pipe = Pipe(); process.standardError = pipe
+        try process.run(); process.waitUntilExit()
+        let diag = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(),
+                          as: UTF8.self)
+        XCTAssertEqual(process.terminationStatus, 0,
+                       "exported source must be syntactically valid Swift: \(diag)")
+    }
+}
