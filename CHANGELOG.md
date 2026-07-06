@@ -8,6 +8,57 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-06
+
+`word-aligned-state-sync` Phase 5 — the migration that began at v0.30.0
+completes: **one IO path, tree-based.**
+
+### The v0.30 → v1.0 arc
+
+| Release | What landed |
+|---------|-------------|
+| v0.30.0 | `XmlNode` lossless tree foundation (byte-faithful parse/serialize) |
+| v0.31.x | Typed views become tree-backed (opt-in `wireTreeBackedViews`, `ElementID`) |
+| v0.32.0 | Event-sourced operation log + JSONL/snapshot sidecars (opt-in) |
+| v0.33.x | `SyncOrchestrator` bidirectional Word/Swift alignment + OOXML-mirror op taxonomy (#128) |
+| v0.34.x | `.mdocx` script transcoder + WordDSLSwift result-builder runtime |
+| **v1.0.0** | Tree becomes the only IO path; `rawChildren` bridge removed |
+
+### Changed — BREAKING
+
+- **Reads are tree projections.** Every XML part's typed parse now consumes
+  `XmlTreeWriter.serialize(tree)` instead of raw disk bytes. The tree is the
+  single path that reads XML from disk; `typed = f(tree)` holds structurally.
+- **Writes are tree emissions.** Every part that reaches the package comes
+  out of `XmlTreeWriter.serialize`: reducer-refreshed parts (`treeFreshParts`)
+  serialize the live tree directly; parts emitted by typed writers are
+  materialized back through the tree (`finalizePartFromTree`) before packaging.
+- **`RunProperties.rawChildren` removed.** Unknown `<w:rPr>` children
+  (w14:* effects, vendor extensions) are preserved by the tree path, not a
+  string-XML escape hatch on the typed model.
+
+### Migration note — direct typed mutation is deprecated
+
+Mutating the typed model directly (`document.body.children = [...]`,
+`replaceText`, `acceptRevision`, …) still works, **but its fidelity contract
+changed**: a directly-mutated dirty part re-emits through the typed writer,
+and unknown `<w:rPr>` content the typed model cannot represent no longer
+survives that path (the rawChildren bridge that used to patch this is gone).
+**Full-fidelity editing goes through the operation log** — `apply(operations:)`,
+the typed setters, `WordEdit`, or the WordDSLSwift authoring surface — where
+the reducer mutates the tree itself and nothing is lost. The direct-mutation
+API surface migrates to op-based implementations incrementally; each migrated
+API regains the full-fidelity guarantee automatically.
+
+- Routing fix surfaced by the migration: `appendParagraph(in: nil)` on a
+  multi-part document routes directly to `word/document.xml`.
+- Downgrade guidance: see `docs/downgrade-matrix-word-aligned-state-sync.md`.
+- Benchmarks (memory/perf risk bars): `docs/benchmarks-word-aligned-state-sync.md`.
+
+Verified: ooxml-swift 1171 tests; che-word-mcp 297 tests against this head;
+macdoc CLI full suite; live Microsoft Word round-trip (gated).
+
+
 ## [0.31.4] - 2026-05-07
 
 ### Added — OperationReducer (Phase 2b — tasks 3.9-3.14)
