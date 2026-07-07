@@ -8,6 +8,34 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-08
+
+format-alignment-engine Phase A — dual-track acceptance foundation (raw-channel
+byte-equal floor + DSL coverage metrics). See PsychQuant/macdoc#130. (The v1.1.0
+tag points at the code commit; this CHANGELOG entry lands in the follow-up docs
+commit on main.)
+
+### Added
+- **PartFidelity** (`Transcode/PartFidelity.swift`): per-part byte-diff (Stage A
+  per-part verdict, Stage B full-set verdict, first-divergence offset) and
+  DSL/raw coverage accounting — the truthful imitation metric for the
+  format-alignment pipeline.
+- **`Operation.carryPart(partPath:xml:)`** + all-parts raw channel: sibling XML
+  parts (styles.xml, settings.xml, rels, `[Content_Types].xml`, …) ride the
+  rebuild script verbatim through the `// @op` escape, stored on
+  `WordDocument.carriedParts`, and emitted byte-exact by
+  `writeAuthoringPackage` (raw takes priority over synthesized parts) — the
+  byte-equal floor of the dual-track contract. Operation taxonomy 32 → 33 cases.
+- **RawPartChannel** (`Transcode/RawPartChannel.swift`): `readAllParts`
+  (container-normalized package reader — Stage C zip layout is out of contract),
+  `carriedPartOps` (reverse: package → carryPart ops), and `partLevelCoverage`.
+
+### Notes
+- Additive, no breaking change; existing JSONL sidecars decode unchanged.
+- `carryPart` carries XML text parts only; binary media (images/fonts) stay
+  outside the raw channel pending a base64 channel, and the coverage metric
+  reflects that gap honestly.
+
 ## [1.0.3] - 2026-07-06
 
 7.x release-verify panel, third fix batch.
