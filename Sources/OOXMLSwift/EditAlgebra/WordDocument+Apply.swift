@@ -129,6 +129,13 @@ extension WordDocument {
             // §4b (#128): log-only markers / opaque ops append to the log but
             // have no materialization target — skip the per-part apply.
             switch op {
+            case .carryPart(let carriedPath, let xml):
+                // Raw part channel (format-alignment-engine Phase A): store the
+                // verbatim bytes on `carriedParts`. carryPart materializes to a
+                // package part, not to a document tree, so skip the per-part
+                // apply below. `writeAuthoringPackage` emits it byte-exact.
+                carriedParts[carriedPath] = Data(xml.utf8)
+                continue
             case .batchBegin, .batchEnd, .beginComponent, .endComponent, .unknown:
                 continue
             default:

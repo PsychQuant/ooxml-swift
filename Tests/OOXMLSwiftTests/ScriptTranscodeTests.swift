@@ -351,7 +351,7 @@ extension ScriptTranscodeTests {
 extension ScriptTranscodeTests {
 
     /// 5.5 "Script export covers all operation types in the log" — EVERY
-    /// Operation case (all 32, same construction list as the enum pin in
+    /// Operation case (all 33, same construction list as the enum pin in
     /// OperationLogTests) must have a Swift representation that survives
     /// export → import with op equivalence. DSL-form for the authoring
     /// subset, `// @op` raw escape (the spec's comment-marker mechanism)
@@ -401,8 +401,9 @@ extension ScriptTranscodeTests {
             .insertTab(in: id),
             .insertBreak(in: id),
             .insertNoBreakHyphen(in: id),
+            .carryPart(partPath: "word/styles.xml", xml: "<w:styles/>"),
         ]
-        XCTAssertEqual(cases.count, 32,
+        XCTAssertEqual(cases.count, 33,
                        "update this list when the Operation enum grows — every case must round-trip")
 
         var l = OperationLog()

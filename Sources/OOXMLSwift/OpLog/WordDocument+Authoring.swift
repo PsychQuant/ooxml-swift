@@ -62,41 +62,61 @@ extension WordDocument {
             try content.write(to: fileURL)
         }
 
-        guard let docTree = xmlTrees["word/document.xml"] else {
-            throw WordError.parseError("authoring package requires a word/document.xml tree")
+        // Raw carried parts first — the byte-equal floor (format-alignment-engine
+        // Phase A, Decision 2). A carried part is written verbatim and takes
+        // priority over any synthesized part of the same path below.
+        for (partPath, bytes) in carriedParts {
+            try write(bytes, partPath)
         }
-        try write(try XmlTreeWriter.serialize(docTree), "word/document.xml")
 
-        let hasStyles = xmlTrees["word/styles.xml"] != nil
-        if let stylesTree = xmlTrees["word/styles.xml"] {
+        // word/document.xml — from the tree unless carried verbatim.
+        if carriedParts["word/document.xml"] == nil {
+            guard let docTree = xmlTrees["word/document.xml"] else {
+                throw WordError.parseError("authoring package requires a word/document.xml tree")
+            }
+            try write(try XmlTreeWriter.serialize(docTree), "word/document.xml")
+        }
+
+        // word/styles.xml — from the tree unless carried verbatim.
+        let hasStyles = xmlTrees["word/styles.xml"] != nil || carriedParts["word/styles.xml"] != nil
+        if carriedParts["word/styles.xml"] == nil, let stylesTree = xmlTrees["word/styles.xml"] {
             try write(try XmlTreeWriter.serialize(stylesTree), "word/styles.xml")
         }
 
-        let stylesOverride = hasStyles
-            ? "\n    <Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>"
-            : ""
-        try write(Data("""
-            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-            <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-                <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-                <Default Extension="xml" ContentType="application/xml"/>
-                <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\(stylesOverride)
-            </Types>
-            """.utf8), "[Content_Types].xml")
-        try write(Data("""
-            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-                <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-            </Relationships>
-            """.utf8), "_rels/.rels")
-        let stylesRel = hasStyles
-            ? "\n    <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>"
-            : ""
-        try write(Data("""
-            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\(stylesRel)
-            </Relationships>
-            """.utf8), "word/_rels/document.xml.rels")
+        // [Content_Types].xml — synthesized only if not carried verbatim.
+        if carriedParts["[Content_Types].xml"] == nil {
+            let stylesOverride = hasStyles
+                ? "\n    <Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>"
+                : ""
+            try write(Data("""
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+                    <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+                    <Default Extension="xml" ContentType="application/xml"/>
+                    <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\(stylesOverride)
+                </Types>
+                """.utf8), "[Content_Types].xml")
+        }
+        // _rels/.rels — synthesized only if not carried verbatim.
+        if carriedParts["_rels/.rels"] == nil {
+            try write(Data("""
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                    <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+                </Relationships>
+                """.utf8), "_rels/.rels")
+        }
+        // word/_rels/document.xml.rels — synthesized only if not carried verbatim.
+        if carriedParts["word/_rels/document.xml.rels"] == nil {
+            let stylesRel = hasStyles
+                ? "\n    <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>"
+                : ""
+            try write(Data("""
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\(stylesRel)
+                </Relationships>
+                """.utf8), "word/_rels/document.xml.rels")
+        }
 
         let data = try ZipHelper.zipToData(tempDir)
         let tempFile = url.appendingPathExtension("tmp.\(UUID().uuidString)")

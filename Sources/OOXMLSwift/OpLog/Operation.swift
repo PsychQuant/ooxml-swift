@@ -132,6 +132,22 @@ public enum Operation: Equatable, Sendable {
     /// attribute. See macdoc#110 §5 design walkthrough Q3.
     case addRelationship(part: String, id: String, type: String, target: String, targetMode: String?)
 
+    // MARK: Raw part channel (format-alignment-engine Phase A)
+
+    /// Carries one XML part of the package verbatim so a rebuild script can
+    /// reproduce it byte-for-byte — the byte-equal floor of the dual-track
+    /// contract (`format-alignment-pipeline`, Decision 2). `partPath` is the
+    /// OOXML part path (e.g. "word/styles.xml"); `xml` is that part's content
+    /// as a UTF-8 string. The reducer stores it on `WordDocument.carriedParts`;
+    /// `writeAuthoringPackage` emits it byte-exact, taking priority over any
+    /// synthesized part of the same path.
+    ///
+    /// XML text parts only. Binary media (images, embedded fonts) are NOT
+    /// representable here — a UTF-8 `String` would corrupt their bytes. A
+    /// base64 media channel is deferred; until then such parts stay outside the
+    /// raw channel and the coverage metric reflects that honestly.
+    case carryPart(partPath: String, xml: String)
+
     // MARK: Forward-compat fallback (preserves unrecognized op_type byte-equal)
 
     /// Carries any op_type the local code does not declare so the JSONL log

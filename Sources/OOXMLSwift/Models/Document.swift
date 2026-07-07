@@ -136,6 +136,15 @@ public struct WordDocument: Equatable {
     /// (same rationale as `xmlTrees`).
     public internal(set) var xmlTreeLoadFailures: [String: String] = [:]
 
+    /// format-alignment-engine Phase A (task 1.2): verbatim raw bytes of XML
+    /// parts carried by `Operation.carryPart` — the byte-equal floor of the
+    /// dual-track rebuild contract (`format-alignment-pipeline`, Decision 2).
+    /// Keyed by OOXML part path (e.g. `"word/styles.xml"`).
+    /// `writeAuthoringPackage` emits these byte-exact, taking priority over any
+    /// synthesized part of the same path. Excluded from `Equatable` (same
+    /// rationale as `xmlTrees`: per-instance authoring state).
+    public internal(set) var carriedParts: [String: Data] = [:]
+
     /// v0.17.0+ (#51): document-level setting for `<w:evenAndOddHeaders/>` in
     /// settings.xml — when true, headers/footers of type `even` apply to even pages.
     public var evenAndOddHeaders: Bool = false
