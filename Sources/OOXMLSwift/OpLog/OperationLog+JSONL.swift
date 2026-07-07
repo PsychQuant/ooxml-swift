@@ -254,6 +254,13 @@ internal enum JSONLLineCoder {
                 ("target", jsonString(target)),
                 ("targetMode", targetMode.map(jsonString) ?? "null")
             ])
+        case .carryPart(let partPath, let xml):
+            // Field names `partPath` / `xml` — neither collides with the
+            // envelope keys op_id / ts / source / op_type.
+            return ("carryPart", [
+                ("partPath", jsonString(partPath)),
+                ("xml", jsonString(xml))
+            ])
         case .appendParagraph(let container, let paragraph):
             return ("appendParagraph", [
                 ("in", container.map { jsonString($0.raw) } ?? "null"),
@@ -417,6 +424,8 @@ internal enum JSONLLineCoder {
                 target: try str("target"),
                 targetMode: optStr("targetMode")
             )
+        case "carryPart":
+            return .carryPart(partPath: try str("partPath"), xml: try str("xml"))
         default:
             // Unknown op_type — preserve the full payload (everything except
             // the four required fields) byte-equal in a JSONValue object.

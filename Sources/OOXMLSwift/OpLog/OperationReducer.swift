@@ -524,6 +524,13 @@ public enum OperationReducer {
                 rel.setAttribute(prefix: nil, localName: "TargetMode", value: targetMode)
             }
             tree.root.children.append(rel)
+
+        case .carryPart:
+            // Part-addressed raw channel: carryPart never mutates a document
+            // tree. WordDocument.appendAndMaterialize intercepts it and stores
+            // the verbatim bytes on `carriedParts` before the reducer runs; if
+            // it reaches here (defensive), it is a no-op on the tree.
+            break
         }
     }
 
@@ -807,6 +814,7 @@ public enum OperationReducer {
             // Log-metadata markers; the component id is not a tree node.
             return []
         case .undo, .redo, .batchBegin, .batchEnd, .unknown: return []
+        case .carryPart: return []  // part-addressed raw channel, no ElementID
         }
     }
 
@@ -871,6 +879,7 @@ public enum OperationReducer {
         case .insertSiblingAfter(let after, _): return after == elementID
         case .wrapWithHyperlink(let target, _): return target == elementID
         case .addRelationship: return false  // rels-part operation, not element-addressed
+        case .carryPart: return false  // part-addressed raw channel, not element-addressed
         case .unknown: return false
         }
     }

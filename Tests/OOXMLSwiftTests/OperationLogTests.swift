@@ -70,10 +70,11 @@ final class OperationLogTests: XCTestCase {
             .endComponent(id: id),
             .insertTab(in: id),
             .insertBreak(in: id),
-            .insertNoBreakHyphen(in: id)
+            .insertNoBreakHyphen(in: id),
+            .carryPart(partPath: "word/styles.xml", xml: "<w:styles/>")
         ]
 
-        XCTAssertEqual(cases.count, 32, "Operation MUST have exactly 32 cases enumerated in the test")
+        XCTAssertEqual(cases.count, 33, "Operation MUST have exactly 33 cases enumerated in the test")
 
         // Pattern-match: each case maps to its expected discriminator.
         for op in cases {
@@ -92,7 +93,8 @@ final class OperationLogTests: XCTestCase {
                  .unknown,
                  .appendParagraph, .setRuns, .defineStyle,
                  .beginComponent, .endComponent,
-                 .insertTab, .insertBreak, .insertNoBreakHyphen:
+                 .insertTab, .insertBreak, .insertNoBreakHyphen,
+                 .carryPart:
                 break // matched
             }
         }
