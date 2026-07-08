@@ -8,6 +8,46 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-08
+
+format-alignment-engine Phase B — five-layer reverse extraction with the
+byte-equal upgrade rule (raw→DSL upgrades accepted only when the trial
+rebuild reproduces the source bytes; Decision 3, no canonical-form
+exemptions). See PsychQuant/macdoc#130.
+
+### Added
+- **Payload additive extensions** (task 2.1): `RunPayload` gains
+  fontAscii/fontEastAsia/sizeHalfPoints/underline/vertAlign;
+  `ParagraphPayload` gains alignment/spacing*/indent*/numId/numLevel;
+  new `SectionPayload` + `HeaderFooterReference`. All optional — v1.0.x/v1.1
+  JSONL sidecars decode unchanged.
+- **`Operation.setSectionProperties(at:section:)`**: typed `<w:sectPr>`
+  stamping — `at: nil` = trailing body sectPr, `at: <paragraph>` = mid-body
+  section break inside that paragraph's pPr (placed last per CT_PPr).
+- **`Operation.appendTable(in:table:)`** (task 2.5): one-op table authoring
+  from `TablePayload.cells` (additive row-major grid text) — no table
+  ElementID needed, so it round-trips scripts losslessly. Canonical minimal
+  form: `tblGrid` of bare gridCols + rows of single-paragraph cells.
+  Operation taxonomy 33 → 35 cases.
+- **ReverseExtractor** (`Transcode/ReverseExtractor.swift`, tasks 2.2–2.5):
+  full-package reverse with the upgrade rule — document.xml is trial-rebuilt
+  from typed ops (paragraph pPr, run rPr, sections, canonical tables) and
+  upgraded to the DSL channel only on byte equality; everything else (and
+  every failed trial) stays on the raw channel. `Result.rawReasons` names
+  the content class that blocked each upgrade ("table", "hyperlink",
+  "byte-mismatch", …) for the coverage report.
+- **Reducer stamping**: makeParagraph builds full pPr (pStyle, numPr,
+  spacing, ind, jc in CT_PPr order); setRuns builds full rPr (rFonts, b, i,
+  color, sz, u, vertAlign in CT_RPr order).
+- **UpgradeClassGuardTests** (task 3.3): parameterized regression pin — every
+  upgraded content class must keep Stage B green through the full script
+  round-trip.
+
+### Fixed
+- **ScriptExporter lossy paragraph block**: the DSL `Paragraph(…) { text }`
+  spelling silently dropped the new pPr fields; payloads carrying any
+  extended field now fall back to the lossless `// @op` escape.
+
 ## [1.1.0] - 2026-07-08
 
 format-alignment-engine Phase A — dual-track acceptance foundation (raw-channel

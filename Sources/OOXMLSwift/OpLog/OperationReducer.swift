@@ -245,7 +245,7 @@ public enum OperationReducer {
                 }
                 parent = body
             }
-            let newP = makeParagraph(text: payload.text, styleId: payload.styleId)
+            let newP = makeParagraph(payload: payload)
             if let paraId = payload.paraId, !paraId.isEmpty {
                 newP.setAttribute(prefix: "w14", localName: "paraId", value: paraId)
             } else {
@@ -276,9 +276,22 @@ public enum OperationReducer {
             let kept = node.children.filter {
                 $0.kind == .element && $0.localName == "pPr"
             }
+            // rPr children follow CT_RPr schema order: rFonts, b, i, color,
+            // sz, u, vertAlign (format-alignment-engine Phase B task 2.1 —
+            // reducer stamping of the additive rPr fields).
             let runNodes: [XmlNode] = runs.map { run in
                 var rChildren: [XmlNode] = []
                 var rPrChildren: [XmlNode] = []
+                if run.fontAscii != nil || run.fontEastAsia != nil {
+                    let rFonts = XmlNode.element(prefix: "w", localName: "rFonts")
+                    if let v = run.fontAscii {
+                        rFonts.setAttribute(prefix: "w", localName: "ascii", value: v)
+                    }
+                    if let v = run.fontEastAsia {
+                        rFonts.setAttribute(prefix: "w", localName: "eastAsia", value: v)
+                    }
+                    rPrChildren.append(rFonts)
+                }
                 if run.bold == true {
                     rPrChildren.append(XmlNode.element(prefix: "w", localName: "b"))
                 }
@@ -290,6 +303,21 @@ public enum OperationReducer {
                     c.setAttribute(prefix: "w", localName: "val", value: color)
                     rPrChildren.append(c)
                 }
+                if let sz = run.sizeHalfPoints {
+                    let n = XmlNode.element(prefix: "w", localName: "sz")
+                    n.setAttribute(prefix: "w", localName: "val", value: String(sz))
+                    rPrChildren.append(n)
+                }
+                if let u = run.underline {
+                    let n = XmlNode.element(prefix: "w", localName: "u")
+                    n.setAttribute(prefix: "w", localName: "val", value: u)
+                    rPrChildren.append(n)
+                }
+                if let va = run.vertAlign {
+                    let n = XmlNode.element(prefix: "w", localName: "vertAlign")
+                    n.setAttribute(prefix: "w", localName: "val", value: va)
+                    rPrChildren.append(n)
+                }
                 if !rPrChildren.isEmpty {
                     rChildren.append(XmlNode.element(prefix: "w", localName: "rPr", children: rPrChildren))
                 }
@@ -298,6 +326,91 @@ public enum OperationReducer {
                 return XmlNode.element(prefix: "w", localName: "r", children: rChildren)
             }
             node.children = kept + runNodes
+
+        case .appendTable(let container, let payload):
+            // format-alignment-engine Phase B (task 2.5): one-op table
+            // authoring. Same container semantics as appendParagraph —
+            // nil = <w:body>, inserted before a trailing sectPr.
+            let parent: XmlNode
+            if let containerID = container {
+                guard let node = findNode(elementID: containerID, in: tree) else {
+                    throw ReducerError.elementNotFound(opID: entry.opID, elementID: containerID)
+                }
+                parent = node
+            } else {
+                guard let body = tree.root.children.first(where: {
+                    $0.kind == .element && $0.localName == "body"
+                }) else {
+                    throw ReducerError.malformedOp(
+                        opID: entry.opID, reason: "appendTable(in: nil) requires a <w:body>")
+                }
+                parent = body
+            }
+            guard payload.rows > 0, payload.columns > 0 else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID, reason: "appendTable requires rows > 0 and columns > 0")
+            }
+            if let cells = payload.cells {
+                guard cells.count == payload.rows,
+                      cells.allSatisfy({ $0.count == payload.columns }) else {
+                    throw ReducerError.malformedOp(
+                        opID: entry.opID,
+                        reason: "appendTable cells shape must be rows × columns")
+                }
+            }
+            let newTbl = makeTable(payload: payload)
+            newTbl.libraryUUID = entry.opID
+            if let sectIdx = parent.children.firstIndex(where: {
+                $0.kind == .element && $0.localName == "sectPr"
+            }) {
+                parent.children.insert(newTbl, at: sectIdx)
+            } else {
+                parent.children.append(newTbl)
+            }
+
+        case .setSectionProperties(let at, let section):
+            // format-alignment-engine Phase B (task 2.1): typed sectPr
+            // stamping. `at: nil` → trailing body sectPr (replace existing);
+            // `at: <paragraph>` → sectPr as the LAST child of that
+            // paragraph's pPr (mid-body section break), creating pPr on
+            // demand.
+            let sectPr = makeSectPr(section)
+            if let paraID = at {
+                guard let node = findNode(elementID: paraID, in: tree) else {
+                    throw ReducerError.elementNotFound(opID: entry.opID, elementID: paraID)
+                }
+                guard node.localName == "p" else {
+                    throw ReducerError.malformedOp(
+                        opID: entry.opID,
+                        reason: "setSectionProperties(at:) target must be a <w:p>, got <\(node.localName)>")
+                }
+                let pPr: XmlNode
+                if let existing = node.children.first(where: {
+                    $0.kind == .element && $0.localName == "pPr"
+                }) {
+                    pPr = existing
+                } else {
+                    pPr = XmlNode.element(prefix: "w", localName: "pPr")
+                    node.children = [pPr] + node.children
+                }
+                // Replace any existing sectPr; CT_PPr places sectPr last.
+                pPr.children = pPr.children.filter {
+                    !($0.kind == .element && $0.localName == "sectPr")
+                }
+                pPr.children.append(sectPr)
+            } else {
+                guard let body = tree.root.children.first(where: {
+                    $0.kind == .element && $0.localName == "body"
+                }) else {
+                    throw ReducerError.malformedOp(
+                        opID: entry.opID,
+                        reason: "setSectionProperties(at: nil) requires a <w:body>")
+                }
+                body.children = body.children.filter {
+                    !($0.kind == .element && $0.localName == "sectPr")
+                }
+                body.children.append(sectPr)
+            }
 
         case .defineStyle(let payload):
             // §4b (#128): define-on-first-use into <w:styles>; duplicate
@@ -391,7 +504,7 @@ public enum OperationReducer {
             guard let (parent, idx) = findParentAndIndex(targetID: after, in: tree.root) else {
                 throw ReducerError.elementNotFound(opID: entry.opID, elementID: after)
             }
-            let newP = makeParagraph(text: payload.text, styleId: payload.styleId)
+            let newP = makeParagraph(payload: payload)
             // 7.4 verify P0: a payload paraId (e.g. Word-assigned, carried by
             // the import diff) is the paragraph's real identity — stamp it.
             // Only ID-less payloads fall back to the deterministic
@@ -407,7 +520,7 @@ public enum OperationReducer {
             guard let (parent, idx) = findParentAndIndex(targetID: before, in: tree.root) else {
                 throw ReducerError.elementNotFound(opID: entry.opID, elementID: before)
             }
-            let newP = makeParagraph(text: payload.text, styleId: payload.styleId)
+            let newP = makeParagraph(payload: payload)
             if let paraId = payload.paraId, !paraId.isEmpty {
                 newP.setAttribute(prefix: "w14", localName: "paraId", value: paraId)
             } else {
@@ -639,19 +752,182 @@ public enum OperationReducer {
     /// Child Run is anonymous (no libraryUUID) — future Operations addressing
     /// the run must use path-based addressing (entry.opID + child path index).
     internal static func makeParagraph(text: String, styleId: String?) -> XmlNode {
-        let textNode = XmlNode.text(text)
+        makeParagraph(payload: ParagraphPayload(text: text, styleId: styleId))
+    }
+
+    /// Builds a `<w:p>` from the full payload. pPr children follow CT_PPr
+    /// schema order: pStyle, numPr, spacing, ind, jc (format-alignment-engine
+    /// Phase B task 2.1 — reducer stamping of the additive pPr fields).
+    internal static func makeParagraph(payload: ParagraphPayload) -> XmlNode {
+        let textNode = XmlNode.text(payload.text)
         let wt = XmlNode.element(prefix: "w", localName: "t", children: [textNode])
         let wr = XmlNode.element(prefix: "w", localName: "r", children: [wt])
 
         var children: [XmlNode] = []
-        if let styleId = styleId, !styleId.isEmpty {
-            let pStyle = XmlNode.element(prefix: "w", localName: "pStyle")
-            pStyle.setAttribute(prefix: "w", localName: "val", value: styleId)
-            let pPr = XmlNode.element(prefix: "w", localName: "pPr", children: [pStyle])
-            children.append(pPr)
+        let pPrChildren = makePPrChildren(payload: payload)
+        if !pPrChildren.isEmpty {
+            children.append(XmlNode.element(prefix: "w", localName: "pPr", children: pPrChildren))
         }
         children.append(wr)
         return XmlNode.element(prefix: "w", localName: "p", children: children)
+    }
+
+    /// pPr children in CT_PPr schema order from the payload's optional fields.
+    private static func makePPrChildren(payload: ParagraphPayload) -> [XmlNode] {
+        var out: [XmlNode] = []
+        if let styleId = payload.styleId, !styleId.isEmpty {
+            let pStyle = XmlNode.element(prefix: "w", localName: "pStyle")
+            pStyle.setAttribute(prefix: "w", localName: "val", value: styleId)
+            out.append(pStyle)
+        }
+        if payload.numId != nil || payload.numLevel != nil {
+            var numChildren: [XmlNode] = []
+            if let ilvl = payload.numLevel {
+                let n = XmlNode.element(prefix: "w", localName: "ilvl")
+                n.setAttribute(prefix: "w", localName: "val", value: String(ilvl))
+                numChildren.append(n)
+            }
+            if let numId = payload.numId {
+                let n = XmlNode.element(prefix: "w", localName: "numId")
+                n.setAttribute(prefix: "w", localName: "val", value: String(numId))
+                numChildren.append(n)
+            }
+            out.append(XmlNode.element(prefix: "w", localName: "numPr", children: numChildren))
+        }
+        if payload.spacingBefore != nil || payload.spacingAfter != nil
+            || payload.spacingLine != nil || payload.spacingLineRule != nil {
+            let spacing = XmlNode.element(prefix: "w", localName: "spacing")
+            if let v = payload.spacingBefore {
+                spacing.setAttribute(prefix: "w", localName: "before", value: String(v))
+            }
+            if let v = payload.spacingAfter {
+                spacing.setAttribute(prefix: "w", localName: "after", value: String(v))
+            }
+            if let v = payload.spacingLine {
+                spacing.setAttribute(prefix: "w", localName: "line", value: String(v))
+            }
+            if let v = payload.spacingLineRule {
+                spacing.setAttribute(prefix: "w", localName: "lineRule", value: v)
+            }
+            out.append(spacing)
+        }
+        if payload.indentLeft != nil || payload.indentRight != nil
+            || payload.indentFirstLine != nil || payload.indentHanging != nil {
+            let ind = XmlNode.element(prefix: "w", localName: "ind")
+            if let v = payload.indentLeft {
+                ind.setAttribute(prefix: "w", localName: "left", value: String(v))
+            }
+            if let v = payload.indentRight {
+                ind.setAttribute(prefix: "w", localName: "right", value: String(v))
+            }
+            if let v = payload.indentFirstLine {
+                ind.setAttribute(prefix: "w", localName: "firstLine", value: String(v))
+            }
+            if let v = payload.indentHanging {
+                ind.setAttribute(prefix: "w", localName: "hanging", value: String(v))
+            }
+            out.append(ind)
+        }
+        if let jc = payload.alignment {
+            let n = XmlNode.element(prefix: "w", localName: "jc")
+            n.setAttribute(prefix: "w", localName: "val", value: jc)
+            out.append(n)
+        }
+        return out
+    }
+
+    /// Builds a `<w:tbl>` from the payload (format-alignment-engine Phase B
+    /// task 2.5). Canonical minimal form: `<w:tblGrid>` with one bare
+    /// `<w:gridCol/>` per column, then one `<w:tr>` per row whose `<w:tc>`
+    /// each hold a single paragraph in `makeParagraph`'s own shape — the
+    /// vocabulary the reverse extractor recognizes for the byte-equal
+    /// upgrade rule.
+    internal static func makeTable(payload: TablePayload) -> XmlNode {
+        var tblChildren: [XmlNode] = []
+        var gridCols: [XmlNode] = []
+        for _ in 0..<payload.columns {
+            gridCols.append(XmlNode.element(prefix: "w", localName: "gridCol"))
+        }
+        tblChildren.append(XmlNode.element(prefix: "w", localName: "tblGrid", children: gridCols))
+        for row in 0..<payload.rows {
+            var cells: [XmlNode] = []
+            for column in 0..<payload.columns {
+                let text = payload.cells?[row][column] ?? ""
+                let p = makeParagraph(payload: ParagraphPayload(text: text))
+                cells.append(XmlNode.element(prefix: "w", localName: "tc", children: [p]))
+            }
+            tblChildren.append(XmlNode.element(prefix: "w", localName: "tr", children: cells))
+        }
+        return XmlNode.element(prefix: "w", localName: "tbl", children: tblChildren)
+    }
+
+    /// Builds a `<w:sectPr>` from the payload. Children follow CT_SectPr
+    /// schema order: headerReference*, footerReference*, pgSz, pgMar, cols.
+    private static func makeSectPr(_ section: SectionPayload) -> XmlNode {
+        var children: [XmlNode] = []
+        for ref in section.headerReferences ?? [] {
+            let n = XmlNode.element(prefix: "w", localName: "headerReference")
+            n.setAttribute(prefix: "w", localName: "type", value: ref.type)
+            n.setAttribute(prefix: "r", localName: "id", value: ref.relationshipId)
+            children.append(n)
+        }
+        for ref in section.footerReferences ?? [] {
+            let n = XmlNode.element(prefix: "w", localName: "footerReference")
+            n.setAttribute(prefix: "w", localName: "type", value: ref.type)
+            n.setAttribute(prefix: "r", localName: "id", value: ref.relationshipId)
+            children.append(n)
+        }
+        if section.pageWidth != nil || section.pageHeight != nil || section.orientation != nil {
+            let pgSz = XmlNode.element(prefix: "w", localName: "pgSz")
+            if let v = section.pageWidth {
+                pgSz.setAttribute(prefix: "w", localName: "w", value: String(v))
+            }
+            if let v = section.pageHeight {
+                pgSz.setAttribute(prefix: "w", localName: "h", value: String(v))
+            }
+            if let v = section.orientation {
+                pgSz.setAttribute(prefix: "w", localName: "orient", value: v)
+            }
+            children.append(pgSz)
+        }
+        if section.marginTop != nil || section.marginRight != nil || section.marginBottom != nil
+            || section.marginLeft != nil || section.marginHeader != nil
+            || section.marginFooter != nil || section.marginGutter != nil {
+            let pgMar = XmlNode.element(prefix: "w", localName: "pgMar")
+            if let v = section.marginTop {
+                pgMar.setAttribute(prefix: "w", localName: "top", value: String(v))
+            }
+            if let v = section.marginRight {
+                pgMar.setAttribute(prefix: "w", localName: "right", value: String(v))
+            }
+            if let v = section.marginBottom {
+                pgMar.setAttribute(prefix: "w", localName: "bottom", value: String(v))
+            }
+            if let v = section.marginLeft {
+                pgMar.setAttribute(prefix: "w", localName: "left", value: String(v))
+            }
+            if let v = section.marginHeader {
+                pgMar.setAttribute(prefix: "w", localName: "header", value: String(v))
+            }
+            if let v = section.marginFooter {
+                pgMar.setAttribute(prefix: "w", localName: "footer", value: String(v))
+            }
+            if let v = section.marginGutter {
+                pgMar.setAttribute(prefix: "w", localName: "gutter", value: String(v))
+            }
+            children.append(pgMar)
+        }
+        if section.columnCount != nil || section.columnSpace != nil {
+            let cols = XmlNode.element(prefix: "w", localName: "cols")
+            if let v = section.columnCount {
+                cols.setAttribute(prefix: "w", localName: "num", value: String(v))
+            }
+            if let v = section.columnSpace {
+                cols.setAttribute(prefix: "w", localName: "space", value: String(v))
+            }
+            children.append(cols)
+        }
+        return XmlNode.element(prefix: "w", localName: "sectPr", children: children)
     }
 
     /// Applies the INVERSE of an entry's op (used by `undo` and by `.undo`
@@ -815,6 +1091,8 @@ public enum OperationReducer {
             return []
         case .undo, .redo, .batchBegin, .batchEnd, .unknown: return []
         case .carryPart: return []  // part-addressed raw channel, no ElementID
+        case .setSectionProperties(let at, _): return at.map { [$0] } ?? []
+        case .appendTable(let container, _): return container.map { [$0] } ?? []
         }
     }
 
@@ -880,6 +1158,8 @@ public enum OperationReducer {
         case .wrapWithHyperlink(let target, _): return target == elementID
         case .addRelationship: return false  // rels-part operation, not element-addressed
         case .carryPart: return false  // part-addressed raw channel, not element-addressed
+        case .setSectionProperties(let at, _): return at == elementID
+        case .appendTable(let container, _): return container == elementID
         case .unknown: return false
         }
     }

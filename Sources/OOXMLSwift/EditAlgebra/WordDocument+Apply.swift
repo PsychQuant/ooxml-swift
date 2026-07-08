@@ -162,6 +162,15 @@ extension WordDocument {
                 if newTrees[partPath] == nil {
                     newTrees[partPath] = makeEmptyStylesTree()
                 }
+            } else if case .appendTable(let container, _) = op, container == nil {
+                // format-alignment-engine Phase B (2.5): same routing as
+                // appendParagraph(in: nil) — targets the main body.
+                partPath = "word/document.xml"
+            } else if case .setSectionProperties = op {
+                // format-alignment-engine Phase B: sectPr always lives in
+                // word/document.xml. The at:nil form references no ElementID,
+                // so the partContaining walk would fail on multi-part docs.
+                partPath = "word/document.xml"
             } else if let single = singlePartPath {
                 partPath = single
             } else {

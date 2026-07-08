@@ -261,6 +261,18 @@ internal enum JSONLLineCoder {
                 ("partPath", jsonString(partPath)),
                 ("xml", jsonString(xml))
             ])
+        case .setSectionProperties(let at, let section):
+            // Field names `at` / `section` — neither collides with the
+            // envelope keys op_id / ts / source / op_type.
+            return ("setSectionProperties", [
+                ("at", at.map { jsonString($0.raw) } ?? "null"),
+                ("section", encodeCodable(section))
+            ])
+        case .appendTable(let container, let table):
+            return ("appendTable", [
+                ("in", container.map { jsonString($0.raw) } ?? "null"),
+                ("table", encodeCodable(table))
+            ])
         case .appendParagraph(let container, let paragraph):
             return ("appendParagraph", [
                 ("in", container.map { jsonString($0.raw) } ?? "null"),
@@ -426,6 +438,12 @@ internal enum JSONLLineCoder {
             )
         case "carryPart":
             return .carryPart(partPath: try str("partPath"), xml: try str("xml"))
+        case "setSectionProperties":
+            let at = optStr("at").map { ElementID(rawString: $0) }
+            return .setSectionProperties(at: at, section: try payload("section", SectionPayload.self))
+        case "appendTable":
+            let container = optStr("in").map { ElementID(rawString: $0) }
+            return .appendTable(in: container, table: try payload("table", TablePayload.self))
         default:
             // Unknown op_type — preserve the full payload (everything except
             // the four required fields) byte-equal in a JSONValue object.
