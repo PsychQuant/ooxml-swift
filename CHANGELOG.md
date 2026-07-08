@@ -8,6 +8,34 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-08
+
+format-alignment-engine Phase D — named content slots + gated visual-diff
+harness + end-to-end acceptance. See PsychQuant/macdoc#130.
+
+### Added
+- **Content slots** (task 4.1, `template-content-slots`):
+  `ScriptExporter.exportSwift(log:slots:)` emits a parameterized script —
+  designated paragraphs' text becomes Swift function parameters
+  (`func makeDocument(title: String, …)`), the call site carries the
+  extracted content as default arguments, and every non-slot op is emitted
+  exactly as the canonical form. `ScriptImporter.parse` understands the
+  parameterized form (signature, bare-identifier slot references,
+  call-site bindings). Strict mode: unusable designations throw the new
+  `TranscodeError.slotDesignationFailure` — no inference, no silent
+  degradation. Empty slots delegate to the canonical exporter
+  (no-designation invariant, task 4.2: byte-equal Stage B, pinned).
+- **Visual-diff harness** (task 4.3, `docx-visual-diff-testing`):
+  `VisualDiffTests` gated behind `RUN_WORD_INTEGRATION=1` — docx→PDF via
+  live Microsoft Word (AppleScript), PDFKit/CoreGraphics page render,
+  per-page pixel-difference ratio vs threshold. Identical-documents-pass +
+  layout-drift-caught scenarios; loud skip without the gate or Word.
+- **Acceptance run** (task 4.4): `FormatAlignmentAcceptanceTests` — synthetic
+  five-layer (57.5% DSL coverage), committed CJK template (honest 0%), and
+  env-gated real template (`MACDOC_TEMPLATE_DIR`) through reverse → script →
+  rebuild → Stage B, printing the coverage numbers recorded in macdoc's
+  docs/format-alignment-baselines.md.
+
 ## [1.2.0] - 2026-07-08
 
 format-alignment-engine Phase B — five-layer reverse extraction with the
