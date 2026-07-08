@@ -120,12 +120,31 @@ enum VisualDiffHarness {
 final class VisualDiffTests: XCTestCase {
 
     /// Multi-paragraph two-column source so a layout change is visually
-    /// large. Word's sandbox prefers user-domain paths over /tmp.
+    /// large.
+    ///
+    /// FIXED scratch path, deliberately NOT per-run UUID: sandboxed Word's
+    /// `save as` into a never-authorized folder raises a BLOCKING
+    /// "Grant Access" sheet until the 120s AppleEvent timeout, and a fresh
+    /// UUID dir re-triggers it on every export of every run (diagnosed
+    /// 2026-07-08 — the harness skipped on -1712/-1708 despite TCC being
+    /// granted). With a stable path one manual grant persists across runs.
+    /// Teardown clears the files but KEEPS the directory — deleting it could
+    /// invalidate Word's path-based grant.
     private func makeScratchDir() throws -> URL {
         let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/ooxml-swift-visual-diff-\(UUID().uuidString)")
+            .appendingPathComponent(".cache/ooxml-swift-visual-diff")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        // Clear stale artifacts from previous runs up front; keep the dir.
+        for file in (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil)) ?? [] {
+            try? FileManager.default.removeItem(at: file)
+        }
+        addTeardownBlock {
+            for file in (try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: nil)) ?? [] {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
         return dir
     }
 
