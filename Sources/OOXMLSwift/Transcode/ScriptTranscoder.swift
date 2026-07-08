@@ -162,6 +162,16 @@ public enum ScriptExporter {
     /// DSL spelling (non-identifier styleId etc.).
     private static func paragraphBlock(payload: ParagraphPayload, paraId: String,
                                        indent: Int) -> [String]? {
+        // format-alignment-engine Phase B: the DSL block spells only
+        // id/style/text. A payload carrying any extended pPr field
+        // (alignment/spacing/indent/numPr) has no lossless DSL spelling yet —
+        // fall back to the `// @op` escape so the fields survive round-trip.
+        guard payload.alignment == nil,
+              payload.spacingBefore == nil, payload.spacingAfter == nil,
+              payload.spacingLine == nil, payload.spacingLineRule == nil,
+              payload.indentLeft == nil, payload.indentRight == nil,
+              payload.indentFirstLine == nil, payload.indentHanging == nil,
+              payload.numId == nil, payload.numLevel == nil else { return nil }
         let pad = String(repeating: " ", count: indent)
         var head = "\(pad)Paragraph(id: \(quote(paraId))"
         if let styleId = payload.styleId {

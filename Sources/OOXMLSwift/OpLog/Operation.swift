@@ -148,6 +148,24 @@ public enum Operation: Equatable, Sendable {
     /// raw channel and the coverage metric reflects that honestly.
     case carryPart(partPath: String, xml: String)
 
+    // MARK: Section properties (format-alignment-engine Phase B, task 2.1)
+
+    /// Sets a `<w:sectPr>` from a typed `SectionPayload`. `at: nil` places
+    /// (or replaces) the trailing body-level sectPr — the final section of
+    /// the document. `at: <paragraph id>` places it inside that paragraph's
+    /// `<w:pPr>` (a mid-body section break, ending the section at that
+    /// paragraph). sectPr always lives in word/document.xml.
+    case setSectionProperties(at: ElementID?, section: SectionPayload)
+
+    // MARK: Table authoring (format-alignment-engine Phase B, task 2.5)
+
+    /// Appends a full table (grid + cell text via `TablePayload.cells`) as
+    /// the last block-level child of the container (nil = `<w:body>`,
+    /// inserted before a trailing sectPr like `appendParagraph`). One-op
+    /// table authoring: unlike `insertTable` + `setCellText`, it needs no
+    /// table ElementID, so it round-trips scripts losslessly.
+    case appendTable(in: ElementID?, table: TablePayload)
+
     // MARK: Forward-compat fallback (preserves unrecognized op_type byte-equal)
 
     /// Carries any op_type the local code does not declare so the JSONL log
@@ -161,6 +179,11 @@ public enum Operation: Equatable, Sendable {
 /// Minimal data needed by `insertParagraphAfter` / `insertParagraphBefore` to
 /// reconstruct a paragraph in the reducer (Phase 2b). Carries text-only +
 /// optional style; rich formatting goes through `setRunFormat` follow-up ops.
+///
+/// format-alignment-engine Phase B (task 2.1): additive optional pPr fields
+/// for five-layer extraction — spacing ↔ `<w:spacing>`, indentation ↔
+/// `<w:ind>`, alignment ↔ `<w:jc w:val>`, numbering ↔ `<w:numPr>`. Absent
+/// fields mean "not specified"; pre-extension JSONL decodes unchanged.
 public struct ParagraphPayload: Equatable, Sendable, Codable {
     public var text: String
     public var styleId: String?
@@ -169,23 +192,70 @@ public struct ParagraphPayload: Equatable, Sendable, Codable {
     /// created `<w:p>`; when absent the opID-derived libraryUUID behavior
     /// applies unchanged.
     public var paraId: String?
+    /// ↔ `<w:jc w:val>` (e.g. "center", "both").
+    public var alignment: String?
+    /// ↔ `<w:spacing w:before>` in twentieths of a point.
+    public var spacingBefore: Int?
+    /// ↔ `<w:spacing w:after>` in twentieths of a point.
+    public var spacingAfter: Int?
+    /// ↔ `<w:spacing w:line>`.
+    public var spacingLine: Int?
+    /// ↔ `<w:spacing w:lineRule>` (e.g. "auto", "exact").
+    public var spacingLineRule: String?
+    /// ↔ `<w:ind w:left>`.
+    public var indentLeft: Int?
+    /// ↔ `<w:ind w:right>`.
+    public var indentRight: Int?
+    /// ↔ `<w:ind w:firstLine>`.
+    public var indentFirstLine: Int?
+    /// ↔ `<w:ind w:hanging>`.
+    public var indentHanging: Int?
+    /// ↔ `<w:numPr><w:numId w:val>`.
+    public var numId: Int?
+    /// ↔ `<w:numPr><w:ilvl w:val>`.
+    public var numLevel: Int?
 
-    public init(text: String, styleId: String? = nil, paraId: String? = nil) {
+    public init(text: String, styleId: String? = nil, paraId: String? = nil,
+                alignment: String? = nil,
+                spacingBefore: Int? = nil, spacingAfter: Int? = nil,
+                spacingLine: Int? = nil, spacingLineRule: String? = nil,
+                indentLeft: Int? = nil, indentRight: Int? = nil,
+                indentFirstLine: Int? = nil, indentHanging: Int? = nil,
+                numId: Int? = nil, numLevel: Int? = nil) {
         self.text = text
         self.styleId = styleId
         self.paraId = paraId
+        self.alignment = alignment
+        self.spacingBefore = spacingBefore
+        self.spacingAfter = spacingAfter
+        self.spacingLine = spacingLine
+        self.spacingLineRule = spacingLineRule
+        self.indentLeft = indentLeft
+        self.indentRight = indentRight
+        self.indentFirstLine = indentFirstLine
+        self.indentHanging = indentHanging
+        self.numId = numId
+        self.numLevel = numLevel
     }
 }
 
 /// Minimal data needed by `insertTable` to reconstruct an empty grid in the
 /// reducer. Cell content arrives via subsequent `setCellText` ops.
+///
+/// format-alignment-engine Phase B (task 2.5): additive `cells` carries the
+/// full grid text row-major (outer = rows, inner = columns) so `appendTable`
+/// can rebuild a table in one op — `setCellText` needs a table ElementID,
+/// which is not stable across script round-trips.
 public struct TablePayload: Equatable, Sendable, Codable {
     public var rows: Int
     public var columns: Int
+    /// Row-major cell text. Absent (pre-extension wire) means empty cells.
+    public var cells: [[String]]?
 
-    public init(rows: Int, columns: Int) {
+    public init(rows: Int, columns: Int, cells: [[String]]? = nil) {
         self.rows = rows
         self.columns = columns
+        self.cells = cells
     }
 }
 
@@ -201,12 +271,103 @@ public struct RunPayload: Equatable, Sendable, Codable {
     public var bold: Bool?
     public var italic: Bool?
     public var color: String?
+    /// format-alignment-engine Phase B (task 2.1) — additive rPr fields.
+    /// ↔ `<w:rFonts w:ascii>`.
+    public var fontAscii: String?
+    /// ↔ `<w:rFonts w:eastAsia>`.
+    public var fontEastAsia: String?
+    /// ↔ `<w:sz w:val>` (half-points).
+    public var sizeHalfPoints: Int?
+    /// ↔ `<w:u w:val>` (e.g. "single").
+    public var underline: String?
+    /// ↔ `<w:vertAlign w:val>` ("superscript" / "subscript").
+    public var vertAlign: String?
 
-    public init(text: String, bold: Bool? = nil, italic: Bool? = nil, color: String? = nil) {
+    public init(text: String, bold: Bool? = nil, italic: Bool? = nil, color: String? = nil,
+                fontAscii: String? = nil, fontEastAsia: String? = nil,
+                sizeHalfPoints: Int? = nil, underline: String? = nil,
+                vertAlign: String? = nil) {
         self.text = text
         self.bold = bold
         self.italic = italic
         self.color = color
+        self.fontAscii = fontAscii
+        self.fontEastAsia = fontEastAsia
+        self.sizeHalfPoints = sizeHalfPoints
+        self.underline = underline
+        self.vertAlign = vertAlign
+    }
+}
+
+/// Header/footer reference carried by `SectionPayload`
+/// (↔ `<w:headerReference w:type r:id>` / `<w:footerReference …>`).
+public struct HeaderFooterReference: Equatable, Sendable, Codable {
+    /// ↔ `w:type` ("default" / "first" / "even").
+    public var type: String
+    /// ↔ `r:id`.
+    public var relationshipId: String
+
+    public init(type: String, relationshipId: String) {
+        self.type = type
+        self.relationshipId = relationshipId
+    }
+}
+
+/// Section properties carried by `setSectionProperties`
+/// (format-alignment-engine Phase B task 2.1, ↔ `<w:sectPr>`). All fields
+/// optional — only specified fields are stamped, per the additive-only wire
+/// discipline. Values are twentieths of a point unless noted.
+public struct SectionPayload: Equatable, Sendable, Codable {
+    /// ↔ `<w:pgSz w:w>`.
+    public var pageWidth: Int?
+    /// ↔ `<w:pgSz w:h>`.
+    public var pageHeight: Int?
+    /// ↔ `<w:pgSz w:orient>` ("portrait" / "landscape").
+    public var orientation: String?
+    /// ↔ `<w:pgMar w:top>`.
+    public var marginTop: Int?
+    /// ↔ `<w:pgMar w:right>`.
+    public var marginRight: Int?
+    /// ↔ `<w:pgMar w:bottom>`.
+    public var marginBottom: Int?
+    /// ↔ `<w:pgMar w:left>`.
+    public var marginLeft: Int?
+    /// ↔ `<w:pgMar w:header>`.
+    public var marginHeader: Int?
+    /// ↔ `<w:pgMar w:footer>`.
+    public var marginFooter: Int?
+    /// ↔ `<w:pgMar w:gutter>`.
+    public var marginGutter: Int?
+    /// ↔ `<w:cols w:num>`.
+    public var columnCount: Int?
+    /// ↔ `<w:cols w:space>`.
+    public var columnSpace: Int?
+    /// ↔ `<w:headerReference>*`.
+    public var headerReferences: [HeaderFooterReference]?
+    /// ↔ `<w:footerReference>*`.
+    public var footerReferences: [HeaderFooterReference]?
+
+    public init(pageWidth: Int? = nil, pageHeight: Int? = nil, orientation: String? = nil,
+                marginTop: Int? = nil, marginRight: Int? = nil, marginBottom: Int? = nil,
+                marginLeft: Int? = nil, marginHeader: Int? = nil, marginFooter: Int? = nil,
+                marginGutter: Int? = nil,
+                columnCount: Int? = nil, columnSpace: Int? = nil,
+                headerReferences: [HeaderFooterReference]? = nil,
+                footerReferences: [HeaderFooterReference]? = nil) {
+        self.pageWidth = pageWidth
+        self.pageHeight = pageHeight
+        self.orientation = orientation
+        self.marginTop = marginTop
+        self.marginRight = marginRight
+        self.marginBottom = marginBottom
+        self.marginLeft = marginLeft
+        self.marginHeader = marginHeader
+        self.marginFooter = marginFooter
+        self.marginGutter = marginGutter
+        self.columnCount = columnCount
+        self.columnSpace = columnSpace
+        self.headerReferences = headerReferences
+        self.footerReferences = footerReferences
     }
 }
 
