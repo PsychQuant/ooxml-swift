@@ -143,8 +143,7 @@ public enum ScriptExporter {
                 throw TranscodeError.slotDesignationFailure(
                     name: slot.name, reason: "paragraph \(slot.paraId) designated twice")
             }
-            // The designated paragraph must exist and be DSL-spellable —
-            // a slot inside a raw `// @op` line would not be substitutable.
+            // The designated paragraph must exist.
             let target = log.entries.first { entry in
                 if case .appendParagraph(let c, let payload) = entry.op, c == nil,
                    payload.paraId == slot.paraId { return true }
@@ -156,23 +155,43 @@ public enum ScriptExporter {
                     name: slot.name,
                     reason: "no body paragraph with id \(slot.paraId) in the log")
             }
-            guard paragraphBlock(payload: payload, paraId: slot.paraId, indent: 8) != nil else {
-                throw TranscodeError.slotDesignationFailure(
-                    name: slot.name,
-                    reason: "paragraph \(slot.paraId) has no DSL spelling (extended formatting rides the raw escape)")
+            // Its text must be substitutable: either the paragraph is
+            // DSL-spellable (script-text parameter, the plain path) OR it is a
+            // raw-form paragraph whose text lives in a single-run setRuns or
+            // the appendParagraph itself (op-level substitution). A paragraph
+            // with no unambiguous text target fails loudly.
+            let isDSL = paragraphBlock(payload: payload, paraId: slot.paraId, indent: 8) != nil
+            if !isDSL {
+                guard opLevelSlotDefault(log: log, paraId: slot.paraId) != nil else {
+                    throw TranscodeError.slotDesignationFailure(
+                        name: slot.name,
+                        reason: "paragraph \(slot.paraId) has no substitutable text (needs a single-run setRuns or non-empty appendParagraph text)")
+                }
             }
         }
 
-        let body = emitBody(entries: log.entries, slotByParaId: slotByParaId)
+        // Split slots into DSL-form (script-text parameter) and op-level
+        // (raw-form paragraph text substituted via a // @slot directive).
+        let dslSlots = slotByParaId.filter {
+            if case .appendParagraph(_, let p)? = firstAppendParagraph(log: log, paraId: $0.key)?.op {
+                return paragraphBlock(payload: p, paraId: $0.key, indent: 8) != nil
+            }
+            return false
+        }
+        let opLevelSlots = slotByParaId.filter { dslSlots[$0.key] == nil }
+
+        let body = emitBody(entries: log.entries, slotByParaId: dslSlots)
 
         // Defaults = the extracted content (call site executes the verbatim
         // rebuild; callers substitute new values for new content).
         var defaults: [String: String] = [:]
-        for entry in log.entries {
-            if case .appendParagraph(let c, let payload) = entry.op, c == nil,
-               let paraId = payload.paraId, let slot = slotByParaId[paraId] {
+        for (paraId, slot) in dslSlots {
+            if case .appendParagraph(_, let payload)? = firstAppendParagraph(log: log, paraId: paraId)?.op {
                 defaults[slot.name] = payload.text
             }
+        }
+        for (paraId, slot) in opLevelSlots {
+            defaults[slot.name] = opLevelSlotDefault(log: log, paraId: paraId) ?? ""
         }
 
         var out: [String] = []
@@ -182,6 +201,15 @@ public enum ScriptExporter {
         out.append("// slots are function parameters; call-site arguments carry the content.")
         out.append("import WordDSLSwift")
         out.append("")
+        // Op-level slot directives (task 3.2b): a formatted paragraph rides the
+        // raw `// @op` escape, so its text has no DSL identifier position. The
+        // `// @slot <name> <paraId>` directive tells the importer to substitute
+        // the paragraph's text-bearing op with the call-site value. Emitted in
+        // paraId order for deterministic output.
+        for paraId in opLevelSlots.keys.sorted() {
+            out.append("// @slot \(opLevelSlots[paraId]!.name) \(paraId)")
+        }
+        if !opLevelSlots.isEmpty { out.append("") }
         out.append("func makeDocument(")
         for (idx, slot) in slots.enumerated() {
             let comma = idx == slots.count - 1 ? "" : ","
@@ -315,6 +343,34 @@ public enum ScriptExporter {
                 "\(pad)}"]
     }
 
+    /// The first top-level `appendParagraph` entry carrying `paraId`.
+    static func firstAppendParagraph(log: OperationLog, paraId: String) -> LogEntry? {
+        log.entries.first { entry in
+            if case .appendParagraph(let c, let payload) = entry.op, c == nil,
+               payload.paraId == paraId { return true }
+            return false
+        }
+    }
+
+    /// The substitutable text of a raw-form paragraph for an op-level slot, or
+    /// nil when the paragraph has no unambiguous text target. The chosen target
+    /// is the paragraph's single-run `setRuns` if present, otherwise a non-empty
+    /// `appendParagraph` text. A multi-run setRuns (or an empty paragraph with
+    /// no run text) has no unambiguous target and fails loudly upstream.
+    static func opLevelSlotDefault(log: OperationLog, paraId: String) -> String? {
+        for entry in log.entries {
+            if case .setRuns(let target, let runs) = entry.op,
+               target.raw == "w14:paraId=\(paraId)", runs.count == 1 {
+                return runs[0].text
+            }
+        }
+        if case .appendParagraph(_, let payload)? = firstAppendParagraph(log: log, paraId: paraId)?.op,
+           !payload.text.isEmpty {
+            return payload.text
+        }
+        return nil
+    }
+
     /// `// @op {"op_type":...,"source":...,<op fields>}` — canonical raw
     /// escape reusing the JSONL codec's field encoding (single source of
     /// truth for op shapes; op_id/timestamp regenerate on import per the
@@ -385,6 +441,10 @@ public enum ScriptImporter {
         // by `func makeDocument(…)` and their call-site argument values.
         var slotNames: Set<String> = []
         let slotBindings = collectSlotBindings(source: source)
+        // Op-level slots (task 3.2b): `// @slot <name> <paraId>` directives map
+        // a paraId to its slot name; the text-bearing op is substituted after
+        // the log is built.
+        let opLevelSlots = collectOpLevelSlots(source: source)  // paraId -> name
 
         let lines = source.components(separatedBy: "\n")
         for (idx, rawLine) in lines.enumerated() {
@@ -585,6 +645,12 @@ public enum ScriptImporter {
             throw TranscodeError.unsupportedSyntax(
                 line: lines.count, column: 1, reason: "unterminated block at end of source")
         }
+
+        // Op-level slot substitution (task 3.2b): rewrite each slotted
+        // paragraph's text-bearing op with its call-site value.
+        if !opLevelSlots.isEmpty {
+            log = applyOpLevelSlots(log, opSlots: opLevelSlots, bindings: slotBindings)
+        }
         return log
     }
 
@@ -612,6 +678,74 @@ public enum ScriptImporter {
             }
         }
         return bindings
+    }
+
+    /// Pre-pass collecting `// @slot <name> <paraId>` directives (task 3.2b).
+    /// Returns paraId → slot name. Empty for scripts without op-level slots.
+    private static func collectOpLevelSlots(source: String) -> [String: String] {
+        var slots: [String: String] = [:]
+        for rawLine in source.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("// @slot ") else { continue }
+            let parts = line.dropFirst("// @slot ".count)
+                .split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            guard parts.count == 2 else { continue }
+            slots[String(parts[1])] = String(parts[0])
+        }
+        return slots
+    }
+
+    /// Rewrites each op-level-slotted paragraph's text-bearing op with its
+    /// call-site value. The substitution target mirrors the exporter's choice
+    /// (`ScriptExporter.opLevelSlotDefault`): the paragraph's single-run
+    /// `setRuns` if present, otherwise its non-empty `appendParagraph` text.
+    private static func applyOpLevelSlots(
+        _ log: OperationLog,
+        opSlots: [String: String],
+        bindings: [String: String]
+    ) -> OperationLog {
+        // Which slotted paraIds carry a single-run setRuns (the preferred
+        // target). The rest substitute the appendParagraph text.
+        var setRunsTargets: Set<String> = []
+        for entry in log.entries {
+            if case .setRuns(let target, let runs) = entry.op,
+               let pid = paraId(fromTarget: target), runs.count == 1,
+               opSlots[pid] != nil {
+                setRunsTargets.insert(pid)
+            }
+        }
+        var rebuilt = OperationLog()
+        for entry in log.entries {
+            var op = entry.op
+            switch op {
+            case .setRuns(let target, let runs):
+                if let pid = paraId(fromTarget: target), let name = opSlots[pid],
+                   setRunsTargets.contains(pid), runs.count == 1,
+                   let value = bindings[name] {
+                    var run = runs[0]
+                    run.text = value
+                    op = .setRuns(target: target, runs: [run])
+                }
+            case .appendParagraph(let container, let payload):
+                if container == nil, let pid = payload.paraId, let name = opSlots[pid],
+                   !setRunsTargets.contains(pid), let value = bindings[name] {
+                    var p = payload
+                    p.text = value
+                    op = .appendParagraph(in: nil, paragraph: p)
+                }
+            default:
+                break
+            }
+            rebuilt.append(op, source: entry.source)
+        }
+        return rebuilt
+    }
+
+    /// Extracts the paraId from a `w14:paraId=<id>` op target, or nil.
+    private static func paraId(fromTarget target: ElementID) -> String? {
+        let prefix = "w14:paraId="
+        guard target.raw.hasPrefix(prefix) else { return nil }
+        return String(target.raw.dropFirst(prefix.count))
     }
 
     private static func decodeRawOp(json: String, line: Int) throws -> (op: Operation, source: OpSource) {

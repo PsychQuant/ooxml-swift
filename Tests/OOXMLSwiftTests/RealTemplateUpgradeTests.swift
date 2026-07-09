@@ -50,6 +50,70 @@ final class RealTemplateUpgradeTests: XCTestCase {
             + broken.map { "\($0.partPath) (\($0.status))" }.joined(separator: ", "))
     }
 
+    /// reverse → slotted script → substitute → execute → rebuilt part map.
+    private func executeScript(_ script: String) throws -> [String: Data] {
+        let parsed = try ScriptImporter.parse(source: script)
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.apply(operations: parsed.entries.map(\.op))
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rtu-slot-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try doc.writeAuthoringPackage(to: url)
+        return try RawPartChannel.readAllParts(from: url)
+    }
+
+    /// (b) task 3.2(b) acceptance: `--slot` works end-to-end on the real JPA
+    /// template. A formatted paragraph (raw-form, single-run setRuns) is
+    /// designated as a slot; substituting new text at the call site lands the
+    /// new content in document.xml while every non-document XML part stays
+    /// byte-equal to the reference.
+    func testRealTemplateSlotSubstitution() throws {
+        let url = try TemplateFixtureGate.requireTemplate(TemplateFixtureGate.baselineTemplateName)
+        let reference = try RawPartChannel.readAllParts(from: url)
+        let log = try ReverseExtractor.reverse(parts: reference).log
+
+        // Find a slottable formatted paragraph: a single-run setRuns with
+        // non-empty text whose paragraph is op-level substitutable.
+        var slotParaId: String?
+        for entry in log.entries {
+            guard case .setRuns(let target, let runs) = entry.op,
+                  runs.count == 1, !runs[0].text.isEmpty,
+                  target.raw.hasPrefix("w14:paraId=") else { continue }
+            let pid = String(target.raw.dropFirst("w14:paraId=".count))
+            if ScriptExporter.opLevelSlotDefault(log: log, paraId: pid) != nil {
+                slotParaId = pid
+                break
+            }
+        }
+        let paraId = try XCTUnwrap(slotParaId,
+            "expected at least one slottable formatted paragraph in the JPA template")
+
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "slot0", paraId: paraId),
+        ])
+        XCTAssertTrue(script.contains("// @slot slot0 \(paraId)"),
+                      "op-level slot directive expected")
+
+        let sentinel = "＿＿差し込みテスト＿＿"
+        let original = try XCTUnwrap(ScriptExporter.opLevelSlotDefault(log: log, paraId: paraId))
+        script = script.replacingOccurrences(
+            of: "    slot0: \(ScriptExporter.quote(original))",
+            with: "    slot0: \(ScriptExporter.quote(sentinel))")
+
+        let rebuilt = try executeScript(script)
+        let docXML = String(decoding: rebuilt["word/document.xml"] ?? Data(), as: UTF8.self)
+        XCTAssertTrue(docXML.contains(sentinel),
+                      "the slot must land the new text in document.xml")
+
+        // Every non-document XML part stays byte-equal (the slot only touches
+        // document.xml); binary media is skipped (documented raw-channel limit).
+        for (path, bytes) in reference where path != "word/document.xml" {
+            guard String(data: bytes, encoding: .utf8) != nil else { continue }
+            XCTAssertEqual(rebuilt[path], bytes,
+                           "non-slot XML part \(path) must stay byte-equal")
+        }
+    }
+
     /// (c) thesis-fixture no-regress: its out-of-scope structures keep
     /// document.xml on the raw channel (this change must NOT falsely upgrade
     /// it), and every XML part that the raw channel carries round-trips
