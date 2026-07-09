@@ -315,7 +315,8 @@ public enum ReverseExtractor {
             throw Unsupported("paragraph-no-paraId", path)
         }
         payload.paraId = paraId
-        var runs: [RunPayload] = []
+        var items: [InlineItem] = []
+        var hasMarker = false
         var sectionOp: Operation? = nil
 
         let children = try elementsOnly(p, path: path)
@@ -329,33 +330,58 @@ public enum ReverseExtractor {
             idx += 1
         }
         while idx < children.count {
-            // Non-run inline content (hyperlink, bookmarkStart, …) tags the
-            // bail with its element name for class attribution.
-            guard children[idx].localName == "r" else {
-                throw Unsupported(children[idx].localName, "\(path)/w:\(children[idx].localName)")
+            let child = children[idx]
+            if child.localName == "r" {
+                items.append(.run(try extractRun(child, path: "\(path)/w:r[\(idx)]")))
+            } else if Self.inlineMarkerNames.contains(child.localName), child.children.isEmpty {
+                // Self-contained leaf marker (task 2.4): carried verbatim.
+                let attrs = child.attributes.map {
+                    RootAttribute(prefix: $0.prefix, localName: $0.localName, value: $0.value)
+                }
+                items.append(.marker(InlineMarker(localName: child.localName, attributes: attrs)))
+                hasMarker = true
+            } else {
+                // Non-run, non-marker inline content (hyperlink, drawing, …)
+                // bails, named for the report.
+                throw Unsupported(child.localName, "\(path)/w:\(child.localName)")
             }
-            runs.append(try extractRun(children[idx], path: "\(path)/w:r[\(idx)]"))
             idx += 1
         }
 
-        // Uniform emission: appendParagraph stamps pPr + a placeholder run;
-        // setRuns then replaces the inline content (keeping pPr). A single
-        // plain-text run matches makeParagraph's own shape, so the shorter
-        // spelling is used when possible.
         var ops: [Operation] = []
-        if runs.count == 1, runs[0] == RunPayload(text: runs[0].text) {
-            payload.text = runs[0].text
-            ops.append(.appendParagraph(in: nil, paragraph: payload))
-        } else {
+        let target = ElementID(rawString: "w14:paraId=\(paraId)")
+        if hasMarker {
+            // Ordered run|marker sequence rides setParagraphContent (task 2.4).
             payload.text = ""
             ops.append(.appendParagraph(in: nil, paragraph: payload))
-            ops.append(.setRuns(target: ElementID(rawString: "w14:paraId=\(paraId)"), runs: runs))
+            ops.append(.setParagraphContent(target: target, items: items))
+        } else {
+            // Marker-free: keep the plain-run / setRuns paths (no regression).
+            // A single plain-text run matches makeParagraph's own shape, so
+            // the shorter appendParagraph spelling is used when possible.
+            let runs = items.compactMap { $0.run }
+            if runs.count == 1, runs[0] == RunPayload(text: runs[0].text) {
+                payload.text = runs[0].text
+                ops.append(.appendParagraph(in: nil, paragraph: payload))
+            } else {
+                payload.text = ""
+                ops.append(.appendParagraph(in: nil, paragraph: payload))
+                ops.append(.setRuns(target: target, runs: runs))
+            }
         }
         if let sectionOp {
             ops.append(sectionOp)
         }
         return ops
     }
+
+    /// Inline markers carried verbatim by `setParagraphContent` (task 2.4).
+    /// Bounded whitelist of self-contained leaf/paired markers — anything
+    /// else (hyperlink wrappers, drawing, oMath, …) bails to raw.
+    static let inlineMarkerNames: Set<String> = [
+        "bookmarkStart", "bookmarkEnd", "proofErr",
+        "commentRangeStart", "commentRangeEnd", "commentReference",
+    ]
 
     /// Extracts pPr fields into the payload; returns a SectionPayload when a
     /// trailing mid-body `<w:sectPr>` is present (task 2.4). Order and

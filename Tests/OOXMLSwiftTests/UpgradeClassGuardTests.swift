@@ -69,6 +69,19 @@ final class UpgradeClassGuardTests: XCTestCase {
             .setRuns(target: ElementID(rawString: "w14:paraId=P1"),
                      runs: [RunPayload(text: " spaced ", preserveSpace: true)]),
         ]),
+        ("inline markers (wcf 2.4)", [
+            .appendParagraph(in: nil, paragraph: ParagraphPayload(text: "", paraId: "P1")),
+            .setParagraphContent(target: ElementID(rawString: "w14:paraId=P1"), items: [
+                .marker(InlineMarker(localName: "bookmarkStart", attributes: [
+                    RootAttribute(prefix: "w", localName: "id", value: "0"),
+                    RootAttribute(prefix: "w", localName: "name", value: "_Hlk96608833")])),
+                .marker(InlineMarker(localName: "proofErr", attributes: [
+                    RootAttribute(prefix: "w", localName: "type", value: "gramStart")])),
+                .run(RunPayload(text: "本文")),
+                .marker(InlineMarker(localName: "bookmarkEnd", attributes: [
+                    RootAttribute(prefix: "w", localName: "id", value: "0")])),
+            ]),
+        ]),
     ]
 
     /// Parameterized guard: every upgrade class must (1) actually upgrade

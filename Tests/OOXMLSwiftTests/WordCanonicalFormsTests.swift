@@ -146,4 +146,56 @@ final class WordCanonicalFormsTests: XCTestCase {
         XCTAssertTrue(upgraded, "xml:space paragraph must upgrade")
         XCTAssertEqual(rebuilt, Data(xml.utf8))
     }
+
+    // MARK: - 2.4 inline-passthrough markers
+
+    func testInlineMarkerWireRoundTrips() throws {
+        let items: [InlineItem] = [
+            .marker(InlineMarker(localName: "bookmarkStart", attributes: [
+                RootAttribute(prefix: "w", localName: "id", value: "0"),
+                RootAttribute(prefix: "w", localName: "name", value: "_Hlk96608833")])),
+            .run(RunPayload(text: "本文")),
+            .marker(InlineMarker(localName: "proofErr", attributes: [
+                RootAttribute(prefix: "w", localName: "type", value: "gramStart")])),
+            .marker(InlineMarker(localName: "bookmarkEnd", attributes: [
+                RootAttribute(prefix: "w", localName: "id", value: "0")])),
+        ]
+        var log = OperationLog()
+        log.append(.setParagraphContent(target: ElementID(rawString: "w14:paraId=P1"), items: items),
+                   source: .swift)
+        let decoded = try OperationLog.decodeJSONL(log.encodeJSONL())
+        guard case .setParagraphContent(_, let got) = decoded.entries[0].op else {
+            return XCTFail("expected setParagraphContent")
+        }
+        XCTAssertEqual(got, items, "inline items round-trip field-for-field in order")
+        XCTAssertEqual(log.encodeJSONL(), decoded.encodeJSONL(), "byte-equal re-encode")
+    }
+
+    /// A paragraph with bookmarkStart/proofErr interleaved between runs
+    /// rebuilds byte-equal (the 2.4 structural centerpiece).
+    func testInterleavedMarkersRoundTripByteEqual() throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="P1"><w:bookmarkStart w:id="0" w:name="_Hlk96608833"/><w:proofErr w:type="gramStart"/><w:r><w:t>本文です</w:t></w:r><w:bookmarkEnd w:id="0"/></w:p></w:body></w:document>
+        """
+        let (upgraded, rebuilt) = try roundTrip(documentXML: xml)
+        XCTAssertTrue(upgraded, "interleaved-marker paragraph must upgrade")
+        XCTAssertEqual(rebuilt, Data(xml.utf8), "rebuilt must be byte-equal")
+    }
+
+    /// A marker-free paragraph still takes the plain path (no regression:
+    /// setParagraphContent only appears when markers are present).
+    func testMarkerFreeParagraphKeepsPlainForm() throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="P1"><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>
+        """
+        let parts = ["word/document.xml": Data(xml.utf8)]
+        let result = try ReverseExtractor.reverse(parts: parts)
+        XCTAssertTrue(result.dslParts.contains("word/document.xml"))
+        let hasContentOp = result.log.entries.contains {
+            if case .setParagraphContent = $0.op { return true }; return false
+        }
+        XCTAssertFalse(hasContentOp, "marker-free paragraph must not emit setParagraphContent")
+    }
 }
