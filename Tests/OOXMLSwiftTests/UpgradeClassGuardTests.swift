@@ -48,6 +48,27 @@ final class UpgradeClassGuardTests: XCTestCase {
                 ["a", "b"], ["c", "d"],
             ])),
         ]),
+        ("document-root (wcf 2.1)", [
+            .setDocumentRoot(attributes: [
+                RootAttribute(prefix: "xmlns", localName: "w", value: "http://schemas.openxmlformats.org/wordprocessingml/2006/main"),
+                RootAttribute(prefix: "xmlns", localName: "w14", value: "http://schemas.microsoft.com/office/word/2010/wordml"),
+                RootAttribute(prefix: "xmlns", localName: "mc", value: "http://schemas.openxmlformats.org/markup-compatibility/2006"),
+                RootAttribute(prefix: "mc", localName: "Ignorable", value: "w14"),
+            ]),
+            .appendParagraph(in: nil, paragraph: ParagraphPayload(text: "根", paraId: "P1")),
+        ]),
+        ("rsid + textId (wcf 2.2)", [
+            .appendParagraph(in: nil, paragraph: ParagraphPayload(
+                text: "", paraId: "1FE40057", textId: "740FF560",
+                rsidR: "00040150", rsidRPr: "007F04E2", rsidRDefault: "00C74BEF", rsidP: "00F32D54")),
+            .setRuns(target: ElementID(rawString: "w14:paraId=1FE40057"),
+                     runs: [RunPayload(text: "本文", rsidRPr: "007F04E2")]),
+        ]),
+        ("xml:space preserve (wcf 2.3)", [
+            .appendParagraph(in: nil, paragraph: ParagraphPayload(text: "", paraId: "P1")),
+            .setRuns(target: ElementID(rawString: "w14:paraId=P1"),
+                     runs: [RunPayload(text: " spaced ", preserveSpace: true)]),
+        ]),
     ]
 
     /// Parameterized guard: every upgrade class must (1) actually upgrade

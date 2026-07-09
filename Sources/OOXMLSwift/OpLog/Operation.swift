@@ -166,6 +166,16 @@ public enum Operation: Equatable, Sendable {
     /// table ElementID, so it round-trips scripts losslessly.
     case appendTable(in: ElementID?, table: TablePayload)
 
+    // MARK: Document root (word-canonical-forms Phase 2, task 2.1)
+
+    /// Replaces the `<w:document>` root element's attribute list wholesale
+    /// with `attributes` in array order — carries the Word-authored root's
+    /// namespace cloud (all `xmlns:*` declarations + `mc:Ignorable`) so a
+    /// real document rebuilds byte-equal. When the op is absent the authoring
+    /// default root (minimal `xmlns:w` + `xmlns:w14`) is unchanged. Emitted
+    /// first by extraction when the reference root differs from the default.
+    case setDocumentRoot(attributes: [RootAttribute])
+
     // MARK: Forward-compat fallback (preserves unrecognized op_type byte-equal)
 
     /// Carries any op_type the local code does not declare so the JSONL log
@@ -214,6 +224,19 @@ public struct ParagraphPayload: Equatable, Sendable, Codable {
     public var numId: Int?
     /// ↔ `<w:numPr><w:ilvl w:val>`.
     public var numLevel: Int?
+    // word-canonical-forms task 2.2 — Word-authored paragraph attributes.
+    // Stamped on `<w:p>` AFTER paraId in Word's observed order:
+    // w14:paraId, w14:textId, w:rsidR, w:rsidRPr, w:rsidRDefault, w:rsidP.
+    /// ↔ `w14:textId`.
+    public var textId: String?
+    /// ↔ `w:rsidR`.
+    public var rsidR: String?
+    /// ↔ `w:rsidRPr`.
+    public var rsidRPr: String?
+    /// ↔ `w:rsidRDefault`.
+    public var rsidRDefault: String?
+    /// ↔ `w:rsidP`.
+    public var rsidP: String?
 
     public init(text: String, styleId: String? = nil, paraId: String? = nil,
                 alignment: String? = nil,
@@ -221,7 +244,9 @@ public struct ParagraphPayload: Equatable, Sendable, Codable {
                 spacingLine: Int? = nil, spacingLineRule: String? = nil,
                 indentLeft: Int? = nil, indentRight: Int? = nil,
                 indentFirstLine: Int? = nil, indentHanging: Int? = nil,
-                numId: Int? = nil, numLevel: Int? = nil) {
+                numId: Int? = nil, numLevel: Int? = nil,
+                textId: String? = nil, rsidR: String? = nil, rsidRPr: String? = nil,
+                rsidRDefault: String? = nil, rsidP: String? = nil) {
         self.text = text
         self.styleId = styleId
         self.paraId = paraId
@@ -236,6 +261,11 @@ public struct ParagraphPayload: Equatable, Sendable, Codable {
         self.indentHanging = indentHanging
         self.numId = numId
         self.numLevel = numLevel
+        self.textId = textId
+        self.rsidR = rsidR
+        self.rsidRPr = rsidRPr
+        self.rsidRDefault = rsidRDefault
+        self.rsidP = rsidP
     }
 }
 
@@ -282,11 +312,20 @@ public struct RunPayload: Equatable, Sendable, Codable {
     public var underline: String?
     /// ↔ `<w:vertAlign w:val>` ("superscript" / "subscript").
     public var vertAlign: String?
+    // word-canonical-forms task 2.2/2.3 — Word-authored run forms.
+    /// ↔ `<w:r w:rsidR>` (stamped on the run element, order: rsidR, rsidRPr).
+    public var rsidR: String?
+    /// ↔ `<w:r w:rsidRPr>`.
+    public var rsidRPr: String?
+    /// ↔ `<w:t xml:space="preserve">` — true when the text run preserves
+    /// leading/trailing whitespace (task 2.3).
+    public var preserveSpace: Bool?
 
     public init(text: String, bold: Bool? = nil, italic: Bool? = nil, color: String? = nil,
                 fontAscii: String? = nil, fontEastAsia: String? = nil,
                 sizeHalfPoints: Int? = nil, underline: String? = nil,
-                vertAlign: String? = nil) {
+                vertAlign: String? = nil,
+                rsidR: String? = nil, rsidRPr: String? = nil, preserveSpace: Bool? = nil) {
         self.text = text
         self.bold = bold
         self.italic = italic
@@ -296,6 +335,26 @@ public struct RunPayload: Equatable, Sendable, Codable {
         self.sizeHalfPoints = sizeHalfPoints
         self.underline = underline
         self.vertAlign = vertAlign
+        self.rsidR = rsidR
+        self.rsidRPr = rsidRPr
+        self.preserveSpace = preserveSpace
+    }
+}
+
+/// A single document-root attribute carried by `setDocumentRoot`
+/// (word-canonical-forms task 2.1). Order-significant — the array preserves
+/// Word's declaration order. `prefix` is the namespace prefix (e.g. `xmlns`
+/// for a namespace declaration, `mc` for `mc:Ignorable`); `nil` for an
+/// unprefixed attribute.
+public struct RootAttribute: Equatable, Sendable, Codable {
+    public var prefix: String?
+    public var localName: String
+    public var value: String
+
+    public init(prefix: String?, localName: String, value: String) {
+        self.prefix = prefix
+        self.localName = localName
+        self.value = value
     }
 }
 
@@ -346,6 +405,17 @@ public struct SectionPayload: Equatable, Sendable, Codable {
     public var headerReferences: [HeaderFooterReference]?
     /// ↔ `<w:footerReference>*`.
     public var footerReferences: [HeaderFooterReference]?
+    // word-canonical-forms task 2.2 — sectPr element attributes, stamped on
+    // `<w:sectPr>` before its children, order: rsidR, rsidSect.
+    /// ↔ `<w:sectPr w:rsidR>`.
+    public var rsidR: String?
+    /// ↔ `<w:sectPr w:rsidSect>`.
+    public var rsidSect: String?
+    // word-canonical-forms task 3.1 — sectPr `<w:docGrid>` child (CJK line grid).
+    /// ↔ `<w:docGrid w:type>`.
+    public var docGridType: String?
+    /// ↔ `<w:docGrid w:linePitch>`.
+    public var docGridLinePitch: Int?
 
     public init(pageWidth: Int? = nil, pageHeight: Int? = nil, orientation: String? = nil,
                 marginTop: Int? = nil, marginRight: Int? = nil, marginBottom: Int? = nil,
@@ -353,7 +423,9 @@ public struct SectionPayload: Equatable, Sendable, Codable {
                 marginGutter: Int? = nil,
                 columnCount: Int? = nil, columnSpace: Int? = nil,
                 headerReferences: [HeaderFooterReference]? = nil,
-                footerReferences: [HeaderFooterReference]? = nil) {
+                footerReferences: [HeaderFooterReference]? = nil,
+                rsidR: String? = nil, rsidSect: String? = nil,
+                docGridType: String? = nil, docGridLinePitch: Int? = nil) {
         self.pageWidth = pageWidth
         self.pageHeight = pageHeight
         self.orientation = orientation
@@ -368,6 +440,10 @@ public struct SectionPayload: Equatable, Sendable, Codable {
         self.columnSpace = columnSpace
         self.headerReferences = headerReferences
         self.footerReferences = footerReferences
+        self.rsidR = rsidR
+        self.rsidSect = rsidSect
+        self.docGridType = docGridType
+        self.docGridLinePitch = docGridLinePitch
     }
 }
 

@@ -171,6 +171,10 @@ extension WordDocument {
                 // word/document.xml. The at:nil form references no ElementID,
                 // so the partContaining walk would fail on multi-part docs.
                 partPath = "word/document.xml"
+            } else if case .setDocumentRoot = op {
+                // word-canonical-forms task 2.1: the document root lives in
+                // word/document.xml; references no ElementID.
+                partPath = "word/document.xml"
             } else if let single = singlePartPath {
                 partPath = single
             } else {

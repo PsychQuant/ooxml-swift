@@ -148,6 +148,15 @@ public enum ReverseExtractor {
         return "byte@\(i) src=…\(window(a, i))… out=…\(window(b, i))…"
     }
 
+    /// The root attribute set `emptyAuthoringDocument` emits — a source root
+    /// matching this needs no `setDocumentRoot` op (word-canonical-forms 2.1).
+    static let authoringDefaultRootAttributes: [RootAttribute] = [
+        RootAttribute(prefix: "xmlns", localName: "w",
+                      value: "http://schemas.openxmlformats.org/wordprocessingml/2006/main"),
+        RootAttribute(prefix: "xmlns", localName: "w14",
+                      value: "http://schemas.microsoft.com/office/word/2010/wordml"),
+    ]
+
     /// Extraction bail-out carrying the content class + located XML path
     /// (word-canonical-forms task 1.1). Throw sites thread a `path` breadcrumb
     /// so the report names exactly where the unsupported form sits.
@@ -175,6 +184,15 @@ public enum ReverseExtractor {
         let body = elementChildren[0]
 
         var ops: [Operation] = []
+        // word-canonical-forms task 2.1: when the root's attribute cloud
+        // differs from the authoring default (minimal w + w14), emit a
+        // setDocumentRoot first so the rebuild reproduces the namespace set.
+        let rootAttrs = root.attributes.map {
+            RootAttribute(prefix: $0.prefix, localName: $0.localName, value: $0.value)
+        }
+        if rootAttrs != Self.authoringDefaultRootAttributes {
+            ops.append(.setDocumentRoot(attributes: rootAttrs))
+        }
         let bodyChildren = try elementsOnly(body, path: "w:document/w:body")
         for (index, child) in bodyChildren.enumerated() {
             let cpath = "w:document/w:body/w:\(child.localName)[\(index)]"
@@ -276,22 +294,27 @@ public enum ReverseExtractor {
     // MARK: Paragraph extraction (tasks 2.2 + 2.3)
 
     private static func extractParagraph(_ p: XmlNode, path: String) throws -> [Operation] {
-        // Attributes: exactly w14:paraId (needed as the stable setRuns
-        // target across script round-trips) and nothing else.
-        guard p.attributes.count == 1,
-              let paraIdAttr = p.attributes.first,
-              paraIdAttr.prefix == "w14", paraIdAttr.localName == "paraId",
-              !paraIdAttr.value.isEmpty else {
-            // Name the first attribute that isn't the expected w14:paraId so
-            // the report points at the exact offending token (e.g. w:rsidR).
-            let offending = p.attributes.first {
-                !($0.prefix == "w14" && $0.localName == "paraId")
+        // Attributes: w14:paraId required (the stable setRuns target across
+        // script round-trips) + Word-authored w14:textId / w:rsid* (task 2.2).
+        // Any other attribute bails, named for the report.
+        var payload = ParagraphPayload(text: "")
+        var paraIdValue: String? = nil
+        for attr in p.attributes {
+            switch (attr.prefix, attr.localName) {
+            case ("w14", "paraId"): paraIdValue = attr.value
+            case ("w14", "textId"): payload.textId = attr.value
+            case ("w", "rsidR"): payload.rsidR = attr.value
+            case ("w", "rsidRPr"): payload.rsidRPr = attr.value
+            case ("w", "rsidRDefault"): payload.rsidRDefault = attr.value
+            case ("w", "rsidP"): payload.rsidP = attr.value
+            default:
+                throw Unsupported("paragraph-attrs", "\(path)/\(attrToken(attr))")
             }
-            throw Unsupported("paragraph-attrs", "\(path)/\(attrToken(offending))")
         }
-        let paraId = paraIdAttr.value
-
-        var payload = ParagraphPayload(text: "", paraId: paraId)
+        guard let paraId = paraIdValue, !paraId.isEmpty else {
+            throw Unsupported("paragraph-no-paraId", path)
+        }
+        payload.paraId = paraId
         var runs: [RunPayload] = []
         var sectionOp: Operation? = nil
 
@@ -394,8 +417,15 @@ public enum ReverseExtractor {
     }
 
     private static func extractRun(_ r: XmlNode, path: String) throws -> RunPayload {
-        guard r.attributes.isEmpty else { throw Unsupported("run-attrs", "\(path)/@attrs") }
         var run = RunPayload(text: "")
+        // Run-level rsids (task 2.2); any other run attribute bails.
+        for attr in r.attributes {
+            switch (attr.prefix, attr.localName) {
+            case ("w", "rsidR"): run.rsidR = attr.value
+            case ("w", "rsidRPr"): run.rsidRPr = attr.value
+            default: throw Unsupported("run-attrs", "\(path)/\(attrToken(attr))")
+            }
+        }
         let children = try elementsOnly(r, path: path)
         var idx = 0
         if idx < children.count, children[idx].localName == "rPr" {
@@ -403,12 +433,20 @@ public enum ReverseExtractor {
             idx += 1
         }
         guard idx < children.count, children[idx].localName == "t",
-              children[idx].attributes.isEmpty,
               idx == children.count - 1 else {
             let where_ = idx < children.count ? "w:\(children[idx].localName)" : "w:t(missing)"
             throw Unsupported("run-body", "\(path)/\(where_)")
         }
-        run.text = children[idx].children
+        let t = children[idx]
+        // xml:space="preserve" (task 2.3); any other <w:t> attribute bails.
+        for attr in t.attributes {
+            if attr.prefix == "xml", attr.localName == "space", attr.value == "preserve" {
+                run.preserveSpace = true
+            } else {
+                throw Unsupported("t-attrs", "\(path)/w:t/\(attrToken(attr))")
+            }
+        }
+        run.text = t.children
             .compactMap { $0.kind == .text ? $0.textContent : nil }
             .joined()
         return run
@@ -456,8 +494,15 @@ public enum ReverseExtractor {
     /// sectPr vocabulary and order must be exactly what makeSectPr stamps:
     /// headerReference*, footerReference*, pgSz, pgMar, cols.
     private static func extractSectPr(_ sectPr: XmlNode, path: String) throws -> SectionPayload {
-        guard sectPr.attributes.isEmpty else { throw Unsupported("sectPr-attrs", "\(path)/@attrs") }
         var section = SectionPayload()
+        // sectPr element rsids (task 2.2); any other attribute bails.
+        for attr in sectPr.attributes {
+            switch (attr.prefix, attr.localName) {
+            case ("w", "rsidR"): section.rsidR = attr.value
+            case ("w", "rsidSect"): section.rsidSect = attr.value
+            default: throw Unsupported("sectPr-attrs", "\(path)/\(attrToken(attr))")
+            }
+        }
         for child in try elementsOnly(sectPr, path: path) {
             let cpath = "\(path)/w:\(child.localName)"
             switch child.localName {
@@ -514,6 +559,16 @@ public enum ReverseExtractor {
                     }
                 }
                 guard child.children.isEmpty else { throw Unsupported("cols-children", cpath) }
+            case "docGrid":
+                for attr in child.attributes {
+                    guard attr.prefix == "w" else { throw Unsupported("docGrid-attr", "\(cpath)/\(attrToken(attr))") }
+                    switch attr.localName {
+                    case "type": section.docGridType = attr.value
+                    case "linePitch": section.docGridLinePitch = try int(attr.value, path: cpath)
+                    default: throw Unsupported("docGrid-attr", "\(cpath)/\(attrToken(attr))")
+                    }
+                }
+                guard child.children.isEmpty else { throw Unsupported("docGrid-children", cpath) }
             default:
                 throw Unsupported("sectPr-element", cpath)
             }
