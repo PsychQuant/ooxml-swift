@@ -362,6 +362,11 @@ public enum OperationReducer {
                 parent.children.append(newTbl)
             }
 
+        case .setDocumentProlog(let prolog):
+            // word-canonical-forms (task 3.1): carry the synthesized prolog
+            // (declaration + separator) so a Word CRLF prolog rebuilds exact.
+            tree.synthesizedProlog = Array(prolog.utf8)
+
         case .setDocumentRoot(let attributes):
             // word-canonical-forms (task 2.1): replace the <w:document> root
             // element's attribute list wholesale, in op order. The root is
@@ -814,16 +819,25 @@ public enum OperationReducer {
             out.append(spacing)
         }
         if payload.indentLeft != nil || payload.indentRight != nil
-            || payload.indentFirstLine != nil || payload.indentHanging != nil {
+            || payload.indentFirstLine != nil || payload.indentHanging != nil
+            || payload.indentFirstLineChars != nil || payload.indentHangingChars != nil {
             let ind = XmlNode.element(prefix: "w", localName: "ind")
+            // Order (task 3.1): left, right, firstLineChars, firstLine,
+            // hangingChars, hanging.
             if let v = payload.indentLeft {
                 ind.setAttribute(prefix: "w", localName: "left", value: String(v))
             }
             if let v = payload.indentRight {
                 ind.setAttribute(prefix: "w", localName: "right", value: String(v))
             }
+            if let v = payload.indentFirstLineChars {
+                ind.setAttribute(prefix: "w", localName: "firstLineChars", value: String(v))
+            }
             if let v = payload.indentFirstLine {
                 ind.setAttribute(prefix: "w", localName: "firstLine", value: String(v))
+            }
+            if let v = payload.indentHangingChars {
+                ind.setAttribute(prefix: "w", localName: "hangingChars", value: String(v))
             }
             if let v = payload.indentHanging {
                 ind.setAttribute(prefix: "w", localName: "hanging", value: String(v))
@@ -834,6 +848,10 @@ public enum OperationReducer {
             let n = XmlNode.element(prefix: "w", localName: "jc")
             n.setAttribute(prefix: "w", localName: "val", value: jc)
             out.append(n)
+        }
+        // Paragraph-mark run properties as the trailing pPr child (task 3.1).
+        if let markRun = payload.paragraphMarkRun, let rPr = makeRPr(markRun) {
+            out.append(rPr)
         }
         return out
     }
@@ -867,17 +885,31 @@ public enum OperationReducer {
     /// order (rFonts, b, i, color, sz, u, vertAlign); run-level rsids stamp
     /// on `<w:r>` (rsidR, rsidRPr); xml:space rides `<w:t>`. Shared by
     /// setRuns and setParagraphContent (task 2.4).
-    private static func makeRunNode(_ run: RunPayload) -> XmlNode {
-        var rChildren: [XmlNode] = []
+    /// Builds a `<w:rPr>` from a RunPayload's formatting fields, or nil when
+    /// none are set. Children follow CT_RPr schema order: rFonts, b, bCs, i,
+    /// iCs, color, sz, szCs, u, vertAlign. rFonts attributes follow Word's
+    /// observed order: ascii, eastAsia, hAnsi, hint, asciiTheme,
+    /// eastAsiaTheme, hAnsiTheme. Shared by run rPr and the pPr/rPr
+    /// paragraph-mark properties (word-canonical-forms task 3.1).
+    private static func makeRPr(_ run: RunPayload) -> XmlNode? {
         var rPrChildren: [XmlNode] = []
-        if run.fontAscii != nil || run.fontEastAsia != nil {
+        if run.fontAscii != nil || run.fontEastAsia != nil || run.fontHAnsi != nil
+            || run.fontHint != nil || run.fontAsciiTheme != nil
+            || run.fontEastAsiaTheme != nil || run.fontHAnsiTheme != nil {
             let rFonts = XmlNode.element(prefix: "w", localName: "rFonts")
             if let v = run.fontAscii { rFonts.setAttribute(prefix: "w", localName: "ascii", value: v) }
             if let v = run.fontEastAsia { rFonts.setAttribute(prefix: "w", localName: "eastAsia", value: v) }
+            if let v = run.fontHAnsi { rFonts.setAttribute(prefix: "w", localName: "hAnsi", value: v) }
+            if let v = run.fontHint { rFonts.setAttribute(prefix: "w", localName: "hint", value: v) }
+            if let v = run.fontAsciiTheme { rFonts.setAttribute(prefix: "w", localName: "asciiTheme", value: v) }
+            if let v = run.fontEastAsiaTheme { rFonts.setAttribute(prefix: "w", localName: "eastAsiaTheme", value: v) }
+            if let v = run.fontHAnsiTheme { rFonts.setAttribute(prefix: "w", localName: "hAnsiTheme", value: v) }
             rPrChildren.append(rFonts)
         }
         if run.bold == true { rPrChildren.append(XmlNode.element(prefix: "w", localName: "b")) }
+        if run.boldCs == true { rPrChildren.append(XmlNode.element(prefix: "w", localName: "bCs")) }
         if run.italic == true { rPrChildren.append(XmlNode.element(prefix: "w", localName: "i")) }
+        if run.italicCs == true { rPrChildren.append(XmlNode.element(prefix: "w", localName: "iCs")) }
         if let color = run.color {
             let c = XmlNode.element(prefix: "w", localName: "color")
             c.setAttribute(prefix: "w", localName: "val", value: color)
@@ -886,6 +918,11 @@ public enum OperationReducer {
         if let sz = run.sizeHalfPoints {
             let n = XmlNode.element(prefix: "w", localName: "sz")
             n.setAttribute(prefix: "w", localName: "val", value: String(sz))
+            rPrChildren.append(n)
+        }
+        if let szCs = run.sizeCsHalfPoints {
+            let n = XmlNode.element(prefix: "w", localName: "szCs")
+            n.setAttribute(prefix: "w", localName: "val", value: String(szCs))
             rPrChildren.append(n)
         }
         if let u = run.underline {
@@ -898,9 +935,13 @@ public enum OperationReducer {
             n.setAttribute(prefix: "w", localName: "val", value: va)
             rPrChildren.append(n)
         }
-        if !rPrChildren.isEmpty {
-            rChildren.append(XmlNode.element(prefix: "w", localName: "rPr", children: rPrChildren))
-        }
+        return rPrChildren.isEmpty
+            ? nil : XmlNode.element(prefix: "w", localName: "rPr", children: rPrChildren)
+    }
+
+    private static func makeRunNode(_ run: RunPayload) -> XmlNode {
+        var rChildren: [XmlNode] = []
+        if let rPr = makeRPr(run) { rChildren.append(rPr) }
         let wt = XmlNode.element(prefix: "w", localName: "t", children: [XmlNode.text(run.text)])
         if run.preserveSpace == true {
             wt.setAttribute(prefix: "xml", localName: "space", value: "preserve")
@@ -928,7 +969,14 @@ public enum OperationReducer {
             n.setAttribute(prefix: "r", localName: "id", value: ref.relationshipId)
             children.append(n)
         }
-        if section.pageWidth != nil || section.pageHeight != nil || section.orientation != nil {
+        // <w:type> before pgSz (CT_SectPr order; task 3.1).
+        if let v = section.sectionType {
+            let t = XmlNode.element(prefix: "w", localName: "type")
+            t.setAttribute(prefix: "w", localName: "val", value: v)
+            children.append(t)
+        }
+        if section.pageWidth != nil || section.pageHeight != nil || section.orientation != nil
+            || section.pageSizeCode != nil {
             let pgSz = XmlNode.element(prefix: "w", localName: "pgSz")
             if let v = section.pageWidth {
                 pgSz.setAttribute(prefix: "w", localName: "w", value: String(v))
@@ -938,6 +986,9 @@ public enum OperationReducer {
             }
             if let v = section.orientation {
                 pgSz.setAttribute(prefix: "w", localName: "orient", value: v)
+            }
+            if let v = section.pageSizeCode {
+                pgSz.setAttribute(prefix: "w", localName: "code", value: String(v))
             }
             children.append(pgSz)
         }
@@ -990,8 +1041,9 @@ public enum OperationReducer {
             children.append(docGrid)
         }
         let sectPr = XmlNode.element(prefix: "w", localName: "sectPr", children: children)
-        // word-canonical-forms task 2.2: sectPr element rsids, order: rsidR, rsidSect.
+        // sectPr element rsids, order: rsidR, rsidRPr, rsidSect (tasks 2.2/3.1).
         if let v = section.rsidR { sectPr.setAttribute(prefix: "w", localName: "rsidR", value: v) }
+        if let v = section.rsidRPr { sectPr.setAttribute(prefix: "w", localName: "rsidRPr", value: v) }
         if let v = section.rsidSect { sectPr.setAttribute(prefix: "w", localName: "rsidSect", value: v) }
         return sectPr
     }
@@ -1160,6 +1212,7 @@ public enum OperationReducer {
         case .setSectionProperties(let at, _): return at.map { [$0] } ?? []
         case .appendTable(let container, _): return container.map { [$0] } ?? []
         case .setDocumentRoot: return []  // root-addressed, no ElementID
+        case .setDocumentProlog: return []  // document-addressed, no ElementID
         case .setParagraphContent(let target, _): return [target]
         }
     }
@@ -1229,6 +1282,7 @@ public enum OperationReducer {
         case .setSectionProperties(let at, _): return at == elementID
         case .appendTable(let container, _): return container == elementID
         case .setDocumentRoot: return false  // root-addressed, not element-addressed
+        case .setDocumentProlog: return false  // document-addressed
         case .setParagraphContent(let target, _): return target == elementID
         case .unknown: return false
         }

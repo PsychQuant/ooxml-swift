@@ -186,6 +186,13 @@ public enum Operation: Equatable, Sendable {
     /// first by extraction when the reference root differs from the default.
     case setDocumentRoot(attributes: [RootAttribute])
 
+    /// Sets the synthesized document.xml prolog (XML declaration + separator)
+    /// verbatim, so a Word-authored prolog (e.g. CRLF after the declaration)
+    /// rebuilds byte-exact (word-canonical-forms task 3.1). Absent → the
+    /// writer default `<?xml …?>\n`. Emitted first by extraction when the
+    /// reference prolog differs from the default.
+    case setDocumentProlog(prolog: String)
+
     // MARK: Forward-compat fallback (preserves unrecognized op_type byte-equal)
 
     /// Carries any op_type the local code does not declare so the JSONL log
@@ -247,6 +254,15 @@ public struct ParagraphPayload: Equatable, Sendable, Codable {
     public var rsidRDefault: String?
     /// ↔ `w:rsidP`.
     public var rsidP: String?
+    // word-canonical-forms task 3.1 — CJK indent char units + paragraph-mark rPr.
+    /// ↔ `<w:ind w:firstLineChars>`.
+    public var indentFirstLineChars: Int?
+    /// ↔ `<w:ind w:hangingChars>`.
+    public var indentHangingChars: Int?
+    /// The paragraph-mark run properties (`<w:pPr><w:rPr>…</w:rPr></w:pPr>`) —
+    /// a RunPayload whose text is unused; only its rPr fields are stamped as
+    /// the pPr's trailing `<w:rPr>`.
+    public var paragraphMarkRun: RunPayload?
 
     public init(text: String, styleId: String? = nil, paraId: String? = nil,
                 alignment: String? = nil,
@@ -256,7 +272,9 @@ public struct ParagraphPayload: Equatable, Sendable, Codable {
                 indentFirstLine: Int? = nil, indentHanging: Int? = nil,
                 numId: Int? = nil, numLevel: Int? = nil,
                 textId: String? = nil, rsidR: String? = nil, rsidRPr: String? = nil,
-                rsidRDefault: String? = nil, rsidP: String? = nil) {
+                rsidRDefault: String? = nil, rsidP: String? = nil,
+                indentFirstLineChars: Int? = nil, indentHangingChars: Int? = nil,
+                paragraphMarkRun: RunPayload? = nil) {
         self.text = text
         self.styleId = styleId
         self.paraId = paraId
@@ -276,6 +294,9 @@ public struct ParagraphPayload: Equatable, Sendable, Codable {
         self.rsidRPr = rsidRPr
         self.rsidRDefault = rsidRDefault
         self.rsidP = rsidP
+        self.indentFirstLineChars = indentFirstLineChars
+        self.indentHangingChars = indentHangingChars
+        self.paragraphMarkRun = paragraphMarkRun
     }
 }
 
@@ -330,12 +351,33 @@ public struct RunPayload: Equatable, Sendable, Codable {
     /// ↔ `<w:t xml:space="preserve">` — true when the text run preserves
     /// leading/trailing whitespace (task 2.3).
     public var preserveSpace: Bool?
+    // word-canonical-forms task 3.1 — Word-canonical rFonts + companions.
+    /// ↔ `<w:rFonts w:hAnsi>`.
+    public var fontHAnsi: String?
+    /// ↔ `<w:rFonts w:hint>` ("eastAsia").
+    public var fontHint: String?
+    /// ↔ `<w:rFonts w:asciiTheme>`.
+    public var fontAsciiTheme: String?
+    /// ↔ `<w:rFonts w:eastAsiaTheme>`.
+    public var fontEastAsiaTheme: String?
+    /// ↔ `<w:rFonts w:hAnsiTheme>`.
+    public var fontHAnsiTheme: String?
+    /// ↔ `<w:bCs>` (complex-script bold).
+    public var boldCs: Bool?
+    /// ↔ `<w:iCs>` (complex-script italic).
+    public var italicCs: Bool?
+    /// ↔ `<w:szCs w:val>` (complex-script size, half-points).
+    public var sizeCsHalfPoints: Int?
 
     public init(text: String, bold: Bool? = nil, italic: Bool? = nil, color: String? = nil,
                 fontAscii: String? = nil, fontEastAsia: String? = nil,
                 sizeHalfPoints: Int? = nil, underline: String? = nil,
                 vertAlign: String? = nil,
-                rsidR: String? = nil, rsidRPr: String? = nil, preserveSpace: Bool? = nil) {
+                rsidR: String? = nil, rsidRPr: String? = nil, preserveSpace: Bool? = nil,
+                fontHAnsi: String? = nil, fontHint: String? = nil,
+                fontAsciiTheme: String? = nil, fontEastAsiaTheme: String? = nil,
+                fontHAnsiTheme: String? = nil,
+                boldCs: Bool? = nil, italicCs: Bool? = nil, sizeCsHalfPoints: Int? = nil) {
         self.text = text
         self.bold = bold
         self.italic = italic
@@ -348,6 +390,14 @@ public struct RunPayload: Equatable, Sendable, Codable {
         self.rsidR = rsidR
         self.rsidRPr = rsidRPr
         self.preserveSpace = preserveSpace
+        self.fontHAnsi = fontHAnsi
+        self.fontHint = fontHint
+        self.fontAsciiTheme = fontAsciiTheme
+        self.fontEastAsiaTheme = fontEastAsiaTheme
+        self.fontHAnsiTheme = fontHAnsiTheme
+        self.boldCs = boldCs
+        self.italicCs = italicCs
+        self.sizeCsHalfPoints = sizeCsHalfPoints
     }
 }
 
@@ -433,6 +483,8 @@ public struct SectionPayload: Equatable, Sendable, Codable {
     public var pageHeight: Int?
     /// ↔ `<w:pgSz w:orient>` ("portrait" / "landscape").
     public var orientation: String?
+    /// ↔ `<w:pgSz w:code>` (page-size code; task 3.1).
+    public var pageSizeCode: Int?
     /// ↔ `<w:pgMar w:top>`.
     public var marginTop: Int?
     /// ↔ `<w:pgMar w:right>`.
@@ -455,10 +507,15 @@ public struct SectionPayload: Equatable, Sendable, Codable {
     public var headerReferences: [HeaderFooterReference]?
     /// ↔ `<w:footerReference>*`.
     public var footerReferences: [HeaderFooterReference]?
+    /// ↔ `<w:type w:val>` (section type "continuous"/"nextPage"…; before
+    /// pgSz in CT_SectPr order; task 3.1).
+    public var sectionType: String?
     // word-canonical-forms task 2.2 — sectPr element attributes, stamped on
     // `<w:sectPr>` before its children, order: rsidR, rsidSect.
     /// ↔ `<w:sectPr w:rsidR>`.
     public var rsidR: String?
+    /// ↔ `<w:sectPr w:rsidRPr>` (order: rsidR, rsidRPr, rsidSect).
+    public var rsidRPr: String?
     /// ↔ `<w:sectPr w:rsidSect>`.
     public var rsidSect: String?
     // word-canonical-forms task 3.1 — sectPr `<w:docGrid>` child (CJK line grid).
@@ -474,11 +531,14 @@ public struct SectionPayload: Equatable, Sendable, Codable {
                 columnCount: Int? = nil, columnSpace: Int? = nil,
                 headerReferences: [HeaderFooterReference]? = nil,
                 footerReferences: [HeaderFooterReference]? = nil,
-                rsidR: String? = nil, rsidSect: String? = nil,
-                docGridType: String? = nil, docGridLinePitch: Int? = nil) {
+                rsidR: String? = nil, rsidRPr: String? = nil, rsidSect: String? = nil,
+                docGridType: String? = nil, docGridLinePitch: Int? = nil,
+                pageSizeCode: Int? = nil, sectionType: String? = nil) {
+        self.sectionType = sectionType
         self.pageWidth = pageWidth
         self.pageHeight = pageHeight
         self.orientation = orientation
+        self.pageSizeCode = pageSizeCode
         self.marginTop = marginTop
         self.marginRight = marginRight
         self.marginBottom = marginBottom
@@ -491,6 +551,7 @@ public struct SectionPayload: Equatable, Sendable, Codable {
         self.headerReferences = headerReferences
         self.footerReferences = footerReferences
         self.rsidR = rsidR
+        self.rsidRPr = rsidRPr
         self.rsidSect = rsidSect
         self.docGridType = docGridType
         self.docGridLinePitch = docGridLinePitch

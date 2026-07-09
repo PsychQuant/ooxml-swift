@@ -296,10 +296,13 @@ public enum ScriptExporter {
               payload.indentLeft == nil, payload.indentRight == nil,
               payload.indentFirstLine == nil, payload.indentHanging == nil,
               payload.numId == nil, payload.numLevel == nil,
-              // word-canonical-forms task 2.2: Word-authored paragraph attrs
-              // have no lossless DSL spelling — fall back to the // @op escape.
+              // word-canonical-forms task 2.2/3.1: Word-authored paragraph
+              // attrs + pPr/rPr have no lossless DSL spelling — fall back to
+              // the // @op escape.
               payload.textId == nil, payload.rsidR == nil, payload.rsidRPr == nil,
-              payload.rsidRDefault == nil, payload.rsidP == nil else { return nil }
+              payload.rsidRDefault == nil, payload.rsidP == nil,
+              payload.indentFirstLineChars == nil, payload.indentHangingChars == nil,
+              payload.paragraphMarkRun == nil else { return nil }
         let pad = String(repeating: " ", count: indent)
         var head = "\(pad)Paragraph(id: \(quote(paraId))"
         if let styleId = payload.styleId {

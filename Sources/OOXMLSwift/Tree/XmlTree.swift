@@ -23,9 +23,15 @@ public struct XmlTree {
     /// for clean nodes. Synthesized trees carry an empty `Data`.
     public let sourceBytes: Data
 
-    public init(root: XmlNode, sourceBytes: Data) {
+    /// Prolog bytes (XML declaration + separator) for a SYNTHESIZED tree.
+    /// `nil` → the writer's default `<?xml …?>\n`. Set to reproduce a
+    /// Word-authored prolog exactly (e.g. CRLF) — word-canonical-forms 3.1.
+    public var synthesizedProlog: [UInt8]?
+
+    public init(root: XmlNode, sourceBytes: Data, synthesizedProlog: [UInt8]? = nil) {
         self.root = root
         self.sourceBytes = sourceBytes
+        self.synthesizedProlog = synthesizedProlog
     }
 
     /// Constructs a synthesized tree for a node built in memory (no source).
@@ -41,6 +47,7 @@ public struct XmlTree {
     /// pure-function semantics — the reducer mutates the clone, never the
     /// caller's input.
     internal func deepCopy() -> XmlTree {
-        return XmlTree(root: root.deepClone(), sourceBytes: sourceBytes)
+        return XmlTree(root: root.deepClone(), sourceBytes: sourceBytes,
+                       synthesizedProlog: synthesizedProlog)
     }
 }

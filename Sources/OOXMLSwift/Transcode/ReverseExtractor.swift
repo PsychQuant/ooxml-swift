@@ -184,6 +184,18 @@ public enum ReverseExtractor {
         let body = elementChildren[0]
 
         var ops: [Operation] = []
+        // word-canonical-forms task 3.1: when the source prolog (declaration +
+        // separator, bytes before the root) differs from the writer default
+        // `<?xml …?>\n` (e.g. Word's CRLF), emit setDocumentProlog first so
+        // the rebuild reproduces it byte-exact.
+        if let rootStart = root.sourceRange?.lowerBound, rootStart > 0,
+           rootStart <= tree.sourceBytes.count {
+            let prologBytes = tree.sourceBytes.subdata(in: 0..<rootStart)
+            let defaultProlog = Data(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#.utf8) + Data([0x0A])
+            if prologBytes != defaultProlog, let prolog = String(data: prologBytes, encoding: .utf8) {
+                ops.append(.setDocumentProlog(prolog: prolog))
+            }
+        }
         // word-canonical-forms task 2.1: when the root's attribute cloud
         // differs from the authoring default (minimal w + w14), emit a
         // setDocumentRoot first so the rebuild reproduces the namespace set.
@@ -426,13 +438,21 @@ public enum ReverseExtractor {
                     case "left": payload.indentLeft = try int(attr.value, path: cpath)
                     case "right": payload.indentRight = try int(attr.value, path: cpath)
                     case "firstLine": payload.indentFirstLine = try int(attr.value, path: cpath)
+                    case "firstLineChars": payload.indentFirstLineChars = try int(attr.value, path: cpath)
                     case "hanging": payload.indentHanging = try int(attr.value, path: cpath)
+                    case "hangingChars": payload.indentHangingChars = try int(attr.value, path: cpath)
                     default: throw Unsupported("ind-attr", "\(cpath)/\(attrToken(attr))")
                     }
                 }
                 guard child.children.isEmpty else { throw Unsupported("ind-children", cpath) }
             case "jc":
                 payload.alignment = try singleVal(child, path: cpath)
+            case "rPr":
+                // Paragraph-mark run properties (task 3.1): reuse the run rPr
+                // extractor into a text-less RunPayload.
+                var markRun = RunPayload(text: "")
+                try extractRPr(child, into: &markRun, path: cpath)
+                payload.paragraphMarkRun = markRun
             case "sectPr":
                 section = try extractSectPr(child, path: cpath)
             default:
@@ -491,6 +511,11 @@ public enum ReverseExtractor {
                     switch attr.localName {
                     case "ascii": run.fontAscii = attr.value
                     case "eastAsia": run.fontEastAsia = attr.value
+                    case "hAnsi": run.fontHAnsi = attr.value
+                    case "hint": run.fontHint = attr.value
+                    case "asciiTheme": run.fontAsciiTheme = attr.value
+                    case "eastAsiaTheme": run.fontEastAsiaTheme = attr.value
+                    case "hAnsiTheme": run.fontHAnsiTheme = attr.value
                     default: throw Unsupported("rFonts-attr", "\(cpath)/\(attrToken(attr))")
                     }
                 }
@@ -498,13 +523,21 @@ public enum ReverseExtractor {
             case "b":
                 guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported("b-shape", cpath) }
                 run.bold = true
+            case "bCs":
+                guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported("bCs-shape", cpath) }
+                run.boldCs = true
             case "i":
                 guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported("i-shape", cpath) }
                 run.italic = true
+            case "iCs":
+                guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported("iCs-shape", cpath) }
+                run.italicCs = true
             case "color":
                 run.color = try singleVal(child, path: cpath)
             case "sz":
                 run.sizeHalfPoints = try intVal(child, path: cpath)
+            case "szCs":
+                run.sizeCsHalfPoints = try intVal(child, path: cpath)
             case "u":
                 run.underline = try singleVal(child, path: cpath)
             case "vertAlign":
@@ -525,6 +558,7 @@ public enum ReverseExtractor {
         for attr in sectPr.attributes {
             switch (attr.prefix, attr.localName) {
             case ("w", "rsidR"): section.rsidR = attr.value
+            case ("w", "rsidRPr"): section.rsidRPr = attr.value
             case ("w", "rsidSect"): section.rsidSect = attr.value
             default: throw Unsupported("sectPr-attrs", "\(path)/\(attrToken(attr))")
             }
@@ -532,6 +566,8 @@ public enum ReverseExtractor {
         for child in try elementsOnly(sectPr, path: path) {
             let cpath = "\(path)/w:\(child.localName)"
             switch child.localName {
+            case "type":
+                section.sectionType = try singleVal(child, path: cpath)
             case "headerReference", "footerReference":
                 var type: String? = nil
                 var rId: String? = nil
@@ -556,6 +592,7 @@ public enum ReverseExtractor {
                     case "w": section.pageWidth = try int(attr.value, path: cpath)
                     case "h": section.pageHeight = try int(attr.value, path: cpath)
                     case "orient": section.orientation = attr.value
+                    case "code": section.pageSizeCode = try int(attr.value, path: cpath)
                     default: throw Unsupported("pgSz-attr", "\(cpath)/\(attrToken(attr))")
                     }
                 }

@@ -82,6 +82,25 @@ final class UpgradeClassGuardTests: XCTestCase {
                     RootAttribute(prefix: "w", localName: "id", value: "0")])),
             ]),
         ]),
+        ("pPr/rPr + rFonts long-tail + docGrid + prolog (wcf 3.1)", [
+            .setDocumentProlog(prolog: "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"),
+            .appendParagraph(in: nil, paragraph: ParagraphPayload(
+                text: "", paraId: "P1",
+                indentFirstLine: 180, indentFirstLineChars: 100,
+                paragraphMarkRun: RunPayload(
+                    text: "", fontAscii: "Times New Roman", sizeHalfPoints: 36,
+                    fontHAnsi: "Times New Roman", sizeCsHalfPoints: 36))),
+            .setRuns(target: ElementID(rawString: "w14:paraId=P1"), runs: [RunPayload(
+                text: "ゴシック", fontEastAsia: "ＭＳ ゴシック", sizeHalfPoints: 21,
+                fontHAnsi: "ＭＳ ゴシック", fontHint: "eastAsia",
+                boldCs: true, italicCs: true, sizeCsHalfPoints: 21)]),
+            .setSectionProperties(at: nil, section: SectionPayload(
+                pageWidth: 11906, pageHeight: 16838,
+                marginTop: 1985, columnSpace: 425,
+                rsidR: "0081382F", rsidRPr: "006C42D6", rsidSect: "00BC5145",
+                docGridType: "linesAndChars", docGridLinePitch: 286,
+                pageSizeCode: 9, sectionType: "continuous")),
+        ]),
     ]
 
     /// Parameterized guard: every upgrade class must (1) actually upgrade
