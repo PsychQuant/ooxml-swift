@@ -17,18 +17,18 @@ final class FormGapReportTests: XCTestCase {
     // MARK: - Extraction bail (case a): has an XML breadcrumb
 
     /// Spec scenario: bail names the offending attribute. A paragraph
-    /// carrying `w:rsidR` (not the supported w14:paraId-only form) bails; the
+    /// carrying an attribute outside the supported set (`w:zzz`) bails; the
     /// gap locates the paragraph and names the offending attribute.
     func testBailNamesOffendingAttributePath() throws {
         let xml = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p w:rsidR="00AB12CD"><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="P1" w:zzz="x"><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>
         """
         let result = try ReverseExtractor.reverse(parts: parts(documentXML: xml))
         XCTAssertFalse(result.dslParts.contains("word/document.xml"))
         let gap = try XCTUnwrap(result.formGaps.first { $0.partPath == "word/document.xml" })
         XCTAssertTrue(gap.xmlPath.contains("w:p"), "gap path should locate the paragraph: \(gap.xmlPath)")
-        XCTAssertTrue(gap.xmlPath.contains("rsidR"),
+        XCTAssertTrue(gap.xmlPath.contains("zzz"),
                       "gap path should name the offending attribute: \(gap.xmlPath)")
     }
 
@@ -69,16 +69,14 @@ final class FormGapReportTests: XCTestCase {
 
     // MARK: - Byte-mismatch (case b): extraction passes, rebuild bytes differ
 
-    /// A root carrying a namespace declaration the authoring default doesn't
-    /// emit passes extraction (root attrs aren't extraction-checked) but the
-    /// trial rebuild differs — the gap is class byte-mismatch and the path
-    /// carries the byte offset so the diff is locatable.
+    /// A paragraph whose rsid attributes appear in a DIFFERENT order than the
+    /// reducer stamps (rsidP before paraId) extracts successfully (extraction
+    /// maps by name, order-independent) but the trial rebuild stamps them in
+    /// canonical order → byte-mismatch, with the divergence offset located.
     func testByteMismatchGapCarriesOffset() throws {
-        // Extra xmlns:mc on root — extraction accepts (only localName checked),
-        // but emptyAuthoringDocument rebuilds with only w + w14 → byte diff.
         let xml = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:p w14:paraId="P1"><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w:rsidP="00F32D54" w14:paraId="P1"><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>
         """
         let result = try ReverseExtractor.reverse(parts: parts(documentXML: xml))
         XCTAssertFalse(result.dslParts.contains("word/document.xml"))

@@ -251,6 +251,14 @@ public enum OperationReducer {
             } else {
                 newP.libraryUUID = entry.opID
             }
+            // word-canonical-forms task 2.2: Word-authored paragraph attrs,
+            // stamped AFTER paraId in observed order: w14:textId, w:rsidR,
+            // w:rsidRPr, w:rsidRDefault, w:rsidP.
+            if let v = payload.textId { newP.setAttribute(prefix: "w14", localName: "textId", value: v) }
+            if let v = payload.rsidR { newP.setAttribute(prefix: "w", localName: "rsidR", value: v) }
+            if let v = payload.rsidRPr { newP.setAttribute(prefix: "w", localName: "rsidRPr", value: v) }
+            if let v = payload.rsidRDefault { newP.setAttribute(prefix: "w", localName: "rsidRDefault", value: v) }
+            if let v = payload.rsidP { newP.setAttribute(prefix: "w", localName: "rsidP", value: v) }
             // Insert before a trailing body-level <w:sectPr> so the section
             // marker stays last (OOXML body shape).
             if let sectIdx = parent.children.firstIndex(where: {
@@ -321,9 +329,18 @@ public enum OperationReducer {
                 if !rPrChildren.isEmpty {
                     rChildren.append(XmlNode.element(prefix: "w", localName: "rPr", children: rPrChildren))
                 }
-                rChildren.append(XmlNode.element(
-                    prefix: "w", localName: "t", children: [XmlNode.text(run.text)]))
-                return XmlNode.element(prefix: "w", localName: "r", children: rChildren)
+                // word-canonical-forms task 2.3: xml:space="preserve" on <w:t>.
+                let wt = XmlNode.element(prefix: "w", localName: "t", children: [XmlNode.text(run.text)])
+                if run.preserveSpace == true {
+                    wt.setAttribute(prefix: "xml", localName: "space", value: "preserve")
+                }
+                rChildren.append(wt)
+                let wr = XmlNode.element(prefix: "w", localName: "r", children: rChildren)
+                // word-canonical-forms task 2.2: run-level rsids on <w:r>,
+                // order: rsidR, rsidRPr.
+                if let v = run.rsidR { wr.setAttribute(prefix: "w", localName: "rsidR", value: v) }
+                if let v = run.rsidRPr { wr.setAttribute(prefix: "w", localName: "rsidRPr", value: v) }
+                return wr
             }
             node.children = kept + runNodes
 
@@ -366,6 +383,14 @@ public enum OperationReducer {
                 parent.children.insert(newTbl, at: sectIdx)
             } else {
                 parent.children.append(newTbl)
+            }
+
+        case .setDocumentRoot(let attributes):
+            // word-canonical-forms (task 2.1): replace the <w:document> root
+            // element's attribute list wholesale, in op order. The root is
+            // the tree's root element.
+            tree.root.attributes = attributes.map {
+                XmlAttribute(prefix: $0.prefix, localName: $0.localName, value: $0.value)
             }
 
         case .setSectionProperties(let at, let section):
@@ -927,7 +952,22 @@ public enum OperationReducer {
             }
             children.append(cols)
         }
-        return XmlNode.element(prefix: "w", localName: "sectPr", children: children)
+        // word-canonical-forms task 3.1: <w:docGrid> after cols (CT_SectPr order).
+        if section.docGridType != nil || section.docGridLinePitch != nil {
+            let docGrid = XmlNode.element(prefix: "w", localName: "docGrid")
+            if let v = section.docGridType {
+                docGrid.setAttribute(prefix: "w", localName: "type", value: v)
+            }
+            if let v = section.docGridLinePitch {
+                docGrid.setAttribute(prefix: "w", localName: "linePitch", value: String(v))
+            }
+            children.append(docGrid)
+        }
+        let sectPr = XmlNode.element(prefix: "w", localName: "sectPr", children: children)
+        // word-canonical-forms task 2.2: sectPr element rsids, order: rsidR, rsidSect.
+        if let v = section.rsidR { sectPr.setAttribute(prefix: "w", localName: "rsidR", value: v) }
+        if let v = section.rsidSect { sectPr.setAttribute(prefix: "w", localName: "rsidSect", value: v) }
+        return sectPr
     }
 
     /// Applies the INVERSE of an entry's op (used by `undo` and by `.undo`
@@ -1093,6 +1133,7 @@ public enum OperationReducer {
         case .carryPart: return []  // part-addressed raw channel, no ElementID
         case .setSectionProperties(let at, _): return at.map { [$0] } ?? []
         case .appendTable(let container, _): return container.map { [$0] } ?? []
+        case .setDocumentRoot: return []  // root-addressed, no ElementID
         }
     }
 
@@ -1160,6 +1201,7 @@ public enum OperationReducer {
         case .carryPart: return false  // part-addressed raw channel, not element-addressed
         case .setSectionProperties(let at, _): return at == elementID
         case .appendTable(let container, _): return container == elementID
+        case .setDocumentRoot: return false  // root-addressed, not element-addressed
         case .unknown: return false
         }
     }
