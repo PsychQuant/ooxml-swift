@@ -276,6 +276,11 @@ internal enum JSONLLineCoder {
         case .setDocumentRoot(let attributes):
             // Field name `attributes` — no envelope-key collision.
             return ("setDocumentRoot", [("attributes", encodeCodable(attributes))])
+        case .setParagraphContent(let target, let items):
+            return ("setParagraphContent", [
+                ("target", jsonString(target.raw)),
+                ("items", encodeCodable(items))
+            ])
         case .appendParagraph(let container, let paragraph):
             return ("appendParagraph", [
                 ("in", container.map { jsonString($0.raw) } ?? "null"),
@@ -449,6 +454,9 @@ internal enum JSONLLineCoder {
             return .appendTable(in: container, table: try payload("table", TablePayload.self))
         case "setDocumentRoot":
             return .setDocumentRoot(attributes: try payload("attributes", [RootAttribute].self))
+        case "setParagraphContent":
+            return .setParagraphContent(target: try eid("target"),
+                                        items: try payload("items", [InlineItem].self))
         default:
             // Unknown op_type — preserve the full payload (everything except
             // the four required fields) byte-equal in a JSONValue object.

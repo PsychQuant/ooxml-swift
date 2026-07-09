@@ -74,10 +74,11 @@ final class OperationLogTests: XCTestCase {
             .carryPart(partPath: "word/styles.xml", xml: "<w:styles/>"),
             .setSectionProperties(at: nil, section: SectionPayload(pageWidth: 11906)),
             .appendTable(in: nil, table: TablePayload(rows: 2, columns: 2, cells: [["a", "b"], ["c", "d"]])),
-            .setDocumentRoot(attributes: [RootAttribute(prefix: "xmlns", localName: "w", value: "NS")])
+            .setDocumentRoot(attributes: [RootAttribute(prefix: "xmlns", localName: "w", value: "NS")]),
+            .setParagraphContent(target: ElementID(rawString: "w14:paraId=P1"), items: [.run(RunPayload(text: "x"))])
         ]
 
-        XCTAssertEqual(cases.count, 36, "Operation MUST have exactly 36 cases enumerated in the test")
+        XCTAssertEqual(cases.count, 37, "Operation MUST have exactly 37 cases enumerated in the test")
 
         // Pattern-match: each case maps to its expected discriminator.
         for op in cases {
@@ -98,7 +99,8 @@ final class OperationLogTests: XCTestCase {
                  .beginComponent, .endComponent,
                  .insertTab, .insertBreak, .insertNoBreakHyphen,
                  .carryPart,
-                 .setSectionProperties, .appendTable, .setDocumentRoot:
+                 .setSectionProperties, .appendTable, .setDocumentRoot,
+                 .setParagraphContent:
                 break // matched
             }
         }

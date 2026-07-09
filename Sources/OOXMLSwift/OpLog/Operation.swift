@@ -168,6 +168,16 @@ public enum Operation: Equatable, Sendable {
 
     // MARK: Document root (word-canonical-forms Phase 2, task 2.1)
 
+    // MARK: Inline-passthrough markers (word-canonical-forms Phase 2, task 2.4)
+
+    /// Replaces a paragraph's inline content with an ordered sequence of runs
+    /// and inline markers (Decision 6). Runs become `<w:r>` (same as
+    /// `setRuns`); markers are carried verbatim self-contained leaf elements
+    /// (bookmarkStart/End, proofErr, …) stamped back in position byte-exact.
+    /// Keeps `<w:pPr>`. Used by extraction only when a paragraph interleaves
+    /// markers between runs — marker-free paragraphs keep the setRuns path.
+    case setParagraphContent(target: ElementID, items: [InlineItem])
+
     /// Replaces the `<w:document>` root element's attribute list wholesale
     /// with `attributes` in array order — carries the Word-authored root's
     /// namespace cloud (all `xmlns:*` declarations + `mc:Ignorable`) so a
@@ -338,6 +348,46 @@ public struct RunPayload: Equatable, Sendable, Codable {
         self.rsidR = rsidR
         self.rsidRPr = rsidRPr
         self.preserveSpace = preserveSpace
+    }
+}
+
+/// A self-contained inline marker carried verbatim by `setParagraphContent`
+/// (word-canonical-forms task 2.4). `localName` is the element name
+/// (bookmarkStart / bookmarkEnd / proofErr / commentRange* / …); `attributes`
+/// are its attributes in source order. Opaque — never semantically
+/// interpreted; the reducer stamps a self-closing leaf element and the trial
+/// gate proves byte equality. `RootAttribute` is reused as the generic
+/// (prefix, localName, value) attribute triple.
+public struct InlineMarker: Equatable, Sendable, Codable {
+    public var localName: String
+    public var attributes: [RootAttribute]
+
+    public init(localName: String, attributes: [RootAttribute]) {
+        self.localName = localName
+        self.attributes = attributes
+    }
+}
+
+/// One item in a paragraph's ordered inline content (`setParagraphContent`).
+/// Exactly one of `run` / `marker` is set per `kind`. A struct (not an enum
+/// with associated values) keeps the JSONL codec simple.
+public struct InlineItem: Equatable, Sendable, Codable {
+    public enum Kind: String, Sendable, Codable { case run, marker }
+    public var kind: Kind
+    public var run: RunPayload?
+    public var marker: InlineMarker?
+
+    public static func run(_ run: RunPayload) -> InlineItem {
+        InlineItem(kind: .run, run: run, marker: nil)
+    }
+    public static func marker(_ marker: InlineMarker) -> InlineItem {
+        InlineItem(kind: .marker, run: nil, marker: marker)
+    }
+
+    public init(kind: Kind, run: RunPayload? = nil, marker: InlineMarker? = nil) {
+        self.kind = kind
+        self.run = run
+        self.marker = marker
     }
 }
 

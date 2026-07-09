@@ -284,65 +284,42 @@ public enum OperationReducer {
             let kept = node.children.filter {
                 $0.kind == .element && $0.localName == "pPr"
             }
-            // rPr children follow CT_RPr schema order: rFonts, b, i, color,
-            // sz, u, vertAlign (format-alignment-engine Phase B task 2.1 —
-            // reducer stamping of the additive rPr fields).
-            let runNodes: [XmlNode] = runs.map { run in
-                var rChildren: [XmlNode] = []
-                var rPrChildren: [XmlNode] = []
-                if run.fontAscii != nil || run.fontEastAsia != nil {
-                    let rFonts = XmlNode.element(prefix: "w", localName: "rFonts")
-                    if let v = run.fontAscii {
-                        rFonts.setAttribute(prefix: "w", localName: "ascii", value: v)
-                    }
-                    if let v = run.fontEastAsia {
-                        rFonts.setAttribute(prefix: "w", localName: "eastAsia", value: v)
-                    }
-                    rPrChildren.append(rFonts)
-                }
-                if run.bold == true {
-                    rPrChildren.append(XmlNode.element(prefix: "w", localName: "b"))
-                }
-                if run.italic == true {
-                    rPrChildren.append(XmlNode.element(prefix: "w", localName: "i"))
-                }
-                if let color = run.color {
-                    let c = XmlNode.element(prefix: "w", localName: "color")
-                    c.setAttribute(prefix: "w", localName: "val", value: color)
-                    rPrChildren.append(c)
-                }
-                if let sz = run.sizeHalfPoints {
-                    let n = XmlNode.element(prefix: "w", localName: "sz")
-                    n.setAttribute(prefix: "w", localName: "val", value: String(sz))
-                    rPrChildren.append(n)
-                }
-                if let u = run.underline {
-                    let n = XmlNode.element(prefix: "w", localName: "u")
-                    n.setAttribute(prefix: "w", localName: "val", value: u)
-                    rPrChildren.append(n)
-                }
-                if let va = run.vertAlign {
-                    let n = XmlNode.element(prefix: "w", localName: "vertAlign")
-                    n.setAttribute(prefix: "w", localName: "val", value: va)
-                    rPrChildren.append(n)
-                }
-                if !rPrChildren.isEmpty {
-                    rChildren.append(XmlNode.element(prefix: "w", localName: "rPr", children: rPrChildren))
-                }
-                // word-canonical-forms task 2.3: xml:space="preserve" on <w:t>.
-                let wt = XmlNode.element(prefix: "w", localName: "t", children: [XmlNode.text(run.text)])
-                if run.preserveSpace == true {
-                    wt.setAttribute(prefix: "xml", localName: "space", value: "preserve")
-                }
-                rChildren.append(wt)
-                let wr = XmlNode.element(prefix: "w", localName: "r", children: rChildren)
-                // word-canonical-forms task 2.2: run-level rsids on <w:r>,
-                // order: rsidR, rsidRPr.
-                if let v = run.rsidR { wr.setAttribute(prefix: "w", localName: "rsidR", value: v) }
-                if let v = run.rsidRPr { wr.setAttribute(prefix: "w", localName: "rsidRPr", value: v) }
-                return wr
+            node.children = kept + runs.map { makeRunNode($0) }
+
+        case .setParagraphContent(let target, let items):
+            // word-canonical-forms task 2.4: ordered run|marker inline
+            // content, keeping <w:pPr>. Markers are self-contained leaf
+            // elements stamped verbatim in position.
+            guard let node = findNode(elementID: target, in: tree) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
             }
-            node.children = kept + runNodes
+            guard node.localName == "p" else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "setParagraphContent target must be a <w:p>, got <\(node.localName)>")
+            }
+            let keptPPr = node.children.filter {
+                $0.kind == .element && $0.localName == "pPr"
+            }
+            let contentNodes: [XmlNode] = try items.map { item in
+                switch item.kind {
+                case .run:
+                    guard let run = item.run else {
+                        throw ReducerError.malformedOp(opID: entry.opID, reason: "run item missing run")
+                    }
+                    return makeRunNode(run)
+                case .marker:
+                    guard let marker = item.marker else {
+                        throw ReducerError.malformedOp(opID: entry.opID, reason: "marker item missing marker")
+                    }
+                    let el = XmlNode.element(prefix: "w", localName: marker.localName)
+                    for attr in marker.attributes {
+                        el.setAttribute(prefix: attr.prefix, localName: attr.localName, value: attr.value)
+                    }
+                    return el
+                }
+            }
+            node.children = keptPPr + contentNodes
 
         case .appendTable(let container, let payload):
             // format-alignment-engine Phase B (task 2.5): one-op table
@@ -886,6 +863,55 @@ public enum OperationReducer {
         return XmlNode.element(prefix: "w", localName: "tbl", children: tblChildren)
     }
 
+    /// Builds a `<w:r>` from a RunPayload. rPr children follow CT_RPr schema
+    /// order (rFonts, b, i, color, sz, u, vertAlign); run-level rsids stamp
+    /// on `<w:r>` (rsidR, rsidRPr); xml:space rides `<w:t>`. Shared by
+    /// setRuns and setParagraphContent (task 2.4).
+    private static func makeRunNode(_ run: RunPayload) -> XmlNode {
+        var rChildren: [XmlNode] = []
+        var rPrChildren: [XmlNode] = []
+        if run.fontAscii != nil || run.fontEastAsia != nil {
+            let rFonts = XmlNode.element(prefix: "w", localName: "rFonts")
+            if let v = run.fontAscii { rFonts.setAttribute(prefix: "w", localName: "ascii", value: v) }
+            if let v = run.fontEastAsia { rFonts.setAttribute(prefix: "w", localName: "eastAsia", value: v) }
+            rPrChildren.append(rFonts)
+        }
+        if run.bold == true { rPrChildren.append(XmlNode.element(prefix: "w", localName: "b")) }
+        if run.italic == true { rPrChildren.append(XmlNode.element(prefix: "w", localName: "i")) }
+        if let color = run.color {
+            let c = XmlNode.element(prefix: "w", localName: "color")
+            c.setAttribute(prefix: "w", localName: "val", value: color)
+            rPrChildren.append(c)
+        }
+        if let sz = run.sizeHalfPoints {
+            let n = XmlNode.element(prefix: "w", localName: "sz")
+            n.setAttribute(prefix: "w", localName: "val", value: String(sz))
+            rPrChildren.append(n)
+        }
+        if let u = run.underline {
+            let n = XmlNode.element(prefix: "w", localName: "u")
+            n.setAttribute(prefix: "w", localName: "val", value: u)
+            rPrChildren.append(n)
+        }
+        if let va = run.vertAlign {
+            let n = XmlNode.element(prefix: "w", localName: "vertAlign")
+            n.setAttribute(prefix: "w", localName: "val", value: va)
+            rPrChildren.append(n)
+        }
+        if !rPrChildren.isEmpty {
+            rChildren.append(XmlNode.element(prefix: "w", localName: "rPr", children: rPrChildren))
+        }
+        let wt = XmlNode.element(prefix: "w", localName: "t", children: [XmlNode.text(run.text)])
+        if run.preserveSpace == true {
+            wt.setAttribute(prefix: "xml", localName: "space", value: "preserve")
+        }
+        rChildren.append(wt)
+        let wr = XmlNode.element(prefix: "w", localName: "r", children: rChildren)
+        if let v = run.rsidR { wr.setAttribute(prefix: "w", localName: "rsidR", value: v) }
+        if let v = run.rsidRPr { wr.setAttribute(prefix: "w", localName: "rsidRPr", value: v) }
+        return wr
+    }
+
     /// Builds a `<w:sectPr>` from the payload. Children follow CT_SectPr
     /// schema order: headerReference*, footerReference*, pgSz, pgMar, cols.
     private static func makeSectPr(_ section: SectionPayload) -> XmlNode {
@@ -1134,6 +1160,7 @@ public enum OperationReducer {
         case .setSectionProperties(let at, _): return at.map { [$0] } ?? []
         case .appendTable(let container, _): return container.map { [$0] } ?? []
         case .setDocumentRoot: return []  // root-addressed, no ElementID
+        case .setParagraphContent(let target, _): return [target]
         }
     }
 
@@ -1202,6 +1229,7 @@ public enum OperationReducer {
         case .setSectionProperties(let at, _): return at == elementID
         case .appendTable(let container, _): return container == elementID
         case .setDocumentRoot: return false  // root-addressed, not element-addressed
+        case .setParagraphContent(let target, _): return target == elementID
         case .unknown: return false
         }
     }
