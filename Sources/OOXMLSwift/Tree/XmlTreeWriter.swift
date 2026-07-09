@@ -48,9 +48,15 @@ public enum XmlTreeWriter {
                 output.append(epilog)
             }
         } else {
-            // Synthesized tree: emit a minimal declaration then the root.
-            output.append(contentsOf: Array(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#.utf8))
-            output.append(0x0A) // newline
+            // Synthesized tree: emit the carried prolog (word-canonical-forms
+            // 3.1 — reproduces a Word CRLF prolog byte-exact) or the default
+            // `<?xml …?>\n`.
+            if let prolog = tree.synthesizedProlog {
+                output.append(contentsOf: prolog)
+            } else {
+                output.append(contentsOf: Array(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#.utf8))
+                output.append(0x0A) // newline
+            }
             try emit(tree.root, sourceBytes: tree.sourceBytes, dirtyMap: dirtyMap, into: &output)
         }
         return output

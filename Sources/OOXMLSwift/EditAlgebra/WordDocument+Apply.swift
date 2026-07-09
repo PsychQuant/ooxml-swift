@@ -175,6 +175,9 @@ extension WordDocument {
                 // word-canonical-forms task 2.1: the document root lives in
                 // word/document.xml; references no ElementID.
                 partPath = "word/document.xml"
+            } else if case .setDocumentProlog = op {
+                // word-canonical-forms task 3.1: prolog lives in word/document.xml.
+                partPath = "word/document.xml"
             } else if let single = singlePartPath {
                 partPath = single
             } else {

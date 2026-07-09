@@ -75,10 +75,11 @@ final class OperationLogTests: XCTestCase {
             .setSectionProperties(at: nil, section: SectionPayload(pageWidth: 11906)),
             .appendTable(in: nil, table: TablePayload(rows: 2, columns: 2, cells: [["a", "b"], ["c", "d"]])),
             .setDocumentRoot(attributes: [RootAttribute(prefix: "xmlns", localName: "w", value: "NS")]),
-            .setParagraphContent(target: ElementID(rawString: "w14:paraId=P1"), items: [.run(RunPayload(text: "x"))])
+            .setParagraphContent(target: ElementID(rawString: "w14:paraId=P1"), items: [.run(RunPayload(text: "x"))]),
+            .setDocumentProlog(prolog: "<?xml?>\r\n")
         ]
 
-        XCTAssertEqual(cases.count, 37, "Operation MUST have exactly 37 cases enumerated in the test")
+        XCTAssertEqual(cases.count, 38, "Operation MUST have exactly 38 cases enumerated in the test")
 
         // Pattern-match: each case maps to its expected discriminator.
         for op in cases {
@@ -100,7 +101,7 @@ final class OperationLogTests: XCTestCase {
                  .insertTab, .insertBreak, .insertNoBreakHyphen,
                  .carryPart,
                  .setSectionProperties, .appendTable, .setDocumentRoot,
-                 .setParagraphContent:
+                 .setParagraphContent, .setDocumentProlog:
                 break // matched
             }
         }
