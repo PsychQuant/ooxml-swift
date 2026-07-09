@@ -8,6 +8,56 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-09
+
+word-canonical-forms — real Word documents upgrade from the raw byte-equal
+floor to the typed DSL channel, and content slots work on them. Additive
+throughout (no breaking change). See PsychQuant/macdoc#131.
+
+### Added
+- **Form-gap measurement** (Phase 1): `ReverseExtractor.Result` gains
+  `formGaps: [FormGap]` (`partPath` / `xmlPath` / `contentClass`), empty on a
+  clean upgrade. The bail path records the XML path of the first unsupported
+  form, turning the extractor into a self-reporting work queue.
+- **`setDocumentRoot`** op + `RootAttribute {prefix, localName, value}`:
+  order-significant wholesale replacement of `<w:document>` root attributes
+  (the foreign-namespace cloud + `mc:Ignorable`). Extraction emits it first
+  when the reference root differs from the authoring default.
+- **`setParagraphContent`** op + `InlineItem` (`.run` | `.marker`) +
+  `InlineMarker {localName, attributes}`: paragraph inline content becomes an
+  ordered run|marker sequence, carrying `bookmarkStart`/`bookmarkEnd`/
+  `proofErr`/comment markers verbatim as opaque inline nodes in position.
+- **`setDocumentProlog`** op: carries Word's CRLF XML declaration
+  (`<?xml …?>\r\n`) so the prolog survives byte-equal.
+- **Word-canonical payload vocabulary** (additive `ParagraphPayload` /
+  `RunPayload` / `SectionPayload` fields): rsid family (`rsidR`/`rsidRPr`/
+  `rsidRDefault`/`rsidP`/`rsidSect`), `textId`, `xml:space="preserve"`
+  (`preserveSpace`), rFonts long-tail (`hAnsi`/`hint`/`asciiTheme`/
+  `eastAsiaTheme`/`hAnsiTheme`), `bCs`/`iCs`/`szCs`, first-line/hanging char
+  indents, paragraph-mark run properties, `docGrid`, section `type`, and the
+  numeric `pgSz` code — each stamped in the measured Word attribute order
+  behind the existing trial-rebuild byte-equal gate.
+- **Op-level content slots** (task 3.2b): the slot mechanism now covers
+  *formatted* paragraphs that ride the raw `// @op` escape (not just
+  DSL-spellable `Paragraph(id){text}`). `ScriptExporter.exportSwift(log:slots:)`
+  classifies each slot as DSL or op-level; op-level slots emit a
+  `// @slot <name> <paraId>` directive and `ScriptImporter.parse` substitutes
+  the paragraph's text-bearing op (single-run `setRuns` preferred, else
+  non-empty `appendParagraph` text) with the call-site value. Strict mode: a
+  paragraph with no unambiguous text target throws `slotDesignationFailure`.
+
+### Changed
+- Operation taxonomy 35 → 38 (`setDocumentRoot`, `setParagraphContent`,
+  `setDocumentProlog`). `XmlTree` gains `synthesizedProlog` for the CRLF
+  declaration branch.
+
+### Notes
+- `90_template_ja.docx` (real JPA template) document.xml now upgrades to the
+  DSL channel with per-part coverage 100% and `--slot` works end-to-end on it.
+  thesis-fixture stays on the raw channel (out-of-scope structures) — no
+  regression. Payload struct layouts changed: run `swift package clean` in
+  downstream consumers after bumping.
+
 ## [1.3.0] - 2026-07-08
 
 format-alignment-engine Phase D — named content slots + gated visual-diff
