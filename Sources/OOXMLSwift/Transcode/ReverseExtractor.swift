@@ -2,6 +2,9 @@
 // format-alignment-engine Phase B tasks 2.2/2.3 — typed reverse extraction
 // with the byte-equal upgrade rule (`ooxml-script-transcode`, «Reverse
 // extraction covers the five format layers»; Decision 3).
+// word-canonical-forms Phase 1 task 1.1 — form-gap measurement: every bail
+// records the XML path to the first offending node/attribute so the report
+// is the work queue for vocabulary extension (Decision 1).
 //
 // The upgrade rule: candidate typed ops are extracted from a part, applied
 // to an empty authoring document, and re-serialized; the part leaves the raw
@@ -13,11 +16,29 @@
 // Extraction is deliberately narrow: it recognizes exactly the shapes the
 // OperationReducer stamps (makeParagraph / setRuns / setSectionProperties).
 // Anything else — unknown elements, extra attributes, foreign whitespace —
-// bails to raw. The final authority is always the byte comparison.
+// bails to raw, recording a FormGap. The final authority is always the byte
+// comparison.
 
 import Foundation
 
 public enum ReverseExtractor {
+
+    /// A form the extraction/rebuild could not represent, located for the
+    /// measurement report (`ooxml-script-transcode`, «Form-gap measurement»;
+    /// Decision 1). `xmlPath` is the breadcrumb to the first offending node
+    /// or attribute for an extraction bail, or `byte@<offset> src=… out=…`
+    /// for a trial-rebuild byte-mismatch. `contentClass` is the bail tag.
+    public struct FormGap: Equatable {
+        public let partPath: String
+        public let xmlPath: String
+        public let contentClass: String
+
+        public init(partPath: String, xmlPath: String, contentClass: String) {
+            self.partPath = partPath
+            self.xmlPath = xmlPath
+            self.contentClass = contentClass
+        }
+    }
 
     /// Result of a full-package reverse with the upgrade rule applied.
     public struct Result {
@@ -32,6 +53,9 @@ public enum ReverseExtractor {
         /// "records which content classes remain on the raw channel").
         /// Values are class tags like "table", "hyperlink", "byte-mismatch".
         public let rawReasons: [String: String]
+        /// Located form-gaps (empty for parts that upgraded). The measurement
+        /// report / work queue for vocabulary extension.
+        public let formGaps: [FormGap]
     }
 
     /// Full-package reverse: attempts the document.xml DSL upgrade, carries
@@ -41,14 +65,17 @@ public enum ReverseExtractor {
         var log = OperationLog()
         var dslParts: Set<String> = []
         var rawReasons: [String: String] = [:]
+        var formGaps: [FormGap] = []
 
         var documentOps: [Operation]? = nil
         if let documentXML = parts["word/document.xml"] {
             switch documentUpgrade(documentXML: documentXML) {
             case .upgraded(let ops):
                 documentOps = ops
-            case .raw(let reason):
+            case .raw(let reason, let xmlPath):
                 rawReasons["word/document.xml"] = reason
+                formGaps.append(FormGap(partPath: "word/document.xml",
+                                        xmlPath: xmlPath, contentClass: reason))
             }
         }
 
@@ -68,75 +95,102 @@ public enum ReverseExtractor {
             }
             dslParts.insert("word/document.xml")
         }
-        return Result(log: log, dslParts: dslParts, rawReasons: rawReasons)
+        return Result(log: log, dslParts: dslParts, rawReasons: rawReasons, formGaps: formGaps)
     }
 
     // MARK: - document.xml typed extraction (trial + byte-compare)
 
     enum Upgrade {
         case upgraded([Operation])
-        case raw(reason: String)
+        case raw(reason: String, xmlPath: String)
     }
 
     /// Attempts typed extraction of a document.xml. `.upgraded` carries the
     /// ops when the trial rebuild is byte-equal to the source; `.raw` carries
-    /// the content-class tag that blocked the upgrade.
+    /// the content-class tag and located XML path that blocked the upgrade.
     static func documentUpgrade(documentXML: Data) -> Upgrade {
         let ops: [Operation]
         do {
             ops = try extractDocumentOps(documentXML: documentXML)
         } catch let bail as Unsupported {
-            return .raw(reason: bail.contentClass)
+            return .raw(reason: bail.contentClass, xmlPath: bail.xmlPath)
         } catch {
-            return .raw(reason: "parse-error")
+            return .raw(reason: "parse-error", xmlPath: "w:document")
         }
         // Trial rebuild through the same reducer + serializer the script
         // execution path uses — the byte comparison is the upgrade gate.
         var doc = WordDocument.emptyAuthoringDocument()
         guard (try? doc.apply(operations: ops)) != nil,
               let tree = doc.xmlTrees["word/document.xml"],
-              let rebuilt = try? XmlTreeWriter.serialize(tree),
-              rebuilt == documentXML else {
-            return .raw(reason: "byte-mismatch")
+              let rebuilt = try? XmlTreeWriter.serialize(tree) else {
+            return .raw(reason: "rebuild-error", xmlPath: "w:document")
+        }
+        if rebuilt != documentXML {
+            return .raw(reason: "byte-mismatch",
+                        xmlPath: byteMismatchLocator(source: documentXML, rebuilt: rebuilt))
         }
         return .upgraded(ops)
     }
 
-    /// Extraction bail-out carrying the content class that cannot ride the
-    /// typed channel (task 2.5 "class attribution").
+    /// Locates the first byte divergence between source and rebuilt, with a
+    /// small context window each side so the differing form is identifiable.
+    static func byteMismatchLocator(source: Data, rebuilt: Data) -> String {
+        let a = [UInt8](source)
+        let b = [UInt8](rebuilt)
+        let n = min(a.count, b.count)
+        var i = 0
+        while i < n, a[i] == b[i] { i += 1 }
+        func window(_ bytes: [UInt8], _ at: Int) -> String {
+            let lo = max(0, at - 24)
+            let hi = min(bytes.count, at + 24)
+            return String(decoding: bytes[lo..<hi], as: UTF8.self)
+        }
+        return "byte@\(i) src=…\(window(a, i))… out=…\(window(b, i))…"
+    }
+
+    /// Extraction bail-out carrying the content class + located XML path
+    /// (word-canonical-forms task 1.1). Throw sites thread a `path` breadcrumb
+    /// so the report names exactly where the unsupported form sits.
     private struct Unsupported: Error {
         let contentClass: String
-        init(_ contentClass: String = "unsupported-form") {
+        let xmlPath: String
+        init(_ contentClass: String = "unsupported-form", _ xmlPath: String = "w:document") {
             self.contentClass = contentClass
+            self.xmlPath = xmlPath
         }
     }
 
     /// Walks the document tree and derives typed ops. Throws `Unsupported`
-    /// on any shape outside the reducer's stamping vocabulary.
+    /// (with a located path) on any shape outside the reducer's vocabulary.
     private static func extractDocumentOps(documentXML: Data) throws -> [Operation] {
         let tree = try XmlTreeReader.parse(documentXML)
         let root = tree.root
-        guard root.localName == "document" else { throw Unsupported() }
-        let elementChildren = try elementsOnly(root)
+        guard root.localName == "document" else {
+            throw Unsupported("root-element", "w:\(root.localName)")
+        }
+        let elementChildren = try elementsOnly(root, path: "w:document")
         guard elementChildren.count == 1, elementChildren[0].localName == "body" else {
-            throw Unsupported()
+            throw Unsupported("root-shape", "w:document")
         }
         let body = elementChildren[0]
 
         var ops: [Operation] = []
-        let bodyChildren = try elementsOnly(body)
+        let bodyChildren = try elementsOnly(body, path: "w:document/w:body")
         for (index, child) in bodyChildren.enumerated() {
+            let cpath = "w:document/w:body/w:\(child.localName)[\(index)]"
             switch child.localName {
             case "p":
-                ops.append(contentsOf: try extractParagraph(child))
+                ops.append(contentsOf: try extractParagraph(child, path: cpath))
             case "tbl":
-                ops.append(.appendTable(in: nil, table: try extractTable(child)))
+                ops.append(.appendTable(in: nil, table: try extractTable(child, path: cpath)))
             case "sectPr":
                 // Trailing body sectPr only (the reducer stamps it last).
-                guard index == bodyChildren.count - 1 else { throw Unsupported("sectPr-position") }
-                ops.append(.setSectionProperties(at: nil, section: try extractSectPr(child)))
+                guard index == bodyChildren.count - 1 else {
+                    throw Unsupported("sectPr-position", cpath)
+                }
+                ops.append(.setSectionProperties(at: nil, section: try extractSectPr(child, path: cpath)))
             default:
-                throw Unsupported(child.localName)
+                throw Unsupported(child.localName, cpath)
             }
         }
         return ops
@@ -148,54 +202,56 @@ public enum ReverseExtractor {
     /// bare gridCols, then rows of cells each holding a single plain
     /// paragraph. Any richer table form (tblPr, merged cells, styled cell
     /// paragraphs) bails with the "table" class tag → raw channel.
-    private static func extractTable(_ tbl: XmlNode) throws -> TablePayload {
-        guard tbl.attributes.isEmpty else { throw Unsupported("table") }
-        let children = try elementsOnly(tbl)
+    private static func extractTable(_ tbl: XmlNode, path: String) throws -> TablePayload {
+        guard tbl.attributes.isEmpty else { throw Unsupported("table", "\(path)/@attrs") }
+        let children = try elementsOnly(tbl, path: path)
         guard let grid = children.first, grid.localName == "tblGrid" else {
-            throw Unsupported("table")
+            throw Unsupported("table", "\(path)/w:tblGrid")
         }
-        guard grid.attributes.isEmpty else { throw Unsupported("table") }
-        let gridCols = try elementsOnly(grid)
+        guard grid.attributes.isEmpty else { throw Unsupported("table", "\(path)/w:tblGrid/@attrs") }
+        let gridCols = try elementsOnly(grid, path: "\(path)/w:tblGrid")
         let columns = gridCols.count
         guard columns > 0, gridCols.allSatisfy({
             $0.localName == "gridCol" && $0.attributes.isEmpty && $0.children.isEmpty
         }) else {
-            throw Unsupported("table")
+            throw Unsupported("table", "\(path)/w:tblGrid/w:gridCol")
         }
 
         var cells: [[String]] = []
-        for tr in children.dropFirst() {
-            guard tr.localName == "tr", tr.attributes.isEmpty else { throw Unsupported("table") }
-            let tcs = try elementsOnly(tr)
-            guard tcs.count == columns else { throw Unsupported("table") }
+        for (ri, tr) in children.dropFirst().enumerated() {
+            let rpath = "\(path)/w:tr[\(ri)]"
+            guard tr.localName == "tr", tr.attributes.isEmpty else { throw Unsupported("table", rpath) }
+            let tcs = try elementsOnly(tr, path: rpath)
+            guard tcs.count == columns else { throw Unsupported("table", "\(rpath)/w:tc") }
             var row: [String] = []
-            for tc in tcs {
-                guard tc.localName == "tc", tc.attributes.isEmpty else { throw Unsupported("table") }
-                let tcChildren = try elementsOnly(tc)
+            for (ci, tc) in tcs.enumerated() {
+                let cpath = "\(rpath)/w:tc[\(ci)]"
+                guard tc.localName == "tc", tc.attributes.isEmpty else { throw Unsupported("table", cpath) }
+                let tcChildren = try elementsOnly(tc, path: cpath)
                 guard tcChildren.count == 1, tcChildren[0].localName == "p" else {
-                    throw Unsupported("table")
+                    throw Unsupported("table", "\(cpath)/w:p")
                 }
-                row.append(try plainCellText(tcChildren[0]))
+                row.append(try plainCellText(tcChildren[0], path: "\(cpath)/w:p"))
             }
             cells.append(row)
         }
-        guard !cells.isEmpty else { throw Unsupported("table") }
+        guard !cells.isEmpty else { throw Unsupported("table", "\(path)/w:tr") }
         return TablePayload(rows: cells.count, columns: columns, cells: cells)
     }
 
     /// Cell paragraph in `makeParagraph(text:)`'s exact shape:
     /// `<w:p><w:r><w:t>text</w:t></w:r></w:p>` — no attributes, no pPr, no rPr.
-    private static func plainCellText(_ p: XmlNode) throws -> String {
-        guard p.attributes.isEmpty else { throw Unsupported("table") }
-        let children = try elementsOnly(p)
+    private static func plainCellText(_ p: XmlNode, path: String) throws -> String {
+        guard p.attributes.isEmpty else { throw Unsupported("table", "\(path)/@attrs") }
+        let children = try elementsOnly(p, path: path)
         guard children.count == 1, children[0].localName == "r",
               children[0].attributes.isEmpty else {
-            throw Unsupported("table")
+            throw Unsupported("table", "\(path)/w:r")
         }
-        let rChildren = try elementsOnly(children[0])
+        let rChildren = try elementsOnly(children[0], path: "\(path)/w:r")
         guard rChildren.count == 1, rChildren[0].localName == "t",
               rChildren[0].attributes.isEmpty else {
-            throw Unsupported("table")
+            throw Unsupported("table", "\(path)/w:r/w:t")
         }
         return rChildren[0].children
             .compactMap { $0.kind == .text ? $0.textContent : nil }
@@ -206,10 +262,12 @@ public enum ReverseExtractor {
     /// content (text, comments, PIs). The reducer's stamping emits compact
     /// element-only structure, so even whitespace-only text between elements
     /// is a foreign form (pretty-printed source) — bail before the trial.
-    private static func elementsOnly(_ node: XmlNode) throws -> [XmlNode] {
+    private static func elementsOnly(_ node: XmlNode, path: String) throws -> [XmlNode] {
         var out: [XmlNode] = []
         for child in node.children {
-            guard child.kind == .element else { throw Unsupported() }
+            guard child.kind == .element else {
+                throw Unsupported("non-element-content", "\(path)/#\(child.kind)")
+            }
             out.append(child)
         }
         return out
@@ -217,14 +275,19 @@ public enum ReverseExtractor {
 
     // MARK: Paragraph extraction (tasks 2.2 + 2.3)
 
-    private static func extractParagraph(_ p: XmlNode) throws -> [Operation] {
+    private static func extractParagraph(_ p: XmlNode, path: String) throws -> [Operation] {
         // Attributes: exactly w14:paraId (needed as the stable setRuns
         // target across script round-trips) and nothing else.
         guard p.attributes.count == 1,
               let paraIdAttr = p.attributes.first,
               paraIdAttr.prefix == "w14", paraIdAttr.localName == "paraId",
               !paraIdAttr.value.isEmpty else {
-            throw Unsupported()
+            // Name the first attribute that isn't the expected w14:paraId so
+            // the report points at the exact offending token (e.g. w:rsidR).
+            let offending = p.attributes.first {
+                !($0.prefix == "w14" && $0.localName == "paraId")
+            }
+            throw Unsupported("paragraph-attrs", "\(path)/\(attrToken(offending))")
         }
         let paraId = paraIdAttr.value
 
@@ -232,10 +295,10 @@ public enum ReverseExtractor {
         var runs: [RunPayload] = []
         var sectionOp: Operation? = nil
 
-        let children = try elementsOnly(p)
+        let children = try elementsOnly(p, path: path)
         var idx = 0
         if idx < children.count, children[idx].localName == "pPr" {
-            let section = try extractPPr(children[idx], into: &payload)
+            let section = try extractPPr(children[idx], into: &payload, path: "\(path)/w:pPr")
             if let section {
                 sectionOp = .setSectionProperties(
                     at: ElementID(rawString: "w14:paraId=\(paraId)"), section: section)
@@ -246,9 +309,9 @@ public enum ReverseExtractor {
             // Non-run inline content (hyperlink, bookmarkStart, …) tags the
             // bail with its element name for class attribution.
             guard children[idx].localName == "r" else {
-                throw Unsupported(children[idx].localName)
+                throw Unsupported(children[idx].localName, "\(path)/w:\(children[idx].localName)")
             }
-            runs.append(try extractRun(children[idx]))
+            runs.append(try extractRun(children[idx], path: "\(path)/w:r[\(idx)]"))
             idx += 1
         }
 
@@ -275,70 +338,75 @@ public enum ReverseExtractor {
     /// trailing mid-body `<w:sectPr>` is present (task 2.4). Order and
     /// vocabulary must be exactly what `makePPrChildren` stamps.
     private static func extractPPr(_ pPr: XmlNode,
-                                   into payload: inout ParagraphPayload) throws -> SectionPayload? {
-        guard pPr.attributes.isEmpty else { throw Unsupported() }
+                                   into payload: inout ParagraphPayload,
+                                   path: String) throws -> SectionPayload? {
+        guard pPr.attributes.isEmpty else { throw Unsupported("pPr-attrs", "\(path)/@attrs") }
         var section: SectionPayload? = nil
-        for child in try elementsOnly(pPr) {
-            guard section == nil else { throw Unsupported() }  // sectPr must be last
+        for child in try elementsOnly(pPr, path: path) {
+            guard section == nil else {
+                throw Unsupported("pPr-after-sectPr", "\(path)/w:\(child.localName)")
+            }
+            let cpath = "\(path)/w:\(child.localName)"
             switch child.localName {
             case "pStyle":
-                payload.styleId = try singleVal(child)
+                payload.styleId = try singleVal(child, path: cpath)
             case "numPr":
-                for numChild in try elementsOnly(child) {
+                for numChild in try elementsOnly(child, path: cpath) {
                     switch numChild.localName {
-                    case "ilvl": payload.numLevel = try intVal(numChild)
-                    case "numId": payload.numId = try intVal(numChild)
-                    default: throw Unsupported()
+                    case "ilvl": payload.numLevel = try intVal(numChild, path: "\(cpath)/w:ilvl")
+                    case "numId": payload.numId = try intVal(numChild, path: "\(cpath)/w:numId")
+                    default: throw Unsupported("numPr-element", "\(cpath)/w:\(numChild.localName)")
                     }
                 }
             case "spacing":
                 for attr in child.attributes {
-                    guard attr.prefix == "w" else { throw Unsupported() }
+                    guard attr.prefix == "w" else { throw Unsupported("spacing-attr", "\(cpath)/\(attrToken(attr))") }
                     switch attr.localName {
-                    case "before": payload.spacingBefore = try int(attr.value)
-                    case "after": payload.spacingAfter = try int(attr.value)
-                    case "line": payload.spacingLine = try int(attr.value)
+                    case "before": payload.spacingBefore = try int(attr.value, path: cpath)
+                    case "after": payload.spacingAfter = try int(attr.value, path: cpath)
+                    case "line": payload.spacingLine = try int(attr.value, path: cpath)
                     case "lineRule": payload.spacingLineRule = attr.value
-                    default: throw Unsupported()
+                    default: throw Unsupported("spacing-attr", "\(cpath)/\(attrToken(attr))")
                     }
                 }
-                guard child.children.isEmpty else { throw Unsupported() }
+                guard child.children.isEmpty else { throw Unsupported("spacing-children", cpath) }
             case "ind":
                 for attr in child.attributes {
-                    guard attr.prefix == "w" else { throw Unsupported() }
+                    guard attr.prefix == "w" else { throw Unsupported("ind-attr", "\(cpath)/\(attrToken(attr))") }
                     switch attr.localName {
-                    case "left": payload.indentLeft = try int(attr.value)
-                    case "right": payload.indentRight = try int(attr.value)
-                    case "firstLine": payload.indentFirstLine = try int(attr.value)
-                    case "hanging": payload.indentHanging = try int(attr.value)
-                    default: throw Unsupported()
+                    case "left": payload.indentLeft = try int(attr.value, path: cpath)
+                    case "right": payload.indentRight = try int(attr.value, path: cpath)
+                    case "firstLine": payload.indentFirstLine = try int(attr.value, path: cpath)
+                    case "hanging": payload.indentHanging = try int(attr.value, path: cpath)
+                    default: throw Unsupported("ind-attr", "\(cpath)/\(attrToken(attr))")
                     }
                 }
-                guard child.children.isEmpty else { throw Unsupported() }
+                guard child.children.isEmpty else { throw Unsupported("ind-children", cpath) }
             case "jc":
-                payload.alignment = try singleVal(child)
+                payload.alignment = try singleVal(child, path: cpath)
             case "sectPr":
-                section = try extractSectPr(child)
+                section = try extractSectPr(child, path: cpath)
             default:
-                throw Unsupported()
+                throw Unsupported("pPr-element", cpath)
             }
         }
         return section
     }
 
-    private static func extractRun(_ r: XmlNode) throws -> RunPayload {
-        guard r.attributes.isEmpty else { throw Unsupported() }
+    private static func extractRun(_ r: XmlNode, path: String) throws -> RunPayload {
+        guard r.attributes.isEmpty else { throw Unsupported("run-attrs", "\(path)/@attrs") }
         var run = RunPayload(text: "")
-        let children = try elementsOnly(r)
+        let children = try elementsOnly(r, path: path)
         var idx = 0
         if idx < children.count, children[idx].localName == "rPr" {
-            try extractRPr(children[idx], into: &run)
+            try extractRPr(children[idx], into: &run, path: "\(path)/w:rPr")
             idx += 1
         }
         guard idx < children.count, children[idx].localName == "t",
               children[idx].attributes.isEmpty,
               idx == children.count - 1 else {
-            throw Unsupported()
+            let where_ = idx < children.count ? "w:\(children[idx].localName)" : "w:t(missing)"
+            throw Unsupported("run-body", "\(path)/\(where_)")
         }
         run.text = children[idx].children
             .compactMap { $0.kind == .text ? $0.textContent : nil }
@@ -348,36 +416,37 @@ public enum ReverseExtractor {
 
     /// rPr vocabulary and order must be exactly what setRuns stamps:
     /// rFonts, b, i, color, sz, u, vertAlign.
-    private static func extractRPr(_ rPr: XmlNode, into run: inout RunPayload) throws {
-        guard rPr.attributes.isEmpty else { throw Unsupported() }
-        for child in try elementsOnly(rPr) {
+    private static func extractRPr(_ rPr: XmlNode, into run: inout RunPayload, path: String) throws {
+        guard rPr.attributes.isEmpty else { throw Unsupported("rPr-attrs", "\(path)/@attrs") }
+        for child in try elementsOnly(rPr, path: path) {
+            let cpath = "\(path)/w:\(child.localName)"
             switch child.localName {
             case "rFonts":
                 for attr in child.attributes {
-                    guard attr.prefix == "w" else { throw Unsupported() }
+                    guard attr.prefix == "w" else { throw Unsupported("rFonts-attr", "\(cpath)/\(attrToken(attr))") }
                     switch attr.localName {
                     case "ascii": run.fontAscii = attr.value
                     case "eastAsia": run.fontEastAsia = attr.value
-                    default: throw Unsupported()
+                    default: throw Unsupported("rFonts-attr", "\(cpath)/\(attrToken(attr))")
                     }
                 }
-                guard child.children.isEmpty else { throw Unsupported() }
+                guard child.children.isEmpty else { throw Unsupported("rFonts-children", cpath) }
             case "b":
-                guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported() }
+                guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported("b-shape", cpath) }
                 run.bold = true
             case "i":
-                guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported() }
+                guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported("i-shape", cpath) }
                 run.italic = true
             case "color":
-                run.color = try singleVal(child)
+                run.color = try singleVal(child, path: cpath)
             case "sz":
-                run.sizeHalfPoints = try intVal(child)
+                run.sizeHalfPoints = try intVal(child, path: cpath)
             case "u":
-                run.underline = try singleVal(child)
+                run.underline = try singleVal(child, path: cpath)
             case "vertAlign":
-                run.vertAlign = try singleVal(child)
+                run.vertAlign = try singleVal(child, path: cpath)
             default:
-                throw Unsupported()
+                throw Unsupported("rPr-element", cpath)
             }
         }
     }
@@ -386,10 +455,11 @@ public enum ReverseExtractor {
 
     /// sectPr vocabulary and order must be exactly what makeSectPr stamps:
     /// headerReference*, footerReference*, pgSz, pgMar, cols.
-    private static func extractSectPr(_ sectPr: XmlNode) throws -> SectionPayload {
-        guard sectPr.attributes.isEmpty else { throw Unsupported() }
+    private static func extractSectPr(_ sectPr: XmlNode, path: String) throws -> SectionPayload {
+        guard sectPr.attributes.isEmpty else { throw Unsupported("sectPr-attrs", "\(path)/@attrs") }
         var section = SectionPayload()
-        for child in try elementsOnly(sectPr) {
+        for child in try elementsOnly(sectPr, path: path) {
+            let cpath = "\(path)/w:\(child.localName)"
             switch child.localName {
             case "headerReference", "footerReference":
                 var type: String? = nil
@@ -397,9 +467,11 @@ public enum ReverseExtractor {
                 for attr in child.attributes {
                     if attr.prefix == "w", attr.localName == "type" { type = attr.value }
                     else if attr.prefix == "r", attr.localName == "id" { rId = attr.value }
-                    else { throw Unsupported() }
+                    else { throw Unsupported("hf-ref-attr", "\(cpath)/\(attrToken(attr))") }
                 }
-                guard let t = type, let id = rId, child.children.isEmpty else { throw Unsupported() }
+                guard let t = type, let id = rId, child.children.isEmpty else {
+                    throw Unsupported("hf-ref-shape", cpath)
+                }
                 let ref = HeaderFooterReference(type: t, relationshipId: id)
                 if child.localName == "headerReference" {
                     section.headerReferences = (section.headerReferences ?? []) + [ref]
@@ -408,42 +480,42 @@ public enum ReverseExtractor {
                 }
             case "pgSz":
                 for attr in child.attributes {
-                    guard attr.prefix == "w" else { throw Unsupported() }
+                    guard attr.prefix == "w" else { throw Unsupported("pgSz-attr", "\(cpath)/\(attrToken(attr))") }
                     switch attr.localName {
-                    case "w": section.pageWidth = try int(attr.value)
-                    case "h": section.pageHeight = try int(attr.value)
+                    case "w": section.pageWidth = try int(attr.value, path: cpath)
+                    case "h": section.pageHeight = try int(attr.value, path: cpath)
                     case "orient": section.orientation = attr.value
-                    default: throw Unsupported()
+                    default: throw Unsupported("pgSz-attr", "\(cpath)/\(attrToken(attr))")
                     }
                 }
-                guard child.children.isEmpty else { throw Unsupported() }
+                guard child.children.isEmpty else { throw Unsupported("pgSz-children", cpath) }
             case "pgMar":
                 for attr in child.attributes {
-                    guard attr.prefix == "w" else { throw Unsupported() }
+                    guard attr.prefix == "w" else { throw Unsupported("pgMar-attr", "\(cpath)/\(attrToken(attr))") }
                     switch attr.localName {
-                    case "top": section.marginTop = try int(attr.value)
-                    case "right": section.marginRight = try int(attr.value)
-                    case "bottom": section.marginBottom = try int(attr.value)
-                    case "left": section.marginLeft = try int(attr.value)
-                    case "header": section.marginHeader = try int(attr.value)
-                    case "footer": section.marginFooter = try int(attr.value)
-                    case "gutter": section.marginGutter = try int(attr.value)
-                    default: throw Unsupported()
+                    case "top": section.marginTop = try int(attr.value, path: cpath)
+                    case "right": section.marginRight = try int(attr.value, path: cpath)
+                    case "bottom": section.marginBottom = try int(attr.value, path: cpath)
+                    case "left": section.marginLeft = try int(attr.value, path: cpath)
+                    case "header": section.marginHeader = try int(attr.value, path: cpath)
+                    case "footer": section.marginFooter = try int(attr.value, path: cpath)
+                    case "gutter": section.marginGutter = try int(attr.value, path: cpath)
+                    default: throw Unsupported("pgMar-attr", "\(cpath)/\(attrToken(attr))")
                     }
                 }
-                guard child.children.isEmpty else { throw Unsupported() }
+                guard child.children.isEmpty else { throw Unsupported("pgMar-children", cpath) }
             case "cols":
                 for attr in child.attributes {
-                    guard attr.prefix == "w" else { throw Unsupported() }
+                    guard attr.prefix == "w" else { throw Unsupported("cols-attr", "\(cpath)/\(attrToken(attr))") }
                     switch attr.localName {
-                    case "num": section.columnCount = try int(attr.value)
-                    case "space": section.columnSpace = try int(attr.value)
-                    default: throw Unsupported()
+                    case "num": section.columnCount = try int(attr.value, path: cpath)
+                    case "space": section.columnSpace = try int(attr.value, path: cpath)
+                    default: throw Unsupported("cols-attr", "\(cpath)/\(attrToken(attr))")
                     }
                 }
-                guard child.children.isEmpty else { throw Unsupported() }
+                guard child.children.isEmpty else { throw Unsupported("cols-children", cpath) }
             default:
-                throw Unsupported()
+                throw Unsupported("sectPr-element", cpath)
             }
         }
         return section
@@ -451,23 +523,30 @@ public enum ReverseExtractor {
 
     // MARK: Small helpers
 
+    /// Renders an attribute as a `@prefix:localName` token for gap paths.
+    private static func attrToken(_ attr: XmlAttribute?) -> String {
+        guard let attr else { return "@attrs" }
+        let prefix = attr.prefix.map { "\($0):" } ?? ""
+        return "@\(prefix)\(attr.localName)"
+    }
+
     /// The sole `w:val` attribute of an empty element.
-    private static func singleVal(_ node: XmlNode) throws -> String {
+    private static func singleVal(_ node: XmlNode, path: String) throws -> String {
         guard node.children.isEmpty,
               node.attributes.count == 1,
               let attr = node.attributes.first,
               attr.prefix == "w", attr.localName == "val" else {
-            throw Unsupported()
+            throw Unsupported("val-attr-shape", path)
         }
         return attr.value
     }
 
-    private static func intVal(_ node: XmlNode) throws -> Int {
-        try int(try singleVal(node))
+    private static func intVal(_ node: XmlNode, path: String) throws -> Int {
+        try int(try singleVal(node, path: path), path: path)
     }
 
-    private static func int(_ s: String) throws -> Int {
-        guard let v = Int(s) else { throw Unsupported() }
+    private static func int(_ s: String, path: String) throws -> Int {
+        guard let v = Int(s) else { throw Unsupported("non-integer", path) }
         return v
     }
 }
