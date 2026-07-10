@@ -34,7 +34,11 @@ let package = Package(
             // when Phase B activates. See `mdocx-fixture-corpus` change
             // design.md Decision 5.
             exclude: [
-                "Fixtures/mdocx"
+                "Fixtures/mdocx",
+                // Committed PDF fixtures for RenderGeometryTests
+                // (render-effect-semantics task 1.1) — located via #filePath,
+                // not Bundle resources.
+                "Fixtures/render"
             ]
         ),
         .testTarget(

@@ -7,6 +7,7 @@
 //   MACDOC_TEMPLATE_DIR=/path/to/private/docx swift test --filter RealTemplateUpgradeTests
 
 import XCTest
+import PDFKit
 @testable import OOXMLSwift
 
 final class RealTemplateUpgradeTests: XCTestCase {
@@ -112,6 +113,114 @@ final class RealTemplateUpgradeTests: XCTestCase {
             XCTAssertEqual(rebuilt[path], bytes,
                            "non-slot XML part \(path) must stay byte-equal")
         }
+    }
+
+    /// (d) render-effect-semantics task 3.1 — render-level acceptance for
+    /// slotted rebuilds (`docx-render-semantics`, «Slotted rebuilds carry
+    /// render-level acceptance»; design Decision 7). DUAL-gated: needs both
+    /// `RUN_WORD_INTEGRATION=1` (live Word render) and `MACDOC_TEMPLATE_DIR`
+    /// (real template) — each absence skips loudly naming the missing gate.
+    /// Executing the slotted script with sentinel content of comparable
+    /// length must preserve rendered structure: equal page count, equal page
+    /// box on every page, substituted-page median line pitch within Decision
+    /// 5 tolerance of the reference page; every untouched page stays under
+    /// the pixel-ratio threshold.
+    func testRealTemplateSlotSubstitutionRendersEquivalently() throws {
+        try VisualDiffHarness.requireGate()
+        let url = try TemplateFixtureGate.requireTemplate(TemplateFixtureGate.baselineTemplateName)
+        let reference = try RawPartChannel.readAllParts(from: url)
+        let log = try ReverseExtractor.reverse(parts: reference).log
+
+        // Same slot selection as scenario (b): first op-level-substitutable
+        // formatted paragraph.
+        var slotParaId: String?
+        for entry in log.entries {
+            guard case .setRuns(let target, let runs) = entry.op,
+                  runs.count == 1, !runs[0].text.isEmpty,
+                  target.raw.hasPrefix("w14:paraId=") else { continue }
+            let pid = String(target.raw.dropFirst("w14:paraId=".count))
+            if ScriptExporter.opLevelSlotDefault(log: log, paraId: pid) != nil {
+                slotParaId = pid
+                break
+            }
+        }
+        let paraId = try XCTUnwrap(slotParaId, "expected a slottable paragraph in the JPA template")
+        let original = try XCTUnwrap(ScriptExporter.opLevelSlotDefault(log: log, paraId: paraId))
+
+        // Sentinel of comparable length: distinctive prefix, padded to the
+        // original's character count so line-fill stays comparable.
+        let prefix = "差込検証"
+        let sentinel = original.count > prefix.count
+            ? prefix + String(repeating: "査", count: original.count - prefix.count)
+            : prefix
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "slot0", paraId: paraId),
+        ])
+        script = script.replacingOccurrences(
+            of: "    slot0: \(ScriptExporter.quote(original))",
+            with: "    slot0: \(ScriptExporter.quote(sentinel))")
+
+        // Execute → rebuilt docx on disk; render both through Word. All I/O
+        // rides the TCC-granted scratch dir (the reference docx is copied in
+        // so Word never touches an unauthorized path).
+        let scratch = try RenderProbeHarness.scratchDir()
+        let refDocx = scratch.appendingPathComponent("slot-render-ref.docx")
+        let rebuiltDocx = scratch.appendingPathComponent("slot-render-new.docx")
+        let refPDFURL = scratch.appendingPathComponent("slot-render-ref.pdf")
+        let rebuiltPDFURL = scratch.appendingPathComponent("slot-render-new.pdf")
+        for f in [refDocx, rebuiltDocx, refPDFURL, rebuiltPDFURL] {
+            try? FileManager.default.removeItem(at: f)
+        }
+        try FileManager.default.copyItem(at: url, to: refDocx)
+        let parsed = try ScriptImporter.parse(source: script)
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.apply(operations: parsed.entries.map(\.op))
+        try doc.writeAuthoringPackage(to: rebuiltDocx)
+
+        try VisualDiffHarness.exportPDF(docx: refDocx, to: refPDFURL)
+        try VisualDiffHarness.exportPDF(docx: rebuiltDocx, to: rebuiltPDFURL)
+        let refPDF = try XCTUnwrap(PDFDocument(url: refPDFURL))
+        let newPDF = try XCTUnwrap(PDFDocument(url: rebuiltPDFURL))
+
+        // Structure: page count + page box equal on every page.
+        XCTAssertEqual(RenderGeometry.pageCount(pdf: refPDF),
+                       RenderGeometry.pageCount(pdf: newPDF),
+                       "new slot content must not change the page count")
+        for page in 0..<RenderGeometry.pageCount(pdf: refPDF) {
+            XCTAssertEqual(RenderGeometry.pageBox(pdf: refPDF, page: page),
+                           RenderGeometry.pageBox(pdf: newPDF, page: page),
+                           "page box must be unchanged on page \(page + 1)")
+        }
+
+        // Locate the substituted page via the sentinel prefix.
+        var substitutedPage: Int?
+        for page in 0..<RenderGeometry.pageCount(pdf: newPDF)
+        where (newPDF.page(at: page)?.string ?? "").contains(prefix) {
+            substitutedPage = page
+            break
+        }
+        let slotPage = try XCTUnwrap(substitutedPage,
+                                     "sentinel text must appear in the rendered rebuild")
+
+        // Substituted page: line pitch within Decision 5 tolerance of the
+        // reference page (nil pitch on a text page is a failure, not a skip).
+        if let refPitch = RenderGeometry.medianLinePitch(pdf: refPDF, page: slotPage) {
+            let newPitch = try XCTUnwrap(
+                RenderGeometry.medianLinePitch(pdf: newPDF, page: slotPage),
+                "substituted page must keep measurable text lines")
+            XCTAssertEqual(newPitch, refPitch,
+                           accuracy: RenderProbeHarness.tolerance(forPredicted: refPitch),
+                           "substituted-page line pitch must stay within tolerance")
+        }
+
+        // Untouched pages: pixel-equal within the harness threshold.
+        let ratios = try VisualDiffHarness.pageDiffRatios(refPDFURL, rebuiltPDFURL)
+        for (page, ratio) in ratios.enumerated() where page != slotPage {
+            XCTAssertLessThanOrEqual(ratio, VisualDiffHarness.threshold,
+                "untouched page \(page + 1) drifted (ratio \(ratio))")
+        }
+        print("[render-effect evidence] slot render acceptance: \(ratios.count) pages, "
+              + "substituted page \(slotPage + 1), ratios \(ratios)")
     }
 
     /// (c) thesis-fixture no-regress: its out-of-scope structures keep
