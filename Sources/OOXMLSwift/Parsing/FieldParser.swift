@@ -133,7 +133,8 @@ public enum FieldParser {
     /// Phase-2 walker: detect SEQ fields emitted as 5 separate `<w:r>` runs
     /// (begin / instrText / separate / cachedValue / end). State machine
     /// resets on out-of-order patterns to be robust against malformed
-    /// paragraphs.
+    /// paragraphs. A truncated span that reaches paragraph end without a
+    /// closing `fldCharType="end"` is discarded and emits no `ParsedField`.
     private static func parseFiveRunSpan(paragraph: Paragraph) -> [ParsedField] {
         // State of an in-progress field span as we walk the runs.
         struct InProgress {
