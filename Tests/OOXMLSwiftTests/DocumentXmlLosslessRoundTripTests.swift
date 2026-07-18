@@ -481,13 +481,15 @@ final class DocumentXmlLosslessRoundTripTests: XCTestCase {
                        "parseParagraph must NOT add <w:pPr> to unrecognizedChildren — it is consumed by parseParagraphProperties before the child walker. v0.19.0 regression: pPr fell into the default branch and got double-emitted on save.")
     }
 
-    // MARK: - Phase 1: Create-from-scratch minimal namespace set
+    // MARK: - Phase 1: Create-from-scratch root namespace cloud
 
-    /// Implements spec scenario "Create-from-scratch document emits minimal namespace set".
-    /// Verifies the `documentRootAttributes` empty-dictionary fallback path: an
-    /// initializer-built `WordDocument()` has no source archive, so the Writer must
-    /// fall back to emitting exactly `xmlns:w` + `xmlns:r`. Lands in task 1.5.
-    func testCreateFromScratchEmitsMinimalNamespaceSet() throws {
+    /// Implements spec scenario "Create-from-scratch document emits the full
+    /// Word-canonical cloud" (ooxml-roundtrip-fidelity, MODIFIED by change
+    /// authoring-canonical-conformance design D4). The `documentRootAttributes`
+    /// empty-dictionary fallback emits the full real-Word namespace cloud —
+    /// the previous minimal `w + r` fallback could not carry the `w14:paraId`
+    /// attributes stamped by the authoring chokepoints.
+    func testCreateFromScratchEmitsFullWordCanonicalCloud() throws {
         var doc = WordDocument()
         doc.appendParagraph(Paragraph(text: "Anchor"))
         let outputURL = FileManager.default.temporaryDirectory
@@ -500,20 +502,16 @@ final class DocumentXmlLosslessRoundTripTests: XCTestCase {
         let openTagEnd = try XCTUnwrap(savedDocumentXML.range(of: ">", range: openTagRange.upperBound..<savedDocumentXML.endIndex))
         let rootOpenTag = String(savedDocumentXML[openTagRange.lowerBound..<openTagEnd.upperBound])
 
-        XCTAssertTrue(
-            rootOpenTag.contains(#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#),
-            "Scratch-built document root tag must declare xmlns:w. Saw: \(rootOpenTag)"
-        )
-        XCTAssertTrue(
-            rootOpenTag.contains(#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#),
-            "Scratch-built document root tag must declare xmlns:r. Saw: \(rootOpenTag)"
-        )
-        // No additional xmlns declarations.
-        let xmlnsCount = rootOpenTag.components(separatedBy: "xmlns:").count - 1
         XCTAssertEqual(
-            xmlnsCount, 2,
-            "Scratch-built document must declare exactly 2 xmlns prefixes (w + r). Saw \(xmlnsCount). Tag: \(rootOpenTag)"
+            rootOpenTag, DocxWriter.wordCanonicalRootOpenTag,
+            "Scratch-built document root tag must equal the full Word-canonical cloud byte-for-byte"
         )
+        // The stamping contract depends on w14 being declared; w and r remain
+        // required for body content and relationship references.
+        for prefix in ["xmlns:w=", "xmlns:r=", "xmlns:w14="] {
+            XCTAssertTrue(rootOpenTag.contains(prefix),
+                          "root cloud must declare \(prefix). Saw: \(rootOpenTag.prefix(200))")
+        }
     }
 
     // MARK: - Fixture builder

@@ -204,6 +204,10 @@ extension WordDocument {
 
     /// Insert a paragraph at the given `InsertLocation`. See `InsertLocation`.
     public mutating func insertParagraph(_ paragraph: Paragraph, at location: InsertLocation) throws {
+        // authoring-canonical-conformance (design D3): same stamping contract
+        // as appendParagraph — nil paraId gains a generated unique ID before
+        // any placement branch runs; preset values pass through verbatim.
+        let paragraph = withStampedParaId(paragraph)
         switch location {
         case .paragraphIndex(let idx):
             guard idx >= 0, idx <= body.children.count else {

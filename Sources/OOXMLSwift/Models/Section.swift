@@ -414,8 +414,10 @@ extension SectionProperties {
             xml += "<w:pgNumType \(pgNumAttrs)/>"
         }
 
-        // 欄設定
-        xml += "<w:cols w:space=\"720\" w:num=\"\(columns)\"/>"
+        // 欄設定 — attribute order w:num before w:space matches the reducer's
+        // canonical <w:cols> emit (authoring-canonical-conformance, design D1:
+        // the authoring side conforms to the frozen transcoder form).
+        xml += "<w:cols w:num=\"\(columns)\" w:space=\"720\"/>"
 
         // v0.16.0+ (#44 §4): line numbering
         if let ln = lineNumbers {
