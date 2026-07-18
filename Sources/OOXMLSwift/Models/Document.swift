@@ -2482,7 +2482,7 @@ public struct WordDocument: Equatable {
         // 在段落中添加註解標記
         let actualIndex = paragraphIndices[paragraphIndex]
         if case .paragraph(var para) = body.children[actualIndex] {
-            para.commentIds.append(commentId)
+            para.appendLegacyCommentId(commentId)
             body.children[actualIndex] = .paragraph(para)
         }
 
@@ -2523,7 +2523,7 @@ public struct WordDocument: Equatable {
         if paragraphIndex >= 0 && paragraphIndex < paragraphIndices.count {
             let actualIndex = paragraphIndices[paragraphIndex]
             if case .paragraph(var para) = body.children[actualIndex] {
-                para.commentIds.removeAll { $0 == commentId }
+                para.removeLegacyCommentId(commentId)
                 body.children[actualIndex] = .paragraph(para)
             }
         }
