@@ -8,6 +8,14 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-18
+
+authoring-canonical-conformance — the authoring path (DocxWriter + typed
+models) emits transcoder-canonical document.xml; pure-paragraph self-authored
+documents now upgrade to the DSL channel and round-trip byte-equal. Verified
+by a two-round 6-AI cross-review (R2 PASS, tag `idd-85-verified`). See
+PsychQuant/ooxml-swift#85 (PR #91); follow-ups #87-#90.
+
 ### Changed (byte-level behavior — downstream goldens will differ)
 
 - **Create-from-scratch root namespace cloud** — documents built without a
