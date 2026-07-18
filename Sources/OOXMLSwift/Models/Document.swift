@@ -330,14 +330,29 @@ public struct WordDocument: Equatable {
 
     // MARK: - Paragraph Operations
 
+    /// authoring-canonical-conformance (design D3): paragraphs entering the
+    /// document through the authoring chokepoints must carry `w14:paraId` —
+    /// the transcoder's stable setRuns addressing key (`extractParagraph`
+    /// bails with `paragraph-no-paraId` without it). A caller-preset value is
+    /// kept verbatim. Parsed paragraphs never pass through these APIs on
+    /// load, so source-absent paraIds stay absent (no backfill).
+    func withStampedParaId(_ paragraph: Paragraph) -> Paragraph {
+        guard paragraph.w14ParaId == nil else { return paragraph }
+        var stamped = paragraph
+        var generator = ParaIdGenerator()
+        let existing = Set(getAllParagraphs().compactMap(\.w14ParaId))
+        stamped.w14ParaId = generator.next(excluding: existing)
+        return stamped
+    }
+
     public mutating func appendParagraph(_ paragraph: Paragraph) {
-        body.children.append(.paragraph(paragraph))
+        body.children.append(.paragraph(withStampedParaId(paragraph)))
         markTypedDirty("word/document.xml")
     }
 
     public mutating func insertParagraph(_ paragraph: Paragraph, at index: Int) {
         let clampedIndex = min(max(0, index), body.children.count)
-        body.children.insert(.paragraph(paragraph), at: clampedIndex)
+        body.children.insert(.paragraph(withStampedParaId(paragraph)), at: clampedIndex)
         markTypedDirty("word/document.xml")
     }
 
