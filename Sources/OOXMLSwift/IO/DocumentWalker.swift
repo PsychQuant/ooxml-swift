@@ -13,6 +13,16 @@ import Foundation
 /// so callers can mark the correct part dirty in `WordDocument.modifiedParts`
 /// instead of blanket-marking `word/document.xml`.
 internal enum DocumentWalker {
+    private struct PartParagraphVisitor: BodyChildVisitor {
+        typealias State = String
+
+        let initialState: String
+        let visit: (Paragraph, _ partKey: String) -> Void
+
+        mutating func visitParagraph(_ paragraph: inout Paragraph, state: inout String) {
+            visit(paragraph, state)
+        }
+    }
 
     // MARK: - Part-key constants
 
@@ -46,7 +56,7 @@ internal enum DocumentWalker {
     /// key the paragraph lives in. Recurses into table cells, nested tables,
     /// and block-level content-control children so callers see the same
     /// universe regardless of where the paragraph is nested.
-    static func walkAllParagraphs(in document: WordDocument, visit: (Paragraph, _ partKey: String) -> Void) {
+    static func walkAllParagraphs(in document: WordDocument, visit: @escaping (Paragraph, _ partKey: String) -> Void) {
         // Body
         walkBodyChildren(document.body.children, partKey: bodyPartKey, visit: visit)
         // Headers — v0.19.5+ (#56 R5 P0 #6): walk bodyChildren so paragraphs
@@ -70,29 +80,13 @@ internal enum DocumentWalker {
         }
     }
 
-    private static func walkBodyChildren(_ children: [BodyChild], partKey: String, visit: (Paragraph, _ partKey: String) -> Void) {
-        for child in children {
-            switch child {
-            case .paragraph(let p):
-                visit(p, partKey)
-            case .table(let t):
-                walkTable(t, partKey: partKey, visit: visit)
-            case .contentControl(_, let inner):
-                walkBodyChildren(inner, partKey: partKey, visit: visit)
-            case .bookmarkMarker, .rawBlockElement:
-                // Body-level markers contain no paragraphs to visit (#58).
-                continue
-            }
-        }
-    }
-
-    private static func walkTable(_ table: Table, partKey: String, visit: (Paragraph, _ partKey: String) -> Void) {
-        for row in table.rows {
-            for cell in row.cells {
-                for para in cell.paragraphs { visit(para, partKey) }
-                for nested in cell.nestedTables { walkTable(nested, partKey: partKey, visit: visit) }
-            }
-        }
+    private static func walkBodyChildren(
+        _ children: [BodyChild],
+        partKey: String,
+        visit: @escaping (Paragraph, _ partKey: String) -> Void
+    ) {
+        var visitor = PartParagraphVisitor(initialState: partKey, visit: visit)
+        BodyChildWalker.walk(children, visitor: &visitor)
     }
 
     // MARK: - findUnrecognizedChild
