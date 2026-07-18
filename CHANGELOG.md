@@ -8,6 +8,30 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (byte-level behavior — downstream goldens will differ)
+
+- **Create-from-scratch root namespace cloud** — documents built without a
+  source archive now emit the full Word-canonical root namespace cloud
+  (every `xmlns:*` declaration plus `mc:Ignorable`, values and order captured
+  from the real-Word `90_template_ja.docx` baseline) instead of the minimal
+  `xmlns:w` + `xmlns:r` pair. Refs PsychQuant/ooxml-swift#85.
+- **`w14:paraId` stamping at authoring chokepoints** — paragraphs entering
+  through `appendParagraph` / `insertParagraph(_:at: Int)` /
+  `insertParagraph(_:at: InsertLocation)` (body-level targets only; table-cell
+  targets stay attribute-free) receive a generated 8-uppercase-hex paraId
+  unique within the document. Caller-preset IDs pass through verbatim; parsed
+  paragraphs are never backfilled. Legacy captured roots lacking `xmlns:w14`
+  gain the declaration when (and only when) stamped content requires it.
+- **Authoring `document.xml` is transcoder-canonical** — no inter-element
+  whitespace; `<w:cols>` attribute order matches the reducer's canonical emit
+  (`w:num` before `w:space`). Pure-paragraph authoring documents now
+  reverse-extract on the DSL channel (per-part coverage 100%) and round-trip
+  byte-equal (export → execute).
+
+Consumers pinned `from: "1.4.0"` (che-word-mcp — PsychQuant/che-word-mcp#173;
+macdoc) pick these byte-level changes up on their next `swift package update`
+after the release tag and refresh authoring goldens accordingly.
+
 ## [1.4.0] - 2026-07-09
 
 word-canonical-forms — real Word documents upgrade from the raw byte-equal
