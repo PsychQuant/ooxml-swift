@@ -22,11 +22,12 @@ public struct ParaIdGenerator {
         self.rng = rng
     }
 
-    /// Next paraId not present in `existing`. Draws map into the open
-    /// interval (0x00000000, 0x80000000); out-of-range and colliding draws
-    /// are skipped. Termination: the space holds 2^31 - 1 candidates while a
-    /// document holds orders of magnitude fewer paragraphs, so a free value
-    /// is always reachable.
+    /// Next paraId not present in `existing`. Each 64-bit draw is truncated
+    /// and masked into [0x0, 0x7FFFFFFF]; a masked value of zero is re-drawn
+    /// (keeping the result strictly inside the open interval), and values
+    /// colliding with `existing` are skipped. Termination: the space holds
+    /// 2^31 - 1 candidates while a document holds orders of magnitude fewer
+    /// paragraphs, so a free value is always reachable.
     public mutating func next(excluding existing: Set<String>) -> String {
         while true {
             let raw = UInt32(truncatingIfNeeded: rng.next()) & 0x7FFF_FFFF

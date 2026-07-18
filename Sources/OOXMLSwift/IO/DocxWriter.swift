@@ -796,7 +796,17 @@ public struct DocxWriter {
         // text nodes as foreign forms and the whole part falls to the raw
         // channel. The prolog keeps its `declaration + \n` shape (the
         // extractor's no-op default).
-        let rootOpenTag = try renderDocumentRootOpenTag(document.documentRootAttributes)
+        // Verify #85 R1 finding 1: a captured legacy root (e.g. the old
+        // minimal w+r create-from-scratch output) lacks xmlns:w14, but the
+        // authoring chokepoints now stamp w14:paraId — emitting that without
+        // the declaration reproduces the v3.12.0 "unbound prefix" failure
+        // mode. Augment the declaration only; paragraphs are never backfilled.
+        var rootAttrs = document.documentRootAttributes
+        if !rootAttrs.isEmpty, rootAttrs["xmlns:w14"] == nil,
+           document.getAllParagraphs().contains(where: { $0.w14ParaId != nil || $0.w14TextId != nil }) {
+            rootAttrs["xmlns:w14"] = "http://schemas.microsoft.com/office/word/2010/wordml"
+        }
+        let rootOpenTag = try renderDocumentRootOpenTag(rootAttrs)
         var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
             + rootOpenTag
             + "<w:body>"
@@ -832,9 +842,12 @@ public struct DocxWriter {
     /// cloud (every xmlns declaration plus `mc:Ignorable`), captured verbatim
     /// (values AND order) from the real-Word `90_template_ja.docx` baseline.
     /// Provenance is asserted by the env-gated fixture test; do not edit by
-    /// hand. Exported scripts of such documents carry one `setDocumentRoot`
-    /// op (the cloud differs from the transcoder's minimal `w + w14`
-    /// authoring default) — DSL upgrade and byte-equal are unaffected.
+    /// hand. Static literal only — never interpolate runtime values into
+    /// this tag (this fallback path bypasses per-attribute escape and
+    /// validateAttrName). Exported scripts of such documents carry one
+    /// `setDocumentRoot` op (the cloud differs from the transcoder's minimal
+    /// `w + w14` authoring default) — DSL upgrade and byte-equal are
+    /// unaffected.
     static let wordCanonicalRootOpenTag = "<w:document xmlns:wpc=\"http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas\" xmlns:cx=\"http://schemas.microsoft.com/office/drawing/2014/chartex\" xmlns:cx1=\"http://schemas.microsoft.com/office/drawing/2015/9/8/chartex\" xmlns:cx2=\"http://schemas.microsoft.com/office/drawing/2015/10/21/chartex\" xmlns:cx3=\"http://schemas.microsoft.com/office/drawing/2016/5/9/chartex\" xmlns:cx4=\"http://schemas.microsoft.com/office/drawing/2016/5/10/chartex\" xmlns:cx5=\"http://schemas.microsoft.com/office/drawing/2016/5/11/chartex\" xmlns:cx6=\"http://schemas.microsoft.com/office/drawing/2016/5/12/chartex\" xmlns:cx7=\"http://schemas.microsoft.com/office/drawing/2016/5/13/chartex\" xmlns:cx8=\"http://schemas.microsoft.com/office/drawing/2016/5/14/chartex\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:aink=\"http://schemas.microsoft.com/office/drawing/2016/ink\" xmlns:am3d=\"http://schemas.microsoft.com/office/drawing/2017/model3d\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:oel=\"http://schemas.microsoft.com/office/2019/extlst\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\" xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:wp14=\"http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing\" xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:w10=\"urn:schemas-microsoft-com:office:word\" xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\" xmlns:w16cex=\"http://schemas.microsoft.com/office/word/2018/wordml/cex\" xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\" xmlns:w16=\"http://schemas.microsoft.com/office/word/2018/wordml\" xmlns:w16du=\"http://schemas.microsoft.com/office/word/2023/wordml/word16du\" xmlns:w16sdtdh=\"http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash\" xmlns:w16sdtfl=\"http://schemas.microsoft.com/office/word/2024/wordml/sdtformatlock\" xmlns:w16se=\"http://schemas.microsoft.com/office/word/2015/wordml/symex\" xmlns:wpg=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\" xmlns:wpi=\"http://schemas.microsoft.com/office/word/2010/wordprocessingInk\" xmlns:wne=\"http://schemas.microsoft.com/office/word/2006/wordml\" xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" mc:Ignorable=\"w14 w15 w16se w16cid w16 w16cex w16sdtdh w16sdtfl w16du wp14\">"
 
     static func renderDocumentRootOpenTag(_ attrs: [String: String]) throws -> String {
