@@ -4,10 +4,11 @@
 // The Phase-D slot mechanism (`template-content-slots`) only parameterized
 // DSL-spellable paragraphs (`Paragraph(id){text}`). Real templates like
 // 90_template_ja carry *formatted* paragraphs that ride the raw `// @op`
-// escape, with their visible text in a single-run `setRuns` op. This extends
-// slots to those paragraphs: the exporter emits a `// @slot <name> <paraId>`
-// directive + a `makeDocument` parameter; the importer substitutes the run
-// text at the call site while keeping every formatting attribute byte-equal.
+// escape, with their visible text in a `setRuns` op. This extends slots to
+// both single- and multi-run paragraphs: the exporter emits a
+// `// @slot <name> <paraId>` directive + a `makeDocument` parameter; the
+// importer substitutes text at the call site while keeping every run and
+// formatting attribute intact.
 
 import XCTest
 @testable import OOXMLSwift
@@ -107,25 +108,80 @@ final class ContentSlotOpLevelTests: XCTestCase {
         }
     }
 
-    /// A formatted paragraph with NO substitutable text target (e.g. inline
-    /// markers only, no single-run setRuns) fails loudly in strict mode.
-    func testOpLevelSlotWithoutTextTargetFailsLoudly() throws {
+    /// A multi-run slot keeps its original run partition byte-equal when the
+    /// default binding is used. When callers supply new text, only run text is
+    /// rewritten: the first non-whitespace run is the deterministic carrier,
+    /// and every run's formatting payload stays intact.
+    func testOpLevelMultiRunSlotPreservesFormatting() throws {
         var doc = WordDocument.emptyAuthoringDocument()
         try doc.apply(operations: [
-            // Two runs: no single unambiguous substitution target.
             .appendParagraph(in: nil, paragraph: ParagraphPayload(
                 text: "", paraId: "P1", indentFirstLineChars: 100,
                 paragraphMarkRun: RunPayload(text: "", sizeHalfPoints: 36))),
             .setRuns(target: ElementID(rawString: "w14:paraId=P1"), runs: [
-                RunPayload(text: "前半"), RunPayload(text: "後半", bold: true),
+                RunPayload(text: "　", preserveSpace: true),
+                RunPayload(text: "原文標題", bold: true, fontEastAsia: "ＭＳ ゴシック"),
+                RunPayload(text: "（説明）", color: "FF0000", sizeHalfPoints: 18),
             ]),
         ])
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("oplevel-multi-\(UUID().uuidString).docx")
         defer { try? FileManager.default.removeItem(at: url) }
         try doc.writeAuthoringPackage(to: url)
-        let parts = try RawPartChannel.readAllParts(from: url)
-        let log = try ReverseExtractor.reverse(parts: parts).log
+        let reference = try RawPartChannel.readAllParts(from: url)
+        let log = try ReverseExtractor.reverse(parts: reference).log
+
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "heading", paraId: "P1"),
+        ])
+        XCTAssertTrue(script.contains("heading: \"　原文標題（説明）\""),
+                      "the slot default must be the visible text joined in run order")
+        XCTAssertTrue(PartFidelity.stageB(reference: reference,
+                                          rebuilt: try execute(script: script)),
+                      "the default binding must not repartition runs")
+
+        script = script.replacingOccurrences(
+            of: "    heading: \"　原文標題（説明）\"",
+            with: "    heading: \"新しい標題\"")
+        let substituted = try ScriptImporter.parse(source: script)
+        let runs = try XCTUnwrap(substituted.entries.compactMap { entry -> [RunPayload]? in
+            guard case .setRuns(let target, let runs) = entry.op,
+                  target.raw == "w14:paraId=P1" else { return nil }
+            return runs
+        }.first)
+        XCTAssertEqual(runs.map(\.text), ["", "新しい標題", ""],
+                       "new text must use the first non-whitespace carrier run")
+
+        let originalRuns = try XCTUnwrap(log.entries.compactMap { entry -> [RunPayload]? in
+            guard case .setRuns(let target, let runs) = entry.op,
+                  target.raw == "w14:paraId=P1" else { return nil }
+            return runs
+        }.first)
+        XCTAssertEqual(runs.map { var run = $0; run.text = ""; return run },
+                       originalRuns.map { var run = $0; run.text = ""; return run },
+                       "slot substitution must preserve every run formatting field")
+
+        let rebuilt = try execute(script: script)
+        let documentXML = String(decoding: rebuilt["word/document.xml"] ?? Data(), as: UTF8.self)
+        XCTAssertTrue(documentXML.contains("新しい標題"))
+        XCTAssertFalse(documentXML.contains("原文標題"))
+        XCTAssertFalse(documentXML.contains("（説明）"))
+        for (path, bytes) in reference where path != "word/document.xml" {
+            XCTAssertEqual(rebuilt[path], bytes, "non-slot part \(path) must stay byte-equal")
+        }
+    }
+
+    /// Strict mode still rejects a formatted paragraph when neither setRuns
+    /// nor appendParagraph carries any text; multi-run support must not turn
+    /// an empty target into a silent no-op slot.
+    func testOpLevelSlotWithoutTextTargetFailsLoudly() throws {
+        var log = OperationLog()
+        log.append(.appendParagraph(in: nil, paragraph: ParagraphPayload(
+            text: "", paraId: "P1", indentFirstLineChars: 100,
+            paragraphMarkRun: RunPayload(text: "", sizeHalfPoints: 36))), source: .word)
+        log.append(.setRuns(target: ElementID(rawString: "w14:paraId=P1"), runs: [
+            RunPayload(text: ""), RunPayload(text: "", bold: true),
+        ]), source: .word)
 
         XCTAssertThrowsError(try ScriptExporter.exportSwift(log: log, slots: [
             SlotDesignation(name: "heading", paraId: "P1"),
@@ -134,6 +190,78 @@ final class ContentSlotOpLevelTests: XCTestCase {
                 return XCTFail("expected slotDesignationFailure, got \(error)")
             }
             XCTAssertEqual(name, "heading")
+        }
+    }
+
+    /// Multiple setRuns operations for one paragraph are sequential writes;
+    /// only the final occurrence is the visible state and therefore the slot
+    /// default and substitution target. Earlier history must remain unchanged.
+    func testOpLevelSlotTargetsOnlyFinalSetRunsOccurrence() throws {
+        var log = OperationLog()
+        log.append(.appendParagraph(in: nil, paragraph: ParagraphPayload(
+            text: "", paraId: "P1", indentFirstLineChars: 100,
+            paragraphMarkRun: RunPayload(text: "", sizeHalfPoints: 36))), source: .word)
+        log.append(.setRuns(target: ElementID(rawString: "w14:paraId=P1"), runs: [
+            RunPayload(text: "歷史文字", italic: true),
+        ]), source: .word)
+        log.append(.setRuns(target: ElementID(rawString: "w14:paraId=P1"), runs: [
+            RunPayload(text: "目前"), RunPayload(text: "內容", bold: true),
+        ]), source: .word)
+
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "heading", paraId: "P1"),
+        ])
+        XCTAssertTrue(script.contains("heading: \"目前內容\""),
+                      "the final setRuns operation must supply the default")
+        XCTAssertEqual(try ScriptImporter.parse(source: script).entries.map(\.op),
+                       log.entries.map(\.op),
+                       "default binding must preserve all operation history")
+
+        script = script.replacingOccurrences(
+            of: "    heading: \"目前內容\"",
+            with: "    heading: \"替換內容\"")
+        let parsed = try ScriptImporter.parse(source: script)
+        let occurrences = parsed.entries.compactMap { entry -> [RunPayload]? in
+            guard case .setRuns(let target, let runs) = entry.op,
+                  target.raw == "w14:paraId=P1" else { return nil }
+            return runs
+        }
+        XCTAssertEqual(occurrences.map { $0.map(\.text) },
+                       [["歷史文字"], ["替換內容", ""]],
+                       "only the final setRuns occurrence may be substituted")
+        XCTAssertTrue(occurrences[0][0].italic == true,
+                      "earlier operation payload must remain untouched")
+        XCTAssertTrue(occurrences[1][1].bold == true,
+                      "final run formatting must remain intact")
+    }
+
+    /// A replacement with XML boundary whitespace must opt the carrier text
+    /// into xml:space preservation even when the original run did not need it.
+    func testOpLevelSlotPreservesBoundaryWhitespace() throws {
+        var log = OperationLog()
+        log.append(.appendParagraph(in: nil, paragraph: ParagraphPayload(
+            text: "", paraId: "P1", indentFirstLineChars: 100,
+            paragraphMarkRun: RunPayload(text: "", sizeHalfPoints: 36))), source: .word)
+        log.append(.setRuns(target: ElementID(rawString: "w14:paraId=P1"), runs: [
+            RunPayload(text: "Original", bold: true),
+        ]), source: .word)
+
+        let template = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "heading", paraId: "P1"),
+        ])
+        for value in [" padded ", "\tpadded", "padded\n", "\r\npadded"] {
+            let script = template.replacingOccurrences(
+                of: "    heading: \"Original\"",
+                with: "    heading: \(ScriptExporter.quote(value))")
+            let parsed = try ScriptImporter.parse(source: script)
+            let run = try XCTUnwrap(parsed.entries.compactMap { entry -> RunPayload? in
+                guard case .setRuns(let target, let runs) = entry.op,
+                      target.raw == "w14:paraId=P1" else { return nil }
+                return runs.first
+            }.first)
+            XCTAssertEqual(run.text, value)
+            XCTAssertEqual(run.preserveSpace, true,
+                           "boundary whitespace requires xml:space=preserve: \(value.debugDescription)")
         }
     }
 }
