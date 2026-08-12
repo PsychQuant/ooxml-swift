@@ -73,8 +73,33 @@ extension WordDocument {
     /// setters (task 3.15, `WordDocument+TypedSetters.swift`) route through
     /// the exact same log + reducer path instead of duplicating it.
     internal mutating func appendAndMaterialize(
-        _ newOps: [Operation], source: OpSource = .swift
+        _ newOps: [Operation], source: OpSource = .swift,
+        replayOpIDs: [UUID]? = nil,
+        replayTimestamps: [Date]? = nil,
+        replaySources: [OpSource]? = nil,
+        appendToLog: Bool = true
     ) throws {
+
+        // Legacy typed mutators update the typed model and deliberately mark
+        // their corresponding XmlTree stale. Before starting a new operation
+        // suffix, bridge those dirty typed parts back into isolated, lossless
+        // trees; otherwise the checkpoint below would capture an older tree
+        // and the first reducer op would silently erase the typed mutation.
+        let staleTypedParts = Set(
+            modifiedParts.subtracting(treeFreshParts).filter { part in
+                xmlTrees[part] != nil
+                    || part == "[Content_Types].xml"
+                    || part.hasSuffix(".xml")
+                    || part.hasSuffix(".rels")
+            })
+        if !newOps.isEmpty, !staleTypedParts.isEmpty {
+            let refreshed = try DocxWriter.materializeTypedTrees(
+                self, parts: staleTypedParts)
+            for (part, tree) in refreshed {
+                xmlTrees[part] = tree
+                treeFreshParts.insert(part)
+            }
+        }
 
         // 2. Generate stable opIDs ONCE — shared between persisted log and
         //    per-op materialization log. Critical for replay determinism:
@@ -82,13 +107,84 @@ extension WordDocument {
         //    Phase 2c convention), so if newLog and the materialize log used
         //    DIFFERENT opIDs, re-materializing the persisted log would
         //    produce different IDs than the freshly-applied tree.
-        let opIDs: [UUID] = newOps.map { _ in UUID() }
+        let opIDs: [UUID] = replayOpIDs ?? newOps.map { _ in UUID() }
+        let timestamps: [Date] = replayTimestamps ?? newOps.map { _ in Date() }
+        let sources: [OpSource] = replaySources
+            ?? Array(repeating: source, count: newOps.count)
+        guard opIDs.count == newOps.count,
+              timestamps.count == newOps.count,
+              sources.count == newOps.count else {
+            throw EditError.operationLogFailure(
+                underlying: "replay metadata count does not match operation count")
+        }
+
+        if appendToLog, !newOps.isEmpty, operationReplayBase == nil {
+            operationReplayBase = OperationReplayBase(
+                // Reducer materialization is copy-on-write at the XmlTree
+                // level, so retaining the current tree references is a safe,
+                // constant-time checkpoint. Legacy direct typed mutations
+                // invalidate this checkpoint through `markTypedDirty`.
+                trees: xmlTrees,
+                comments: comments,
+                carriedParts: carriedParts,
+                modifiedParts: modifiedParts,
+                treeFreshParts: treeFreshParts,
+                logStartIndex: operationLog.entries.count)
+        }
 
         // 3. Build accumulated log = old log + new ops (with shared opIDs).
         //    OperationLog enforces append-only semantics; we copy + extend.
         var newLog = self.operationLog
-        for (op, opID) in zip(newOps, opIDs) {
-            newLog.append(op, source: source, opID: opID)
+        if appendToLog {
+            for index in newOps.indices {
+                newLog.append(newOps[index], source: sources[index],
+                              opID: opIDs[index], at: timestamps[index])
+            }
+        }
+
+
+        // A control changes the active history set; patching only the current
+        // value cannot recover a value that came from the pre-log document,
+        // and cannot reverse structural batches. Rebuild the locally-owned
+        // history suffix from its captured base instead. This also makes
+        // controls atomic: validation/replay finishes before `self` changes.
+        if appendToLog, newOps.contains(where: {
+            if case .undo = $0 { return true }
+            if case .redo = $0 { return true }
+            return false
+        }) {
+            guard let replayBase = operationReplayBase else {
+                throw EditError.operationLogFailure(
+                    underlying: "control operation has no replay base")
+            }
+            var localLog = OperationLog()
+            for entry in newLog.entries.dropFirst(replayBase.logStartIndex) {
+                localLog.append(entry.op, source: entry.source,
+                                opID: entry.opID, at: entry.timestamp)
+            }
+            let active = try OperationReducer.activeEntryIndices(in: localLog)
+            let entries = localLog.entries.enumerated().compactMap { index, entry in
+                active.contains(index) ? entry : nil
+            }
+
+            var rebuilt = self
+            rebuilt.xmlTrees = replayBase.trees.mapValues { $0.deepCopy() }
+            rebuilt.comments = replayBase.comments
+            rebuilt.carriedParts = replayBase.carriedParts
+            rebuilt.modifiedParts = replayBase.modifiedParts
+            rebuilt.treeFreshParts = replayBase.treeFreshParts
+            rebuilt.operationLog = newLog
+            rebuilt.operationReplayBase = replayBase
+            try rebuilt.appendAndMaterialize(
+                entries.map(\.op),
+                replayOpIDs: entries.map(\.opID),
+                replayTimestamps: entries.map(\.timestamp),
+                replaySources: entries.map(\.source),
+                appendToLog: false)
+            rebuilt.operationLog = newLog
+            rebuilt.operationReplayBase = replayBase
+            self = rebuilt
+            return
         }
 
         // 4. Materialize ops per-part: each op is replayed only against the
@@ -104,7 +200,10 @@ extension WordDocument {
         //    every tree" pattern which threw elementNotFound on parts that
         //    didn't contain the op's target.
         var newTrees = self.xmlTrees
+        var newComments = self.comments
+        var newCarriedParts = self.carriedParts
         var touchedParts: Set<String> = []
+        var freshParts: Set<String> = []
 
         // Single-part fast path: when the doc has exactly one part, skip the
         // partContaining tree walk. materialize will throw elementNotFound
@@ -118,8 +217,68 @@ extension WordDocument {
         // this fast path.
         let singlePartPath: String? = newTrees.count == 1 ? newTrees.keys.first : nil
 
-        for (op, opID) in zip(newOps, opIDs) {
+        let previousLogCount = self.operationLog.entries.count
+        for index in newOps.indices {
+            let op = newOps[index]
+            let opID = opIDs[index]
+            let timestamp = timestamps[index]
+            let entrySource = sources[index]
             let partPath: String
+
+            // A control operation changes which prior entries participate in
+            // replay. The document already contains the prior history, so
+            // compute the resulting text/style values from the accumulated
+            // prefix and apply only those corrections to the current trees.
+            // This preserves operation identity and avoids the incorrect
+            // single-op reducer path where undo was a silent no-op.
+            switch op {
+            case .undo, .redo:
+                var prefix = OperationLog()
+                let prefixCount = appendToLog
+                    ? previousLogCount + index + 1
+                    : newLog.entries.count
+                for entry in newLog.entries.prefix(prefixCount) {
+                    prefix.append(entry.op, source: entry.source,
+                                  opID: entry.opID, at: entry.timestamp)
+                }
+                do {
+                    for replacement in try OperationReducer.controlReplacementOperations(
+                        for: op, in: prefix) {
+                        let replacementPart: String
+                        if let single = singlePartPath {
+                            replacementPart = single
+                        } else if let found = OperationReducer.partContaining(
+                            op: replacement, in: newTrees) {
+                            replacementPart = found
+                        } else {
+                            throw ReducerError.elementNotFound(
+                                opID: opID,
+                                elementID: OperationReducer.referencedElementIDs(
+                                    in: replacement).first ?? ElementID(rawString: "lib:\(opID.uuidString)"))
+                        }
+                        guard var replacementTree = newTrees[replacementPart] else {
+                            throw ReducerError.elementNotFound(
+                                opID: opID,
+                                elementID: OperationReducer.referencedElementIDs(
+                                    in: replacement).first ?? ElementID(rawString: "lib:\(opID.uuidString)"))
+                        }
+                        try OperationReducer.apply(
+                            entry: LogEntry(
+                                opID: opID, op: replacement,
+                                source: entrySource, timestamp: timestamp),
+                            to: &replacementTree)
+                        newTrees[replacementPart] = replacementTree
+                        touchedParts.insert(replacementPart)
+                        freshParts.insert(replacementPart)
+                    }
+                } catch {
+                    throw EditError.operationLogFailure(
+                        underlying: "control operation replay failed: \(error)")
+                }
+                continue
+            default:
+                break
+            }
 
             // Part-addressed ops (addRelationship) carry their target part
             // path in the payload — route directly without partContaining
@@ -134,7 +293,22 @@ extension WordDocument {
                 // verbatim bytes on `carriedParts`. carryPart materializes to a
                 // package part, not to a document tree, so skip the per-part
                 // apply below. `writeAuthoringPackage` emits it byte-exact.
-                carriedParts[carriedPath] = Data(xml.utf8)
+                guard isSafeRelativeOOXMLPath(carriedPath) else {
+                    throw EditError.operationLogFailure(
+                        underlying: "unsafe carryPart path: \(carriedPath)")
+                }
+                newCarriedParts[carriedPath] = Data(xml.utf8)
+                continue
+            case .carryBinaryPart(let carriedPath, let base64):
+                guard isSafeRelativeOOXMLPath(carriedPath) else {
+                    throw EditError.operationLogFailure(
+                        underlying: "unsafe carryBinaryPart path: \(carriedPath)")
+                }
+                guard let bytes = Data(base64Encoded: base64) else {
+                    throw EditError.operationLogFailure(
+                        underlying: "invalid base64 for binary part: \(carriedPath)")
+                }
+                newCarriedParts[carriedPath] = bytes
                 continue
             case .batchBegin, .batchEnd, .beginComponent, .endComponent, .unknown:
                 continue
@@ -143,6 +317,10 @@ extension WordDocument {
             }
 
             if case .addRelationship(let part, _, _, _, _) = op {
+                guard isSafeRelativeOOXMLPath(part) else {
+                    throw EditError.operationLogFailure(
+                        underlying: "unsafe addRelationship part path: \(part)")
+                }
                 partPath = part
                 if newTrees[part] == nil {
                     newTrees[part] = makeEmptyRelationshipsTree()
@@ -161,10 +339,19 @@ extension WordDocument {
                 partPath = "word/styles.xml"
                 if newTrees[partPath] == nil {
                     newTrees[partPath] = makeEmptyStylesTree()
+                    // A newly-created styles part also needs package metadata.
+                    // These are deliberately dirty but not tree-fresh: the
+                    // typed overlay writers merge the new style relationship
+                    // and content type into the existing package metadata.
+                    touchedParts.formUnion([
+                        "word/_rels/document.xml.rels", "[Content_Types].xml",
+                    ])
                 }
             } else if case .appendTable(let container, _) = op, container == nil {
                 // format-alignment-engine Phase B (2.5): same routing as
                 // appendParagraph(in: nil) — targets the main body.
+                partPath = "word/document.xml"
+            } else if case .appendBlockMarker = op {
                 partPath = "word/document.xml"
             } else if case .setSectionProperties = op {
                 // format-alignment-engine Phase B: sectPr always lives in
@@ -196,7 +383,7 @@ extension WordDocument {
             // sees entry.opID == opID, so the new node's libraryUUID derives
             // from the same UUID that's persisted in newLog above.
             var singleOpLog = OperationLog()
-            singleOpLog.append(op, source: source, opID: opID)
+            singleOpLog.append(op, source: entrySource, opID: opID, at: timestamp)
 
             do {
                 let materialized = try OperationReducer.materialize(
@@ -205,6 +392,36 @@ extension WordDocument {
                 )
                 newTrees[partPath] = materialized
                 touchedParts.insert(partPath)
+                freshParts.insert(partPath)
+                if case .insertComment(let anchor, let commentID, let text, let author) = op {
+                    try materializeCommentDefinition(
+                        id: commentID,
+                        text: text,
+                        author: author,
+                        opID: opID,
+                        timestamp: timestamp,
+                        trees: &newTrees
+                    )
+                    let paragraphIndex = paragraphOrdinal(
+                        for: anchor, in: materialized) ?? -1
+                    var comment = Comment(
+                        id: commentID,
+                        author: author,
+                        text: text,
+                        paragraphIndex: paragraphIndex,
+                        date: timestamp
+                    )
+                    comment.paraId = deterministicCommentParaID(opID)
+                    newComments.comments.removeAll { $0.id == commentID }
+                    newComments.comments.append(comment)
+                    touchedParts.formUnion([
+                        "word/comments.xml", "word/_rels/document.xml.rels",
+                        "[Content_Types].xml",
+                    ])
+                    freshParts.formUnion([
+                        "word/comments.xml", "word/_rels/document.xml.rels",
+                    ])
+                }
             } catch {
                 throw EditError.operationLogFailure(
                     underlying: "OperationReducer.materialize failed on part '\(partPath)': \(error.localizedDescription)"
@@ -227,13 +444,121 @@ extension WordDocument {
         //    every access) could enable auto-resync — out of scope here.
         self.operationLog = newLog
         self.xmlTrees = newTrees
+        self.comments = newComments
+        self.carriedParts = newCarriedParts
         // Reducer-applied parts: the tree is now the authoritative content —
         // write serializes it directly (tree-first), and the part must be
         // re-emitted (dirty) in overlay mode.
         // Order matters: marking dirty clears freshness (stale-shadow
         // guard), so freshness must be granted AFTER the dirty mark.
         self.modifiedParts.formUnion(touchedParts)
-        self.treeFreshParts.formUnion(touchedParts)
+        // Some operations update package metadata through the typed overlay
+        // writers rather than producing a complete replacement tree. If a
+        // typed→op bridge refreshed that metadata immediately beforehand,
+        // revoke its freshness now so the later typed metadata change wins.
+        self.treeFreshParts.subtract(touchedParts.subtracting(freshParts))
+        self.treeFreshParts.formUnion(freshParts)
+        for part in touchedParts { self.carriedParts.removeValue(forKey: part) }
+    }
+
+    private func materializeCommentDefinition(
+        id: Int,
+        text: String,
+        author: String,
+        opID: UUID,
+        timestamp: Date,
+        trees: inout [String: XmlTree]
+    ) throws {
+        let commentsPath = "word/comments.xml"
+        let commentsTree = trees[commentsPath]?.deepCopy() ?? makeEmptyCommentsTree()
+        guard commentsTree.root.localName == "comments" else {
+            throw EditError.operationLogFailure(
+                underlying: "word/comments.xml root must be <w:comments>")
+        }
+        let duplicate = commentsTree.root.children.contains { child in
+            child.kind == .element && child.localName == "comment"
+                && child.attributeValue(prefix: "w", localName: "id") == String(id)
+        }
+        guard !duplicate else {
+            throw EditError.operationLogFailure(underlying: "duplicate comment id: \(id)")
+        }
+
+        let comment = XmlNode.element(prefix: "w", localName: "comment")
+        comment.setAttribute(prefix: "w", localName: "id", value: String(id))
+        comment.setAttribute(prefix: "w", localName: "author", value: author)
+        comment.setAttribute(
+            prefix: "w", localName: "date",
+            value: ISO8601DateFormatter().string(from: timestamp))
+        comment.setAttribute(
+            prefix: "w", localName: "initials",
+            value: String(author.prefix(2).uppercased()))
+
+        let paragraph = OperationReducer.makeParagraph(
+            payload: ParagraphPayload(text: text))
+        paragraph.setAttribute(
+            prefix: "w14", localName: "paraId", value: deterministicCommentParaID(opID))
+        comment.children = [paragraph]
+        commentsTree.root.children.append(comment)
+        trees[commentsPath] = commentsTree
+
+        let relsPath = "word/_rels/document.xml.rels"
+        let rels = trees[relsPath]?.deepCopy() ?? makeEmptyRelationshipsTree()
+        let commentsRelationshipType =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
+        if !rels.root.children.contains(where: {
+            $0.kind == .element
+                && $0.attributeValue(prefix: nil, localName: "Type") == commentsRelationshipType
+        }) {
+            let existingIDs = Set(rels.root.children.compactMap {
+                $0.attributeValue(prefix: nil, localName: "Id")
+            })
+            var relationshipID = "rIdComments"
+            var suffix = 2
+            while existingIDs.contains(relationshipID) {
+                relationshipID = "rIdComments\(suffix)"
+                suffix += 1
+            }
+            let relationship = XmlNode.element(localName: "Relationship")
+            relationship.setAttribute(prefix: nil, localName: "Id", value: relationshipID)
+            relationship.setAttribute(
+                prefix: nil, localName: "Type", value: commentsRelationshipType)
+            relationship.setAttribute(prefix: nil, localName: "Target", value: "comments.xml")
+            rels.root.children.append(relationship)
+        }
+        trees[relsPath] = rels
+    }
+
+    private func makeEmptyCommentsTree() -> XmlTree {
+        let root = XmlNode.element(
+            prefix: "w",
+            localName: "comments",
+            namespaceURI: "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+            attributes: [
+                XmlAttribute(
+                    prefix: "xmlns", localName: "w",
+                    value: "http://schemas.openxmlformats.org/wordprocessingml/2006/main"),
+                XmlAttribute(
+                    prefix: "xmlns", localName: "w14",
+                    value: "http://schemas.microsoft.com/office/word/2010/wordml"),
+            ]
+        )
+        return .synthesized(root: root)
+    }
+
+    private func paragraphOrdinal(for id: ElementID, in tree: XmlTree) -> Int? {
+        guard let body = tree.root.children.first(where: {
+            $0.kind == .element && $0.localName == "body"
+        }) else { return nil }
+        var ordinal = 0
+        for child in body.children where child.kind == .element && child.localName == "p" {
+            if ElementID(node: child) == id { return ordinal }
+            ordinal += 1
+        }
+        return nil
+    }
+
+    private func deterministicCommentParaID(_ opID: UUID) -> String {
+        String(opID.uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).uppercased()
     }
 
     /// Constructs an empty `<Relationships>` XmlTree suitable for
@@ -261,7 +586,10 @@ extension WordDocument {
         let root = XmlNode.element(
             prefix: nil,
             localName: "Relationships",
-            namespaceURI: "http://schemas.openxmlformats.org/package/2006/relationships"
+            namespaceURI: "http://schemas.openxmlformats.org/package/2006/relationships",
+            attributes: [XmlAttribute(
+                prefix: nil, localName: "xmlns",
+                value: "http://schemas.openxmlformats.org/package/2006/relationships")]
         )
         return XmlTree.synthesized(root: root)
     }

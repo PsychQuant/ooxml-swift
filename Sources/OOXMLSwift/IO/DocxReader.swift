@@ -710,9 +710,11 @@ public struct DocxReader {
         // package into `xmlTrees` so the Phase 2 op log can address parts the
         // typed model does not consume (customXml/*, word/theme/*,
         // word/fontTable.xml, word/webSettings.xml, docProps/*, glossary/…).
-        // Skipped: relationship parts (`_rels/*.rels` — RelationshipsCollection
-        // owns them), `[Content_Types].xml` (package metadata with a dedicated
-        // overlay), and non-XML (binary) parts. A part that fails to parse is
+        // Relationship parts are also loaded into `xmlTrees`: typed
+        // RelationshipsCollection remains the convenience view, while the
+        // tree is the lossless mutation base for addRelationship/comment ops.
+        // Skipped: `[Content_Types].xml` (package metadata with a dedicated
+        // overlay) and non-XML (binary) parts. A part that fails to parse is
         // recorded in `xmlTreeLoadFailures` and does NOT abort the read — its
         // bytes still round-trip verbatim via the overlay save path.
         if let sweep = FileManager.default.enumerator(
@@ -721,11 +723,11 @@ public struct DocxReader {
             for case let fileURL as URL in sweep {
                 let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
                 if isDir { continue }
-                guard fileURL.pathExtension.lowercased() == "xml" else { continue }
+                let partExtension = fileURL.pathExtension.lowercased()
+                guard partExtension == "xml" || partExtension == "rels" else { continue }
                 let partPath = String(
                     fileURL.resolvingSymlinksInPath().path.dropFirst(tempBase.count + 1))
                 if partPath == "[Content_Types].xml" { continue }
-                if partPath.hasPrefix("_rels/") || partPath.contains("/_rels/") { continue }
                 if document.xmlTrees[partPath] != nil { continue }
                 do {
                     let partData = try Data(contentsOf: fileURL)
@@ -1936,11 +1938,10 @@ public struct DocxReader {
         }
 
         // v0.19.3+ (#56 round 2 P0-3): walk children once, building both the
-        // ordered `children` list (source of truth for the writer) AND the
-        // legacy `runs` / `rawChildren` projections (kept for backward-compat
-        // reads from existing callers that still iterate the typed lists).
+        // ordered `children` list (source of truth for the writer) and the
+        // typed `runs` projection. Non-run children live only as `.rawXML`
+        // after the v1.0 rawChildren bridge removal.
         var runs: [Run] = []
-        var rawChildren: [String] = []
         var children: [HyperlinkChild] = []
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement else { continue }
@@ -1950,7 +1951,6 @@ public struct DocxReader {
                 children.append(.run(run))
             } else {
                 let raw = childElement.xmlString
-                rawChildren.append(raw)
                 children.append(.rawXML(raw))
                 // v0.19.12+ (#59 B-CONT-2 P0, R2 finding): nested non-`<w:r>`
                 // hyperlink children (e.g., `<w:fldSimple>`, `<mc:AlternateContent>`,
@@ -2012,7 +2012,6 @@ public struct DocxReader {
             tooltip: tooltip,
             history: history,
             rawAttributes: rawAttributes,
-            rawChildren: rawChildren,
             children: children,
             position: position
         )

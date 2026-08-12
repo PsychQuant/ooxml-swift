@@ -1,5 +1,18 @@
 import Foundation
 
+/// In-memory replay checkpoint for operation controls. The operation log can
+/// span multiple public `apply` calls, while undo/redo semantics require
+/// replaying active history from the state that existed before that history.
+/// This checkpoint is deliberately not serialized into the DOCX.
+internal struct OperationReplayBase {
+    let trees: [String: XmlTree]
+    let comments: CommentsCollection
+    let carriedParts: [String: Data]
+    let modifiedParts: Set<String>
+    let treeFreshParts: Set<String>
+    let logStartIndex: Int
+}
+
 /// Word 文件結構
 public struct WordDocument: Equatable {
     public var body: Body
@@ -31,6 +44,11 @@ public struct WordDocument: Equatable {
     /// Initial value is empty `OperationLog()` — DocxReader doesn't seed
     /// log entries (the log starts when callers begin invoking `apply`).
     public var operationLog: OperationLog = OperationLog()
+
+    /// Captured before the first locally appended operation in this value.
+    /// Controls may target entries at or after `logStartIndex`; older loaded
+    /// history has no reconstructible pre-state and therefore fails loudly.
+    internal var operationReplayBase: OperationReplayBase?
 
     internal var nextBookmarkId: Int = 1       // 書籤 ID 計數器
     private var nextHyperlinkId: Int = 1      // 超連結 ID 計數器
@@ -77,8 +95,14 @@ public struct WordDocument: Equatable {
     /// time. The op pipeline (appendAndMaterialize) marks dirty + fresh
     /// itself and must NOT route through this.
     internal mutating func markTypedDirty(_ partPath: String) {
+        // A direct typed mutation does not participate in the operation log,
+        // so an older replay checkpoint can no longer reconstruct the current
+        // mixed state. Discard it; the next logged operation starts a new
+        // replayable suffix from the post-mutation document.
+        operationReplayBase = nil
         modifiedParts.insert(partPath)
         treeFreshParts.remove(partPath)
+        carriedParts.removeValue(forKey: partPath)
     }
 
     /// Read-only public accessor for `modifiedParts`. Used by tests and
@@ -346,7 +370,54 @@ public struct WordDocument: Equatable {
     }
 
     public mutating func appendParagraph(_ paragraph: Paragraph) {
-        body.children.append(.paragraph(withStampedParaId(paragraph)))
+        let stamped = withStampedParaId(paragraph)
+        if xmlTrees["word/document.xml"] != nil, let paraId = stamped.w14ParaId {
+            let p = stamped.properties
+            let payload = ParagraphPayload(
+                text: stamped.text,
+                styleId: p.style,
+                paraId: paraId,
+                alignment: p.alignment?.rawValue,
+                spacingBefore: p.spacing?.before,
+                spacingAfter: p.spacing?.after,
+                spacingLine: p.spacing?.line,
+                spacingLineRule: p.spacing?.lineRule?.rawValue,
+                indentLeft: p.indentation?.left,
+                indentRight: p.indentation?.right,
+                indentFirstLine: p.indentation?.firstLine,
+                indentHanging: p.indentation?.hanging,
+                numId: p.numbering?.numId,
+                numLevel: p.numbering?.level)
+            var ops: [Operation] = [.appendParagraph(in: nil, paragraph: payload)]
+            let runPayloads = stamped.runs.map { run -> RunPayload in
+                let rp = run.properties
+                return RunPayload(
+                    text: run.text,
+                    bold: rp.bold ? true : nil,
+                    italic: rp.italic ? true : nil,
+                    color: rp.color,
+                    fontAscii: rp.rFonts?.ascii ?? rp.fontName,
+                    fontEastAsia: rp.rFonts?.eastAsia ?? rp.fontName,
+                    sizeHalfPoints: rp.fontSize,
+                    underline: rp.underline?.rawValue,
+                    vertAlign: rp.verticalAlign?.rawValue,
+                    fontHAnsi: rp.rFonts?.hAnsi ?? rp.fontName,
+                    fontHint: rp.rFonts?.hint)
+            }
+            if runPayloads.count != 1 || runPayloads.first != RunPayload(text: stamped.text) {
+                ops.append(.setRuns(
+                    target: ElementID(rawString: "w14:paraId=\(paraId)"),
+                    runs: runPayloads))
+            }
+            do {
+                try appendAndMaterialize(ops)
+                resyncBodyFromDocumentTree()
+                return
+            } catch {
+                assertionFailure("tree-backed appendParagraph failed: \(error)")
+            }
+        }
+        body.children.append(.paragraph(stamped))
         markTypedDirty("word/document.xml")
     }
 

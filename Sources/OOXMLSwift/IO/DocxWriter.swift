@@ -24,6 +24,20 @@ public struct DocxWriter {
     /// leaves the original at `url` byte-preserved; the temp file is cleaned
     /// up via `defer`.
     public static func write(_ document: WordDocument, to url: URL) throws {
+        _ = try write(document, to: url, expectedDocxSHA256: nil)
+    }
+
+    /// Sync-aware atomic write. The generation check is intentionally made
+    /// after ZIP creation, temp-file write, and fsync — immediately before
+    /// the target rename — so almost all expensive work is outside the
+    /// compare-and-replace window. The optional hook is test-only injection
+    /// passed by value (no global mutable state).
+    internal static func write(
+        _ document: WordDocument,
+        to url: URL,
+        expectedDocxSHA256: String?,
+        immediatelyBeforeGenerationCheck: (() throws -> Void)? = nil
+    ) throws -> String {
         // Phase 1: compute new bytes BEFORE touching `url`. If serialization
         // throws here, the original at `url` is untouched.
         let data: Data
@@ -46,6 +60,20 @@ public struct DocxWriter {
         try handle.synchronize()
         try handle.close()
 
+        try immediatelyBeforeGenerationCheck?()
+        if WordLock.isLockedByWord(url) {
+            throw SyncError.fileLockedByWord(
+                lockURL: WordLock.lockFileURL(for: url))
+        }
+        if let expectedDocxSHA256 {
+            let actual = SidecarStore.sha256Hex(of: try Data(contentsOf: url))
+            guard actual == expectedDocxSHA256 else {
+                throw SyncError.externalGenerationChanged(
+                    expectedSHA256: expectedDocxSHA256,
+                    actualSHA256: actual)
+            }
+        }
+
         // POSIX `rename(2)` (same volume) or copy+delete fallback (cross-volume).
         // Atomic at the kernel level: external observers see either the original
         // bytes or the new bytes at `url`, never an intermediate state.
@@ -55,6 +83,10 @@ public struct DocxWriter {
             backupItemName: nil,
             options: []
         )
+        // Return the digest of the bytes we prepared and renamed. Re-reading
+        // the live URL here would let a post-rename external replacement be
+        // mistaken for this writer's generation by rollback code.
+        return SidecarStore.sha256Hex(of: data)
     }
 
     /// 將 WordDocument 壓縮成 in-memory .docx bytes（不落地）
@@ -72,6 +104,56 @@ public struct DocxWriter {
 
         try writeAllParts(document, to: tempDir, overlayMode: false)
         return try ZipHelper.zipToData(tempDir)
+    }
+
+    /// Materializes legacy typed mutations into lossless trees without
+    /// touching the document's preserved archive. Operation replay uses this
+    /// bridge only when a typed mutation made a previously loaded tree stale.
+    /// Overlay documents are staged from an isolated archive copy so package
+    /// metadata and unknown children follow the same preservation path as a
+    /// real save.
+    internal static func materializeTypedTrees(
+        _ document: WordDocument,
+        parts: Set<String>
+    ) throws -> [String: XmlTree] {
+        guard !parts.isEmpty else { return [:] }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("che-word-mcp")
+            .appendingPathComponent("typed-tree-refresh-\(UUID().uuidString)")
+        let staging = root.appendingPathComponent("package")
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true)
+        defer { ZipHelper.cleanup(root) }
+
+        let overlayMode = document.archiveTempDir != nil
+        if let archive = document.archiveTempDir {
+            try FileManager.default.copyItem(at: archive, to: staging)
+        } else {
+            try FileManager.default.createDirectory(
+                at: staging, withIntermediateDirectories: true)
+        }
+        try writeAllParts(document, to: staging, overlayMode: overlayMode)
+
+        var result: [String: XmlTree] = [:]
+        for part in parts {
+            guard isSafeRelativeOOXMLPath(part) else {
+                throw EditError.operationLogFailure(
+                    underlying: "unsafe typed part path: \(part)")
+            }
+            let fileURL = staging.appendingPathComponent(part)
+            guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                continue // Binary/new absent parts have no XmlTree projection.
+            }
+            let data = try Data(contentsOf: fileURL)
+            let mustBeXML = document.xmlTrees[part] != nil
+                || part == "[Content_Types].xml"
+                || part.hasSuffix(".xml")
+                || part.hasSuffix(".rels")
+            if mustBeXML {
+                result[part] = try XmlTreeReader.parse(data)
+            }
+        }
+        return result
     }
 
     /// 將 WordDocument 的所有 OOXML parts 寫到指定目錄（共享 pipeline）
