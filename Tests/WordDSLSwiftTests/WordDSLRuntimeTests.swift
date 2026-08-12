@@ -25,7 +25,7 @@ final class WordDSLRuntimeTests: XCTestCase {
         }
         let log = try document.buildLog()
 
-        XCTAssertEqual(log.entries.count, 1)
+        XCTAssertEqual(log.entries.count, 2, "appendParagraph + final section properties")
         guard case .appendParagraph(let container, let p) = log.entries[0].op else {
             return XCTFail("expected appendParagraph")
         }
@@ -75,7 +75,8 @@ final class WordDSLRuntimeTests: XCTestCase {
         }
         let log = try document.buildLog()
 
-        XCTAssertEqual(log.entries.count, 2, "appendParagraph + setRuns")
+        XCTAssertEqual(log.entries.count, 3,
+                       "appendParagraph + setRuns + final section properties")
         guard case .setRuns(let target, let runs) = log.entries[1].op else {
             return XCTFail("expected setRuns")
         }
@@ -97,11 +98,188 @@ final class WordDSLRuntimeTests: XCTestCase {
             }
         }
         let log = try document.buildLog()
-        XCTAssertEqual(log.entries.count, 3, "appendParagraph + insertTab + insertBreak")
-        guard case .insertTab(let t) = log.entries[1].op else {
+        XCTAssertEqual(log.entries.count, 5,
+                       "appendParagraph + structural content + insertTab + insertBreak + final section properties")
+        guard case .setParagraphContent(_, let items) = log.entries[1].op,
+              items.count == 1,
+              items[0].kind == .run,
+              let runID = items[0].runID else {
+            return XCTFail("expected identified run content")
+        }
+        guard case .insertTab(let t) = log.entries[2].op else {
             return XCTFail("expected insertTab")
         }
-        XCTAssertEqual(t.raw, "w14:paraId=p1")
+        XCTAssertEqual(t, ElementID(libraryUUID: runID))
+        guard case .insertBreak(let b) = log.entries[3].op else {
+            return XCTFail("expected insertBreak")
+        }
+        XCTAssertEqual(b, t)
+    }
+
+    func testInlineAtomsPreserveDeclarationOrderAndElementKinds() throws {
+        let document = WordDocument {
+            Section(id: "main") {
+                Paragraph(id: "p1") {
+                    "A"
+                    Tab()
+                    "B"
+                    Break()
+                    "C"
+                    NoBreakHyphen()
+                    "D"
+                }
+            }
+        }
+        var materialized = OOXMLSwift.WordDocument.emptyAuthoringDocument()
+        let log = try document.buildLog()
+        try materialized.apply(operations: log.entries.map(\.op))
+
+        let body = try XCTUnwrap(materialized.xmlTrees["word/document.xml"]?
+            .root.children.first { $0.localName == "body" })
+        let paragraph = try XCTUnwrap(body.children.first { $0.localName == "p" })
+        XCTAssertEqual(paragraph.children.map(\.localName), ["r", "r", "r", "r"])
+        XCTAssertEqual(paragraph.children.map { $0.children.map(\.localName) }, [
+            ["t", "tab"], ["t", "br"], ["t", "noBreakHyphen"], ["t"],
+        ])
+    }
+
+    func testHyperlinkAtomsPreserveDeclarationOrderAndMailtoScheme() throws {
+        let document = WordDocument {
+            Section(id: "main") {
+                Paragraph(id: "p1") {
+                    Hyperlink(to: .mailto("hello@example.com")) {
+                        "A"
+                        Tab()
+                        "B"
+                        Break()
+                    }
+                }
+            }
+        }
+        let log = try document.buildLog()
+        let mailRelationship = try XCTUnwrap(log.entries.compactMap { entry -> String? in
+            guard case .addRelationship(_, _, _, let target, _) = entry.op else { return nil }
+            return target
+        }.first)
+        XCTAssertEqual(mailRelationship, "mailto:hello@example.com")
+
+        var materialized = OOXMLSwift.WordDocument.emptyAuthoringDocument()
+        try materialized.apply(operations: log.entries.map(\.op))
+        let hyperlink = try XCTUnwrap(materialized.xmlTrees["word/document.xml"]?
+            .root.children.first { $0.localName == "body" }?
+            .children.first { $0.localName == "p" }?
+            .children.first { $0.localName == "hyperlink" })
+        XCTAssertEqual(hyperlink.children.map(\.localName), ["r", "r"])
+        XCTAssertEqual(hyperlink.children.map { $0.children.map(\.localName) }, [
+            ["t", "tab"], ["t", "br"],
+        ])
+    }
+
+    func testAtomAfterBookmarkDoesNotMoveBeforeBookmark() throws {
+        let document = WordDocument {
+            Section(id: "main") {
+                Paragraph(id: "p1") {
+                    "A"
+                    Bookmark(id: "target") { "B" }
+                    Tab()
+                    "C"
+                }
+            }
+        }
+        var materialized = OOXMLSwift.WordDocument.emptyAuthoringDocument()
+        try materialized.apply(log: document.buildLog())
+
+        let paragraph = try XCTUnwrap(materialized.xmlTrees["word/document.xml"]?
+            .root.children.first { $0.localName == "body" }?
+            .children.first { $0.localName == "p" })
+        XCTAssertEqual(paragraph.children.map(\.localName), [
+            "r", "bookmarkStart", "r", "bookmarkEnd", "r", "r",
+        ])
+        XCTAssertEqual(paragraph.children[0].children.map(\.localName), ["t"])
+        XCTAssertEqual(paragraph.children[2].children.map(\.localName), ["t"])
+        XCTAssertEqual(paragraph.children[4].children.map(\.localName), ["t", "tab"])
+        XCTAssertEqual(paragraph.children[5].children.map(\.localName), ["t"])
+    }
+
+    func testTableThreeLayerIDsReachSerializedOOXML() throws {
+        let document = WordDocument {
+            Section(id: "main") {
+                Table(id: "tbl1") {
+                    TableRow(id: "tbl1-r0") {
+                        TableCell(id: "tbl1-r0-c0") {
+                            Paragraph(id: "tbl1-r0-c0-p0") { "A" }
+                        }
+                        TableCell(id: "tbl1-r0-c1") {
+                            Paragraph(id: "tbl1-r0-c1-p0") { "B" }
+                        }
+                    }
+                }
+            }
+        }
+        var materialized = OOXMLSwift.WordDocument.emptyAuthoringDocument()
+        let log = try document.buildLog()
+        try materialized.apply(operations: log.entries.map(\.op))
+
+        let table = try XCTUnwrap(materialized.xmlTrees["word/document.xml"]?
+            .root.children.first { $0.localName == "body" }?
+            .children.first { $0.localName == "tbl" })
+        XCTAssertEqual(table.attributeValue(prefix: "w14", localName: "textId"), "tbl1")
+        let row = try XCTUnwrap(table.children.first { $0.localName == "tr" })
+        XCTAssertEqual(row.attributeValue(prefix: "w14", localName: "textId"), "tbl1-r0")
+        let cells = row.children.filter { $0.localName == "tc" }
+        XCTAssertEqual(cells.map {
+            $0.attributeValue(prefix: "w14", localName: "textId")
+        }, ["tbl1-r0-c0", "tbl1-r0-c1"])
+        XCTAssertEqual(cells.compactMap {
+            $0.children.first { $0.localName == "p" }?
+                .attributeValue(prefix: "w14", localName: "paraId")
+        }, ["tbl1-r0-c0-p0", "tbl1-r0-c1-p0"])
+    }
+
+    func testTableCellStructuredInlinePreservesAtomsAndHyperlink() throws {
+        let document = WordDocument {
+            Section(id: "main") {
+                Table(id: "tbl1") {
+                    TableRow(id: "row1") {
+                        TableCell(id: "cell1") {
+                            Paragraph(id: "cell-p1") {
+                                "A"
+                                Tab()
+                                Hyperlink(to: .mailto("cell@example.com")) { "B" }
+                                Break()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let log = try document.buildLog()
+        XCTAssertTrue(log.entries.contains {
+            if case .insertTab = $0.op { return true }
+            return false
+        })
+        XCTAssertTrue(log.entries.contains {
+            if case .insertBreak = $0.op { return true }
+            return false
+        })
+        XCTAssertTrue(log.entries.contains {
+            if case .addRelationship(_, _, _, let target, _) = $0.op {
+                return target == "mailto:cell@example.com"
+            }
+            return false
+        })
+
+        var materialized = OOXMLSwift.WordDocument.emptyAuthoringDocument()
+        try materialized.apply(operations: log.entries.map(\.op))
+        let paragraph = try XCTUnwrap(materialized.xmlTrees["word/document.xml"]?
+            .root.children.first { $0.localName == "body" }?
+            .children.first { $0.localName == "tbl" }?
+            .children.first { $0.localName == "tr" }?
+            .children.first { $0.localName == "tc" }?
+            .children.first { $0.localName == "p" })
+        XCTAssertEqual(paragraph.children.map(\.localName), ["r", "hyperlink", "r"])
+        XCTAssertEqual(paragraph.children[0].children.map(\.localName), ["t", "tab"])
+        XCTAssertEqual(paragraph.children[2].children.map(\.localName), ["t", "br"])
     }
 
     // MARK: - save(to:) three-file write (mdocx-grammar requirement)
@@ -166,7 +344,7 @@ final class WordDSLRuntimeTests: XCTestCase {
         try Data("lock".utf8).write(to: dir.appendingPathComponent("~$locked.docx"))
 
         XCTAssertThrowsError(try WordDocument { }.save(to: url)) { error in
-            guard case SyncError.fileLockedByWord = error else {
+            guard case OOXMLSwift.SyncError.fileLockedByWord = error else {
                 return XCTFail("expected fileLockedByWord, got \(error)")
             }
         }
@@ -323,8 +501,11 @@ final class StructuralCoverageTests: XCTestCase {
         }
         XCTAssertEqual(type, "Summary")
         XCTAssertEqual(cid.raw, "ch1-summary")
-        guard case .endComponent(let eid) = log.entries.last?.op else {
-            return XCTFail("last op must be endComponent")
+        guard let endEntry = log.entries.first(where: {
+            if case .endComponent = $0.op { return true }
+            return false
+        }), case .endComponent(let eid) = endEntry.op else {
+            return XCTFail("log must contain endComponent")
         }
         XCTAssertEqual(eid.raw, "ch1-summary")
         // Envelope contains defineStyle + appendParagraph for the body.
@@ -380,10 +561,9 @@ final class StructuralCoverageTests: XCTestCase {
         }
     }
 
-    func testTableAndBookmarkAndHyperlinkTypesCompile() throws {
-        // Fixtures 10a / 12 / 13a syntax — COMPILING these bodies is the
-        // v0.34 acceptance for the structural types; emission channels are
-        // loud-throw pending taxonomy/reducer increments.
+    func testTableAndBookmarkAndHyperlinkEmitAndSave() throws {
+        // Fixtures 10a / 12 / 13a are executable authoring syntax, not
+        // compile-only placeholders.
         let tableDoc = WordDocument {
             Section(id: "main") {
                 Table(id: "tbl1") {
@@ -395,12 +575,14 @@ final class StructuralCoverageTests: XCTestCase {
                 }
             }
         }
-        XCTAssertThrowsError(try tableDoc.buildLog()) { error in
-            guard case DSLEmissionError.unsupportedElement(let element, _) = error else {
-                return XCTFail("expected loud DSLEmissionError, got \(error)")
+        let tableLog = try tableDoc.buildLog()
+        XCTAssertTrue(tableLog.entries.contains {
+            if case .appendTable(_, let payload) = $0.op {
+                return payload.rows == 1 && payload.columns == 1
+                    && payload.cells == [["cell content"]]
             }
-            XCTAssertTrue(element.contains("Table"))
-        }
+            return false
+        })
 
         let bookmarkDoc = WordDocument {
             Section(id: "main") {
@@ -409,7 +591,14 @@ final class StructuralCoverageTests: XCTestCase {
                 }
             }
         }
-        XCTAssertThrowsError(try bookmarkDoc.buildLog())
+        let bookmarkLog = try bookmarkDoc.buildLog()
+        XCTAssertTrue(bookmarkLog.entries.contains {
+            if case .setParagraphContent(_, let items) = $0.op {
+                return items.contains { $0.marker?.localName == "bookmarkStart" }
+                    && items.contains { $0.marker?.localName == "bookmarkEnd" }
+            }
+            return false
+        })
 
         let hyperlinkDoc = WordDocument {
             Section(id: "main") {
@@ -419,7 +608,25 @@ final class StructuralCoverageTests: XCTestCase {
                 }
             }
         }
-        XCTAssertThrowsError(try hyperlinkDoc.buildLog())
+        let hyperlinkLog = try hyperlinkDoc.buildLog()
+        XCTAssertTrue(hyperlinkLog.entries.contains {
+            if case .setParagraphContent = $0.op { return true }
+            return false
+        })
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("structural-dsl-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let tableURL = dir.appendingPathComponent("table.docx")
+        let bookmarkURL = dir.appendingPathComponent("bookmark.docx")
+        let hyperlinkURL = dir.appendingPathComponent("hyperlink.docx")
+        try tableDoc.save(to: tableURL)
+        try bookmarkDoc.save(to: bookmarkURL)
+        try hyperlinkDoc.save(to: hyperlinkURL)
+        XCTAssertEqual(try DocxReader.read(from: tableURL).body.children.count, 1)
+        XCTAssertEqual(try DocxReader.read(from: bookmarkURL).body.children.count, 1)
+        XCTAssertEqual(try DocxReader.read(from: hyperlinkURL).body.children.count, 1)
     }
 
     func testRealFixture10aAnd13aSyntaxParseability() throws {

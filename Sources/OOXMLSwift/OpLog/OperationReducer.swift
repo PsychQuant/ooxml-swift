@@ -12,12 +12,9 @@
 // by calling `base.deepCopy()` (added v0.31.4 in `Tree/XmlTree.swift`) and
 // applies mutations to the clone.
 //
-// Phase 2b apply scope is narrow: only `setText`, `setParagraphStyle`,
-// `batchBegin/End`, `unknown` (no-op markers). Other ops throw `.malformedOp`
-// with reason `"Phase 2c implements this op"`. The spec tests only exercise
-// setText / undo / redo / blame paths, so this is sufficient. Phase 2c
-// (`operation-log-setter-wiring-impl`) implements the remaining ops when
-// its own tests exercise them.
+// Phase 2b established replay/time-travel; Phase 2c completes the declared
+// element and tree mutation taxonomy. Unsupported or malformed payloads fail
+// through typed ReducerError values rather than being silently ignored.
 
 import Foundation
 
@@ -61,8 +58,9 @@ public enum OperationReducer {
     /// Caller's `base` is NEVER mutated.
     public static func materialize(log: OperationLog, base: XmlTree) throws -> XmlTree {
         var working = base.deepCopy()
-        for (index, entry) in log.entries.enumerated() {
-            try applyOrInterpret(entry: entry, entryIndex: index, log: log, to: &working)
+        let active = try activeEntryIndices(in: log)
+        for (index, entry) in log.entries.enumerated() where active.contains(index) {
+            try apply(entry: entry, to: &working)
         }
         return working
     }
@@ -77,17 +75,64 @@ public enum OperationReducer {
                 let opID = log.entries.first?.opID ?? UUID()
                 throw ReducerError.malformedOp(opID: opID, reason: "index out of range")
             }
-            var working = base.deepCopy()
-            for i in 0..<N {
-                try applyOrInterpret(entry: log.entries[i], entryIndex: i, log: log, to: &working)
+            var prefix = OperationLog()
+            for entry in log.entries.prefix(N) {
+                prefix.append(entry.op, source: entry.source,
+                              opID: entry.opID, at: entry.timestamp)
             }
-            return working
+            return try materialize(log: prefix, base: base)
         case .timestamp(let cutoff):
-            var working = base.deepCopy()
-            for (i, entry) in log.entries.enumerated() where entry.timestamp <= cutoff {
-                try applyOrInterpret(entry: entry, entryIndex: i, log: log, to: &working)
+            // Build the actual replay history first. Undo/redo interpretation
+            // must only see entries admitted by the cutoff; timestamps are
+            // caller-supplied and need not be monotonic in source order.
+            var filtered = OperationLog()
+            for (sourceIndex, entry) in log.entries.enumerated()
+            where entry.timestamp <= cutoff {
+                let priorEntries = log.entries.prefix(sourceIndex)
+                switch entry.op {
+                case .undo(let target):
+                    guard priorEntries.contains(where: { $0.opID == target }) else {
+                        throw ReducerError.cannotUndo(targetOpID: target)
+                    }
+                    guard filtered.entries.contains(where: { $0.opID == target }) else {
+                        // The target exists in the full log but was excluded
+                        // by the cutoff, so this control is outside the
+                        // admitted replay relationship as well.
+                        continue
+                    }
+                case .redo(let target):
+                    guard priorEntries.contains(where: { $0.opID == target }) else {
+                        throw ReducerError.cannotRedo(targetOpID: target)
+                    }
+                    guard priorEntries.contains(where: {
+                        if case .undo(let undoneTarget) = $0.op {
+                            return undoneTarget == target
+                        }
+                        return false
+                    }) else {
+                        throw ReducerError.cannotRedo(targetOpID: target)
+                    }
+                    guard filtered.entries.contains(where: { $0.opID == target }) else {
+                        continue
+                    }
+                    guard filtered.entries.contains(where: {
+                        if case .undo(let undoneTarget) = $0.op {
+                            return undoneTarget == target
+                        }
+                        return false
+                    }) else {
+                        // The redo is well-formed in source order, but its
+                        // prerequisite undo was excluded by this cutoff.
+                        continue
+                    }
+                default:
+                    break
+                }
+                filtered.append(
+                    entry.op, source: entry.source,
+                    opID: entry.opID, at: entry.timestamp)
             }
-            return working
+            return try materialize(log: filtered, base: base)
         }
     }
 
@@ -96,40 +141,163 @@ public enum OperationReducer {
     /// target's effect (per Decision 4: replay the whole history with the
     /// targeted op replaced).
     public static func undo(_ targetOpID: UUID, log: OperationLog, base: XmlTree) throws -> XmlTree {
-        // Verify target exists.
-        guard log.entries.contains(where: { $0.opID == targetOpID }) else {
-            throw ReducerError.cannotUndo(targetOpID: targetOpID)
-        }
-        var working = base.deepCopy()
-        for (i, entry) in log.entries.enumerated() {
-            if entry.opID == targetOpID {
-                try applyInverse(entry: entry, entryIndex: i, log: log, to: &working)
-            } else {
-                try applyOrInterpret(entry: entry, entryIndex: i, log: log, to: &working)
-            }
-        }
-        return working
+        _ = try controlledEntryIndices(
+            targetOpID: targetOpID, before: log.entries.count, in: log)
+        var augmented = log
+        augmented.append(.undo(targetOpID: targetOpID), source: .swift)
+        return try materialize(log: augmented, base: base)
     }
 
     /// Materializes the log skipping the `.undo` entry whose `targetOpID`
     /// matches the argument — restores the target's effect.
     public static func redo(_ targetOpID: UUID, log: OperationLog, base: XmlTree) throws -> XmlTree {
-        // Find a .undo entry matching the target.
-        let undoIndex = log.entries.firstIndex { entry in
-            if case .undo(let tgt) = entry.op, tgt == targetOpID { return true }
-            return false
-        }
-        guard undoIndex != nil else {
-            throw ReducerError.cannotRedo(targetOpID: targetOpID)
-        }
-        var working = base.deepCopy()
-        for (i, entry) in log.entries.enumerated() {
-            if i == undoIndex {
-                continue  // skip the .undo entry → original op stays in effect
+        var augmented = log
+        augmented.append(.redo(targetOpID: targetOpID), source: .swift)
+        return try materialize(log: augmented, base: base)
+    }
+
+    /// Resolves undo/redo before replay. A control entry changes whether its
+    /// target participates in replay; it is not an in-place mutation at the
+    /// point where the control appears. This distinction matters whenever a
+    /// later operation touches the same element: `A, B, C, undo(B)` must
+    /// replay as `A, C`, not apply B's inverse after C.
+    internal static func activeEntryIndices(in log: OperationLog) throws -> Set<Int> {
+        var targetIsActive: [UUID: Bool] = [:]
+        var sawUndo: Set<UUID> = []
+
+        for (index, entry) in log.entries.enumerated() {
+            switch entry.op {
+            case .undo(let target):
+                guard log.entries[..<index].contains(where: {
+                    $0.opID == target
+                }) else {
+                    throw ReducerError.cannotUndo(targetOpID: target)
+                }
+                _ = try controlledEntryIndices(
+                    targetOpID: target, before: index, in: log)
+                targetIsActive[target] = false
+                sawUndo.insert(target)
+            case .redo(let target):
+                guard sawUndo.contains(target) else {
+                    throw ReducerError.cannotRedo(targetOpID: target)
+                }
+                _ = try controlledEntryIndices(
+                    targetOpID: target, before: index, in: log)
+                targetIsActive[target] = true
+            default:
+                break
             }
-            try applyOrInterpret(entry: entry, entryIndex: i, log: log, to: &working)
         }
-        return working
+
+        var inactive: Set<Int> = []
+        for (target, isActive) in targetIsActive where !isActive {
+            inactive.formUnion(try controlledEntryIndices(
+                targetOpID: target, before: log.entries.count, in: log))
+        }
+        return Set(log.entries.indices.filter { index in
+            guard !inactive.contains(index) else { return false }
+            switch log.entries[index].op {
+            case .undo, .redo, .batchBegin, .batchEnd: return false
+            default: return true
+            }
+        })
+    }
+
+    /// Returns the ordinary entries controlled by an undo target. Phase 2b
+    /// allows individual setText/style entries; the later canonical taxonomy
+    /// also makes a closed batchBegin…batchEnd envelope one logical unit.
+    private static func controlledEntryIndices(
+        targetOpID: UUID, before controlIndex: Int, in log: OperationLog
+    ) throws -> Set<Int> {
+        guard let targetIndex = log.entries[..<controlIndex].firstIndex(where: {
+            $0.opID == targetOpID
+        }) else {
+            throw ReducerError.cannotUndo(targetOpID: targetOpID)
+        }
+        switch log.entries[targetIndex].op {
+        case .setText, .setParagraphStyle:
+            return [targetIndex]
+        case .batchBegin:
+            var depth = 0
+            for index in targetIndex..<controlIndex {
+                switch log.entries[index].op {
+                case .batchBegin: depth += 1
+                case .batchEnd:
+                    depth -= 1
+                    if depth == 0 {
+                        return Set((targetIndex + 1)..<index)
+                    }
+                default: break
+                }
+            }
+            throw ReducerError.cannotUndo(targetOpID: targetOpID)
+        default:
+            throw ReducerError.cannotUndo(targetOpID: targetOpID)
+        }
+    }
+
+    /// Computes the concrete text/style corrections needed when a document
+    /// that already materialized its history appends one control operation.
+    /// Structural batch members cannot be reversed from the current tree
+    /// without a stored base, so this path fails loudly for those members.
+    internal static func controlReplacementOperations(
+        for control: Operation, in log: OperationLog
+    ) throws -> [Operation] {
+        let target: UUID
+        switch control {
+        case .undo(let id), .redo(let id): target = id
+        default: return []
+        }
+        let controlIndex = log.entries.count - 1
+        guard log.entries[..<controlIndex].contains(where: {
+            $0.opID == target
+        }) else {
+            if case .undo = control {
+                throw ReducerError.cannotUndo(targetOpID: target)
+            }
+            throw ReducerError.cannotRedo(targetOpID: target)
+        }
+        let controlled = try controlledEntryIndices(
+            targetOpID: target, before: controlIndex, in: log)
+        let active = try activeEntryIndices(in: log)
+
+        var textTargets: [ElementID] = []
+        var styleTargets: [ElementID] = []
+        for index in controlled.sorted() {
+            switch log.entries[index].op {
+            case .setText(let element, _):
+                if !textTargets.contains(element) { textTargets.append(element) }
+            case .setParagraphStyle(let element, _):
+                if !styleTargets.contains(element) { styleTargets.append(element) }
+            case .batchBegin, .batchEnd:
+                break
+            default:
+                throw ReducerError.cannotUndo(targetOpID: target)
+            }
+        }
+
+        var replacements: [Operation] = []
+        for element in textTargets {
+            let value = log.entries.indices.reversed().compactMap { index -> String? in
+                guard active.contains(index),
+                      case .setText(let candidate, let text) = log.entries[index].op,
+                      candidate == element else { return nil }
+                return text
+            }.first ?? ""
+            replacements.append(.setText(target: element, text: value))
+        }
+        for element in styleTargets {
+            var value: String?
+            for index in log.entries.indices.reversed() where active.contains(index) {
+                if case .setParagraphStyle(let candidate, let style) = log.entries[index].op,
+                   candidate == element {
+                    value = style
+                    break
+                }
+            }
+            replacements.append(.setParagraphStyle(target: element, styleId: value))
+        }
+        return replacements
     }
 
     /// Walks `log.entries` in REVERSE order and returns the most recent entry
@@ -159,21 +327,33 @@ public enum OperationReducer {
         case .undo(let targetOpID):
             // Find the target in the log so far (entries before this .undo entry).
             // If found, undo the target on the current tree state.
-            let targetEntry = log.entries[..<entryIndex].first { $0.opID == targetOpID }
-            guard let target = targetEntry else {
+            let targetIndex = log.entries[..<entryIndex].firstIndex { $0.opID == targetOpID }
+            guard let targetIndex else {
                 // Target not in prior history — treat as a no-op (forward-compat).
                 return
             }
-            try applyInverse(entry: target, entryIndex: entryIndex, log: log, to: &tree)
+            try applyInverse(
+                entry: log.entries[targetIndex],
+                entryIndex: targetIndex,
+                log: log,
+                to: &tree
+            )
+        case .redo(let targetOpID):
+            let priorEntries = log.entries[..<entryIndex]
+            guard priorEntries.contains(where: { prior in
+                if case .undo(let undoneID) = prior.op { return undoneID == targetOpID }
+                return false
+            }), let target = priorEntries.first(where: { $0.opID == targetOpID }) else {
+                throw ReducerError.cannotRedo(targetOpID: targetOpID)
+            }
+            try apply(entry: target, to: &tree)
         default:
             try apply(entry: entry, to: &tree)
         }
     }
 
-    /// Applies a single entry's op to the tree. Phase 2b apply scope: only
-    /// `setText`, `setParagraphStyle`, `batchBegin/End`, `unknown` (markers
-    /// + opaque). Other op kinds throw `.malformedOp` with reason
-    /// "Phase 2c implements this op".
+    /// Applies a single entry's op to the tree. Control and package-addressed
+    /// operations are interpreted or routed by the surrounding pipeline.
     internal static func apply(entry: LogEntry, to tree: inout XmlTree) throws {
         switch entry.op {
         case .setText(let target, let text):
@@ -181,7 +361,10 @@ public enum OperationReducer {
                 throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
             }
             let textChild = XmlNode.text(text)
-            let wt = XmlNode.element(prefix: "w", localName: "t", children: [textChild])
+            let wordNS = node.namespaceURI
+                ?? "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            let wt = XmlNode.element(
+                prefix: "w", localName: "t", namespaceURI: wordNS, children: [textChild])
             if node.kind == .element && node.localName == "p" {
                 // Paragraph target (the design's canonical case — setText
                 // addresses the paragraph via w14:paraId): full-text-replace
@@ -191,7 +374,8 @@ public enum OperationReducer {
                 // Pre-fix behavior appended <w:t> directly under <w:p> —
                 // schema-invalid and invisible to the runs-based typed view
                 // (caught by TypedSetterOpLogTests, task 3.15).
-                let wr = XmlNode.element(prefix: "w", localName: "r", children: [wt])
+                let wr = XmlNode.element(
+                    prefix: "w", localName: "r", namespaceURI: wordNS, children: [wt])
                 // 7.3 verify P2: full-text-replace applies to CONTENT
                 // children only. Range markers and paragraph properties
                 // (<w:pPr>, bookmarkStart/End, commentRangeStart/End,
@@ -201,10 +385,31 @@ public enum OperationReducer {
                 let replacedContent: Set<String> = [
                     "r", "hyperlink", "fldSimple", "sdt", "smartTag", "t",
                 ]
-                let keptChildren = node.children.filter {
-                    $0.kind == .element && !replacedContent.contains($0.localName)
+                func isReplaceableContent(_ child: XmlNode) -> Bool {
+                    // Non-element paragraph children are not structural
+                    // anchors and were part of the old content surface too.
+                    guard child.kind == .element else { return true }
+                    guard replacedContent.contains(child.localName) else { return false }
+                    // A comment reference is a structural anchor wrapped in
+                    // a run. Replacing paragraph text must not orphan the
+                    // comments part by deleting that reference run.
+                    return !(child.localName == "r"
+                        && containsDescendant(named: "commentReference", in: child))
                 }
-                node.children = keptChildren + [wr]
+                let firstRemovedIndex = node.children.firstIndex(where: isReplaceableContent)
+                var keptChildren = node.children.filter { !isReplaceableContent($0) }
+                // Insert at the exact location of the first removed content
+                // child, mapped into the retained-child array. This preserves
+                // both non-empty ranges (`start, oldRun, end`) and empty ranges
+                // before following text (`start, end, oldRun`).
+                let insertionIndex = firstRemovedIndex.map { removedIndex in
+                    node.children[..<removedIndex].filter { !isReplaceableContent($0) }.count
+                } ?? keptChildren.firstIndex {
+                    $0.localName == "r"
+                        && containsDescendant(named: "commentReference", in: $0)
+                } ?? keptChildren.count
+                keptChildren.insert(wr, at: insertionIndex)
+                node.children = keptChildren
             } else {
                 // Run-shaped target: replace <w:t> direct children with one
                 // new <w:t>X</w:t>. Other children (e.g., <w:rPr>) are
@@ -301,23 +506,8 @@ public enum OperationReducer {
             let keptPPr = node.children.filter {
                 $0.kind == .element && $0.localName == "pPr"
             }
-            let contentNodes: [XmlNode] = try items.map { item in
-                switch item.kind {
-                case .run:
-                    guard let run = item.run else {
-                        throw ReducerError.malformedOp(opID: entry.opID, reason: "run item missing run")
-                    }
-                    return makeRunNode(run)
-                case .marker:
-                    guard let marker = item.marker else {
-                        throw ReducerError.malformedOp(opID: entry.opID, reason: "marker item missing marker")
-                    }
-                    let el = XmlNode.element(prefix: "w", localName: marker.localName)
-                    for attr in marker.attributes {
-                        el.setAttribute(prefix: attr.prefix, localName: attr.localName, value: attr.value)
-                    }
-                    return el
-                }
+            let contentNodes = try items.map {
+                try makeInlineNode($0, opID: entry.opID)
             }
             node.children = keptPPr + contentNodes
 
@@ -352,7 +542,14 @@ public enum OperationReducer {
                         reason: "appendTable cells shape must be rows × columns")
                 }
             }
-            let newTbl = makeTable(payload: payload)
+            guard payload.rowIds == nil || payload.rowIds?.count == payload.rows,
+                  payload.cellIds == nil || isRectangular(
+                    payload.cellIds!, rows: payload.rows, columns: payload.columns) else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "appendTable stable IDs shape must be rows × columns")
+            }
+            let newTbl = try makeTable(payload: payload, opID: entry.opID)
             newTbl.libraryUUID = entry.opID
             if let sectIdx = parent.children.firstIndex(where: {
                 $0.kind == .element && $0.localName == "sectPr"
@@ -360,6 +557,28 @@ public enum OperationReducer {
                 parent.children.insert(newTbl, at: sectIdx)
             } else {
                 parent.children.append(newTbl)
+            }
+
+        case .appendBlockMarker(let marker):
+            guard let body = tree.root.children.first(where: {
+                $0.kind == .element && $0.localName == "body"
+            }) else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "appendBlockMarker requires a <w:body>")
+            }
+            let node = XmlNode.element(prefix: "w", localName: marker.localName)
+            for attribute in marker.attributes {
+                node.setAttribute(prefix: attribute.prefix,
+                                  localName: attribute.localName,
+                                  value: attribute.value)
+            }
+            if let sectIndex = body.children.firstIndex(where: {
+                $0.kind == .element && $0.localName == "sectPr"
+            }) {
+                body.children.insert(node, at: sectIndex)
+            } else {
+                body.children.append(node)
             }
 
         case .setDocumentProlog(let prolog):
@@ -544,35 +763,204 @@ public enum OperationReducer {
             // bookmarks pointing TO this paragraph) are left dangling. A
             // follow-up should add orphan-collection — file issue if needed.
 
-        case .setRunFormat(let target, let format):
-            // MVP: bold only (sufficient for OOXMLEdit.setBold). Other
-            // fields throw malformedOp — add italic/underline/fontSize/color
-            // when corresponding OOXMLEdit cases appear.
-            if format.italic != nil || format.underline != nil
-               || format.fontSizeHalfPoints != nil || format.color != nil {
+        case .insertTable(let anchor, let payload):
+            guard payload.rows >= 0, payload.columns >= 0,
+                  payload.cells == nil || isRectangular(
+                    payload.cells!, rows: payload.rows, columns: payload.columns),
+                  payload.richCells == nil || isRectangular(
+                    payload.richCells!, rows: payload.rows, columns: payload.columns),
+                  payload.rowIds == nil || payload.rowIds?.count == payload.rows,
+                  payload.cellIds == nil || isRectangular(
+                    payload.cellIds!, rows: payload.rows, columns: payload.columns) else {
                 throw ReducerError.malformedOp(
                     opID: entry.opID,
-                    reason: "Phase 2c MVP supports RunFormatPayload.bold only — italic/underline/fontSizeHalfPoints/color pending"
-                )
+                    reason: "table payload dimensions do not match rows/columns")
             }
+            guard let (parent, index) = findParentAndIndex(targetID: anchor, in: tree.root) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: anchor)
+            }
+            let table = try makeTable(payload: payload, opID: entry.opID)
+            table.libraryUUID = entry.opID
+            parent.children.insert(table, at: index + 1)
+
+        case .removeTable(let target):
+            guard let (parent, index) = findParentAndIndex(targetID: target, in: tree.root) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
+            }
+            guard parent.children[index].localName == "tbl" else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID, reason: "removeTable target must be <w:tbl>")
+            }
+            parent.children.remove(at: index)
+
+        case .setCellText(let tableID, let row, let column, let text):
+            guard let table = findNode(elementID: tableID, in: tree) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: tableID)
+            }
+            guard table.localName == "tbl", row >= 0, column >= 0 else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID, reason: "setCellText requires a table and non-negative indices")
+            }
+            let rows = table.children.filter { $0.kind == .element && $0.localName == "tr" }
+            guard row < rows.count else {
+                throw ReducerError.malformedOp(opID: entry.opID, reason: "table row out of range")
+            }
+            let cells = rows[row].children.filter { $0.kind == .element && $0.localName == "tc" }
+            guard column < cells.count else {
+                throw ReducerError.malformedOp(opID: entry.opID, reason: "table column out of range")
+            }
+            let cell = cells[column]
+            if let paragraph = cell.children.first(where: {
+                $0.kind == .element && $0.localName == "p"
+            }) {
+                replaceParagraphText(paragraph, with: text)
+            } else {
+                cell.children.append(makeParagraph(payload: ParagraphPayload(text: text)))
+            }
+
+        case .insertRun(let paragraphID, let position, let payload):
+            guard let paragraph = findNode(elementID: paragraphID, in: tree) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: paragraphID)
+            }
+            guard paragraph.localName == "p" else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID, reason: "insertRun parent must be <w:p>")
+            }
+            let contentStart = paragraph.children.firstIndex {
+                !($0.kind == .element && $0.localName == "pPr")
+            } ?? paragraph.children.count
+            let contentCount = paragraph.children.count - contentStart
+            guard position >= 0, position <= contentCount else {
+                throw ReducerError.malformedOp(opID: entry.opID, reason: "run position out of range")
+            }
+            let run = makeRunNode(payload)
+            run.libraryUUID = entry.opID
+            paragraph.children.insert(run, at: contentStart + position)
+
+        case .setRunFormat(let target, let format):
             guard let node = findNode(elementID: target, in: tree) else {
                 throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
             }
-            if let bold = format.bold {
-                try setOrRemoveBold(runNode: node, value: bold)
+            guard node.localName == "r" else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID, reason: "setRunFormat target must be <w:r>")
             }
-            // bold == nil → no-op (leave unchanged)
+            applyRunFormat(format, to: node)
 
-        // Phase 2c remaining unsupported op kinds — implemented incrementally.
-        case .insertTable, .removeTable, .setCellText,
-             .insertRun,
-             .insertBookmark, .insertComment,
-             .redo,
-             .insertNode, .removeNode, .updateAttribute, .moveNode:
-            throw ReducerError.malformedOp(
-                opID: entry.opID,
-                reason: "Phase 2c implements this op"
-            )
+        case .insertBookmark(let paragraphID, let bookmarkID, let name):
+            guard let paragraph = findNode(elementID: paragraphID, in: tree) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: paragraphID)
+            }
+            guard paragraph.localName == "p", bookmarkID >= 0, !name.isEmpty else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "insertBookmark requires a paragraph, non-negative id, and non-empty name")
+            }
+            let start = XmlNode.element(prefix: "w", localName: "bookmarkStart")
+            start.setAttribute(prefix: "w", localName: "id", value: String(bookmarkID))
+            start.setAttribute(prefix: "w", localName: "name", value: name)
+            let end = XmlNode.element(prefix: "w", localName: "bookmarkEnd")
+            end.setAttribute(prefix: "w", localName: "id", value: String(bookmarkID))
+            let contentStart = paragraph.children.firstIndex {
+                !($0.kind == .element && $0.localName == "pPr")
+            } ?? paragraph.children.count
+            paragraph.children.insert(start, at: contentStart)
+            paragraph.children.append(end)
+
+        case .insertComment(let paragraphID, let commentID, _, _):
+            guard let paragraph = findNode(elementID: paragraphID, in: tree) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: paragraphID)
+            }
+            guard paragraph.localName == "p", commentID >= 0 else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "insertComment requires a paragraph and non-negative id")
+            }
+            let start = XmlNode.element(prefix: "w", localName: "commentRangeStart")
+            start.setAttribute(prefix: "w", localName: "id", value: String(commentID))
+            let end = XmlNode.element(prefix: "w", localName: "commentRangeEnd")
+            end.setAttribute(prefix: "w", localName: "id", value: String(commentID))
+            let reference = XmlNode.element(prefix: "w", localName: "commentReference")
+            reference.setAttribute(prefix: "w", localName: "id", value: String(commentID))
+            let referenceRun = XmlNode.element(prefix: "w", localName: "r", children: [reference])
+            let contentStart = paragraph.children.firstIndex {
+                !($0.kind == .element && $0.localName == "pPr")
+            } ?? paragraph.children.count
+            paragraph.children.insert(start, at: contentStart)
+            paragraph.children.append(end)
+            paragraph.children.append(referenceRun)
+
+        case .redo:
+            // Interpreted by applyOrInterpret; defensive no-op when apply is
+            // invoked directly by internal callers.
+            return
+
+        case .insertNode(let parentID, let position, let nodeXML):
+            guard let parent = findNode(elementID: parentID, in: tree) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: parentID)
+            }
+            guard position >= 0, position <= parent.children.count else {
+                throw ReducerError.malformedOp(opID: entry.opID, reason: "node position out of range")
+            }
+            do {
+                let node = try parseXMLFragment(nodeXML)
+                node.libraryUUID = entry.opID
+                parent.children.insert(node, at: position)
+            } catch let error as ReducerError {
+                throw error
+            } catch {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "Failed to parse insertNode nodeXML: \(error.localizedDescription)")
+            }
+
+        case .removeNode(let target):
+            guard let (parent, index) = findParentAndIndex(targetID: target, in: tree.root) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
+            }
+            parent.children.remove(at: index)
+
+        case .updateAttribute(let target, let prefix, let localName, let value):
+            guard let node = findNode(elementID: target, in: tree) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: target)
+            }
+            guard !localName.isEmpty else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID, reason: "attribute localName must not be empty")
+            }
+            if let value {
+                node.setAttribute(prefix: prefix, localName: localName, value: value)
+            } else {
+                node.attributes.removeAll { $0.prefix == prefix && $0.localName == localName }
+                node.markDirty()
+            }
+
+        case .moveNode(let sourceID, let destinationParentID, let destinationIndex):
+            guard let source = findNode(elementID: sourceID, in: tree) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: sourceID)
+            }
+            guard let (sourceParent, sourceIndex) = findParentAndIndex(
+                targetID: sourceID, in: tree.root) else {
+                throw ReducerError.elementNotFound(opID: entry.opID, elementID: sourceID)
+            }
+            guard let destinationParent = findNode(elementID: destinationParentID, in: tree) else {
+                throw ReducerError.elementNotFound(
+                    opID: entry.opID, elementID: destinationParentID)
+            }
+            guard source !== destinationParent,
+                  !containsNodeIdentical(to: destinationParent, in: source) else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID, reason: "cannot move a node into itself or its descendant")
+            }
+            guard destinationIndex >= 0,
+                  destinationIndex <= destinationParent.children.count else {
+                throw ReducerError.malformedOp(
+                    opID: entry.opID, reason: "destination index out of range")
+            }
+            sourceParent.children.remove(at: sourceIndex)
+            let adjustedIndex = sourceParent === destinationParent && sourceIndex < destinationIndex
+                ? destinationIndex - 1 : destinationIndex
+            destinationParent.children.insert(source, at: adjustedIndex)
 
         case .insertSiblingAfter(let after, let nodeXML):
             // Find target's parent + index, parse XML fragment, insert as
@@ -645,7 +1033,7 @@ public enum OperationReducer {
             }
             tree.root.children.append(rel)
 
-        case .carryPart:
+        case .carryPart, .carryBinaryPart:
             // Part-addressed raw channel: carryPart never mutates a document
             // tree. WordDocument.appendAndMaterialize intercepts it and stores
             // the verbatim bytes on `carriedParts` before the reducer runs; if
@@ -655,6 +1043,51 @@ public enum OperationReducer {
     }
 
     // MARK: - Phase 2c helpers
+
+    private static func makeInlineNode(_ item: InlineItem, opID: UUID) throws -> XmlNode {
+        switch item.kind {
+        case .run:
+            guard let run = item.run else {
+                throw ReducerError.malformedOp(opID: opID, reason: "run item missing run")
+            }
+            let node = makeRunNode(run)
+            node.libraryUUID = item.runID
+            return node
+        case .marker:
+            guard let marker = item.marker else {
+                throw ReducerError.malformedOp(opID: opID, reason: "marker item missing marker")
+            }
+            let element = XmlNode.element(prefix: "w", localName: marker.localName)
+            for attribute in marker.attributes {
+                element.setAttribute(prefix: attribute.prefix,
+                                     localName: attribute.localName,
+                                     value: attribute.value)
+            }
+            return element
+        case .hyperlink:
+            guard let hyperlink = item.hyperlink else {
+                throw ReducerError.malformedOp(
+                    opID: opID, reason: "hyperlink item missing payload")
+            }
+            let element = XmlNode.element(prefix: "w", localName: "hyperlink")
+            switch hyperlink.targetKind {
+            case .external:
+                guard let relationshipId = hyperlink.relationshipId else {
+                    throw ReducerError.malformedOp(
+                        opID: opID, reason: "external hyperlink missing relationshipId")
+                }
+                element.setAttribute(prefix: "r", localName: "id", value: relationshipId)
+            case .anchor:
+                element.setAttribute(prefix: "w", localName: "anchor", value: hyperlink.target)
+            }
+            if let items = hyperlink.items {
+                element.children = try items.map { try makeInlineNode($0, opID: opID) }
+            } else {
+                element.children = hyperlink.runs.map(makeRunNode)
+            }
+            return element
+        }
+    }
 
     /// Walks the tree from `root` looking for a node whose ElementID matches
     /// `targetID`. Returns the target's parent and its index in
@@ -718,36 +1151,112 @@ public enum OperationReducer {
         return parsed
     }
 
-    /// Sets or removes `<w:b/>` inside a `<w:r>`'s `<w:rPr>` to reflect the
-    /// boolean bold value. `value == true` ensures `<w:b/>` is present;
-    /// `value == false` removes any existing `<w:b/>` element (relies on
-    /// style inheritance for the "not bold" default).
-    ///
-    /// Creates `<w:rPr>` if needed; removes empty `<w:rPr>` if it becomes
-    /// childless after the operation (keeps tree minimal).
-    private static func setOrRemoveBold(runNode: XmlNode, value: Bool) throws {
-        // Find or create <w:rPr>. Per OOXML schema, rPr is the FIRST child of <w:r>.
-        let rPr: XmlNode
-        if let existing = runNode.children.first(where: { $0.kind == .element && $0.localName == "rPr" }) {
-            rPr = existing
-        } else if value {
-            rPr = XmlNode.element(prefix: "w", localName: "rPr")
-            runNode.children = [rPr] + runNode.children
+    private static func isRectangular<T>(
+        _ values: [[T]], rows expectedRows: Int, columns expectedColumns: Int
+    ) -> Bool {
+        values.count == expectedRows && values.allSatisfy { $0.count == expectedColumns }
+    }
+
+    private static func replaceParagraphText(_ paragraph: XmlNode, with text: String) {
+        let properties = paragraph.children.filter {
+            $0.kind == .element && $0.localName == "pPr"
+        }
+        paragraph.children = properties + [makeRunNode(RunPayload(text: text))]
+    }
+
+    private static func containsNodeIdentical(to target: XmlNode, in root: XmlNode) -> Bool {
+        if root === target { return true }
+        return root.children.contains { containsNodeIdentical(to: target, in: $0) }
+    }
+
+    private static func applyRunFormat(_ format: RunFormatPayload, to run: XmlNode) {
+        if let bold = format.bold {
+            setBooleanRunProperty("b", enabled: bold, in: run)
+        }
+        if let italic = format.italic {
+            setBooleanRunProperty("i", enabled: italic, in: run)
+        }
+        if let underline = format.underline {
+            if underline {
+                setValuedRunProperty("u", value: "single", in: run)
+            } else {
+                removeRunProperty("u", from: run)
+            }
+        }
+        if let size = format.fontSizeHalfPoints {
+            setValuedRunProperty("sz", value: String(size), in: run)
+        }
+        if let color = format.color {
+            setValuedRunProperty("color", value: color, in: run)
+        }
+        removeEmptyRunProperties(from: run)
+    }
+
+    private static func setBooleanRunProperty(
+        _ localName: String, enabled: Bool, in run: XmlNode
+    ) {
+        if enabled {
+            _ = upsertRunProperty(localName, in: run)
         } else {
-            // value is false and there's no rPr — already not-bold via inheritance.
-            return
+            removeRunProperty(localName, from: run)
         }
-        // Remove existing <w:b>.
-        rPr.children = rPr.children.filter { !($0.kind == .element && $0.localName == "b") }
-        // Add <w:b/> if value is true.
-        if value {
-            let b = XmlNode.element(prefix: "w", localName: "b")
-            rPr.children.append(b)
+    }
+
+    private static func setValuedRunProperty(
+        _ localName: String, value: String, in run: XmlNode
+    ) {
+        upsertRunProperty(localName, in: run)
+            .setAttribute(prefix: "w", localName: "val", value: value)
+    }
+
+    private static func upsertRunProperty(_ localName: String, in run: XmlNode) -> XmlNode {
+        let rPr: XmlNode
+        if let existing = run.children.first(where: {
+            $0.kind == .element && $0.localName == "rPr"
+        }) {
+            rPr = existing
+        } else {
+            rPr = XmlNode.element(prefix: "w", localName: "rPr")
+            run.children.insert(rPr, at: 0)
         }
-        // If rPr is now empty, remove it (tree minimization).
-        if rPr.children.isEmpty {
-            runNode.children = runNode.children.filter { $0 !== rPr }
+        if let existing = rPr.children.first(where: {
+            $0.kind == .element && $0.localName == localName
+        }) {
+            return existing
         }
+
+        let node = XmlNode.element(prefix: "w", localName: localName)
+        let rank = runPropertyRank(localName)
+        let insertionIndex = rPr.children.firstIndex {
+            runPropertyRank($0.localName) > rank
+        } ?? rPr.children.count
+        rPr.children.insert(node, at: insertionIndex)
+        return node
+    }
+
+    private static func removeRunProperty(_ localName: String, from run: XmlNode) {
+        guard let rPr = run.children.first(where: {
+            $0.kind == .element && $0.localName == "rPr"
+        }) else { return }
+        rPr.children.removeAll { $0.kind == .element && $0.localName == localName }
+    }
+
+    private static func removeEmptyRunProperties(from run: XmlNode) {
+        run.children.removeAll {
+            $0.kind == .element && $0.localName == "rPr" && $0.children.isEmpty
+        }
+    }
+
+    private static func runPropertyRank(_ localName: String) -> Int {
+        let order = [
+            "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps",
+            "strike", "dstrike", "outline", "shadow", "emboss", "imprint", "noProof",
+            "snapToGrid", "vanish", "webHidden", "color", "spacing", "w", "kern",
+            "position", "sz", "szCs", "highlight", "u", "effect", "bdr", "shd",
+            "fitText", "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout",
+            "specVanish", "oMath"
+        ]
+        return order.firstIndex(of: localName) ?? Int.max
     }
 
     /// Constructs a fresh `<w:p>` element with one `<w:r><w:t>text</w:t></w:r>`
@@ -766,17 +1275,22 @@ public enum OperationReducer {
     /// schema order: pStyle, numPr, spacing, ind, jc (format-alignment-engine
     /// Phase B task 2.1 — reducer stamping of the additive pPr fields).
     internal static func makeParagraph(payload: ParagraphPayload) -> XmlNode {
+        let wordNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
         let textNode = XmlNode.text(payload.text)
-        let wt = XmlNode.element(prefix: "w", localName: "t", children: [textNode])
-        let wr = XmlNode.element(prefix: "w", localName: "r", children: [wt])
+        let wt = XmlNode.element(
+            prefix: "w", localName: "t", namespaceURI: wordNS, children: [textNode])
+        let wr = XmlNode.element(
+            prefix: "w", localName: "r", namespaceURI: wordNS, children: [wt])
 
         var children: [XmlNode] = []
         let pPrChildren = makePPrChildren(payload: payload)
         if !pPrChildren.isEmpty {
-            children.append(XmlNode.element(prefix: "w", localName: "pPr", children: pPrChildren))
+            children.append(XmlNode.element(
+                prefix: "w", localName: "pPr", namespaceURI: wordNS, children: pPrChildren))
         }
         children.append(wr)
-        return XmlNode.element(prefix: "w", localName: "p", children: children)
+        return XmlNode.element(
+            prefix: "w", localName: "p", namespaceURI: wordNS, children: children)
     }
 
     /// pPr children in CT_PPr schema order from the payload's optional fields.
@@ -862,7 +1376,7 @@ public enum OperationReducer {
     /// each hold a single paragraph in `makeParagraph`'s own shape — the
     /// vocabulary the reverse extractor recognizes for the byte-equal
     /// upgrade rule.
-    internal static func makeTable(payload: TablePayload) -> XmlNode {
+    internal static func makeTable(payload: TablePayload, opID: UUID) throws -> XmlNode {
         var tblChildren: [XmlNode] = []
         var gridCols: [XmlNode] = []
         for _ in 0..<payload.columns {
@@ -872,13 +1386,50 @@ public enum OperationReducer {
         for row in 0..<payload.rows {
             var cells: [XmlNode] = []
             for column in 0..<payload.columns {
-                let text = payload.cells?[row][column] ?? ""
-                let p = makeParagraph(payload: ParagraphPayload(text: text))
-                cells.append(XmlNode.element(prefix: "w", localName: "tc", children: [p]))
+                let paragraphs: [XmlNode]
+                if let rich = payload.richCells?[row][column], !rich.isEmpty {
+                    paragraphs = try rich.map { richParagraph in
+                        let p = makeParagraph(payload: richParagraph.paragraph)
+                        if let paraId = richParagraph.paragraph.paraId, !paraId.isEmpty {
+                            p.setAttribute(prefix: "w14", localName: "paraId", value: paraId)
+                        }
+                        if let items = richParagraph.items {
+                            let pPr = p.children.filter {
+                                $0.kind == .element && $0.localName == "pPr"
+                            }
+                            p.children = pPr + (try items.map {
+                                try makeInlineNode($0, opID: opID)
+                            })
+                        } else if let runs = richParagraph.runs {
+                            let pPr = p.children.filter {
+                                $0.kind == .element && $0.localName == "pPr"
+                            }
+                            p.children = pPr + runs.map(makeRunNode)
+                        }
+                        return p
+                    }
+                } else {
+                    let text = payload.cells?[row][column] ?? ""
+                    paragraphs = [makeParagraph(payload: ParagraphPayload(text: text))]
+                }
+                let cell = XmlNode.element(
+                    prefix: "w", localName: "tc", children: paragraphs)
+                if let id = payload.cellIds?[row][column], !id.isEmpty {
+                    cell.setAttribute(prefix: "w14", localName: "textId", value: id)
+                }
+                cells.append(cell)
             }
-            tblChildren.append(XmlNode.element(prefix: "w", localName: "tr", children: cells))
+            let rowNode = XmlNode.element(prefix: "w", localName: "tr", children: cells)
+            if let id = payload.rowIds?[row], !id.isEmpty {
+                rowNode.setAttribute(prefix: "w14", localName: "textId", value: id)
+            }
+            tblChildren.append(rowNode)
         }
-        return XmlNode.element(prefix: "w", localName: "tbl", children: tblChildren)
+        let table = XmlNode.element(prefix: "w", localName: "tbl", children: tblChildren)
+        if let id = payload.tableId, !id.isEmpty {
+            table.setAttribute(prefix: "w14", localName: "textId", value: id)
+        }
+        return table
     }
 
     /// Builds a `<w:r>` from a RunPayload. rPr children follow CT_RPr schema
@@ -1113,6 +1664,11 @@ public enum OperationReducer {
         return matches.first
     }
 
+    private static func containsDescendant(named localName: String, in node: XmlNode) -> Bool {
+        if node.kind == .element && node.localName == localName { return true }
+        return node.children.contains { containsDescendant(named: localName, in: $0) }
+    }
+
     private static func findFirstNode(elementID: ElementID, in node: XmlNode) -> XmlNode? {
         if let nodeID = ElementID(node: node), nodeID == elementID {
             return node
@@ -1208,9 +1764,10 @@ public enum OperationReducer {
             // Log-metadata markers; the component id is not a tree node.
             return []
         case .undo, .redo, .batchBegin, .batchEnd, .unknown: return []
-        case .carryPart: return []  // part-addressed raw channel, no ElementID
+        case .carryPart, .carryBinaryPart: return []  // part-addressed raw channel, no ElementID
         case .setSectionProperties(let at, _): return at.map { [$0] } ?? []
         case .appendTable(let container, _): return container.map { [$0] } ?? []
+        case .appendBlockMarker: return []
         case .setDocumentRoot: return []  // root-addressed, no ElementID
         case .setDocumentProlog: return []  // document-addressed, no ElementID
         case .setParagraphContent(let target, _): return [target]
@@ -1278,9 +1835,10 @@ public enum OperationReducer {
         case .insertSiblingAfter(let after, _): return after == elementID
         case .wrapWithHyperlink(let target, _): return target == elementID
         case .addRelationship: return false  // rels-part operation, not element-addressed
-        case .carryPart: return false  // part-addressed raw channel, not element-addressed
+        case .carryPart, .carryBinaryPart: return false  // part-addressed raw channel, not element-addressed
         case .setSectionProperties(let at, _): return at == elementID
         case .appendTable(let container, _): return container == elementID
+        case .appendBlockMarker: return false
         case .setDocumentRoot: return false  // root-addressed, not element-addressed
         case .setDocumentProlog: return false  // document-addressed
         case .setParagraphContent(let target, _): return target == elementID

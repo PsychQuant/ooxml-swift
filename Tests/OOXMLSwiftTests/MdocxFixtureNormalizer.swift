@@ -109,6 +109,7 @@ enum MdocxFixtureNormalizer {
                 with: name,
                 type: .file,
                 uncompressedSize: Int64(data.count),
+                modificationDate: Date(timeIntervalSince1970: 1_767_225_600),
                 compressionMethod: .deflate,
                 provider: { position, size in
                     let start = data.startIndex.advanced(by: Int(position))
