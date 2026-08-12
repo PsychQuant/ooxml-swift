@@ -2678,6 +2678,37 @@ public struct DocxReader {
     /// than risk OOM on malformed input. Matches Word's own internal threshold.
     static let MAX_TABLE_NEST_DEPTH = 5
 
+    private static func isWordprocessingMLElement(_ element: XMLElement) -> Bool {
+        element.uri == wordprocessingMLNamespace
+            || (element.uri == nil && element.name?.hasPrefix("w:") == true)
+    }
+
+    private static func wordChild(
+        _ element: XMLElement,
+        localName: String
+    ) -> XMLElement? {
+        (element.children ?? []).compactMap { $0 as? XMLElement }.first {
+            $0.localName == localName && isWordprocessingMLElement($0)
+        }
+    }
+
+    private static func wordAttributeValue(
+        _ element: XMLElement,
+        localName: String
+    ) -> String? {
+        (element.attributes ?? []).first { attribute in
+            guard attribute.localName == localName else { return false }
+            return attribute.uri == wordprocessingMLNamespace
+                || (attribute.uri == nil && attribute.name?.hasPrefix("w:") == true)
+        }?.stringValue
+    }
+
+    private static func parseOnOff(_ element: XMLElement) -> Bool {
+        guard let raw = wordAttributeValue(element, localName: "val")?
+            .lowercased() else { return true }
+        return !["0", "false", "off", "no"].contains(raw)
+    }
+
     private static func parseTable(
         from element: XMLElement,
         relationships: RelationshipsCollection,
@@ -2696,40 +2727,52 @@ public struct DocxReader {
         if let tblPr = element.elements(forName: "w:tblPr").first {
             table.properties = parseTableProperties(from: tblPr)
             // tblInd
-            if let tblInd = tblPr.elements(forName: "w:tblInd").first,
-               let w = tblInd.attribute(forName: "w:w")?.stringValue,
+            if let tblInd = wordChild(tblPr, localName: "tblInd"),
+               let w = wordAttributeValue(tblInd, localName: "w"),
                let value = Int(w) {
                 table.tableIndent = value
             }
             // explicit layout (separate from properties.layout for round-trip clarity)
-            if let layout = tblPr.elements(forName: "w:tblLayout").first,
-               let val = layout.attribute(forName: "w:type")?.stringValue,
+            if let layout = wordChild(tblPr, localName: "tblLayout"),
+               let val = wordAttributeValue(layout, localName: "type"),
                let lay = TableLayout(rawValue: val) {
                 table.explicitLayout = lay
             }
             // conditional styles
-            for stylePr in tblPr.elements(forName: "w:tblStylePr") {
-                guard let typeStr = stylePr.attribute(forName: "w:type")?.stringValue,
+            for stylePr in (tblPr.children ?? []).compactMap({ $0 as? XMLElement })
+            where stylePr.localName == "tblStylePr" && isWordprocessingMLElement(stylePr) {
+                guard let typeStr = wordAttributeValue(stylePr, localName: "type"),
                       let type = TableConditionalStyleType(rawValue: typeStr)
                 else { continue }
                 var props = TableConditionalStyleProperties()
-                if let rPr = stylePr.elements(forName: "w:rPr").first {
-                    if rPr.elements(forName: "w:b").first != nil { props.bold = true }
-                    if rPr.elements(forName: "w:i").first != nil { props.italic = true }
-                    if let c = rPr.elements(forName: "w:color").first?.attribute(forName: "w:val")?.stringValue {
+                if let rPr = wordChild(stylePr, localName: "rPr") {
+                    if let bold = wordChild(rPr, localName: "b") {
+                        props.bold = parseOnOff(bold)
+                    }
+                    if let italic = wordChild(rPr, localName: "i") {
+                        props.italic = parseOnOff(italic)
+                    }
+                    if let color = wordChild(rPr, localName: "color"),
+                       let c = wordAttributeValue(color, localName: "val") {
                         props.color = c
                     }
-                    if let szStr = rPr.elements(forName: "w:sz").first?.attribute(forName: "w:val")?.stringValue,
+                    if let size = wordChild(rPr, localName: "sz"),
+                       let szStr = wordAttributeValue(size, localName: "val"),
                        let sz = Int(szStr) {
                         props.fontSize = sz
                     }
                 }
-                if let tcPr = stylePr.elements(forName: "w:tcPr").first,
-                   let bg = tcPr.elements(forName: "w:shd").first?.attribute(forName: "w:fill")?.stringValue {
+                if let tcPr = wordChild(stylePr, localName: "tcPr"),
+                   let shading = wordChild(tcPr, localName: "shd"),
+                   let bg = wordAttributeValue(shading, localName: "fill") {
                     props.backgroundColor = bg
                 }
                 table.conditionalStyles.append(TableConditionalStyle(type: type, properties: props))
             }
+            table.sourcePropertyProjection = TableSourcePropertyProjection(
+                tableIndent: table.tableIndent,
+                explicitLayout: table.explicitLayout,
+                conditionalStyles: table.conditionalStyles)
         }
 
         // 解析表格行
@@ -2750,27 +2793,334 @@ public struct DocxReader {
     private static func parseTableProperties(from element: XMLElement) -> TableProperties {
         var props = TableProperties()
 
+        let children = (element.children ?? []).compactMap { $0 as? XMLElement }
         // 寬度
-        if let tblW = element.elements(forName: "w:tblW").first {
-            if let w = tblW.attribute(forName: "w:w")?.stringValue {
+        if let tblW = wordChild(element, localName: "tblW") {
+            if let w = wordAttributeValue(tblW, localName: "w") {
                 props.width = Int(w)
             }
-            if let type = tblW.attribute(forName: "w:type")?.stringValue {
+            if let type = wordAttributeValue(tblW, localName: "type") {
                 props.widthType = WidthType(rawValue: type)
             }
         }
 
         // 對齊
-        if let jc = element.elements(forName: "w:jc").first,
-           let val = jc.attribute(forName: "w:val")?.stringValue {
+        if let jc = wordChild(element, localName: "jc"),
+           let val = wordAttributeValue(jc, localName: "val") {
             props.alignment = Alignment(rawValue: val)
         }
 
         // 版面配置
-        if let layout = element.elements(forName: "w:tblLayout").first,
-           let val = layout.attribute(forName: "w:type")?.stringValue {
+        if let layout = wordChild(element, localName: "tblLayout"),
+           let val = wordAttributeValue(layout, localName: "type") {
             props.layout = TableLayout(rawValue: val)
         }
+
+        // Preserve every child, including typed projections. The source
+        // checkpoint lets the writer keep extension attributes on otherwise
+        // typed elements until the caller actually changes that property.
+        let mcNamespace = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+        func expandedNameKey(namespaceURI: String?, localName: String) -> String {
+            (namespaceURI ?? "") + "\u{0}" + localName
+        }
+        var namespaceAncestry: [XMLElement] = []
+        var namespaceCursor: XMLNode? = element
+        while let current = namespaceCursor as? XMLElement {
+            namespaceAncestry.append(current)
+            namespaceCursor = current.parent
+        }
+        var namespaceContext: [String: String] = [:]
+        var processContentNames: Set<String> = []
+        for current in namespaceAncestry.reversed() {
+            for namespace in current.namespaces ?? [] {
+                let prefix = namespace.name ?? ""
+                namespaceContext[prefix] = namespace.stringValue ?? ""
+            }
+            for attribute in current.attributes ?? []
+            where attribute.uri == mcNamespace && attribute.localName == "ProcessContent" {
+                for token in (attribute.stringValue ?? "")
+                    .split(whereSeparator: \.isWhitespace).map(String.init) {
+                    let pieces = token.split(separator: ":", maxSplits: 1).map(String.init)
+                    let prefix = pieces.count == 2 ? pieces[0] : ""
+                    let localName = pieces.count == 2 ? pieces[1] : pieces[0]
+                    processContentNames.insert(expandedNameKey(
+                        namespaceURI: namespaceContext[prefix],
+                        localName: localName))
+                }
+            }
+        }
+        props.processContentCarrierNames = processContentNames
+
+        func directCanonicalSlot(_ child: XMLElement) -> Int? {
+            guard isWordprocessingMLElement(child),
+                  let localName = child.localName else { return nil }
+            return TableProperties.canonicalPosition[localName]
+        }
+        func lexicalContext(
+            for element: XMLElement,
+            namespaces inheritedNamespaces: [String: String],
+            processContent inheritedProcessContent: Set<String>
+        ) -> (namespaces: [String: String], processContent: Set<String>) {
+            var namespaces = inheritedNamespaces
+            for namespace in element.namespaces ?? [] {
+                namespaces[namespace.name ?? ""] = namespace.stringValue ?? ""
+            }
+            var processContent = inheritedProcessContent
+            for attribute in element.attributes ?? []
+            where attribute.uri == mcNamespace && attribute.localName == "ProcessContent" {
+                for token in (attribute.stringValue ?? "")
+                    .split(whereSeparator: \.isWhitespace).map(String.init) {
+                    let pieces = token.split(separator: ":", maxSplits: 1).map(String.init)
+                    let prefix = pieces.count == 2 ? pieces[0] : ""
+                    let localName = pieces.count == 2 ? pieces[1] : pieces[0]
+                    processContent.insert(expandedNameKey(
+                        namespaceURI: namespaces[prefix], localName: localName))
+                }
+            }
+            return (namespaces, processContent)
+        }
+        func isTraversableCarrier(
+            _ element: XMLElement,
+            processContent: Set<String>
+        ) -> Bool {
+            if element.uri == mcNamespace,
+               let localName = element.localName,
+               ["AlternateContent", "Choice", "Fallback"].contains(localName) {
+                return true
+            }
+            guard let localName = element.localName else { return false }
+            return processContent.contains(expandedNameKey(
+                namespaceURI: element.uri,
+                localName: localName))
+        }
+        func representedWMLNames(
+            _ element: XMLElement,
+            namespaces inheritedNamespaces: [String: String],
+            processContent inheritedProcessContent: Set<String>
+        ) -> Set<String> {
+            if isWordprocessingMLElement(element),
+               let localName = element.localName,
+               TableProperties.canonicalPosition[localName] != nil {
+                return [localName]
+            }
+            guard isTraversableCarrier(
+                element, processContent: inheritedProcessContent) else { return [] }
+            let context = lexicalContext(
+                for: element,
+                namespaces: inheritedNamespaces,
+                processContent: inheritedProcessContent)
+            var names: Set<String> = []
+            for case let child as XMLElement in element.children ?? [] {
+                names.formUnion(representedWMLNames(
+                    child,
+                    namespaces: context.namespaces,
+                    processContent: context.processContent))
+            }
+            return names
+        }
+        func representedStyleTypes(
+            _ element: XMLElement,
+            namespaces inheritedNamespaces: [String: String],
+            processContent inheritedProcessContent: Set<String>
+        ) -> Set<String> {
+            if isWordprocessingMLElement(element),
+               element.localName == "tblStylePr",
+               let type = wordAttributeValue(element, localName: "type") {
+                return [type]
+            }
+            guard isTraversableCarrier(
+                element, processContent: inheritedProcessContent) else { return [] }
+            let context = lexicalContext(
+                for: element,
+                namespaces: inheritedNamespaces,
+                processContent: inheritedProcessContent)
+            var types: Set<String> = []
+            for case let child as XMLElement in element.children ?? [] {
+                types.formUnion(representedStyleTypes(
+                    child,
+                    namespaces: context.namespaces,
+                    processContent: context.processContent))
+            }
+            return types
+        }
+        func namespaceBindingsUsed(
+            in element: XMLElement,
+            inheritedNamespaces: [String: String]
+        ) -> [String: String] {
+            var bindings: [String: String] = [:]
+            let carrierRootNamespaces = inheritedNamespaces
+            func record(
+                qualifiedName: String?,
+                namespaceURI: String?,
+                isElement: Bool
+            ) {
+                guard let qualifiedName, let namespaceURI else { return }
+                let pieces = qualifiedName.split(
+                    separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                let prefix: String?
+                if pieces.count == 2 {
+                    prefix = String(pieces[0])
+                } else {
+                    prefix = isElement ? "" : nil
+                }
+                if let prefix, prefix != "xml" {
+                    if carrierRootNamespaces[prefix] == namespaceURI {
+                        // A local declaration remains in the raw fragment,
+                        // while the artificial wrapper must reproduce the
+                        // binding inherited at the carrier root. Otherwise an
+                        // earlier nested rebind can change the expanded name
+                        // of a later ProcessContent wrapper during rewriting.
+                        bindings[prefix] = namespaceURI
+                    } else if bindings[prefix] == nil {
+                        bindings[prefix] = namespaceURI
+                    }
+                }
+            }
+            func walk(
+                _ current: XMLElement,
+                namespaces inheritedNamespaces: [String: String]
+            ) {
+                var namespaces = inheritedNamespaces
+                for namespace in current.namespaces ?? [] {
+                    namespaces[namespace.name ?? ""] = namespace.stringValue ?? ""
+                }
+                record(
+                    qualifiedName: current.name,
+                    namespaceURI: current.uri,
+                    isElement: true)
+                for attribute in current.attributes ?? [] {
+                    record(
+                        qualifiedName: attribute.name,
+                        namespaceURI: attribute.uri,
+                        isElement: false)
+                    if attribute.uri == mcNamespace,
+                       attribute.localName == "ProcessContent" {
+                        for token in (attribute.stringValue ?? "")
+                            .split(whereSeparator: \.isWhitespace) {
+                            let pieces = token.split(
+                                separator: ":", maxSplits: 1,
+                                omittingEmptySubsequences: false)
+                            let prefix = pieces.count == 2 ? String(pieces[0]) : ""
+                            if let uri = namespaces[prefix] {
+                                if carrierRootNamespaces[prefix] == uri {
+                                    bindings[prefix] = uri
+                                } else if bindings[prefix] == nil {
+                                    bindings[prefix] = uri
+                                }
+                            }
+                        }
+                    }
+                }
+                for case let child as XMLElement in current.children ?? [] {
+                    walk(child, namespaces: namespaces)
+                }
+            }
+            walk(element, namespaces: inheritedNamespaces)
+            return bindings
+        }
+        let directSlots = children.map(directCanonicalSlot)
+        var nearestPrevious: [Int?] = Array(repeating: nil, count: children.count)
+        var previous: Int?
+        for index in children.indices {
+            nearestPrevious[index] = previous
+            if let slot = directSlots[index] { previous = slot }
+        }
+        var nearestNext: [Int?] = Array(repeating: nil, count: children.count)
+        var next: Int?
+        for index in children.indices.reversed() {
+            nearestNext[index] = next
+            if let slot = directSlots[index] { next = slot }
+        }
+        var recognizedStyleIndex = 0
+        for (childIndex, child) in children.enumerated() {
+            guard let localName = child.localName else { continue }
+            let styleType = wordAttributeValue(child, localName: "type")
+            let styleProjectionIndex: Int?
+            if isWordprocessingMLElement(child),
+               localName == "tblStylePr",
+               let styleType,
+               TableConditionalStyleType(rawValue: styleType) != nil {
+                styleProjectionIndex = recognizedStyleIndex
+                recognizedStyleIndex += 1
+            } else {
+                styleProjectionIndex = nil
+            }
+
+            // Markup-compatibility wrappers must stay at the schema position
+            // of the property carried by their effective branch. For other
+            // extensions, retain their source position between the nearest
+            // standard siblings instead of moving every extension to the end.
+            let isMarkupCompatibilityWrapper = child.uri == mcNamespace
+                && localName == "AlternateContent"
+            let isProcessContentWrapper = processContentNames.contains(
+                expandedNameKey(namespaceURI: child.uri, localName: localName))
+            let isCompatibilityCarrier = isMarkupCompatibilityWrapper
+                || isProcessContentWrapper
+            let representedNames = isCompatibilityCarrier
+                ? representedWMLNames(
+                    child,
+                    namespaces: namespaceContext,
+                    processContent: processContentNames) : []
+            let descendantSlot = representedNames.compactMap {
+                TableProperties.canonicalPosition[$0]
+            }.min()
+            let previousSlot = nearestPrevious[childIndex]
+            let nextSlot = nearestNext[childIndex]
+            let sourceSlot = directSlots[childIndex]
+                ?? descendantSlot
+                ?? nextSlot
+                ?? previousSlot
+                ?? 900
+            props.rawChildren.append(PreservedTableProperty(
+                qualifiedName: child.name ?? localName,
+                localName: localName,
+                namespaceURI: child.uri,
+                styleProjectionIndex: styleProjectionIndex,
+                representedStyleTypes: isCompatibilityCarrier
+                    ? representedStyleTypes(
+                        child,
+                        namespaces: namespaceContext,
+                        processContent: processContentNames) : [],
+                slotPosition: sourceSlot,
+                sourceOrder: childIndex,
+                representedWMLNames: representedNames,
+                namespaceBindings: namespaceBindingsUsed(
+                    in: child,
+                    inheritedNamespaces: namespaceContext),
+                xml: child.xmlString))
+        }
+
+        // Foundation serializes a child without namespace declarations that
+        // were inherited from tblPr/body/table ancestors. Capture the local
+        // in-scope closure below this XML part's root (the root declarations
+        // are preserved by the container root bridge) and re-declare it on
+        // the rebuilt tblPr.
+        var ancestry: [XMLElement] = []
+        var cursor: XMLNode? = element
+        while let current = cursor as? XMLElement {
+            if current.parent is XMLElement {
+                ancestry.append(current)
+            }
+            cursor = current.parent
+        }
+        for ancestor in ancestry.reversed() {
+            for namespace in ancestor.namespaces ?? [] {
+                let prefix = namespace.name ?? ""
+                props.inScopeNamespaces[prefix] = namespace.stringValue ?? ""
+            }
+        }
+        for attribute in element.attributes ?? [] {
+            guard let name = attribute.name else { continue }
+            props.wrapperAttributes[name] = attribute.stringValue ?? ""
+        }
+
+        props.sourceProjection = TablePropertiesSourceProjection(
+            width: props.width,
+            widthType: props.widthType,
+            alignment: props.alignment,
+            borders: props.borders,
+            cellMargins: props.cellMargins,
+            layout: props.layout)
 
         return props
     }
