@@ -7,11 +7,18 @@ import XCTest
 /// `ooxml-word-sync` scenarios "Sidecar files created on first sync" +
 /// "docx contains zero sync metadata").
 ///
-/// Naming follows the spec's stem convention: `report.docx` →
-/// `report.oplog.jsonl` + `report.snapshot.json`, same directory.
+/// Naming follows the mdocx-grammar convention: `report.docx` →
+/// `report.docx.oplog.jsonl` + `report.docx.snapshot.json`, same directory.
 /// Sidecars are strictly opt-in (design Open Question Q1 working answer):
 /// plain `DocxWriter.write` / `DocxReader.read` never touch them.
 final class SidecarStoreTests: XCTestCase {
+
+    private func extractedPackageDirectories() -> Set<String> {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("che-word-mcp")
+        return Set((try? FileManager.default.contentsOfDirectory(
+            atPath: root.path)) ?? [])
+    }
 
     private func makeDoc() -> WordDocument {
         var doc = WordDocument()
@@ -26,14 +33,14 @@ final class SidecarStoreTests: XCTestCase {
         return dir.appendingPathComponent("\(name).docx")
     }
 
-    // MARK: - URL derivation (spec stem convention)
+    // MARK: - URL derivation
 
     func testSidecarURLDerivation() {
         let docx = URL(fileURLWithPath: "/tmp/thesis/report.docx")
         XCTAssertEqual(SidecarStore.oplogURL(for: docx).lastPathComponent,
-                       "report.oplog.jsonl")
+                       "report.docx.oplog.jsonl")
         XCTAssertEqual(SidecarStore.snapshotURL(for: docx).lastPathComponent,
-                       "report.snapshot.json")
+                       "report.docx.snapshot.json")
         XCTAssertEqual(SidecarStore.oplogURL(for: docx).deletingLastPathComponent().path,
                        "/tmp/thesis", "sidecars live in the same directory as the docx")
     }
@@ -82,6 +89,90 @@ final class SidecarStoreTests: XCTestCase {
         }
     }
 
+    func testExternalSaveAfterBackupIsNotOverwrittenOrRolledBack() throws {
+        let docxURL = tempDocxURL("generation-race")
+        defer { try? FileManager.default.removeItem(
+            at: docxURL.deletingLastPathComponent()) }
+        let original = makeDoc()
+        try original.saveWithSidecars(to: docxURL)
+        let expected = SidecarStore.sha256Hex(of: try Data(contentsOf: docxURL))
+
+        var external = WordDocument()
+        external.appendParagraph(Paragraph(text: "EXTERNAL WORD GENERATION"))
+        let externalBytes = try DocxWriter.writeData(external)
+
+        XCTAssertThrowsError(try original.saveWithSidecars(
+            to: docxURL,
+            pendingSwiftOpIDs: [],
+            expectedDocxSHA256: expected,
+            afterBackupsCaptured: {
+                try externalBytes.write(to: docxURL, options: .atomic)
+            },
+            immediatelyBeforeGenerationCheck: nil
+        )) { error in
+            guard case SyncError.externalGenerationChanged = error else {
+                return XCTFail("expected externalGenerationChanged, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: docxURL), externalBytes,
+                       "a rejected save must preserve the external generation")
+    }
+
+    func testWordLockAppearingImmediatelyBeforeReplaceRefusesWrite() throws {
+        let docxURL = tempDocxURL("late-lock")
+        defer { try? FileManager.default.removeItem(
+            at: docxURL.deletingLastPathComponent()) }
+        let document = makeDoc()
+        try document.saveWithSidecars(to: docxURL)
+        let originalBytes = try Data(contentsOf: docxURL)
+        let expected = SidecarStore.sha256Hex(of: originalBytes)
+        let lockURL = WordLock.lockFileURL(for: docxURL)
+
+        XCTAssertThrowsError(try document.saveWithSidecars(
+            to: docxURL,
+            pendingSwiftOpIDs: [],
+            expectedDocxSHA256: expected,
+            afterBackupsCaptured: nil,
+            immediatelyBeforeGenerationCheck: {
+                try Data("locked".utf8).write(to: lockURL)
+            }
+        )) { error in
+            guard case SyncError.fileLockedByWord = error else {
+                return XCTFail("expected fileLockedByWord, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: docxURL), originalBytes)
+    }
+
+    func testExternalReplacementImmediatelyAfterRenameIsNeverRolledBack() throws {
+        let docxURL = tempDocxURL("post-rename-race")
+        defer { try? FileManager.default.removeItem(
+            at: docxURL.deletingLastPathComponent()) }
+        let document = makeDoc()
+        try document.saveWithSidecars(to: docxURL)
+        let expected = SidecarStore.sha256Hex(of: try Data(contentsOf: docxURL))
+        var external = WordDocument()
+        external.appendParagraph(Paragraph(text: "POST-RENAME EXTERNAL"))
+        let externalBytes = try DocxWriter.writeData(external)
+
+        XCTAssertThrowsError(try document.saveWithSidecars(
+            to: docxURL,
+            pendingSwiftOpIDs: [],
+            expectedDocxSHA256: expected,
+            afterBackupsCaptured: nil,
+            immediatelyBeforeGenerationCheck: nil,
+            immediatelyAfterDocxWrite: {
+                try externalBytes.write(to: docxURL, options: .atomic)
+            }
+        )) { error in
+            guard case SyncError.externalGenerationChanged = error else {
+                return XCTFail("expected externalGenerationChanged, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: docxURL), externalBytes,
+                       "rollback must never overwrite a post-rename external generation")
+    }
+
     func testPlainWriteNeverCreatesSidecars() throws {
         let doc = makeDoc()
         let docxURL = tempDocxURL()
@@ -119,6 +210,100 @@ final class SidecarStoreTests: XCTestCase {
         }
     }
 
+    func testLegacyStemSidecarsRemainReadableDuringNamingMigration() throws {
+        var doc = makeDoc()
+        doc.operationLog.append(
+            .setText(
+                target: ElementID(rawString: "w14:paraId=0AB7C123"),
+                text: "legacy history"),
+            source: .swift)
+        let docxURL = tempDocxURL("legacy")
+        defer { try? FileManager.default.removeItem(
+            at: docxURL.deletingLastPathComponent()) }
+        try doc.saveWithSidecars(to: docxURL)
+
+        let legacyBase = docxURL.deletingPathExtension()
+        let legacyLog = legacyBase.appendingPathExtension("oplog.jsonl")
+        let legacySnapshot = legacyBase.appendingPathExtension("snapshot.json")
+        try FileManager.default.moveItem(
+            at: SidecarStore.oplogURL(for: docxURL), to: legacyLog)
+        try FileManager.default.moveItem(
+            at: SidecarStore.snapshotURL(for: docxURL), to: legacySnapshot)
+
+        XCTAssertEqual(
+            try SidecarStore.loadLog(alongside: docxURL)?.entries.count, 1)
+        XCTAssertNotNil(try SidecarStore.loadSnapshot(alongside: docxURL))
+    }
+
+    func testBootstrapNeverMixesPartialCanonicalPairWithLegacyPair() throws {
+        var legacyDocument = makeDoc()
+        legacyDocument.operationLog.append(
+            .setText(target: .init(rawString: "w14:paraId=LEGACY"), text: "legacy"),
+            source: .swift)
+        let docxURL = tempDocxURL("pair-migration")
+        defer { try? FileManager.default.removeItem(
+            at: docxURL.deletingLastPathComponent()) }
+        try legacyDocument.saveWithSidecars(to: docxURL)
+
+        let legacyBase = docxURL.deletingPathExtension()
+        try FileManager.default.moveItem(
+            at: SidecarStore.oplogURL(for: docxURL),
+            to: legacyBase.appendingPathExtension("oplog.jsonl"))
+        try FileManager.default.moveItem(
+            at: SidecarStore.snapshotURL(for: docxURL),
+            to: legacyBase.appendingPathExtension("snapshot.json"))
+
+        var partialCanonical = OperationLog()
+        partialCanonical.append(.batchBegin(label: "new incomplete generation"), source: .swift)
+        partialCanonical.append(.batchEnd, source: .swift)
+        try SidecarStore.saveLog(partialCanonical, alongside: docxURL)
+
+        let orchestrator = try SyncOrchestrator.bootstrapFromDocx(url: docxURL)
+        defer { orchestrator.close() }
+        XCTAssertEqual(orchestrator.document.operationLog.entries.count, 1,
+                       "bootstrap must select the complete legacy pair as one generation")
+    }
+
+    func testBootstrapRejectsTornCanonicalPairWithMismatchedOpCount() throws {
+        var document = makeDoc()
+        document.operationLog.append(.batchBegin(label: "old"), source: .swift)
+        let docxURL = tempDocxURL("torn-pair")
+        defer { try? FileManager.default.removeItem(
+            at: docxURL.deletingLastPathComponent()) }
+        try document.saveWithSidecars(to: docxURL)
+
+        var newerLog = document.operationLog
+        newerLog.append(.batchEnd, source: .swift)
+        try SidecarStore.saveLog(newerLog, alongside: docxURL)
+
+        XCTAssertThrowsError(try SyncOrchestrator.bootstrapFromDocx(url: docxURL)) {
+            guard case SidecarStoreError.sidecarGenerationMismatch(
+                logEntryCount: 2, snapshotOpCount: 1) = $0 else {
+                return XCTFail("expected sidecarGenerationMismatch, got \($0)")
+            }
+        }
+    }
+
+    func testOpenWithSidecarsRejectsTornCanonicalPairWithMismatchedOpCount() throws {
+        var document = makeDoc()
+        document.operationLog.append(.batchBegin(label: "old"), source: .swift)
+        let docxURL = tempDocxURL("torn-open-pair")
+        defer { try? FileManager.default.removeItem(
+            at: docxURL.deletingLastPathComponent()) }
+        try document.saveWithSidecars(to: docxURL)
+
+        var newerLog = document.operationLog
+        newerLog.append(.batchEnd, source: .swift)
+        try SidecarStore.saveLog(newerLog, alongside: docxURL)
+
+        XCTAssertThrowsError(try WordDocument.openWithSidecars(from: docxURL)) {
+            guard case SidecarStoreError.sidecarGenerationMismatch(
+                logEntryCount: 2, snapshotOpCount: 1) = $0 else {
+                return XCTFail("expected sidecarGenerationMismatch, got \($0)")
+            }
+        }
+    }
+
     func testOpenWithSidecarsAbsentLogIsFreshStart() throws {
         // bootstrapFromDocx fresh-start semantics: a docx without sidecars
         // opens with an empty log, no throw.
@@ -130,6 +315,21 @@ final class SidecarStoreTests: XCTestCase {
         let reopened = try WordDocument.openWithSidecars(from: docxURL)
         XCTAssertTrue(reopened.operationLog.entries.isEmpty,
                       "absent sidecars must mean fresh start, not an error")
+    }
+
+    func testMalformedLogOpenReleasesArchiveDirectory() throws {
+        let docxURL = tempDocxURL("malformed-open")
+        defer { try? FileManager.default.removeItem(
+            at: docxURL.deletingLastPathComponent()) }
+        try DocxWriter.write(makeDoc(), to: docxURL)
+        try Data("{malformed-jsonl\n".utf8).write(
+            to: SidecarStore.oplogURL(for: docxURL))
+        let before = extractedPackageDirectories()
+
+        XCTAssertThrowsError(try WordDocument.openWithSidecars(from: docxURL))
+
+        XCTAssertEqual(extractedPackageDirectories(), before,
+                       "a failed sidecar open must release its extracted package")
     }
 
     // MARK: - Snapshot contents

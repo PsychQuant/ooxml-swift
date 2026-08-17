@@ -25,7 +25,7 @@ final class ContainerUnknownChildrenPreservationTests: XCTestCase {
 
     private static let documentXML = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" mc:Ignorable="wps"><w:body><w:p><w:r><w:t>Before shapes</w:t></w:r></w:p><w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" behindDoc="0"><wp:extent cx="914400" cy="914400"/></wp:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:rect id="fallback-rect" style="width:72pt;height:72pt"/></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdHdr1"/><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" mc:Ignorable="wps wpg"><w:body><w:p><w:pPr><w:sectPr w:rsidR="11111111"><w:headerReference w:type="even" r:id="rIdHdrEven"/><w:footerReference w:type="default" r:id="rIdFtrRoman"/><w:pgNumType w:fmt="lowerRoman" w:start="1"/></w:sectPr></w:pPr><w:r><w:t>Before shapes</w:t></w:r></w:p><w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wps:wsp><wps:bodyPr/><a:solidFill><a:srgbClr val="AABBCC"/></a:solidFill><a:ln><a:effectLst/></a:ln></wps:wsp><wpg:wgp><wpg:grpSp/></wpg:wgp></w:drawing></mc:Choice><mc:Fallback><w:pict><v:shapetype id="_x0000_t202"/><v:shape id="fallback-shape" style="width:72pt;height:72pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>Fallback textbox</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape><v:rect id="fallback-rect" style="width:72pt;height:72pt"/></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p><w:p><w:pPr><w:sectPr w:rsidR="22222222"><w:headerReference w:type="default" r:id="rIdHdrBody"/><w:footerReference w:type="default" r:id="rIdFtrBody"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:left="1797" w:right="1797"/></w:sectPr></w:pPr><w:r><w:t>Second section</w:t></w:r></w:p><w:sectPr w:rsidR="33333333"><w:headerReference w:type="default" r:id="rIdHdr1"/><w:pgSz w:w="11906" w:h="16838"/><w:titlePg/></w:sectPr></w:body></w:document>
         """
 
     private static let footnotesXML = """
@@ -181,6 +181,26 @@ final class ContainerUnknownChildrenPreservationTests: XCTestCase {
         let outDoc = String(decoding: try extractPart("word/document.xml", from: outURL), as: UTF8.self)
         XCTAssertTrue(outDoc.contains("new body paragraph"),
                       "body mutation must be present in the saved document")
+
+        // Exact regression surface for the four data-loss bugs tracked by
+        // macdoc#127: body VML/wps/wpg (#62), AlternateContent (#63), and
+        // all three section-property blocks (#67) must survive a real body
+        // mutation, not only an overlay-only no-op save.
+        for token in [
+            "<mc:AlternateContent>", "<mc:Choice Requires=\"wps\">", "<mc:Fallback>",
+            "<wps:wsp>", "<wps:bodyPr", "<wpg:wgp>", "<wpg:grpSp",
+            "<v:shapetype id=\"_x0000_t202\"", "<v:shape id=\"fallback-shape\"",
+            "<v:textbox>", "<a:effectLst", "<a:ln>", "<a:srgbClr val=\"AABBCC\"",
+            "r:id=\"rIdHdrEven\"", "r:id=\"rIdFtrRoman\"", "w:fmt=\"lowerRoman\"",
+            "r:id=\"rIdHdrBody\"", "r:id=\"rIdFtrBody\"",
+            "w:left=\"1797\"", "r:id=\"rIdHdr1\"", "<w:titlePg/>"
+        ] {
+            XCTAssertTrue(outDoc.contains(token), "document.xml lost \(token) after body mutation")
+        }
+        XCTAssertEqual(
+            outDoc.components(separatedBy: "<w:sectPr").count - 1,
+            3,
+            "three section breaks must remain three after body mutation")
     }
 
     // MARK: - Typed model still reads normal content from these parts

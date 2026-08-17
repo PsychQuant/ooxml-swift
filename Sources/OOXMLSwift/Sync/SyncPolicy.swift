@@ -33,6 +33,15 @@ public enum SyncPolicy {
 
 /// Structured error surface for sync operations.
 public enum SyncError: Error {
+    /// The orchestrator has released its preserved archive and cannot safely
+    /// perform further reads or writes. Create a new session to continue.
+    case sessionClosed
+    /// The docx bytes no longer match the generation accepted by this
+    /// session. The caller must import/re-bootstrap before writing.
+    case externalGenerationChanged(expectedSHA256: String, actualSHA256: String)
+    /// Snapshot references pending operations absent from the persisted log;
+    /// replay cannot proceed without guessing.
+    case missingPendingOperations(opIDs: [UUID])
     /// Import found overlapping mutations and the policy was `.abortOnConflict`.
     case conflict(report: ConflictReport)
     /// A Swift write was refused because Word holds the docx open
@@ -40,6 +49,9 @@ public enum SyncError: Error {
     case fileLockedByWord(lockURL: URL)
     /// `bootstrapFromDocx` / import could not load a required part tree.
     case missingDocumentTree(partPath: String)
+    /// External changes cannot be merged safely with pending Swift edits.
+    /// The caller must flush/discard one side explicitly; no baseline moves.
+    case unrepresentedExternalChanges(partPaths: [String])
 }
 
 /// One import's worth of overlapping-mutation findings.

@@ -1,5 +1,4 @@
-{"op":"DefineStyle","id":"titleBrown","font":"Noto Serif TC","fontSize":36,"color":"#663300","bold":true,"ts":1735689600}
-{"op":"InsertParagraph","id":"h1","style":"titleBrown","in":"main","at":0,"ts":1735689600}
-{"op":"SetRuns","id":"h1","runs":[{"text":"Title"}],"ts":1735689600}
-{"op":"InsertParagraph","id":"h2","style":"titleBrown","in":"main","at":1,"ts":1735689600}
-{"op":"SetRuns","id":"h2","runs":[{"text":"Subtitle"}],"ts":1735689600}
+{"op_id":"00000000-0000-4000-8000-000000000001","op_type":"defineStyle","payload":{"bold":true,"color":"663300","font":"Noto Serif TC","fontSize":36,"styleId":"titleBrown"},"source":"swift","ts":"1970-01-01T00:00:00Z"}
+{"in":null,"op_id":"00000000-0000-4000-8000-000000000002","op_type":"appendParagraph","paragraph":{"paraId":"h1","styleId":"titleBrown","text":"Title"},"source":"swift","ts":"1970-01-01T00:00:00Z"}
+{"in":null,"op_id":"00000000-0000-4000-8000-000000000003","op_type":"appendParagraph","paragraph":{"paraId":"h2","styleId":"titleBrown","text":"Subtitle"},"source":"swift","ts":"1970-01-01T00:00:00Z"}
+{"at":null,"op_id":"00000000-0000-4000-8000-000000000004","op_type":"setSectionProperties","section":{},"source":"swift","ts":"1970-01-01T00:00:00Z"}

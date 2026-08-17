@@ -249,7 +249,7 @@ final class OperationReducerPhase2cTests: XCTestCase {
         }
     }
 
-    // MARK: - setRunFormat (bold only — sufficient for OOXMLEdit.setBold)
+    // MARK: - setRunFormat
 
     private func makeBodyWithSingleRun(text: String) -> (XmlTree, ElementID) {
         let runUUID = UUID()
@@ -334,9 +334,7 @@ final class OperationReducerPhase2cTests: XCTestCase {
         }
     }
 
-    func testSetRunFormatUnsupportedFieldThrows() {
-        // MVP: only bold is implemented. italic/underline/fontSize/color
-        // throw malformedOp("Phase 2c MVP supports bold only ...").
+    func testSetRunFormatItalicIsSupported() throws {
         let (base, runID) = makeBodyWithSingleRun(text: "hello")
 
         var log = OperationLog()
@@ -345,12 +343,10 @@ final class OperationReducerPhase2cTests: XCTestCase {
             source: .swift
         )
 
-        XCTAssertThrowsError(try OperationReducer.materialize(log: log, base: base)) { error in
-            guard case ReducerError.malformedOp = error else {
-                XCTFail("Expected .malformedOp for unsupported italic field, got \(error)")
-                return
-            }
-        }
+        let result = try OperationReducer.materialize(log: log, base: base)
+        let run = try XCTUnwrap(OperationReducer.findNode(elementID: runID, in: result))
+        let rPr = try XCTUnwrap(run.children.first { $0.localName == "rPr" })
+        XCTAssertTrue(rPr.children.contains { $0.localName == "i" })
     }
 
     // MARK: - removeParagraph

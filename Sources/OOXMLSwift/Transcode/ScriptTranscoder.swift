@@ -255,6 +255,18 @@ public enum ScriptExporter {
     private static func emitBody(entries: [LogEntry],
                                  slotByParaId: [String: SlotDesignation]) -> [String] {
         var body: [String] = []
+        let canonicalIDByIndex = entries.indices.map { index in
+            String(format: "00000000-0000-4000-8000-%012d", index + 1)
+        }
+        // A damaged log may contain duplicate op IDs. Keep reference lookup
+        // deterministic (first producer wins) and give each emitted entry a
+        // distinct canonical ID; never use Dictionary(uniqueKeysWithValues:),
+        // whose duplicate-key precondition would terminate the process.
+        var canonicalIDs: [String: String] = [:]
+        for (index, entry) in entries.enumerated()
+            where canonicalIDs[entry.opID.uuidString] == nil {
+            canonicalIDs[entry.opID.uuidString] = canonicalIDByIndex[index]
+        }
 
         var i = 0
         while i < entries.count {
@@ -276,7 +288,8 @@ public enum ScriptExporter {
                    return false
                }) {
                 body.append("        \(type)(id: \(quote(id.raw))) {")
-                for inner in entries[(i + 1)..<endIdx] {
+                for innerIndex in (i + 1)..<endIdx {
+                    let inner = entries[innerIndex]
                     if case .appendParagraph(let c, let payload) = inner.op,
                        c == nil, inner.source == .swift,
                        let paraId = payload.paraId, !paraId.isEmpty,
@@ -284,7 +297,10 @@ public enum ScriptExporter {
                                                   slotName: slotByParaId[paraId]?.name) {
                         body.append(contentsOf: block)
                     } else {
-                        body.append("            " + rawOpLine(entry: inner))
+                        body.append("            " + rawOpLine(
+                            entry: inner,
+                            canonicalID: canonicalIDByIndex[innerIndex],
+                            canonicalIDs: canonicalIDs))
                     }
                 }
                 body.append("        }")
@@ -300,7 +316,10 @@ public enum ScriptExporter {
                                           slotName: slotByParaId[paraId]?.name) {
                 body.append(contentsOf: block)
             } else {
-                body.append("        " + rawOpLine(entry: entry))
+                body.append("        " + rawOpLine(
+                    entry: entry,
+                    canonicalID: canonicalIDByIndex[i],
+                    canonicalIDs: canonicalIDs))
             }
             i += 1
         }
@@ -358,9 +377,10 @@ public enum ScriptExporter {
     /// `appendParagraph` text. A multi-run setRuns (or an empty paragraph with
     /// no run text) has no unambiguous target and fails loudly upstream.
     static func opLevelSlotDefault(log: OperationLog, paraId: String) -> String? {
-        for entry in log.entries {
+        for entry in log.entries.reversed() {
             if case .setRuns(let target, let runs) = entry.op,
-               target.raw == "w14:paraId=\(paraId)", runs.count == 1 {
+               target.raw == "w14:paraId=\(paraId)" {
+                guard runs.count == 1, !runs[0].text.isEmpty else { return nil }
                 return runs[0].text
             }
         }
@@ -371,19 +391,76 @@ public enum ScriptExporter {
         return nil
     }
 
-    /// `// @op {"op_type":...,"source":...,<op fields>}` — canonical raw
+    /// `// @op {"op_id":...,"ts":...,"op_type":...,"source":...,<op fields>}` — canonical raw
     /// escape reusing the JSONL codec's field encoding (single source of
-    /// truth for op shapes; op_id/timestamp regenerate on import per the
-    /// round-trip contract).
-    private static func rawOpLine(entry: LogEntry) -> String {
+    /// truth for op shapes. Identity is retained because undo/redo and
+    /// `lib:<producer-opID>` targets are referential.
+    private static func rawOpLine(
+        entry: LogEntry, canonicalID: String,
+        canonicalIDs: [String: String]
+    ) -> String {
         let (opType, fields) = JSONLLineCoder.encodeOp(entry.op)
         var parts: [String] = []
+        parts.append("\"op_id\":\(quote(canonicalID))")
+        parts.append("\"ts\":\(quote("1970-01-01T00:00:00Z"))")
         parts.append("\"op_type\":\(quote(opType))")
         parts.append("\"source\":\(quote(entry.source.rawValue))")
         for (key, value) in fields {
-            parts.append("\"\(key)\":\(value)")
+            let remapped = isReferenceField(opType: opType, key: key)
+                ? remapReferenceString(in: value, canonicalIDs: canonicalIDs)
+                : value
+            parts.append("\"\(key)\":\(remapped)")
         }
         return "// @op {\(parts.joined(separator: ","))}"
+    }
+
+    /// Remaps direct UUID/ElementID JSON string fields without touching user
+    /// text that merely contains a UUID as a substring.
+    private static func remapReferenceString(
+        in encodedJSON: String, canonicalIDs: [String: String]
+    ) -> String {
+        guard let data = encodedJSON.data(using: .utf8),
+              let string = try? JSONSerialization.jsonObject(
+                with: data, options: [.fragmentsAllowed]) as? String else {
+            return encodedJSON
+        }
+        if let replacement = canonicalIDs[string] {
+            return JSONLLineCoder.jsonString(replacement)
+        }
+        let prefix = "lib:"
+        if string.hasPrefix(prefix),
+           let replacement = canonicalIDs[String(string.dropFirst(prefix.count))] {
+            return JSONLLineCoder.jsonString(prefix + replacement)
+        }
+        return encodedJSON
+    }
+
+    /// Only these typed fields are operation/element references. Restricting
+    /// alpha-renaming to this allow-list is essential: document text, URLs,
+    /// XML, and unknown future payloads are opaque user data even when a
+    /// string happens to look exactly like an operation UUID.
+    private static func isReferenceField(opType: String, key: String) -> Bool {
+        switch opType {
+        case "insertParagraphAfter": return key == "after"
+        case "insertParagraphBefore": return key == "before"
+        case "removeParagraph", "removeTable", "beginComponent", "endComponent":
+            return key == "id"
+        case "setText", "setParagraphStyle", "setRunFormat", "removeNode",
+             "updateAttribute", "wrapWithHyperlink", "setParagraphContent", "setRuns":
+            return key == "target"
+        case "insertTable", "insertBookmark": return key == "at"
+        case "setCellText": return key == "table"
+        case "insertRun", "appendTable", "appendParagraph", "insertTab",
+             "insertBreak", "insertNoBreakHyphen":
+            return key == "in"
+        case "insertComment": return key == "anchor"
+        case "undo", "redo": return key == "targetOpID"
+        case "insertNode": return key == "parent"
+        case "moveNode": return key == "sourceNode" || key == "destinationParent"
+        case "insertSiblingAfter": return key == "after"
+        case "setSectionProperties": return key == "at"
+        default: return false
+        }
     }
 
     static func quote(_ s: String) -> String {
@@ -458,7 +535,8 @@ public enum ScriptImporter {
             if line.hasPrefix("// @op ") {
                 let json = String(line.dropFirst("// @op ".count))
                 let entry = try decodeRawOp(json: json, line: lineNo)
-                log.append(entry.op, source: entry.source)
+                log.append(entry.op, source: entry.source,
+                           opID: entry.opID, at: entry.timestamp)
                 continue
             }
             if line.hasPrefix("//") { continue }               // ordinary comment
@@ -704,31 +782,36 @@ public enum ScriptImporter {
         opSlots: [String: String],
         bindings: [String: String]
     ) -> OperationLog {
-        // Which slotted paraIds carry a single-run setRuns (the preferred
-        // target). The rest substitute the appendParagraph text.
-        var setRunsTargets: Set<String> = []
-        for entry in log.entries {
+        // The final setRuns for a paragraph is its effective text-bearing
+        // occurrence. Earlier entries are history and stay byte-equivalent.
+        var setRunsEntryByParaId: [String: Int] = [:]
+        for index in log.entries.indices.reversed() {
+            let entry = log.entries[index]
             if case .setRuns(let target, let runs) = entry.op,
                let pid = paraId(fromTarget: target), runs.count == 1,
-               opSlots[pid] != nil {
-                setRunsTargets.insert(pid)
+               opSlots[pid] != nil, setRunsEntryByParaId[pid] == nil {
+                setRunsEntryByParaId[pid] = index
             }
         }
         var rebuilt = OperationLog()
-        for entry in log.entries {
+        for (index, entry) in log.entries.enumerated() {
             var op = entry.op
             switch op {
             case .setRuns(let target, let runs):
                 if let pid = paraId(fromTarget: target), let name = opSlots[pid],
-                   setRunsTargets.contains(pid), runs.count == 1,
+                   setRunsEntryByParaId[pid] == index, runs.count == 1,
                    let value = bindings[name] {
                     var run = runs[0]
                     run.text = value
+                    if value.first.map(isXMLBoundaryWhitespace) == true
+                        || value.last.map(isXMLBoundaryWhitespace) == true {
+                        run.preserveSpace = true
+                    }
                     op = .setRuns(target: target, runs: [run])
                 }
             case .appendParagraph(let container, let payload):
                 if container == nil, let pid = payload.paraId, let name = opSlots[pid],
-                   !setRunsTargets.contains(pid), let value = bindings[name] {
+                   setRunsEntryByParaId[pid] == nil, let value = bindings[name] {
                     var p = payload
                     p.text = value
                     op = .appendParagraph(in: nil, paragraph: p)
@@ -736,9 +819,14 @@ public enum ScriptImporter {
             default:
                 break
             }
-            rebuilt.append(op, source: entry.source)
+            rebuilt.append(op, source: entry.source,
+                           opID: entry.opID, at: entry.timestamp)
         }
         return rebuilt
+    }
+
+    private static func isXMLBoundaryWhitespace(_ character: Character) -> Bool {
+        character == " " || character == "\t" || character == "\n" || character == "\r"
     }
 
     /// Extracts the paraId from a `w14:paraId=<id>` op target, or nil.
@@ -748,7 +836,7 @@ public enum ScriptImporter {
         return String(target.raw.dropFirst(prefix.count))
     }
 
-    private static func decodeRawOp(json: String, line: Int) throws -> (op: Operation, source: OpSource) {
+    private static func decodeRawOp(json: String, line: Int) throws -> LogEntry {
         guard let data = json.data(using: .utf8),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let opType = obj["op_type"] as? String else {
@@ -757,8 +845,29 @@ public enum ScriptImporter {
         let source = OpSource(rawValue: (obj["source"] as? String) ?? "swift") ?? .swift
         do {
             let op = try JSONLLineCoder.decodeOp(opType: opType, fullObject: obj, lineIndex: line)
-            return (op, source)
+            let opID: UUID
+            if let rawID = obj["op_id"] as? String {
+                guard let parsed = UUID(uuidString: rawID) else {
+                    throw TranscodeError.malformedRawOp(
+                        line: line, reason: "op_id is not a UUID")
+                }
+                opID = parsed
+            } else {
+                opID = UUID()
+            }
+            let timestamp: Date
+            if let rawTimestamp = obj["ts"] as? String {
+                guard let parsed = JSONLLineCoder.parseISO8601(rawTimestamp) else {
+                    throw TranscodeError.malformedRawOp(
+                        line: line, reason: "ts is not ISO-8601")
+                }
+                timestamp = parsed
+            } else {
+                timestamp = Date()
+            }
+            return LogEntry(opID: opID, op: op, source: source, timestamp: timestamp)
         } catch {
+            if let transcode = error as? TranscodeError { throw transcode }
             throw TranscodeError.malformedRawOp(line: line, reason: "cannot decode op '\(opType)': \(error)")
         }
     }

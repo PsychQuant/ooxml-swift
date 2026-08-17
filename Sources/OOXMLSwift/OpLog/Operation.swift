@@ -148,6 +148,11 @@ public enum Operation: Equatable, Sendable {
     /// raw channel and the coverage metric reflects that honestly.
     case carryPart(partPath: String, xml: String)
 
+    /// Carries one non-UTF-8 package part verbatim. The payload is base64 so
+    /// JSONL and `.mdocx.swift` remain text-only while Stage B can still
+    /// reconstruct images, embedded fonts, and arbitrary binary OPC parts.
+    case carryBinaryPart(partPath: String, base64: String)
+
     // MARK: Section properties (format-alignment-engine Phase B, task 2.1)
 
     /// Sets a `<w:sectPr>` from a typed `SectionPayload`. `at: nil` places
@@ -165,6 +170,10 @@ public enum Operation: Equatable, Sendable {
     /// table authoring: unlike `insertTable` + `setCellText`, it needs no
     /// table ElementID, so it round-trips scripts losslessly.
     case appendTable(in: ElementID?, table: TablePayload)
+
+    /// Appends a bookmark range marker as a block-level body child. This is
+    /// the escape hatch for bookmark spans crossing paragraph boundaries.
+    case appendBlockMarker(marker: InlineMarker)
 
     // MARK: Document root (word-canonical-forms Phase 2, task 2.1)
 
@@ -312,11 +321,43 @@ public struct TablePayload: Equatable, Sendable, Codable {
     public var columns: Int
     /// Row-major cell text. Absent (pre-extension wire) means empty cells.
     public var cells: [[String]]?
+    /// Rich paragraph payloads per row/cell. When present, this is the
+    /// authoring source of truth; `cells` remains the plain-text projection.
+    public var richCells: [[[TableParagraphPayload]]]?
+    /// Stable DSL identities for the three OOXML table layers. Optional for
+    /// backward-compatible decoding of logs created before the grammar's
+    /// identifier contract was executable.
+    public var tableId: String?
+    public var rowIds: [String]?
+    public var cellIds: [[String]]?
 
-    public init(rows: Int, columns: Int, cells: [[String]]? = nil) {
+    public init(rows: Int, columns: Int, cells: [[String]]? = nil,
+                richCells: [[[TableParagraphPayload]]]? = nil,
+                tableId: String? = nil, rowIds: [String]? = nil,
+                cellIds: [[String]]? = nil) {
         self.rows = rows
         self.columns = columns
         self.cells = cells
+        self.richCells = richCells
+        self.tableId = tableId
+        self.rowIds = rowIds
+        self.cellIds = cellIds
+    }
+}
+
+public struct TableParagraphPayload: Equatable, Sendable, Codable {
+    public var paragraph: ParagraphPayload
+    public var runs: [RunPayload]?
+    /// Ordered structural inline content for bookmarks/hyperlinks. Inline
+    /// atoms remain separate canonical insert* operations targeting the
+    /// identified runs in this sequence.
+    public var items: [InlineItem]?
+
+    public init(paragraph: ParagraphPayload, runs: [RunPayload]? = nil,
+                items: [InlineItem]? = nil) {
+        self.paragraph = paragraph
+        self.runs = runs
+        self.items = items
     }
 }
 
@@ -422,22 +463,54 @@ public struct InlineMarker: Equatable, Sendable, Codable {
 /// Exactly one of `run` / `marker` is set per `kind`. A struct (not an enum
 /// with associated values) keeps the JSONL codec simple.
 public struct InlineItem: Equatable, Sendable, Codable {
-    public enum Kind: String, Sendable, Codable { case run, marker }
+    public enum Kind: String, Sendable, Codable { case run, marker, hyperlink }
     public var kind: Kind
     public var run: RunPayload?
     public var marker: InlineMarker?
+    public var hyperlink: HyperlinkPayload?
+    /// Stable identity used by a following canonical insertTab/Break/NBH op.
+    public var runID: UUID?
 
-    public static func run(_ run: RunPayload) -> InlineItem {
-        InlineItem(kind: .run, run: run, marker: nil)
+    public static func run(_ run: RunPayload, id: UUID? = nil) -> InlineItem {
+        InlineItem(kind: .run, run: run, runID: id)
     }
     public static func marker(_ marker: InlineMarker) -> InlineItem {
-        InlineItem(kind: .marker, run: nil, marker: marker)
+        InlineItem(kind: .marker, marker: marker)
     }
-
-    public init(kind: Kind, run: RunPayload? = nil, marker: InlineMarker? = nil) {
+    public static func hyperlink(_ hyperlink: HyperlinkPayload) -> InlineItem {
+        InlineItem(kind: .hyperlink, hyperlink: hyperlink)
+    }
+    public init(kind: Kind, run: RunPayload? = nil, marker: InlineMarker? = nil,
+                hyperlink: HyperlinkPayload? = nil, runID: UUID? = nil) {
         self.kind = kind
         self.run = run
         self.marker = marker
+        self.hyperlink = hyperlink
+        self.runID = runID
+    }
+}
+
+/// Hyperlink container carried inside `setParagraphContent`.
+public struct HyperlinkPayload: Equatable, Sendable, Codable {
+    public enum TargetKind: String, Equatable, Sendable, Codable {
+        case external, anchor
+    }
+    public var targetKind: TargetKind
+    public var target: String
+    public var relationshipId: String?
+    public var runs: [RunPayload]
+    /// Full ordered inline grammar for container hyperlinks. When absent,
+    /// legacy payloads continue to use `runs`.
+    public var items: [InlineItem]?
+
+    public init(targetKind: TargetKind, target: String,
+                relationshipId: String? = nil, runs: [RunPayload],
+                items: [InlineItem]? = nil) {
+        self.targetKind = targetKind
+        self.target = target
+        self.relationshipId = relationshipId
+        self.runs = runs
+        self.items = items
     }
 }
 

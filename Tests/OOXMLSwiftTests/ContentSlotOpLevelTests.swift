@@ -48,7 +48,7 @@ final class ContentSlotOpLevelTests: XCTestCase {
     private func execute(script: String) throws -> [String: Data] {
         let log = try ScriptImporter.parse(source: script)
         var doc = WordDocument.emptyAuthoringDocument()
-        try doc.apply(operations: log.entries.map(\.op))
+        try doc.apply(log: log)
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("oplevel-out-\(UUID().uuidString).docx")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -135,5 +135,52 @@ final class ContentSlotOpLevelTests: XCTestCase {
             }
             XCTAssertEqual(name, "heading")
         }
+    }
+
+    func testRepeatedSetRunsSubstitutesOnlyFinalOccurrence() throws {
+        var log = OperationLog()
+        log.append(.appendParagraph(in: nil, paragraph: ParagraphPayload(
+            text: "", paraId: "P1", indentFirstLineChars: 100)), source: .swift)
+        log.append(.setRuns(target: .init(rawString: "w14:paraId=P1"),
+                            runs: [RunPayload(text: "historical", bold: true)]),
+                   source: .swift)
+        log.append(.setRuns(target: .init(rawString: "w14:paraId=P1"),
+                            runs: [RunPayload(text: "effective", italic: true)]),
+                   source: .swift)
+
+        let defaultScript = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "heading", paraId: "P1"),
+        ])
+        XCTAssertTrue(defaultScript.contains("heading: \"effective\""))
+        let defaultLog = try ScriptImporter.parse(source: defaultScript)
+        XCTAssertEqual(defaultLog.entries.map(\.op), log.entries.map(\.op))
+
+        let changedScript = defaultScript.replacingOccurrences(
+            of: "heading: \"effective\"", with: "heading: \"replacement\"")
+        let changedLog = try ScriptImporter.parse(source: changedScript)
+        guard case .setRuns(_, let historical) = changedLog.entries[1].op,
+              case .setRuns(_, let effective) = changedLog.entries[2].op else {
+            return XCTFail("expected repeated setRuns entries")
+        }
+        XCTAssertEqual(historical[0].text, "historical")
+        XCTAssertEqual(effective[0].text, "replacement")
+        XCTAssertEqual(effective[0].italic, true)
+    }
+
+    func testChangedSlotWithBoundaryWhitespaceEnablesPreserveSpace() throws {
+        let (_, log) = try makeFormattedReference()
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "heading", paraId: "P1"),
+        ])
+        script = script.replacingOccurrences(
+            of: "heading: \"原文の見出し\"", with: "heading: \" padded \"")
+        let rebuilt = try ScriptImporter.parse(source: script)
+        let run = try XCTUnwrap(rebuilt.entries.compactMap { entry -> RunPayload? in
+            guard case .setRuns(let target, let runs) = entry.op,
+                  target.raw == "w14:paraId=P1", runs.count == 1 else { return nil }
+            return runs[0]
+        }.last)
+        XCTAssertEqual(run.text, " padded ")
+        XCTAssertEqual(run.preserveSpace, true)
     }
 }

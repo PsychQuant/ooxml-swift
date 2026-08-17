@@ -1,4 +1,5 @@
-{"op":"BeginComponent","type":"Summary","id":"ch1-summary","ts":1735689600}
-{"op":"InsertParagraph","id":"sum-frame","style":"SummaryFrame","in":"ch1-summary","at":0,"ts":1735689600}
-{"op":"SetRuns","id":"sum-frame","runs":[{"text":"note text"}],"ts":1735689600}
-{"op":"EndComponent","id":"ch1-summary","ts":1735689600}
+{"id":"ch1-summary","op_id":"00000000-0000-4000-8000-000000000001","op_type":"beginComponent","source":"swift","ts":"1970-01-01T00:00:00Z","type":"Summary"}
+{"op_id":"00000000-0000-4000-8000-000000000002","op_type":"defineStyle","payload":{"styleId":"SummaryFrame"},"source":"swift","ts":"1970-01-01T00:00:00Z"}
+{"in":null,"op_id":"00000000-0000-4000-8000-000000000003","op_type":"appendParagraph","paragraph":{"paraId":"sum-frame","styleId":"SummaryFrame","text":"note text"},"source":"swift","ts":"1970-01-01T00:00:00Z"}
+{"id":"ch1-summary","op_id":"00000000-0000-4000-8000-000000000004","op_type":"endComponent","source":"swift","ts":"1970-01-01T00:00:00Z"}
+{"at":null,"op_id":"00000000-0000-4000-8000-000000000005","op_type":"setSectionProperties","section":{},"source":"swift","ts":"1970-01-01T00:00:00Z"}
