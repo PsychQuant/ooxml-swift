@@ -2921,12 +2921,29 @@ public struct DocxReader {
             props.shading = shading
         }
 
-        // v0.17.0+ (#49): diagonal borders
+        // v0.17.0+ (#49): diagonal borders.
+        // #99: the four edge borders were never parsed here, so any operation
+        // that re-serialised from the model dropped every cell border in the
+        // document — including cells that were never touched. `CellBorders`
+        // already declared the fields and `TableCellProperties.toXML()` already
+        // emitted all six directions; the gap was read-side only.
         if let tcBorders = element.elements(forName: "w:tcBorders").first {
+            let top = parseBorder(tcBorders.elements(forName: "w:top").first)
+            let bottom = parseBorder(tcBorders.elements(forName: "w:bottom").first)
+            let left = parseBorder(tcBorders.elements(forName: "w:left").first)
+            let right = parseBorder(tcBorders.elements(forName: "w:right").first)
             let tl2br = parseBorder(tcBorders.elements(forName: "w:tl2br").first)
             let tr2bl = parseBorder(tcBorders.elements(forName: "w:tr2bl").first)
-            if tl2br != nil || tr2bl != nil {
+            // Allocate only when the source actually carried a border: a cell
+            // with no `<w:tcBorders>` (or an empty one) must not gain borders
+            // on read, because `parseBorder` substitutes defaults for absent
+            // attributes and would otherwise invent them.
+            if [top, bottom, left, right, tl2br, tr2bl].contains(where: { $0 != nil }) {
                 if props.borders == nil { props.borders = CellBorders() }
+                props.borders?.top = top
+                props.borders?.bottom = bottom
+                props.borders?.left = left
+                props.borders?.right = right
                 props.borders?.tl2br = tl2br
                 props.borders?.tr2bl = tr2bl
             }
