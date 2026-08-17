@@ -27,7 +27,6 @@ final class Issue56FollowupTests: XCTestCase {
             relationshipId: "rId99",
             tooltip: "Click me",
             rawAttributes: ["w:tgtFrame": "_blank", "w:docLocation": "section1"],
-            rawChildren: [],
             position: 0
         )
 

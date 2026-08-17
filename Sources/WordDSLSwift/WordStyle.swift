@@ -47,4 +47,9 @@ public struct WordStyle: Equatable, Sendable {
     public static let listItem = WordStyle(styleId: "ListItem")
     public static let title = WordStyle(styleId: "Title")
     public static let subtitle = WordStyle(styleId: "Subtitle")
+    public static let tableHeader = WordStyle(styleId: "TableHeader", bold: true)
+    public static let summaryFrame = WordStyle(styleId: "SummaryFrame")
+    public static let titleBrown = WordStyle(
+        styleId: "titleBrown", font: "Noto Serif TC", fontSize: 36,
+        color: "663300", bold: true)
 }

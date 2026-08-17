@@ -31,10 +31,17 @@ public struct WordImportDiff: Equatable {
     /// cannot represent (formatting-only edits). Callers MUST NOT treat an
     /// empty `operations` array as "no change" without checking this.
     public var unrepresentedChanges: [ElementID]
+    /// True when document.xml changed but no stable ElementID exists for a
+    /// safe semantic op (for example, an ID-less paragraph's text changed).
+    /// The orchestrator must carry/adopt the full document part, never treat
+    /// an empty `operations` array as no change.
+    public var requiresDocumentCarry: Bool
 
-    public init(operations: [Operation] = [], unrepresentedChanges: [ElementID] = []) {
+    public init(operations: [Operation] = [], unrepresentedChanges: [ElementID] = [],
+                requiresDocumentCarry: Bool = false) {
         self.operations = operations
         self.unrepresentedChanges = unrepresentedChanges
+        self.requiresDocumentCarry = requiresDocumentCarry
     }
 }
 
@@ -137,7 +144,16 @@ public enum WordImport {
             }
         }
 
-        return WordImportDiff(operations: operations, unrepresentedChanges: unrepresented)
+        let unmatchedIDLessSnapshot = snapParas.contains {
+            $0.stableID == nil && !usedSnapshot.contains(ObjectIdentifier($0))
+        }
+        let unmatchedIDLessCurrent = currParas.contains {
+            $0.stableID == nil && matches[ObjectIdentifier($0)] == nil
+        }
+        return WordImportDiff(
+            operations: operations,
+            unrepresentedChanges: unrepresented,
+            requiresDocumentCarry: unmatchedIDLessSnapshot || unmatchedIDLessCurrent)
     }
 
     // MARK: - Helpers

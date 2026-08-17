@@ -9,19 +9,35 @@ import XCTest
 /// `XmlTreeReader.parse → XmlTreeWriter.serialize` with no mutations, and
 /// assert byte-equal.
 ///
-/// Note: fixtures are generated programmatically by `CorpusFixtureBuilder` at
-/// test time rather than checked in as binary blobs. The Spectra requirement
-/// is satisfied by the `(fixture-class, byte-equal-assertion)` pair, not by
-/// blob-on-disk specifically; programmatic builders keep the test repo small
-/// and the diff legible.
 final class TreeRoundTripCorpusTests: XCTestCase {
 
+    func testRegenerateCommittedFixturesWhenExplicitlyRequested() throws {
+        guard ProcessInfo.processInfo.environment["UPDATE_TREE_GOLDEN_CORPUS"] == "1" else {
+            throw XCTSkip("Set UPDATE_TREE_GOLDEN_CORPUS=1 to regenerate committed fixtures")
+        }
+        try CorpusFixtureBuilder.regenerateCommittedFixtures()
+    }
+
     func testMultiSectionThesisRoundTripsByteEqual() throws {
-        try assertCorpusFixtureRoundTrips(CorpusFixtureBuilder.buildMultiSectionThesis())
+        let fixture = try CorpusFixtureBuilder.buildMultiSectionThesis()
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        let document = String(decoding: try CorpusFixtureBuilder.readPart(
+            "word/document.xml", from: fixture.url), as: UTF8.self)
+        XCTAssertEqual(document.components(separatedBy: "<w:sectPr").count - 1, 3)
+        XCTAssertTrue(document.contains("<w:headerReference"))
+        XCTAssertTrue(document.contains("<w:footerReference"))
+        try assertCorpusFixtureRoundTrips(fixture, ownsFixture: false)
     }
 
     func testVMLRichRoundTripsByteEqual() throws {
-        try assertCorpusFixtureRoundTrips(CorpusFixtureBuilder.buildVMLRich())
+        let fixture = try CorpusFixtureBuilder.buildVMLRich()
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        let document = String(decoding: try CorpusFixtureBuilder.readPart(
+            "word/document.xml", from: fixture.url), as: UTF8.self)
+        for required in ["<mc:AlternateContent", "<w:pict>", "<wps:wsp>", "<wpg:wgp>"] {
+            XCTAssertTrue(document.contains(required), "Missing required corpus element \(required)")
+        }
+        try assertCorpusFixtureRoundTrips(fixture, ownsFixture: false)
     }
 
     func testCJKSettingsRoundTripsByteEqual() throws {
@@ -36,10 +52,13 @@ final class TreeRoundTripCorpusTests: XCTestCase {
 
     private func assertCorpusFixtureRoundTrips(
         _ fixture: CorpusFixtureBuilder.Fixture,
+        ownsFixture: Bool = true,
         file: StaticString = #file,
         line: UInt = #line
     ) throws {
-        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        defer {
+            if ownsFixture { try? FileManager.default.removeItem(at: fixture.url) }
+        }
         for partPath in fixture.partsToVerify {
             let partBytes = try CorpusFixtureBuilder.readPart(partPath, from: fixture.url)
             let tree = try XmlTreeReader.parse(partBytes)

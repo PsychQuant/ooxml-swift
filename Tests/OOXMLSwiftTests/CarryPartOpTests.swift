@@ -10,6 +10,81 @@ import XCTest
 
 final class CarryPartOpTests: XCTestCase {
 
+    func testBinaryPartRoundTripsThroughRawOperation() throws {
+        let bytes = Data([0x00, 0xFF, 0x89, 0x50, 0x4E, 0x47])
+        var log = OperationLog()
+        log.append(.carryBinaryPart(
+            partPath: "word/media/image1.png",
+            base64: bytes.base64EncodedString()), source: .word)
+
+        let script = ScriptExporter.exportSwift(log: log)
+        let reconstructed = try ScriptImporter.parse(source: script)
+        XCTAssertEqual(reconstructed.entries.map(\.op), log.entries.map(\.op))
+
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.apply(operations: reconstructed.entries.map(\.op))
+        XCTAssertEqual(doc.carriedParts["word/media/image1.png"], bytes)
+    }
+
+    func testReverseExtractorCarriesBinaryPackageParts() throws {
+        let binary = Data([0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF])
+        let parts: [String: Data] = [
+            "word/document.xml": Data("<w:document xmlns:w=\"urn:w\"><w:body/></w:document>".utf8),
+            "word/media/image1.png": binary,
+        ]
+
+        let result = try ReverseExtractor.reverse(parts: parts)
+        XCTAssertTrue(result.log.entries.contains {
+            if case .carryBinaryPart(let path, _) = $0.op {
+                return path == "word/media/image1.png"
+            }
+            return false
+        })
+
+        var rebuilt = WordDocument.emptyAuthoringDocument()
+        try rebuilt.apply(operations: result.log.entries.map(\.op))
+        XCTAssertEqual(rebuilt.carriedParts["word/media/image1.png"], binary)
+    }
+
+    func testCarryPartRejectsParentTraversal() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        XCTAssertThrowsError(try doc.apply(operations: [
+            .carryPart(partPath: "../../escaped.xml", xml: "<x/>")
+        ]))
+        XCTAssertThrowsError(try doc.apply(operations: [
+            .carryBinaryPart(partPath: "../escaped.bin", base64: "AA==")
+        ]))
+    }
+
+    func testAddRelationshipRejectsParentTraversal() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        XCTAssertThrowsError(try doc.apply(operations: [
+            .addRelationship(
+                part: "../../escaped.rels",
+                id: "rIdEscape",
+                type: "urn:test",
+                target: "target.xml",
+                targetMode: nil),
+        ]))
+        XCTAssertNil(doc.xmlTrees["../../escaped.rels"])
+        XCTAssertTrue(doc.operationLog.entries.isEmpty)
+    }
+
+    func testCarryPartBatchIsAtomicWhenLaterOperationFails() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        let originalParts = doc.carriedParts
+
+        XCTAssertThrowsError(try doc.apply(operations: [
+            .carryPart(partPath: "word/custom.xml", xml: "<custom/>"),
+            .setText(
+                target: ElementID(rawString: "w14:paraId=DOES-NOT-EXIST"),
+                text: "boom"),
+        ]))
+
+        XCTAssertEqual(doc.carriedParts, originalParts)
+        XCTAssertTrue(doc.operationLog.entries.isEmpty)
+    }
+
     /// A carryPart op round-trips through export → parse with its partPath and
     /// xml preserved field-for-field.
     func testCarryPartRoundTripsThroughScript() throws {

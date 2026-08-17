@@ -27,14 +27,13 @@ public struct DocxChangeDetector {
     }
 
     /// Returns `true` when the file's content actually changed since the
-    /// last baseline. mtime fast-path: unchanged mtime → no hash computed.
-    /// mtime changed but hash identical → baseline mtime updates, returns
+    /// last baseline. SHA-256 is authoritative even when mtime is unchanged:
+    /// atomic replacement tools can preserve timestamps. mtime changed but
+    /// hash identical → baseline mtime updates, returns
     /// `false` (spec scenario "mtime-only change without content change is
     /// ignored").
     public mutating func poll() throws -> Bool {
         let mtime = Self.modificationDate(of: url)
-        if mtime == lastModificationDate { return false }
-
         // 7.4 verify P2: commit the mtime baseline only AFTER the content
         // read succeeds — committing before a throwing read permanently
         // masked the revision on retry (fast-path matched the advanced

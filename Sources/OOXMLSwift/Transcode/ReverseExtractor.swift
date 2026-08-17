@@ -83,8 +83,13 @@ public enum ReverseExtractor {
         // part that upgraded.
         for (path, bytes) in parts.sorted(by: { $0.key < $1.key }) {
             if path == "word/document.xml", documentOps != nil { continue }
-            guard let xml = String(data: bytes, encoding: .utf8) else { continue }
-            log.append(.carryPart(partPath: path, xml: xml), source: .swift)
+            if let xml = String(data: bytes, encoding: .utf8) {
+                log.append(.carryPart(partPath: path, xml: xml), source: .swift)
+            } else {
+                log.append(.carryBinaryPart(
+                    partPath: path,
+                    base64: bytes.base64EncodedString()), source: .swift)
+            }
             if path != "word/document.xml" {
                 rawReasons[path] = "sibling-part"
             }
@@ -155,6 +160,8 @@ public enum ReverseExtractor {
                       value: "http://schemas.openxmlformats.org/wordprocessingml/2006/main"),
         RootAttribute(prefix: "xmlns", localName: "w14",
                       value: "http://schemas.microsoft.com/office/word/2010/wordml"),
+        RootAttribute(prefix: "xmlns", localName: "r",
+                      value: "http://schemas.openxmlformats.org/officeDocument/2006/relationships"),
     ]
 
     /// Extraction bail-out carrying the content class + located XML path
