@@ -2949,7 +2949,34 @@ public struct DocxReader {
             }
         }
 
+        // #101: cell-level margins. `<w:tcMar>` was read by nothing and emitted
+        // by nothing, so any re-serialisation dropped every cell's margins —
+        // the other half of the same `<w:tcPr>` as #99's borders.
+        if let tcMar = element.elements(forName: "w:tcMar").first {
+            let top = parseMarginWidth(tcMar.elements(forName: "w:top").first)
+            let bottom = parseMarginWidth(tcMar.elements(forName: "w:bottom").first)
+            let left = parseMarginWidth(tcMar.elements(forName: "w:left").first)
+            let right = parseMarginWidth(tcMar.elements(forName: "w:right").first)
+            // Allocate only when the source carried at least one edge, and
+            // leave absent edges nil: a partially-specified `<w:tcMar>` must
+            // not have its missing sides invented. Note `w:w="0"` is a real
+            // value (the macdoc#142 sample has top/bottom at 0), so the guard
+            // tests for nil rather than for zero.
+            if [top, bottom, left, right].contains(where: { $0 != nil }) {
+                props.margins = TableCellMargins(top: top, bottom: bottom, left: left, right: right)
+            }
+        }
+
         return props
+    }
+
+    /// #101 helper: parse the `w:w` (twips) attribute of a `<w:tcMar>` child.
+    /// Returns nil when the element or the attribute is absent, so an
+    /// unspecified edge stays unspecified rather than defaulting to zero.
+    private static func parseMarginWidth(_ element: XMLElement?) -> Int? {
+        guard let el = element,
+              let raw = el.attribute(forName: "w:w")?.stringValue else { return nil }
+        return Int(raw)
     }
 
     /// v0.17.0+ helper: parse a single `<w:top|bottom|...>` border element.
