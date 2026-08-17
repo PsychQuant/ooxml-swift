@@ -242,6 +242,18 @@ public struct DocxReader {
                 numbering: document.numbering
             )
         }
+        // #84: body-level <w:sectPr>. parseBody deliberately skips it (it is
+        // not a BodyChild) and nothing else read it, so DocxWriter always
+        // emitted a default-constructed SectionProperties — silently swapping
+        // the source page size (A4 -> US Letter), margins and docGrid, and
+        // dropping header/footer references. Parsed here, after the body, so
+        // what the writer emits round-trips.
+        if let bodyEl = (try? documentXML.nodes(forXPath: "//*[local-name()='body']"))?
+            .first as? XMLElement,
+           let sectPrEl = bodyEl.elements(forName: "w:sectPr").last {
+            document.sectionProperties = Self.parseSectionProperties(sectPrEl)
+        }
+
         document.images = images
 
         // v0.19.4+ (#56 R3-NEW-5): nextBookmarkId calibration moved AFTER
@@ -3326,6 +3338,123 @@ public struct DocxReader {
         guard let el = element,
               let raw = el.attribute(forName: "w:w")?.stringValue else { return nil }
         return Int(raw)
+    }
+
+
+    /// #84: parse a body-level `<w:sectPr>` into the typed model.
+    ///
+    /// Before this existed, `parseBody` skipped `<w:sectPr>` (correctly — it is
+    /// not a `BodyChild`) and nothing else read it, so `DocxWriter` always
+    /// emitted a default-constructed `SectionProperties`: US Letter page size,
+    /// generic 1440 margins, no header/footer references. The failure mode was
+    /// not a missing attribute but a whole section block swapped for another
+    /// document's.
+    ///
+    /// Coverage is deliberately the set `SectionProperties.toXML()` can emit,
+    /// so read and write are symmetric. Attributes the model cannot express
+    /// (`<w:docGrid w:type>`, a non-720 `<w:cols w:space>`) still do not
+    /// survive; that is a narrower, separate gap.
+    static func parseSectionProperties(_ element: XMLElement) -> SectionProperties {
+        var props = SectionProperties()
+
+        func intAttr(_ el: XMLElement?, _ name: String) -> Int? {
+            guard let raw = el?.attribute(forName: name)?.stringValue else { return nil }
+            return Int(raw)
+        }
+
+        // Header / footer references, per w:type.
+        for ref in element.elements(forName: "w:headerReference") {
+            guard let rId = ref.attribute(forName: "r:id")?.stringValue else { continue }
+            switch ref.attribute(forName: "w:type")?.stringValue {
+            case "first": props.headerReferences.firstRef = rId
+            case "even":  props.headerReferences.evenRef = rId
+            default:
+                props.headerReferences.defaultRef = rId
+                props.headerReference = rId
+            }
+        }
+        for ref in element.elements(forName: "w:footerReference") {
+            guard let rId = ref.attribute(forName: "r:id")?.stringValue else { continue }
+            switch ref.attribute(forName: "w:type")?.stringValue {
+            case "first": props.footerReferences.firstRef = rId
+            case "even":  props.footerReferences.evenRef = rId
+            default:
+                props.footerReferences.defaultRef = rId
+                props.footerReference = rId
+            }
+        }
+
+        // Section break type.
+        if let raw = element.elements(forName: "w:type").first?
+            .attribute(forName: "w:val")?.stringValue {
+            props.sectionBreakType = SectionBreakType(rawValue: raw)
+        }
+
+        // Page size + orientation.
+        if let pgSz = element.elements(forName: "w:pgSz").first {
+            let w = intAttr(pgSz, "w:w") ?? props.pageSize.width
+            let h = intAttr(pgSz, "w:h") ?? props.pageSize.height
+            props.pageSize = PageSize(width: w, height: h)
+            if pgSz.attribute(forName: "w:orient")?.stringValue == "landscape" {
+                props.orientation = .landscape
+            }
+        }
+
+        // Page margins — keep the model default for any attribute the source omits.
+        if let pgMar = element.elements(forName: "w:pgMar").first {
+            var m = props.pageMargins
+            m.top = intAttr(pgMar, "w:top") ?? m.top
+            m.right = intAttr(pgMar, "w:right") ?? m.right
+            m.bottom = intAttr(pgMar, "w:bottom") ?? m.bottom
+            m.left = intAttr(pgMar, "w:left") ?? m.left
+            m.header = intAttr(pgMar, "w:header") ?? m.header
+            m.footer = intAttr(pgMar, "w:footer") ?? m.footer
+            m.gutter = intAttr(pgMar, "w:gutter") ?? m.gutter
+            props.pageMargins = m
+        }
+
+        // Page numbering.
+        if let pgNum = element.elements(forName: "w:pgNumType").first {
+            props.pageNumberStartValue = intAttr(pgNum, "w:start")
+            if let fmt = pgNum.attribute(forName: "w:fmt")?.stringValue {
+                props.pageNumberFormat = SectionPageNumberFormat(rawValue: fmt)
+            }
+        }
+
+        // Columns.
+        if let cols = element.elements(forName: "w:cols").first,
+           let num = intAttr(cols, "w:num") {
+            props.columns = num
+        }
+
+        // Line numbering.
+        if let ln = element.elements(forName: "w:lnNumType").first,
+           let countBy = intAttr(ln, "w:countBy") {
+            let restart = ln.attribute(forName: "w:restart")?.stringValue
+                .flatMap(LineNumberRestart.init(rawValue:)) ?? .continuous
+            props.lineNumbers = LineNumbers(
+                countBy: countBy, start: intAttr(ln, "w:start"), restart: restart)
+        }
+
+        // Vertical alignment.
+        if let raw = element.elements(forName: "w:vAlign").first?
+            .attribute(forName: "w:val")?.stringValue {
+            props.verticalAlignment = SectionVerticalAlignment(rawValue: raw)
+        }
+
+        // Distinct title page.
+        props.titlePageDistinct = !element.elements(forName: "w:titlePg").isEmpty
+
+        // Document grid.
+        if let grid = element.elements(forName: "w:docGrid").first,
+           let linePitch = intAttr(grid, "w:linePitch") {
+            props.docGrid = DocumentGrid(
+                linePitch: linePitch,
+                charSpace: intAttr(grid, "w:charSpace"),
+                type: grid.attribute(forName: "w:type")?.stringValue)
+        }
+
+        return props
     }
 
     /// v0.17.0+ helper: parse a single `<w:top|bottom|...>` border element.
