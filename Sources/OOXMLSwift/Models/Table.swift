@@ -383,6 +383,10 @@ public struct TableCellProperties: Equatable {
     public var borders: CellBorders?           // 邊框
     public var shading: CellShading?           // 底色
 
+    /// #101: cell-level margins (`<w:tcMar>`). Reuses `TableCellMargins`, the
+    /// same four-twips shape already backing the table-level `<w:tblCellMar>`.
+    public var margins: TableCellMargins?      // 儲存格邊距
+
     public init() {}
 }
 
@@ -853,11 +857,6 @@ extension TableCellProperties {
             parts.append("<w:vMerge w:val=\"\(vMerge.rawValue)\"/>")
         }
 
-        // 垂直對齊
-        if let vAlign = verticalAlignment {
-            parts.append("<w:vAlign w:val=\"\(vAlign.rawValue)\"/>")
-        }
-
         // 邊框
         if let borders = borders {
             parts.append("<w:tcBorders>")
@@ -879,6 +878,29 @@ extension TableCellProperties {
             if let color = shading.color { attrs += " w:color=\"\(escapeXMLAttribute(color))\"" }
             if let pattern = shading.pattern { attrs += " w:val=\"\(pattern.rawValue)\"" }
             parts.append("<w:shd \(attrs)/>")
+        }
+
+        // 儲存格邊距（#101）
+        if let margins = margins {
+            parts.append("<w:tcMar>")
+            if let top = margins.top { parts.append("<w:top w:w=\"\(top)\" w:type=\"dxa\"/>") }
+            if let left = margins.left { parts.append("<w:left w:w=\"\(left)\" w:type=\"dxa\"/>") }
+            if let bottom = margins.bottom { parts.append("<w:bottom w:w=\"\(bottom)\" w:type=\"dxa\"/>") }
+            if let right = margins.right { parts.append("<w:right w:w=\"\(right)\" w:type=\"dxa\"/>") }
+            parts.append("</w:tcMar>")
+        }
+
+        // 垂直對齊
+        //
+        // #101: `vAlign` used to be emitted here-ward of `tcBorders` / `shd`,
+        // which already violated the `CT_TcPr` sequence:
+        //   cnfStyle → tcW → gridSpan → hMerge → vMerge → tcBorders → shd →
+        //   noWrap → tcMar → textDirection → tcFitText → vAlign → hideMark
+        // `tcMar`'s slot sits between `shd` and `vAlign`, so it could not be
+        // inserted correctly without moving `vAlign` to where the schema puts
+        // it. Previously invisible because `vAlign` is usually nil.
+        if let vAlign = verticalAlignment {
+            parts.append("<w:vAlign w:val=\"\(vAlign.rawValue)\"/>")
         }
 
         parts.append("</w:tcPr>")
