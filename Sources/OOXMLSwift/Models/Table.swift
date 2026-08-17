@@ -31,6 +31,12 @@ public struct Table: Equatable {
     /// nil means inherit from parent / default.
     public var explicitLayout: TableLayout?
 
+    /// Typed values projected from the source `<w:tblPr>`. Keeping this
+    /// checkpoint lets unrelated mutations continue to emit the preserved
+    /// source XML, while an explicit table-property mutation replaces only
+    /// the corresponding raw child.
+    internal var sourcePropertyProjection: TableSourcePropertyProjection?
+
     public init(rows: [TableRow] = [], properties: TableProperties = TableProperties()) {
         self._legacyRows = rows
         self.properties = properties
@@ -150,6 +156,7 @@ extension Table {
             && lhs.conditionalStyles == rhs.conditionalStyles
             && lhs.tableIndent == rhs.tableIndent
             && lhs.explicitLayout == rhs.explicitLayout
+            && lhs.sourcePropertyProjection == rhs.sourcePropertyProjection
     }
 }
 
@@ -521,7 +528,68 @@ public struct TableProperties: Equatable {
     public var cellMargins: TableCellMargins?  // 預設儲存格邊距
     public var layout: TableLayout?            // 版面配置
 
+    /// Complete source-loaded `<w:tblPr>` children. This is internal so
+    /// callers cannot use it as an unchecked raw-XML injection surface.
+    internal var rawChildren: [PreservedTableProperty] = []
+
+    /// Namespace declarations that were in scope below the document root.
+    /// The document root itself is preserved separately by `DocxReader`.
+    internal var inScopeNamespaces: [String: String] = [:]
+
+    /// Expanded names (`namespaceURI\0localName`) named by an in-scope
+    /// `mc:ProcessContent` declaration. These are the only foreign wrappers
+    /// whose descendants participate in typed table-property replacement;
+    /// every other vendor element remains opaque pass-through content.
+    internal var processContentCarrierNames: Set<String> = []
+
+    /// Attributes carried by the source `<w:tblPr>` wrapper itself (for
+    /// example a local `mc:Ignorable`). Namespace declarations are represented
+    /// by `inScopeNamespaces` because Foundation exposes them separately.
+    internal var wrapperAttributes: [String: String] = [:]
+
+    /// Snapshot of the typed projection at read time. See `rawChildren`.
+    internal var sourceProjection: TablePropertiesSourceProjection?
+
     public init() {}
+}
+
+internal let wordprocessingMLNamespace =
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+internal struct PreservedTableProperty: Equatable {
+    let qualifiedName: String
+    let localName: String
+    let namespaceURI: String?
+    let styleProjectionIndex: Int?
+    let representedStyleTypes: Set<String>
+    let slotPosition: Int
+    let sourceOrder: Int
+    let representedWMLNames: Set<String>
+    /// Namespace bindings actually used by the preserved subtree. Capturing
+    /// them from the parsed DOM supports the full XML NCName character set
+    /// without guessing prefixes from serialized text.
+    let namespaceBindings: [String: String]
+    let xml: String
+
+    var isWordprocessingML: Bool {
+        namespaceURI == wordprocessingMLNamespace
+            || (namespaceURI == nil && qualifiedName.hasPrefix("w:"))
+    }
+}
+
+internal struct TablePropertiesSourceProjection: Equatable {
+    let width: Int?
+    let widthType: WidthType?
+    let alignment: Alignment?
+    let borders: TableBorders?
+    let cellMargins: TableCellMargins?
+    let layout: TableLayout?
+}
+
+internal struct TableSourcePropertyProjection: Equatable {
+    let tableIndent: Int?
+    let explicitLayout: TableLayout?
+    let conditionalStyles: [TableConditionalStyle]
 }
 
 /// 表格邊框
@@ -628,8 +696,12 @@ public struct TableConditionalStyle: Equatable {
     /// Render to OOXML `<w:tblStylePr>` block.
     func toXML() -> String {
         var rPrParts: [String] = []
-        if properties.bold == true { rPrParts.append("<w:b/>") }
-        if properties.italic == true { rPrParts.append("<w:i/>") }
+        if let bold = properties.bold {
+            rPrParts.append(bold ? "<w:b/>" : "<w:b w:val=\"0\"/>")
+        }
+        if let italic = properties.italic {
+            rPrParts.append(italic ? "<w:i/>" : "<w:i w:val=\"0\"/>")
+        }
         if let c = properties.color {
             rPrParts.append("<w:color w:val=\"\(escapeXMLAttribute(c))\"/>")
         }
@@ -686,69 +758,417 @@ extension Table {
 }
 
 extension Table {
-    /// v0.17.0+ (#49): emit Table-level extensions (tblInd, conditional styles,
-    /// explicit layout) into the existing tblPr block. Wrapper around
-    /// `TableProperties.toXML` with table-level fields injected.
+    /// v0.17.0+ (#49): emit Table-level extensions through the same canonical
+    /// slot pipeline as `TableProperties`. Keeping one serializer is important:
+    /// string-injecting before the first `</w:tblPr>` can target the nested
+    /// revision snapshot inside `<w:tblPrChange>` and breaks CT_TblPr ordering.
     func extendedTablePropertiesXML() -> String {
-        let baseXML = properties.toXML()
-        var injected = ""
-        // Inject ind / explicit layout / conditional styles inside <w:tblPr>.
-        if let indent = tableIndent {
-            injected += "<w:tblInd w:w=\"\(indent)\" w:type=\"dxa\"/>"
-        }
-        if let layout = explicitLayout {
-            injected += "<w:tblLayout w:type=\"\(layout.rawValue)\"/>"
-        }
-        for cs in conditionalStyles {
-            injected += cs.toXML()
-        }
-        guard !injected.isEmpty else { return baseXML }
-        // Inject before closing </w:tblPr>.
-        if let range = baseXML.range(of: "</w:tblPr>") {
-            return baseXML.replacingCharacters(in: range, with: injected + "</w:tblPr>")
-        }
-        return baseXML
+        properties.toXML(
+            tableIndent: tableIndent,
+            explicitLayout: explicitLayout,
+            conditionalStyles: conditionalStyles,
+            tableSource: sourcePropertyProjection)
     }
 }
 
 extension TableProperties {
+    /// CT_TblPr canonical child ordering. Unknown extension children stay
+    /// after the standard property set but before `tblPrChange`.
+    internal static let canonicalPosition: [String: Int] = [
+        "tblStyle": 10,
+        "tblpPr": 20,
+        "tblOverlap": 30,
+        "bidiVisual": 40,
+        "tblStyleRowBandSize": 50,
+        "tblStyleColBandSize": 60,
+        "tblW": 70,
+        "jc": 80,
+        "tblCellSpacing": 90,
+        "tblInd": 100,
+        "tblBorders": 110,
+        "shd": 120,
+        "tblLayout": 130,
+        "tblCellMar": 140,
+        "tblLook": 150,
+        "tblCaption": 160,
+        "tblDescription": 170,
+        "tblStylePr": 800,
+        "tblPrChange": 1_000,
+    ]
+
     public func toXML() -> String {
-        var parts: [String] = ["<w:tblPr>"]
-
-        // 寬度
-        if let width = width {
-            let type = widthType?.rawValue ?? "dxa"
-            parts.append("<w:tblW w:w=\"\(width)\" w:type=\"\(type)\"/>")
-        }
-
-        // 對齊
-        if let alignment = alignment {
-            parts.append("<w:jc w:val=\"\(alignment.rawValue)\"/>")
-        }
-
-        // 版面配置
-        if let layout = layout {
-            parts.append("<w:tblLayout w:type=\"\(layout.rawValue)\"/>")
-        }
-
-        // 邊框
-        if let borders = borders {
-            parts.append(borders.toXML())
-        }
-
-        // 儲存格邊距
-        if let margins = cellMargins {
-            parts.append("<w:tblCellMar>")
-            if let top = margins.top { parts.append("<w:top w:w=\"\(top)\" w:type=\"dxa\"/>") }
-            if let bottom = margins.bottom { parts.append("<w:bottom w:w=\"\(bottom)\" w:type=\"dxa\"/>") }
-            if let left = margins.left { parts.append("<w:left w:w=\"\(left)\" w:type=\"dxa\"/>") }
-            if let right = margins.right { parts.append("<w:right w:w=\"\(right)\" w:type=\"dxa\"/>") }
-            parts.append("</w:tblCellMar>")
-        }
-
-        parts.append("</w:tblPr>")
-        return parts.joined()
+        toXML(
+            tableIndent: nil,
+            explicitLayout: nil,
+            conditionalStyles: [],
+            tableSource: nil)
     }
+
+    internal func toXML(
+        tableIndent: Int?,
+        explicitLayout: TableLayout?,
+        conditionalStyles: [TableConditionalStyle],
+        tableSource: TableSourcePropertyProjection?
+    ) -> String {
+        var slots: [(position: Int, order: Int, sequence: Int, xml: String)] = []
+        var order = 0
+        func add(_ name: String, _ xml: String, preferredOrder: Int? = nil) {
+            slots.append((
+                Self.canonicalPosition[name] ?? 900,
+                preferredOrder ?? order,
+                order,
+                xml))
+            order += 1
+        }
+        func add(position: Int, _ xml: String) {
+            slots.append((position, order, order, xml))
+            order += 1
+        }
+
+        func sourceOrder(forWMLName name: String) -> Int? {
+            rawChildren.first {
+                ($0.isWordprocessingML && $0.localName == name)
+                    || $0.representedWMLNames.contains(name)
+            }?.sourceOrder
+        }
+
+        let widthChanged = sourceProjection.map {
+            width != $0.width || widthType != $0.widthType
+        } ?? (width != nil)
+        if widthChanged, let width = width {
+            let type = widthType?.rawValue ?? "dxa"
+            add(
+                "tblW",
+                "<w:tblW w:w=\"\(width)\" w:type=\"\(type)\"/>",
+                preferredOrder: sourceOrder(forWMLName: "tblW"))
+        }
+
+        let alignmentChanged = sourceProjection.map {
+            alignment != $0.alignment
+        } ?? (alignment != nil)
+        if alignmentChanged, let alignment = alignment {
+            add(
+                "jc",
+                "<w:jc w:val=\"\(alignment.rawValue)\"/>",
+                preferredOrder: sourceOrder(forWMLName: "jc"))
+        }
+
+        // `explicitLayout` is the legacy table-level API. On a parsed table it
+        // overrides the source projection only when the caller changed it.
+        let explicitLayoutChanged = tableSource.map {
+            explicitLayout != $0.explicitLayout
+        } ?? (explicitLayout != nil && layout == nil)
+        let emittedLayout = explicitLayoutChanged ? explicitLayout : layout
+        let layoutChanged = explicitLayoutChanged || (sourceProjection.map {
+            layout != $0.layout
+        } ?? (layout != nil))
+        if layoutChanged, let emittedLayout {
+            add(
+                "tblLayout",
+                "<w:tblLayout w:type=\"\(emittedLayout.rawValue)\"/>",
+                preferredOrder: sourceOrder(forWMLName: "tblLayout"))
+        }
+
+        let bordersChanged = sourceProjection.map {
+            borders != $0.borders
+        } ?? (borders != nil)
+        if bordersChanged, let borders = borders {
+            add(
+                "tblBorders",
+                borders.toXML(),
+                preferredOrder: sourceOrder(forWMLName: "tblBorders"))
+        }
+
+        let marginsChanged = sourceProjection.map {
+            cellMargins != $0.cellMargins
+        } ?? (cellMargins != nil)
+        if marginsChanged, let margins = cellMargins {
+            var marginXML = "<w:tblCellMar>"
+            if let top = margins.top { marginXML += "<w:top w:w=\"\(top)\" w:type=\"dxa\"/>" }
+            if let bottom = margins.bottom { marginXML += "<w:bottom w:w=\"\(bottom)\" w:type=\"dxa\"/>" }
+            if let left = margins.left { marginXML += "<w:left w:w=\"\(left)\" w:type=\"dxa\"/>" }
+            if let right = margins.right { marginXML += "<w:right w:w=\"\(right)\" w:type=\"dxa\"/>" }
+            marginXML += "</w:tblCellMar>"
+            add(
+                "tblCellMar",
+                marginXML,
+                preferredOrder: sourceOrder(forWMLName: "tblCellMar"))
+        }
+
+        let indentChanged = tableSource.map {
+            tableIndent != $0.tableIndent
+        } ?? (tableIndent != nil)
+        if indentChanged, let tableIndent {
+            add(
+                "tblInd",
+                "<w:tblInd w:w=\"\(tableIndent)\" w:type=\"dxa\"/>",
+                preferredOrder: sourceOrder(forWMLName: "tblInd"))
+        }
+
+        let sourceStyles = tableSource?.conditionalStyles ?? []
+        let styleCount = max(sourceStyles.count, conditionalStyles.count)
+        let changedStyleIndices = Set((0..<styleCount).filter { index in
+            let source = sourceStyles.indices.contains(index) ? sourceStyles[index] : nil
+            let current = conditionalStyles.indices.contains(index) ? conditionalStyles[index] : nil
+            if tableSource == nil { return current != nil }
+            return source != current
+        })
+        let changedStyleTypes = Set(changedStyleIndices.flatMap { index -> [String] in
+            var types: [String] = []
+            if sourceStyles.indices.contains(index) {
+                types.append(sourceStyles[index].type.rawValue)
+            }
+            if conditionalStyles.indices.contains(index) {
+                types.append(conditionalStyles[index].type.rawValue)
+            }
+            return types
+        })
+        var styleRawByIndex: [Int: PreservedTableProperty] = [:]
+        var styleCarrierOrderByType: [String: Int] = [:]
+        for raw in rawChildren {
+            if let index = raw.styleProjectionIndex, styleRawByIndex[index] == nil {
+                styleRawByIndex[index] = raw
+            }
+            for type in raw.representedStyleTypes
+            where styleCarrierOrderByType[type] == nil {
+                styleCarrierOrderByType[type] = raw.sourceOrder
+            }
+        }
+        for (index, style) in conditionalStyles.enumerated()
+        where changedStyleIndices.contains(index) {
+            add(
+                "tblStylePr",
+                style.toXML(),
+                preferredOrder: styleRawByIndex[index]?.sourceOrder
+                    ?? styleCarrierOrderByType[style.type.rawValue]
+                    ?? (rawChildren.count + index))
+        }
+
+        let replacedWMLNames = Set([
+            widthChanged ? "tblW" : nil,
+            alignmentChanged ? "jc" : nil,
+            layoutChanged ? "tblLayout" : nil,
+            bordersChanged ? "tblBorders" : nil,
+            marginsChanged ? "tblCellMar" : nil,
+            indentChanged ? "tblInd" : nil,
+        ].compactMap { $0 })
+        for raw in rawChildren {
+            let carrierStyleCollision = !raw.representedStyleTypes
+                .isDisjoint(with: changedStyleTypes)
+            var carrierCollisions = raw.representedWMLNames.intersection(replacedWMLNames)
+            if carrierStyleCollision { carrierCollisions.insert("tblStylePr") }
+            if !carrierCollisions.isEmpty {
+                if let rewritten = rewrittenMarkupCompatibilityCarrier(
+                    raw.xml,
+                    namespaceBindings: raw.namespaceBindings,
+                    removingWMLProperties: carrierCollisions,
+                    removingStyleTypes: changedStyleTypes
+                ) {
+                    guard rewritten.hasPayload else { continue }
+                    var remainingNames = raw.representedWMLNames
+                        .subtracting(carrierCollisions)
+                    if !raw.representedStyleTypes
+                        .subtracting(changedStyleTypes).isEmpty {
+                        remainingNames.insert("tblStylePr")
+                    }
+                    let remainingPosition = remainingNames.compactMap {
+                        Self.canonicalPosition[$0]
+                    }.min() ?? raw.slotPosition
+                    slots.append((remainingPosition, raw.sourceOrder, order, rewritten.xml))
+                    order += 1
+                } else {
+                    // A valid source carrier should always parse with the
+                    // captured namespace closure. If platform XML behavior
+                    // nevertheless rejects it, preserve the source instead of
+                    // silently dropping unrelated table properties.
+                    slots.append((raw.slotPosition, raw.sourceOrder, order, raw.xml))
+                    order += 1
+                }
+                continue
+            }
+            guard !(raw.isWordprocessingML && replacedWMLNames.contains(raw.localName)) else {
+                continue
+            }
+            if raw.isWordprocessingML,
+               raw.localName == "tblStylePr",
+               let index = raw.styleProjectionIndex,
+               changedStyleIndices.contains(index) {
+                continue
+            }
+            slots.append((raw.slotPosition, raw.sourceOrder, order, raw.xml))
+            order += 1
+        }
+
+        slots.sort {
+            if $0.position != $1.position { return $0.position < $1.position }
+            if $0.order != $1.order { return $0.order < $1.order }
+            return $0.sequence < $1.sequence
+        }
+        let namespaceXML = inScopeNamespaces
+            .filter { $0.key != "w" && $0.key != "xml" }
+            .sorted { $0.key < $1.key }
+            .map { prefix, uri in
+                let name = prefix.isEmpty ? "xmlns" : "xmlns:\(prefix)"
+                return " \(name)=\"\(escapeXMLAttribute(uri))\""
+            }
+            .joined()
+        let attributeXML = wrapperAttributes
+            .sorted { $0.key < $1.key }
+            .map { name, value in
+                " \(name)=\"\(escapeXMLAttribute(value))\""
+            }
+            .joined()
+        return "<w:tblPr\(namespaceXML)\(attributeXML)>"
+            + slots.map(\.xml).joined() + "</w:tblPr>"
+    }
+
+    /// Remove only the typed property being replaced from a multi-property
+    /// markup-compatibility carrier. Dropping the whole `AlternateContent`
+    /// would also erase unrelated properties carried by the same branches.
+    /// The rewrite and payload check share one DOM parse so work stays linear
+    /// in the size of the carrier rather than parsing each fragment twice.
+    private func rewrittenMarkupCompatibilityCarrier(
+        _ xml: String,
+        namespaceBindings: [String: String],
+        removingWMLProperties names: Set<String>,
+        removingStyleTypes styleTypes: Set<String>
+    ) -> (xml: String, hasPayload: Bool)? {
+        let declarations = carrierNamespaceDeclarations(namespaceBindings)
+        let wrapped = "<__tblPrCarrier \(declarations)>"
+            + xml + "</__tblPrCarrier>"
+        guard let document = try? XMLDocument(
+            data: Data(wrapped.utf8), options: [.nodePreserveAll]),
+              let root = document.rootElement() else { return nil }
+
+        let mcNamespace =
+            "http://schemas.openxmlformats.org/markup-compatibility/2006"
+        func expandedNameKey(namespaceURI: String?, localName: String) -> String {
+            (namespaceURI ?? "") + "\u{0}" + localName
+        }
+        func isMarkupCompatibilityCarrier(_ element: XMLElement) -> Bool {
+            if element.uri == mcNamespace,
+               let localName = element.localName,
+               ["AlternateContent", "Choice", "Fallback"].contains(localName) {
+                return true
+            }
+            return false
+        }
+        func lexicalContext(
+            for element: XMLElement,
+            namespaces inheritedNamespaces: [String: String],
+            processContent inheritedProcessContent: Set<String>
+        ) -> (namespaces: [String: String], processContent: Set<String>) {
+            var namespaces = inheritedNamespaces
+            for namespace in element.namespaces ?? [] {
+                namespaces[namespace.name ?? ""] = namespace.stringValue ?? ""
+            }
+            var processContent = inheritedProcessContent
+            for attribute in element.attributes ?? []
+            where attribute.uri == mcNamespace && attribute.localName == "ProcessContent" {
+                for token in (attribute.stringValue ?? "")
+                    .split(whereSeparator: \.isWhitespace).map(String.init) {
+                    let pieces = token.split(separator: ":", maxSplits: 1).map(String.init)
+                    let prefix = pieces.count == 2 ? pieces[0] : ""
+                    let localName = pieces.count == 2 ? pieces[1] : pieces[0]
+                    processContent.insert(expandedNameKey(
+                        namespaceURI: namespaces[prefix], localName: localName))
+                }
+            }
+            return (namespaces, processContent)
+        }
+        func isTraversableCarrier(
+            _ element: XMLElement,
+            processContent: Set<String>
+        ) -> Bool {
+            if isMarkupCompatibilityCarrier(element) { return true }
+            guard let localName = element.localName else { return false }
+            return processContent.contains(expandedNameKey(
+                namespaceURI: element.uri, localName: localName))
+        }
+        func wordAttributeValue(_ element: XMLElement, localName: String) -> String? {
+            (element.attributes ?? []).first { attribute in
+                guard attribute.localName == localName else { return false }
+                return attribute.uri == wordprocessingMLNamespace
+                    || (attribute.uri == nil
+                        && attribute.name?.hasPrefix("w:") == true)
+            }?.stringValue
+        }
+        func removeMatches(
+            from element: XMLElement,
+            namespaces inheritedNamespaces: [String: String],
+            processContent inheritedProcessContent: Set<String>
+        ) {
+            let context = lexicalContext(
+                for: element,
+                namespaces: inheritedNamespaces,
+                processContent: inheritedProcessContent)
+            for case let child as XMLElement in element.children ?? [] {
+                if child.uri == wordprocessingMLNamespace,
+                   let localName = child.localName,
+                   Self.canonicalPosition[localName] != nil {
+                    if localName == "tblStylePr" {
+                        if let type = wordAttributeValue(child, localName: "type"),
+                           styleTypes.contains(type) {
+                            child.detach()
+                        }
+                    } else if names.contains(localName) {
+                        child.detach()
+                    }
+                    continue
+                }
+                if isTraversableCarrier(child, processContent: context.processContent) {
+                    removeMatches(
+                        from: child,
+                        namespaces: context.namespaces,
+                        processContent: context.processContent)
+                }
+            }
+        }
+        removeMatches(
+            from: root,
+            namespaces: namespaceBindings,
+            processContent: processContentCarrierNames)
+        func hasPayload(
+            _ element: XMLElement,
+            namespaces inheritedNamespaces: [String: String],
+            processContent inheritedProcessContent: Set<String>
+        ) -> Bool {
+            let context = lexicalContext(
+                for: element,
+                namespaces: inheritedNamespaces,
+                processContent: inheritedProcessContent)
+            for case let child as XMLElement in element.children ?? [] {
+                if isTraversableCarrier(child, processContent: context.processContent) {
+                    if hasPayload(
+                        child,
+                        namespaces: context.namespaces,
+                        processContent: context.processContent) { return true }
+                } else {
+                    return true
+                }
+            }
+            return false
+        }
+        let rewritten = (root.children ?? [])
+            .compactMap { ($0 as? XMLElement)?.xmlString }.joined()
+        return (rewritten, hasPayload(
+            root,
+            namespaces: namespaceBindings,
+            processContent: processContentCarrierNames))
+    }
+
+    /// Supply only namespace declarations that the Reader observed on names
+    /// inside this carrier. This avoids both ASCII-only lexical heuristics and
+    /// multiplying unrelated document-root declarations by every table.
+    private func carrierNamespaceDeclarations(
+        _ namespaceBindings: [String: String]
+    ) -> String {
+        namespaceBindings.filter { $0.key != "xml" }.sorted { $0.key < $1.key }.map { prefix, uri in
+            let name = prefix.isEmpty ? "xmlns" : "xmlns:\(prefix)"
+            return "\(name)=\"\(escapeXMLAttribute(uri))\""
+        }.joined(separator: " ")
+    }
+
 }
 
 extension TableBorders {
