@@ -8,6 +8,34 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-08-18
+
+### Fixed
+
+- **#104 — `appendParagraph` 覆蓋鄰近的非段落 body child**（#96 引入的迴歸）。
+  #96 給 `appendParagraph` 加了一條 op-log 分支，只要文件從磁碟載入就會走它，
+  結尾呼叫 `resyncBodyFromDocumentTree()` 後 `return`——繞過原本的
+  `body.children.append(...)`。而該 resync 只重建 `p` 與 `tbl`（其註解自承
+  「disappear from body.children typed view」），兩者相乘讓 append 變成覆蓋：
+
+  ```
+  round-trip 後      [paragraph, bookmarkMarker, paragraph]  count 3
+  appendParagraph 後 [paragraph, paragraph,      paragraph]  count 3
+  ```
+
+  XML 位元組始終完好（留在 `xmlTrees`），丟的只有 typed 投影——而那正是下游索引的
+  依據，所以任何只驗 byte-equality 的測試都看不到它。修法讓 append 精準更新 typed
+  view（它知道自己改了什麼），不再走整份重建的有損路徑。
+
+  下游驗收：che-word-mcp 全套從 **7 failures 回到 0**（v2.0.0 下 `Issue61V315PointReleaseTests`
+  16 tests 有 7 個 assertion 失敗）。上游 1398 tests / 0 failures。
+
+### 已知殘留（新增）
+
+- `resyncBodyFromDocumentTree` 在**另外 8 個呼叫點**仍會讓非段落子節點從 typed view
+  消失（#106）。那是 #96 之前就存在的既有行為，非本次迴歸；要修需先開放節點層的
+  XML 序列化能力（`XmlTreeWriter.emitElement` 目前 private 且需 `sourceBytes`/`dirtyMap`）。
+
 ## [2.0.0] - 2026-08-18
 
 Word round-trip fidelity — 一次 mutation 不再靜默改寫文件。四個獨立的 reader/writer
