@@ -8,6 +8,74 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-18
+
+Word round-trip fidelity — 一次 mutation 不再靜默改寫文件。四個獨立的 reader/writer
+缺口合併修復（#84 / #97 / #99 / #101），加上 #96 的 lossless round-trip pipeline。
+
+**Major bump 的原因**：#96 移除了 9 個 public 宣告（含 `Hyperlink.rawChildren` 與數個
+`public init`）。已確認 macdoc 與 che-word-mcp 對這些符號零使用，但依 semver 仍屬破壞性變更。
+
+### Fixed — 「一次編輯就換掉整份文件設定」的四個缺口
+
+修復前，任何讓文件 dirty 的操作（哪怕只取代一個字串）都會在重新序列化時丟掉下列內容，
+**包含從未被觸碰的部分**。零編輯的 `open` → `save` 走 raw byte channel、不經模型，所以無損
+——這正是四者都長期隱形的原因：**只有真的編輯過才會壞，而且沒有任何工具會報錯。**
+
+以一份真實的 A4 官方表單（20 列 × 2 欄）走一次 `updateCell` 實測：
+
+| 元素 | 修復前 | 修復後 | Issue |
+|---|---|---|---|
+| `<w:tcBorders>` | 40 → **0** | 40 | #99 |
+| `<w:tcMar>` | 40 → **0** | 40 | #101 |
+| `<w:tblCellMar>` / `<w:tblLook>` | 1 → **0** | 1 | #97 |
+| `<w:tblLayout>` | 1 → **2**（重複輸出，無效 OOXML） | 1 | #97 |
+| `<w:pgSz>` | A4 `11906x16838` → **US Letter `12240x15840`** | A4 | #84 |
+| `<w:pgMar>` | 1276/1077 → 1440 全邊 | 1276/1077 | #84 |
+| `<w:footerReference>` | `rId7` → **消失** | `rId7` | #84 |
+| `<w:docGrid>` | `type="lines" linePitch="571"` → `linePitch="360"` | 原樣 | #84 |
+
+- **#99 — `DocxReader` 只讀 `<w:tcBorders>` 的兩條對角線**。`CellBorders` 早已宣告四個
+  邊框、`toXML()` 早已輸出六個方向，缺口純在 reader（#49 當初只為對角線加）。
+- **#101 — `<w:tcMar>` 在 model／reader／writer 三側皆無**。型別複用表格層已在用的
+  `TableCellMargins`。順帶修正 `CT_TcPr` 的輸出順序（`vAlign` 原本排在 `tcBorders`／`shd`
+  之前，不符 schema sequence；`tcMar` 的正確位置在其間，故排序修正是插入的前提）。
+- **#97 — `<w:tblPr>` 的子元素**。採「保留 source XML、只替換真正改動的子元素」策略
+  （`sourceOrder(forWMLName:)`），涵蓋 conditional style 與 `mc:AlternateContent` carrier。
+- **#84 — `DocxReader` 從不指派 `sectionProperties`**，`DocxWriter` 因此每次都輸出預設
+  建構值。效果不是掉一個屬性，是**整段 section 被換成另一份文件的**。紙張尺寸在螢幕上
+  看不出來、要列印或轉 PDF 才發現；頁尾常承載版本日期。新增
+  `parseSectionProperties`，涵蓋範圍**刻意等於 `SectionProperties.toXML()` 能輸出的集合**，
+  使讀寫對稱。
+
+### Added
+
+- `TableCellProperties.margins`（`<w:tcMar>`，#101）
+- `DocumentGrid.type`（`<w:docGrid w:type>`，#84）——先前完全未建模。`w:type` 缺席在 Word
+  中意謂「無格線」，所以丟掉來源的 `w:type="lines"` 等於把 CJK 行格線關掉、改變中文排版。
+- #96：`xmlTrees` 納入 relationship parts；lossless round-trip acceptance corpus。
+
+### Changed (breaking)
+
+- 移除 `Hyperlink.rawChildren`（v1.0 bridge 退場，#96）與 8 個其他 public 宣告。
+
+### 一條值得留下的方法論
+
+四個缺口是**同一個形狀**：writer 寫得出、reader 讀不進 → 重新序列化時補預設值。
+這個不對稱**可機械偵測**：
+
+> 對 `w:tcPr`／`w:tblPr`／`w:sectPr` 的每一個 writer 會輸出的子元素，
+> reader 必須有對應的 `elements(forName:)` 解析。
+
+寫成測試（枚舉 writer 的 `parts.append` 分支 vs reader 的解析呼叫）比維護元素名清單耐久
+——清單會過期，不對稱不會。#67／#69 仍是同一個不對稱的未修實例。
+
+### 已知殘留
+
+- `<w:cols w:space>` 非 720 時不保真（writer 硬寫 720）
+- 多 section 文件的 `sectPr` 塌陷仍未修（#67）——本次只驗證單 section
+- `<w:tcPr>` 內段落級定址仍缺（PsychQuant/macdoc#156），多段落 cell 的整格覆寫仍會塌段落
+
 ## [1.5.0] - 2026-07-18
 
 authoring-canonical-conformance — the authoring path (DocxWriter + typed
