@@ -411,7 +411,29 @@ public struct WordDocument: Equatable {
             }
             do {
                 try appendAndMaterialize(ops)
-                resyncBodyFromDocumentTree()
+                // #104: do NOT call resyncBodyFromDocumentTree() here.
+                //
+                // That resync rebuilds body.children from the tree but only
+                // re-types `p` and `tbl`; every other body-level element hits
+                // its `default: continue` and disappears from the typed view
+                // (its own comment says so). Combined with this op-log branch —
+                // added by #96 and taken whenever the document came from disk —
+                // an append silently *overwrote* neighbouring children instead
+                // of appending:
+                //
+                //   before: [paragraph, bookmarkMarker, paragraph]  count 3
+                //   after : [paragraph, paragraph,      paragraph]  count 3
+                //
+                // The XML bytes were fine (they live in xmlTrees); only the
+                // typed projection lost them — and that projection is what
+                // downstream indexes against (che-word-mcp reports append
+                // position as `body.children.count - 1`, its #69 decision).
+                //
+                // An append knows exactly what it changed, so update the typed
+                // view precisely instead of rebuilding it through a lossy path.
+                // The wider "resync drops non-paragraph children at its other 8
+                // call sites" gap is tracked separately.
+                body.children.append(.paragraph(stamped))
                 return
             } catch {
                 assertionFailure("tree-backed appendParagraph failed: \(error)")
