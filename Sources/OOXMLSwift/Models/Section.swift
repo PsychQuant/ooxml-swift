@@ -332,9 +332,17 @@ public struct DocumentGrid: Equatable {
     public var linePitch: Int  // 行距（twips）
     public var charSpace: Int? // 字元間距
 
-    public init(linePitch: Int = 360, charSpace: Int? = nil) {
+    /// #84: `<w:docGrid w:type>` — the grid mode (`lines`, `linesAndChars`,
+    /// `snapToChars`, `default`). Absent means `default` (no grid), so dropping
+    /// a source `w:type="lines"` silently turns the line grid off and changes
+    /// CJK line layout. Kept optional so a source that omits it round-trips as
+    /// omitted rather than gaining an invented mode.
+    public var type: String?
+
+    public init(linePitch: Int = 360, charSpace: Int? = nil, type: String? = nil) {
         self.linePitch = linePitch
         self.charSpace = charSpace
+        self.type = type
     }
 }
 
@@ -439,7 +447,9 @@ extension SectionProperties {
 
         // 文件格線
         if let grid = docGrid {
-            var gridAttrs = "w:linePitch=\"\(grid.linePitch)\""
+            var gridAttrs = ""
+            if let type = grid.type { gridAttrs += "w:type=\"\(type)\" " }
+            gridAttrs += "w:linePitch=\"\(grid.linePitch)\""
             if let charSpace = grid.charSpace {
                 gridAttrs += " w:charSpace=\"\(charSpace)\""
             }
