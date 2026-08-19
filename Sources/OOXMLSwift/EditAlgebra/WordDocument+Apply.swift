@@ -609,12 +609,12 @@ extension WordDocument {
     /// fresh body.children after apply call this method explicitly.
     ///
     /// **Narrow scope** (documented limitations):
-    /// - Only `<w:p>` and `<w:tbl>` become typed body children. Other
-    ///   body-level elements (`<w:sdt>`, `<w:bookmarkStart>`/End, vendor
-    ///   extensions) are NOT re-typed; they remain in xmlTrees but
-    ///   disappear from body.children. If your doc has these and you
-    ///   rely on body.children to round-trip them, prefer reading from
-    ///   xmlTrees directly.
+    /// - `<w:p>`, `<w:tbl>` and body-level `<w:bookmarkStart>`/`<w:bookmarkEnd>`
+    ///   become typed body children. Elements with no typed BodyChild case
+    ///   (`<w:sdt>`, vendor extensions) are still NOT re-typed; they remain in
+    ///   xmlTrees but disappear from body.children. If your doc has those and
+    ///   you rely on body.children to round-trip them, read from xmlTrees
+    ///   directly. See #106 for why that half is harder.
     /// - Only document.xml's body is resynced. styles, headers, footers,
     ///   numbering, footnotes, endnotes remain stale relative to new
     ///   xmlTrees.
@@ -644,11 +644,46 @@ extension WordDocument {
             case "sectPr":
                 // Parsed separately into sectionProperties; skip from body
                 continue
+            case "bookmarkStart":
+                // #106: body-level bookmark markers ARE typed body children —
+                // DocxReader emits them (its #58 fix) and downstream indexes
+                // against them. Dropping them here made a text edit silently
+                // shrink the caller's view of the body by two entries.
+                //
+                // Re-typed from attributes alone, so this needs none of the
+                // node-level XML serialization that the `default` branch below
+                // still waits on. Construction mirrors DocxReader exactly,
+                // including its "skip when w:id is absent or non-numeric"
+                // behaviour: agreeing with the reader matters more here than
+                // being independently more permissive, since the two views are
+                // supposed to describe the same document.
+                if let idStr = child.attributeValue(prefix: "w", localName: "id"),
+                   let id = Int(idStr) {
+                    newChildren.append(.bookmarkMarker(BookmarkRangeMarker(
+                        kind: .start,
+                        id: id,
+                        position: 0,
+                        name: child.attributeValue(prefix: "w", localName: "name"))))
+                }
+            case "bookmarkEnd":
+                if let idStr = child.attributeValue(prefix: "w", localName: "id"),
+                   let id = Int(idStr) {
+                    newChildren.append(.bookmarkMarker(BookmarkRangeMarker(
+                        kind: .end, id: id, position: 0)))
+                }
             default:
-                // Other body-level elements (sdt, bookmarkMarker, vendor
-                // extensions) are not currently re-typed by apply(). They
-                // remain in xmlTrees for byte-equivalent round-trip but
-                // disappear from body.children typed view. See scope notes.
+                // Still dropped: body-level elements with no typed BodyChild
+                // case (`<w:sdt>`, vendor extensions, other EG_BlockLevelElts).
+                // The bytes survive in xmlTrees, but they leave the typed view.
+                //
+                // Fixing these means landing them as `.rawBlockElement`, which
+                // needs one `XmlNode` serialized back to XML — an ability this
+                // layer does not have. `XmlTreeWriter.emitElement` is private
+                // and takes `sourceBytes`/`dirtyMap`; DocxReader gets away with
+                // it only because it holds a Foundation `XMLElement` and can
+                // call `.xmlString`. Tracked as the remaining half of #106,
+                // pinned by an XCTExpectFailure test so closing that half
+                // cannot pass unnoticed.
                 continue
             }
         }
