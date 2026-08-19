@@ -425,6 +425,13 @@ public struct CellBorders: Equatable {
     public var left: Border?
     public var right: Border?
 
+    /// #99: inside borders. Unusual at cell level — they are normally a
+    /// table-level property — but `CT_TcBorders` allows them and Word emits
+    /// them, and having no field to hold them meant the reader could not keep
+    /// them and the writer could not put them back.
+    public var insideH: Border?
+    public var insideV: Border?
+
     /// v0.17.0+ (#49): diagonal borders.
     /// `tl2br` = top-left to bottom-right (`<w:tl2br>`)
     /// `tr2bl` = top-right to bottom-left (`<w:tr2bl>`)
@@ -432,7 +439,10 @@ public struct CellBorders: Equatable {
     public var tr2bl: Border?
 
     public init(top: Border? = nil, bottom: Border? = nil, left: Border? = nil, right: Border? = nil,
+                insideH: Border? = nil, insideV: Border? = nil,
                 tl2br: Border? = nil, tr2bl: Border? = nil) {
+        self.insideH = insideH
+        self.insideV = insideV
         self.top = top
         self.bottom = bottom
         self.left = left
@@ -1279,11 +1289,18 @@ extension TableCellProperties {
 
         // 邊框
         if let borders = borders {
+            // #99: emission follows the CT_TcBorders xsd:sequence —
+            // top, start|left, bottom, end|right, insideH, insideV, tl2br, tr2bl.
+            // It previously emitted top, bottom, left, right: every edge was
+            // present, so nothing looked lost, but the output was
+            // schema-invalid. Word tolerates it, which is what let it stand.
             parts.append("<w:tcBorders>")
             if let top = borders.top { parts.append(top.toXML(name: "top")) }
-            if let bottom = borders.bottom { parts.append(bottom.toXML(name: "bottom")) }
             if let left = borders.left { parts.append(left.toXML(name: "left")) }
+            if let bottom = borders.bottom { parts.append(bottom.toXML(name: "bottom")) }
             if let right = borders.right { parts.append(right.toXML(name: "right")) }
+            if let insideH = borders.insideH { parts.append(insideH.toXML(name: "insideH")) }
+            if let insideV = borders.insideV { parts.append(insideV.toXML(name: "insideV")) }
             // v0.17.0+ (#49): diagonal borders
             if let tl2br = borders.tl2br { parts.append(tl2br.toXML(name: "tl2br")) }
             if let tr2bl = borders.tr2bl { parts.append(tr2bl.toXML(name: "tr2bl")) }

@@ -8,6 +8,39 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-08-19
+
+### Fixed
+
+- **`<w:tcBorders>` 的 `insideH` / `insideV` 在 mutation 後消失**（#99 殘留）。`CellBorders`
+  model **根本沒有這兩個欄位**，所以 reader 讀不進、writer 也寫不出——與 #101 當初的
+  `<w:tcMar>` 是同一種「model/reader/writer 三側皆無」。實測（released MCP face，帶六個
+  子元素的儲存格經 `update_cell` + save）：
+
+  ```
+  before: ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+  after:  ['top', 'bottom', 'left', 'right']
+  ```
+
+- **`<w:tcBorders>` 子元素輸出順序不符 schema**。`CT_TcBorders` 是 `xsd:sequence`
+  （top, start|left, bottom, end|right, insideH, insideV, tl2br, tr2bl），writer 原本輸出
+  `top, bottom, left, right`。四個邊都在、看起來沒有遺失，但輸出是 schema-invalid；Word
+  容忍它，這正是它能一直留著的原因。
+
+### Added
+
+- `CellBorders.insideH` / `CellBorders.insideV`（附帶預設值的 init 參數，既有呼叫端不受影響）。
+
+### Notes
+
+- #99 原本描述的「reader 只讀對角線、四個邊從不解析」**在本版之前就已修好**；本版處理的是
+  該 issue 剩下的兩個殘留。issue 描述與現況的落差，是因為當初的證據是用「數元素個數」蒐集的。
+- **驗證方法的教訓**：這一輪先後用「元素個數」與「regex 抓自閉合標籤」兩種方式檢查，各自給出
+  一個**有信心但相反**的錯誤答案（前者說全部沒事、後者說六個邊框全滅）。writer 從自閉合改成
+  顯式結束標籤就足以讓 regex 全盤誤判。只有真正的 XML parse 給出正確結果。要複驗這一族，
+  請解析 XML，不要數元素、不要用 regex。
+- 同族的 #101（`tcMar`）與 PsychQuant/macdoc#142（`tblPr` 子元素）經同一輪驗證確認**已修好**。
+
 ## [3.1.0] - 2026-08-19
 
 ### Fixed
