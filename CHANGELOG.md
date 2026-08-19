@@ -8,6 +8,41 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-08-19
+
+### Fixed
+
+- **輸出路徑是既有目錄時，該目錄會被換成檔案並回報成功**（#109）。含 `data.txt` 與
+  `nested/deep.txt` 的目錄在 `--force` 下變成一般檔案，exit 0、印「已寫入」，原內容
+  無法取回（讀取時得到 `NSPOSIXErrorDomain Code=20 "Not a directory"`）。
+
+  **根因是把「存在」讀成「型別」**：`fileExists(atPath:)` 丟棄型別資訊，於是閘門把目錄
+  當成既有檔案、而 `replaceItemAt`（規格上用於檔案）接受目錄目的地並成功。同一個根因
+  也解釋了為什麼拒絕訊息說「輸出**檔案**已存在」——使用者被告知一件假事，而訊息本身
+  建議的補救（加 `--force`）正是摧毀那棵目錄樹的動作。
+
+  **不是本次 staging 重構引入的**：以 A/B 確認而非讀 code 推斷——完全早於覆寫閘與
+  staging 的 **0.6.0** release 行為相同。`replaceItemAt` 自 `96abe91` 起就在
+  `writeAuthoringPackage` 結尾，v2.1.0 已在。長期潛伏，因 #108 診斷觸發檔案系統邊界
+  情境而浮出。
+
+  修法：閘門改用型別感知的 `fileExists(atPath:isDirectory:)`（同套件 `ZipHelper` 早已
+  採用的慣用法），目錄**無論 `overwrite` 與否一律拒絕**——該旗標的語意是「取代既有的
+  檔案」，沒有任何讀法授權刪除目錄樹。`publish()` 內另做一次同樣檢查，關掉閘門與寫入
+  之間的窗口（同一根因的兩個位置）。
+
+### Added
+
+- **`ScriptPipelineError.outputIsDirectory`** —— 訊息明說是目錄，且刻意不提供覆寫建議。
+
+### Notes
+
+- 新增 public enum case 對 exhaustive `switch` 是 source-breaking；兩個 consumer 目前都以
+  `catch let error as ScriptPipelineError` 收尾、非窮舉，但這點在 pin bump 時要重新確認、
+  不可假設。
+- 殘留：`fileExists(atPath:)` 在本套件他處仍有使用，每一處都可能是「用存在代替型別」的
+  同型問題。本版未做該掃描。
+
 ## [3.0.1] - 2026-08-19
 
 ### Fixed

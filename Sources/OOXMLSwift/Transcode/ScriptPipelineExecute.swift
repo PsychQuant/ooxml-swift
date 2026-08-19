@@ -29,6 +29,7 @@ public struct ScriptExecuteResult: Sendable {
 public enum ScriptPipelineError: LocalizedError {
     case fileNotFound(String)
     case outputExists(String)
+    case outputIsDirectory(String)
 
     public var errorDescription: String? {
         switch self {
@@ -39,6 +40,11 @@ public enum ScriptPipelineError: LocalizedError {
             // the CLI would say `--force` and the MCP tool would say the
             // `overwrite` argument. Face-specific wording belongs on the face.
             return "輸出檔案已存在: \(path)"
+        case .outputIsDirectory(let path):
+            // Says DIRECTORY, and offers no overwrite advice on purpose. The
+            // old message called this an existing 檔案, which steered the
+            // operator into passing the very flag that destroyed the tree.
+            return "輸出路徑是一個目錄，不是檔案: \(path)"
         }
     }
 }
@@ -96,7 +102,21 @@ public func scriptPipelineExecute(
        !fm.fileExists(atPath: URL(fileURLWithPath: referencePath).path) {
         throw ScriptPipelineError.fileNotFound(referencePath)
     }
-    guard overwrite || !fm.fileExists(atPath: outputURL.path) else {
+    // Type-aware on purpose. `fileExists(atPath:)` alone answers "is something
+    // here", and both this gate and the publish below then treat that as "a
+    // file is here" — so a directory was refused with a message calling it a
+    // 檔案, and `overwrite` went on to replace the whole tree with the rebuilt
+    // docx, reporting success. Measured against the 0.6.0 release too, so this
+    // long predates the staging rework. The two-argument form is already the
+    // idiom elsewhere in this package (see ZipHelper).
+    var outputIsDirectory: ObjCBool = false
+    let outputPresent = fm.fileExists(atPath: outputURL.path, isDirectory: &outputIsDirectory)
+    if outputPresent, outputIsDirectory.boolValue {
+        // Refused regardless of `overwrite`: that flag means "replace the
+        // existing FILE", and no reading of it authorises deleting a directory.
+        throw ScriptPipelineError.outputIsDirectory(outputPath)
+    }
+    guard overwrite || !outputPresent else {
         throw ScriptPipelineError.outputExists(outputPath)
     }
 
@@ -134,6 +154,13 @@ public func scriptPipelineExecute(
     // caller always takes `moveItem`, which fails when the destination exists,
     // so the concurrent file survives.
     func publish() throws {
+        // Re-checked at write time: the gate above runs before the replay, so a
+        // directory created during that window would otherwise reach
+        // replaceItemAt — which accepts a directory destination and succeeds.
+        var isDirNow: ObjCBool = false
+        if fm.fileExists(atPath: outputURL.path, isDirectory: &isDirNow), isDirNow.boolValue {
+            throw ScriptPipelineError.outputIsDirectory(outputPath)
+        }
         if overwrite, fm.fileExists(atPath: outputURL.path) {
             _ = try fm.replaceItemAt(outputURL, withItemAt: stagingURL,
                                      backupItemName: nil, options: [])
