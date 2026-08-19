@@ -147,6 +147,83 @@ final class TcBordersRoundTripTests: XCTestCase {
     /// substitutes defaults (`single` / 4 / `000000`) for missing attributes,
     /// so an over-eager fix could invent borders where the source had none —
     /// the mirror-image silent infidelity.
+    /// `CT_TcBorders` is an `xsd:sequence`: top, start|left, bottom, end|right,
+    /// insideH, insideV, tl2br, tr2bl. The writer emitted top, bottom, left,
+    /// right — the four edges all survive, but out of schema order, so the
+    /// output is schema-invalid even though Word tolerates it in practice.
+    ///
+    /// Measured through the released MCP face before this test existed:
+    ///   before: [top, left, bottom, right, insideH, insideV]
+    ///   after:  [top, bottom, left, right]
+    func testEdgeBordersAreEmittedInSchemaSequence() throws {
+        var borders = CellBorders()
+        borders.top = Border(style: .single, size: 8, color: "FF0000")
+        borders.left = Border(style: .single, size: 8, color: "00FF00")
+        borders.bottom = Border(style: .single, size: 8, color: "0000FF")
+        borders.right = Border(style: .single, size: 8, color: "FFFF00")
+
+        let docxURL = tempDir.appendingPathComponent("order-\(UUID().uuidString).docx")
+        try DocxWriter.write(document(withCellBorders: borders), to: docxURL)
+
+        let xml = String(decoding: try RawPartChannel.readAllParts(from: docxURL)["word/document.xml"]!,
+                         as: UTF8.self)
+        guard let range = xml.range(of: "<w:tcBorders>"),
+              let end = xml.range(of: "</w:tcBorders>") else {
+            return XCTFail("no <w:tcBorders> in the written document")
+        }
+        let block = String(xml[range.upperBound..<end.lowerBound])
+        let order = ["top", "left", "bottom", "right"].map { name -> (String, Int) in
+            (name, block.range(of: "<w:\(name)").map { block.distance(from: block.startIndex, to: $0.lowerBound) } ?? -1)
+        }
+        XCTAssertFalse(order.contains { $0.1 < 0 },
+                       "every edge must be present: \(order)")
+        let positions = order.map(\.1)
+        XCTAssertEqual(positions, positions.sorted(),
+                       "tcBorders children must follow the CT_TcBorders sequence "
+                       + "(top, left, bottom, right); got \(order.map(\.0)) at \(positions)")
+    }
+
+    /// #99 residue: `insideH` / `insideV` had no model field at all, so the
+    /// reader could not keep them and the writer could not put them back —
+    /// the same three-sided absence #101 had for `<w:tcMar>`. Measured through
+    /// the released MCP face: a cell carrying all six children came back with
+    /// four.
+    func testInsideBordersSurviveRoundTrip() throws {
+        var borders = CellBorders()
+        borders.top = Border(style: .single, size: 12, color: "111111")
+        borders.left = Border(style: .single, size: 12, color: "222222")
+        borders.bottom = Border(style: .single, size: 12, color: "333333")
+        borders.right = Border(style: .single, size: 12, color: "444444")
+        borders.insideH = Border(style: .single, size: 6, color: "555555")
+        borders.insideV = Border(style: .single, size: 6, color: "666666")
+
+        let recovered = try XCTUnwrap(
+            firstCellBorders(of: try roundTrip(document(withCellBorders: borders))))
+
+        XCTAssertEqual(recovered.insideH?.color, "555555", "insideH must survive the round trip")
+        XCTAssertEqual(recovered.insideV?.color, "666666", "insideV must survive the round trip")
+        XCTAssertEqual(recovered.insideH?.size, 6)
+        XCTAssertEqual(recovered.insideV?.size, 6)
+        // The four edges must not be disturbed by carrying the inside pair.
+        XCTAssertEqual(recovered.top?.color, "111111")
+        XCTAssertEqual(recovered.left?.color, "222222")
+        XCTAssertEqual(recovered.bottom?.color, "333333")
+        XCTAssertEqual(recovered.right?.color, "444444")
+    }
+
+    /// A cell that never carried inside borders must not gain them, for the
+    /// same reason the existing no-borders test exists: `parseBorder`
+    /// substitutes defaults for absent attributes.
+    func testCellWithoutInsideBordersDoesNotGainThem() throws {
+        var borders = CellBorders()
+        borders.top = Border(style: .single, size: 8, color: "ABCDEF")
+
+        let recovered = try XCTUnwrap(
+            firstCellBorders(of: try roundTrip(document(withCellBorders: borders))))
+        XCTAssertNil(recovered.insideH, "insideH must not be invented on read")
+        XCTAssertNil(recovered.insideV, "insideV must not be invented on read")
+    }
+
     func testCellWithoutBordersDoesNotGainThem() throws {
         var doc = WordDocument()
         doc.body.children = [.table(Table(rows: [

@@ -3293,18 +3293,25 @@ public struct DocxReader {
             let bottom = parseBorder(tcBorders.elements(forName: "w:bottom").first)
             let left = parseBorder(tcBorders.elements(forName: "w:left").first)
             let right = parseBorder(tcBorders.elements(forName: "w:right").first)
+            // #99: inside borders had no model field, so nothing read them and
+            // nothing could write them back — the same three-sided absence
+            // #101 had for `<w:tcMar>`.
+            let insideH = parseBorder(tcBorders.elements(forName: "w:insideH").first)
+            let insideV = parseBorder(tcBorders.elements(forName: "w:insideV").first)
             let tl2br = parseBorder(tcBorders.elements(forName: "w:tl2br").first)
             let tr2bl = parseBorder(tcBorders.elements(forName: "w:tr2bl").first)
             // Allocate only when the source actually carried a border: a cell
             // with no `<w:tcBorders>` (or an empty one) must not gain borders
             // on read, because `parseBorder` substitutes defaults for absent
             // attributes and would otherwise invent them.
-            if [top, bottom, left, right, tl2br, tr2bl].contains(where: { $0 != nil }) {
+            if [top, bottom, left, right, insideH, insideV, tl2br, tr2bl].contains(where: { $0 != nil }) {
                 if props.borders == nil { props.borders = CellBorders() }
                 props.borders?.top = top
                 props.borders?.bottom = bottom
                 props.borders?.left = left
                 props.borders?.right = right
+                props.borders?.insideH = insideH
+                props.borders?.insideV = insideV
                 props.borders?.tl2br = tl2br
                 props.borders?.tr2bl = tr2bl
             }
