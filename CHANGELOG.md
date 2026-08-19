@@ -8,6 +8,56 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-19
+
+### Breaking
+
+- **`ScriptExecuteResult.written` 由 `String` 改為 `String?`。** `nil` 代表**什麼都沒有
+  publish**。這與 `verified` 早已遵守的規則一致——缺席代表「這件事沒發生」，不是
+  「發生了而答案是否」。舊形狀無條件回報請求的輸出路徑，即使該路徑上仍是原本的
+  位元組；那是一句**正面的假陳述**，比缺少訊號更糟。
+
+- **驗證失敗不再 publish 任何東西。** 舊實作先把重建結果寫到最終輸出路徑，再讀回來
+  比對，所以「驗證失敗」這個結論**永遠在原檔已被摧毀之後才抵達**。實測（新測試
+  `testFailedVerificationLeavesExistingOutputUnmodified`）：輸出路徑上原本 1299 bytes
+  的文件，在一次失敗的驗證後變成 1271 bytes 的重建結果。
+
+  現在改為 staging → verify → move：重建結果寫進**輸出檔同目錄**的暫存路徑，驗過才
+  搬進位。同目錄是為了讓最後那步是 rename 而非跨檔案系統的複製。失敗時輸出路徑保持
+  原狀——原本有檔就原封不動，原本沒檔就不會憑空出現。
+
+### Added
+
+- **`scriptPipelineExecute(…, overwrite:)`**，預設**拒絕**覆寫既有輸出檔，並在**替換
+  腳本之前**就拒絕（不付 parse 與 replay 的成本）。
+
+  這道閘刻意放在共用入口而非任一 wrapper。CLI 早有 `--force`、MCP 完全沒有保護，正是
+  因為它長在 wrapper 上——「兩個 face 共用實作所以行為一致」這句保證**只涵蓋共用函式
+  內部**，bolt 在單一 wrapper 上的東西依定義就在保證之外。放進入口後，未來第三個
+  consumer 不必做任何事就繼承這道保護。
+
+  連帶結果：把同一路徑同時當 output 與 reference（「這份腳本能不能逐位元組重建這份
+  文件？」）**必然**指向既有檔案，因此需要顯式 `overwrite: true`。這是正確結果而非
+  要繞過的特例——那個 caller 確實在覆寫參考檔。
+
+上游 issue：PsychQuant/che-word-mcp#180（驗證失敗不回錯誤）、
+PsychQuant/che-word-mcp#181（覆寫保護只長在 CLI 一側且破壞性寫入早於驗證）。
+規格：macdoc Spectra change `script-pipeline-failure-contract`。
+
+## [2.1.0] - 2026-08-19
+
+> 補記：此版當時已打 tag 並推上 remote，但漏了 CHANGELOG 條目。此處補上，避免文件
+> 看起來從 2.0.1 直接跳到 3.0.0。
+
+### Added
+
+- **`scriptPipelineExecute`** —— 把 `.mdocx.swift` 腳本執行的編排（parse → replay →
+  寫檔 → part 比對）從 che-word-mcp 提升到 `Transcode`，成為單一共用入口，讓
+  `macdoc word render` CLI 與 che-word-mcp 的 `execute_script` 由結構保證一致，而非
+  靠慣例。`verified` 為 optional：未驗證時缺席，不得被讀成通過。
+
+  規格：macdoc Spectra change `script-pipeline-surface`。
+
 ## [2.0.1] - 2026-08-18
 
 ### Fixed
