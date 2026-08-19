@@ -237,6 +237,61 @@ final class ScriptPipelineExecuteTests: XCTestCase {
                        "the refused run must leave the file untouched")
     }
 
+    // MARK: - Requirement: a directory at the output path is never replaced
+    //
+    // ooxml-swift#109. `overwrite` means "replace the existing FILE". A
+    // directory is not a file, and no reading of "render a docx to this path"
+    // means "delete this directory tree". Measured before the fix, against
+    // both the current build and the 0.6.0 release (so this is long-standing,
+    // not a regression from the staging rework): a directory containing
+    // data.txt and nested/deep.txt became a regular file, exit 0, "已寫入".
+
+    /// With overwrite granted, a non-empty directory at the output path must
+    /// still be refused — its contents are unreachable once replaced.
+    func testExistingDirectoryAtOutputIsRefusedEvenWithOverwrite() throws {
+        let dir = try tempDir()
+        let script = dir.appendingPathComponent("doc.mdocx.swift")
+        try writeScript(from: log(text: "第一段", paraId: "P1"), to: script)
+
+        let output = dir.appendingPathComponent("important")
+        try FileManager.default.createDirectory(
+            at: output.appendingPathComponent("nested"), withIntermediateDirectories: true)
+        try Data("irreplaceable".utf8).write(to: output.appendingPathComponent("data.txt"))
+
+        XCTAssertThrowsError(
+            try scriptPipelineExecute(
+                scriptPath: script.path, outputPath: output.path, overwrite: true))
+
+        var isDir: ObjCBool = false
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: output.path, isDirectory: &isDir),
+            "the directory must still exist")
+        XCTAssertTrue(isDir.boolValue, "it must still be a DIRECTORY, not a replacement file")
+        XCTAssertEqual(
+            try Data(contentsOf: output.appendingPathComponent("data.txt")),
+            Data("irreplaceable".utf8),
+            "the directory's contents must be untouched")
+    }
+
+    /// Without overwrite the run is refused too — but the refusal must not
+    /// call a directory a file, because that message is what steers an
+    /// operator into passing the flag that destroys it.
+    func testDirectoryRefusalDoesNotCallItAFile() throws {
+        let dir = try tempDir()
+        let script = dir.appendingPathComponent("doc.mdocx.swift")
+        try writeScript(from: log(text: "第一段", paraId: "P1"), to: script)
+        let output = dir.appendingPathComponent("guarded")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+
+        XCTAssertThrowsError(
+            try scriptPipelineExecute(scriptPath: script.path, outputPath: output.path)
+        ) { error in
+            let message = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            XCTAssertFalse(message.contains("檔案已存在"),
+                           "a directory must not be reported as an existing file: \(message)")
+        }
+    }
+
     /// A mistyped reference path is surfaced before any write side effect —
     /// the second reason the ordering contract exists.
     func testMissingReferenceIsRefusedBeforeAnyWrite() throws {
