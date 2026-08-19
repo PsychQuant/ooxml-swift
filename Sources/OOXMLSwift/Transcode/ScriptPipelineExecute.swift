@@ -123,8 +123,18 @@ public func scriptPipelineExecute(
     defer { try? fm.removeItem(at: stagingURL) }
     try document.writeAuthoringPackage(to: stagingURL)
 
+    // The branch is on `overwrite`, NOT on whether the output currently
+    // exists. Branching on existence re-opens the gate at write time: if the
+    // gate passed because nothing was there, and a file appeared during the
+    // parse/replay/stage window, an existence-branch would take the
+    // `replaceItemAt` path — which succeeds unconditionally on a plain file —
+    // and silently destroy it despite the caller having asked us not to
+    // overwrite anything. Measured: replaceItemAt replaced a concurrently
+    // created file without error. Keying on `overwrite` means the refusing
+    // caller always takes `moveItem`, which fails when the destination exists,
+    // so the concurrent file survives.
     func publish() throws {
-        if fm.fileExists(atPath: outputURL.path) {
+        if overwrite, fm.fileExists(atPath: outputURL.path) {
             _ = try fm.replaceItemAt(outputURL, withItemAt: stagingURL,
                                      backupItemName: nil, options: [])
         } else {
