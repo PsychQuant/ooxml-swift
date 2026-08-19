@@ -8,6 +8,50 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-08-19
+
+### Fixed
+
+- **#106 (partial) — `resyncBodyFromDocumentTree` dropped body-level bookmark
+  markers from the typed view.** The rebuild re-typed only `<w:p>` and
+  `<w:tbl>`; everything else hit `default: continue`. Measured on a body shaped
+  `[p, bookmarkStart, bookmarkEnd, p]` — what any bookmark spanning more than
+  one paragraph produces, TOC anchors included:
+
+  ```
+  after read              ["p", "bookmarkMarker", "bookmarkMarker", "p"]
+  after setParagraphText  ["p", "p"]
+  ```
+
+  Editing one paragraph's text removed the document's bookmarks from the
+  caller's view of the body. **The bytes were never at risk** — they stay in
+  `xmlTrees` and a save still emits them — which is precisely why this lasted:
+  every byte-fidelity test passes while it happens. The casualty is the typed
+  projection, and that is the thing downstream indexes against (che-word-mcp
+  reports insert positions as offsets into `body.children`, its #61), so two
+  dropped entries put every later position out by two.
+
+  Same shape as #104 at the call sites #104 did not touch: #104 stopped
+  `appendParagraph` from depending on the lossy rebuild, but the eight other
+  callers still call it and `setParagraphText` is one of them.
+
+### 已知殘留（未修，刻意）
+
+- Body children with no typed `BodyChild` case — `<w:sdt>`, vendor extensions,
+  other `EG_BlockLevelElts` — **still leave the typed view**. Re-typing them as
+  `.rawBlockElement` requires serializing a single `XmlNode` back to XML, which
+  this layer cannot do: `XmlTreeWriter.emitElement` is private and takes
+  `sourceBytes`/`dirtyMap`, and `DocxReader` only manages it because it holds a
+  Foundation `XMLElement`. Pinned by an `XCTExpectFailure` test so closing that
+  half cannot happen unnoticed. #106 stays open.
+
+### 已知紅燈（既有，非本次造成）
+
+- `MdocxFixtureCorpusTests.testAllFixtures` fails on fixture
+  `15-reverse-cli-roundtrip` (canonicalized reverse source ≠ expected source).
+  Confirmed pre-existing by stashing this change and re-running — it fails
+  identically without it. Full suite otherwise 1417 tests / 0 failures.
+
 ## [3.2.0] - 2026-08-19
 
 ### Fixed
