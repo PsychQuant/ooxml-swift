@@ -3358,9 +3358,9 @@ public struct DocxReader {
     /// document's.
     ///
     /// Coverage is deliberately the set `SectionProperties.toXML()` can emit,
-    /// so read and write are symmetric. Attributes the model cannot express
-    /// (`<w:docGrid w:type>`, a non-720 `<w:cols w:space>`) still do not
-    /// survive; that is a narrower, separate gap.
+    /// so read and write are symmetric. Both attributes this note used to
+    /// list as unexpressible — `<w:docGrid w:type>` and a non-720
+    /// `<w:cols w:space>` — are now modelled and round-trip.
     static func parseSectionProperties(_ element: XMLElement) -> SectionProperties {
         var props = SectionProperties()
 
@@ -3428,10 +3428,12 @@ public struct DocxReader {
             }
         }
 
-        // Columns.
-        if let cols = element.elements(forName: "w:cols").first,
-           let num = intAttr(cols, "w:num") {
-            props.columns = num
+        // Columns. `w:num` and `w:space` are read independently: a section may
+        // carry a gutter without stating a count (one column is the default),
+        // and reading them together would drop the gutter in that shape.
+        if let cols = element.elements(forName: "w:cols").first {
+            if let num = intAttr(cols, "w:num") { props.columns = num }
+            if let space = intAttr(cols, "w:space") { props.columnSpacing = space }
         }
 
         // Line numbering.
