@@ -8,6 +8,39 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-08-20
+
+### Fixed
+
+- **`<w:cols w:space>` 被固定改寫成 720**（PsychQuant/che-word-mcp#176 的殘留）。
+  `SectionProperties` 模型有欄數、沒有欄間距，而 `toXML()` 把 `w:space="720"`
+  寫成字面值 —— 於是任何使用其他間距的 section，只要 typed model 被重新序列化就會
+  被換掉，靜默發生在**完全沒碰版面的編輯**上。
+
+  透過 MCP server 在 A4 表單上實測（用原始回報的 mutation 組合：兩次 `update_cell`
+  ＋兩次 `replace_text`，然後存檔）：
+
+  ```
+  before  <w:cols w:space="425"/>
+  after   <w:cols w:num="1" w:space="720"/>
+  ```
+
+  reader 其實早就知道：它自己的 doc comment 就把「a non-720 `<w:cols w:space>`」
+  列為已知無法表達的屬性。該註解的另一半 `<w:docGrid w:type>` 已經補上，所以註解一併
+  更新，而不是留著描述一個只剩一項的缺口。
+
+  reader 現在分別讀 `w:num` 與 `w:space`。舊寫法用單一 `if let` 串在 `w:num` 上，
+  在「有間距、沒欄數」的形狀會把間距整個丟掉 —— 而被實測的那份文件正是這個形狀。
+
+  輸出的屬性順序不變、預設仍是 720，所以沒指定過間距的 section 產出逐位元組相同。
+  這點在此很要緊：writer 的 canonical form 對 transcoder 是凍結的，形狀一變，所有
+  byte-equality fixture 會跟著移動。已用一條測試釘住「預設情況仍輸出舊字串」。
+
+### 仍未修（回報者自陳無視覺影響）
+
+- `w:rsidR` / `w:rsidSect` 等 revision-save id 仍在重新序列化時遺失。#176 原文將其
+  歸類為「僅 revision-save id、無視覺影響，但屬 round-trip fidelity 損失」。
+
 ## [3.3.0] - 2026-08-20
 
 ### Fixed
