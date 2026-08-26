@@ -129,6 +129,7 @@ public enum ScriptExporter {
         // Validate designations up front — strict mode fails loudly.
         var slotByParaId: [String: SlotDesignation] = [:]
         var seenNames: Set<String> = []
+        var rawChannelParaIds: Set<String> = []
         for slot in slots {
             guard WordStyleMap.isIdentifier(slot.name),
                   slot.name.first.map({ $0.isLowercase || $0 == "_" }) == true else {
@@ -151,9 +152,26 @@ public enum ScriptExporter {
             }
             guard let targetEntry = target,
                   case .appendParagraph(_, let payload) = targetEntry.op else {
+                // Raw-channel fallback (raw-channel-slot-support, #171): a
+                // document whose word/document.xml failed the DSL upgrade has
+                // no paragraph-level ops — the paragraph may still live inside
+                // the carried part's XML. Exactly one occurrence designates a
+                // raw-channel slot; ambiguity and absence fail loudly.
+                if let xml = RawChannelSlotSurgery.documentCarryXML(log: log) {
+                    let count = RawChannelSlotSurgery.occurrences(paraId: slot.paraId, in: xml)
+                    if count == 1 {
+                        rawChannelParaIds.insert(slot.paraId)
+                        continue
+                    }
+                    if count > 1 {
+                        throw TranscodeError.slotDesignationFailure(
+                            name: slot.name,
+                            reason: "paragraph \(slot.paraId) occurs \(count) times in the raw document.xml part — refusing to guess")
+                    }
+                }
                 throw TranscodeError.slotDesignationFailure(
                     name: slot.name,
-                    reason: "no body paragraph with id \(slot.paraId) in the log")
+                    reason: "paragraph \(slot.paraId) not found in the DSL log nor in the raw document.xml part")
             }
             // Its text must be substitutable: either the paragraph is
             // DSL-spellable (script-text parameter, the plain path) OR it is a
@@ -170,15 +188,21 @@ public enum ScriptExporter {
             }
         }
 
-        // Split slots into DSL-form (script-text parameter) and op-level
-        // (raw-form paragraph text substituted via a // @slot directive).
+        // Split slots into DSL-form (script-text parameter), op-level
+        // (raw-form paragraph text substituted via a // @slot directive), and
+        // raw-channel (paragraph inside a carried document.xml part,
+        // substituted via a // @slot-raw directive).
+        let rawSlots = slotByParaId.filter { rawChannelParaIds.contains($0.key) }
         let dslSlots = slotByParaId.filter {
+            guard rawChannelParaIds.contains($0.key) == false else { return false }
             if case .appendParagraph(_, let p)? = firstAppendParagraph(log: log, paraId: $0.key)?.op {
                 return paragraphBlock(payload: p, paraId: $0.key, indent: 8) != nil
             }
             return false
         }
-        let opLevelSlots = slotByParaId.filter { dslSlots[$0.key] == nil }
+        let opLevelSlots = slotByParaId.filter {
+            dslSlots[$0.key] == nil && rawChannelParaIds.contains($0.key) == false
+        }
 
         let body = emitBody(entries: log.entries, slotByParaId: dslSlots)
 
@@ -192,6 +216,16 @@ public enum ScriptExporter {
         }
         for (paraId, slot) in opLevelSlots {
             defaults[slot.name] = opLevelSlotDefault(log: log, paraId: paraId) ?? ""
+        }
+        for (paraId, slot) in rawSlots {
+            // Raw-channel default: the designated paragraph's concatenated
+            // <w:t> text inside the carried document.xml.
+            if let xml = RawChannelSlotSurgery.documentCarryXML(log: log),
+               let range = RawChannelSlotSurgery.paragraphFragmentRange(paraId: paraId, in: xml) {
+                defaults[slot.name] = RawChannelSlotSurgery.paragraphText(fragment: String(xml[range]))
+            } else {
+                defaults[slot.name] = ""
+            }
         }
 
         var out: [String] = []
@@ -209,7 +243,15 @@ public enum ScriptExporter {
         for paraId in opLevelSlots.keys.sorted() {
             out.append("// @slot \(opLevelSlots[paraId]!.name) \(paraId)")
         }
-        if !opLevelSlots.isEmpty { out.append("") }
+        // Raw-channel slot directives (raw-channel-slot-support, #171): the
+        // paragraph lives inside a carried document.xml part, so its text has
+        // neither a DSL position nor a text-bearing op. The
+        // `// @slot-raw <name> <paraId>` directive tells the importer to
+        // substitute the paragraph's text inside the carried XML.
+        for paraId in rawSlots.keys.sorted() {
+            out.append("// @slot-raw \(rawSlots[paraId]!.name) \(paraId)")
+        }
+        if !opLevelSlots.isEmpty || !rawSlots.isEmpty { out.append("") }
         out.append("func makeDocument(")
         for (idx, slot) in slots.enumerated() {
             let comma = idx == slots.count - 1 ? "" : ","
@@ -522,6 +564,9 @@ public enum ScriptImporter {
         // a paraId to its slot name; the text-bearing op is substituted after
         // the log is built.
         let opLevelSlots = collectOpLevelSlots(source: source)  // paraId -> name
+        // Raw-channel slots (raw-channel-slot-support, #171): `// @slot-raw`
+        // directives target paragraphs inside a carried document.xml part.
+        let rawChannelSlots = collectRawChannelSlots(source: source)  // paraId -> name
 
         let lines = source.components(separatedBy: "\n")
         for (idx, rawLine) in lines.enumerated() {
@@ -729,6 +774,14 @@ public enum ScriptImporter {
         if !opLevelSlots.isEmpty {
             log = applyOpLevelSlots(log, opSlots: opLevelSlots, bindings: slotBindings)
         }
+        // Raw-channel slot substitution (raw-channel-slot-support, #171):
+        // run-level surgery on the carried document.xml. A value equal to the
+        // paragraph's current text leaves the part untouched (identity
+        // shortcut), so an all-default execution stays byte-equal.
+        if !rawChannelSlots.isEmpty {
+            log = RawChannelSlotSurgery.apply(
+                log, rawSlots: rawChannelSlots, bindings: slotBindings)
+        }
         return log
     }
 
@@ -766,6 +819,22 @@ public enum ScriptImporter {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             guard line.hasPrefix("// @slot ") else { continue }
             let parts = line.dropFirst("// @slot ".count)
+                .split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            guard parts.count == 2 else { continue }
+            slots[String(parts[1])] = String(parts[0])
+        }
+        return slots
+    }
+
+    /// Pre-pass collecting `// @slot-raw <name> <paraId>` directives
+    /// (raw-channel-slot-support, #171). Returns paraId → slot name; malformed
+    /// lines are skipped exactly like the `// @slot` pre-pass above.
+    private static func collectRawChannelSlots(source: String) -> [String: String] {
+        var slots: [String: String] = [:]
+        for rawLine in source.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("// @slot-raw ") else { continue }
+            let parts = line.dropFirst("// @slot-raw ".count)
                 .split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
             guard parts.count == 2 else { continue }
             slots[String(parts[1])] = String(parts[0])
