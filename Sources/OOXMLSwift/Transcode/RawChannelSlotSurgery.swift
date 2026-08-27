@@ -173,10 +173,33 @@ enum RawChannelSlotSurgery {
                       rawSlots: [String: String],
                       bindings: [String: String]) throws -> OperationLog {
         var rebuilt = OperationLog()
+        var sawDocumentCarry = false
         for entry in log.entries {
             var op = entry.op
             if case .carryPart(let path, var xml) = op, path == "word/document.xml" {
+                sawDocumentCarry = true
                 var didSubstitute = false
+                // Preflight against the ORIGINAL XML: locate every slot first
+                // and refuse overlapping designated spans (an outer paragraph
+                // and one nested in its w:txbxContent). Substituting one would
+                // silently discard or orphan the other, and which one survives
+                // would depend on arbitrary paraId sort order (verify round 2).
+                var spans: [(paraId: String, name: String, span: ParagraphSpan)] = []
+                for paraId in rawSlots.keys.sorted() {
+                    if case .unique(let span) = locate(paraId: paraId, in: xml) {
+                        spans.append((paraId, rawSlots[paraId]!, span))
+                    }
+                }
+                for a in spans.indices {
+                    for b in spans.indices where b > a {
+                        let (x, y) = (spans[a], spans[b])
+                        if x.span.range.overlaps(y.span.range) {
+                            throw TranscodeError.rawSlotExecutionFailure(
+                                name: x.name,
+                                reason: "designated paragraphs \(x.paraId) and \(y.paraId) overlap (one is nested inside the other) — refusing: substituting one would silently discard the other")
+                        }
+                    }
+                }
                 // Ranges invalidate after each replacement — re-locate per slot.
                 for paraId in rawSlots.keys.sorted() {
                     let name = rawSlots[paraId]!
@@ -210,13 +233,21 @@ enum RawChannelSlotSurgery {
                     let parser = XMLParser(data: Data(xml.utf8))
                     guard parser.parse() else {
                         throw TranscodeError.rawSlotExecutionFailure(
-                            name: rawSlots.first?.value ?? "?",
+                            name: rawSlots.keys.sorted().first.flatMap { rawSlots[$0] } ?? "?",
                             reason: "post-surgery well-formedness check failed: \(parser.parserError.map(String.init(describing:)) ?? "unknown parser error")")
                     }
                 }
                 op = .carryPart(partPath: path, xml: xml)
             }
             rebuilt.append(op, source: entry.source, opID: entry.opID, at: entry.timestamp)
+        }
+        // A raw directive with no carried document.xml to act on is the
+        // fail-silent class this change eliminates: refuse, never no-op.
+        if !rawSlots.isEmpty, !sawDocumentCarry {
+            let name = rawSlots.keys.sorted().first.flatMap { rawSlots[$0] } ?? "?"
+            throw TranscodeError.rawSlotExecutionFailure(
+                name: name,
+                reason: "script declares // @slot-raw directives but carries no word/document.xml part")
         }
         return rebuilt
     }
@@ -370,52 +401,40 @@ enum RawChannelSlotSurgery {
         return nil
     }
 
-    /// The `<w:rPr>…</w:rPr>` block of the DIRECT-child run with the longest
-    /// visible text (ties: first). Depth-aware on both the run boundary
-    /// (runs inside nested structures are not direct children) and the rPr
-    /// close (`w:rPrChange` nests another `w:rPr`).
+    /// The `<w:rPr>…</w:rPr>` block of the run with the longest visible text
+    /// anywhere inside the paragraph content (ties: first). Runs nested in
+    /// inline wrappers (`w:hyperlink`, `w:sdt`, `w:fldSimple`) count — an
+    /// official form's only formatted run often lives there (verify round 2
+    /// N2). Span boundaries are depth-aware (`w:rPrChange` nests `w:rPr`).
     private static func dominantRunProperties(inContent content: String) -> String {
         var best = ""
         var bestLength = -1
-        var depth = 0
         var i = content.startIndex
-        while i < content.endIndex, let lt = content[i...].firstIndex(of: "<") {
-            if content[lt...].hasPrefix("<!--") { i = skipPast("-->", from: lt, in: content); continue }
-            let after = content.index(after: lt)
-            guard after < content.endIndex else { break }
-            if content[after] == "/" {
-                guard let gt = content[after...].firstIndex(of: ">") else { break }
-                depth -= 1
-                i = content.index(after: gt)
-                continue
-            }
-            let name = tagName(in: content, from: after)
-            guard let tag = scanTag(in: content, from: lt) else { break }
-            if depth == 0, name == "w:r", !tag.selfClosing {
-                guard let runSpan = elementSpan(name: "w:r", openingAt: lt, in: content) else { break }
-                let run = String(content[runSpan])
-                let textLength = collectTextElements(in: run).count
-                if textLength > bestLength {
-                    bestLength = textLength
-                    best = ""
-                    // First direct <w:rPr> inside the run (depth-aware close).
-                    let runContentStart = tag.end
-                    var k = runContentStart
-                    while k < content.endIndex, k < runSpan.upperBound, isXMLWhitespace(content[k]) {
-                        k = content.index(after: k)
-                    }
-                    if content[k...].hasPrefix("<w:rPr") {
-                        if let rPrSpan = elementSpan(name: "w:rPr", openingAt: k, in: content),
-                           rPrSpan.upperBound <= runSpan.upperBound {
-                            best = String(content[rPrSpan])
-                        }
+        while i < content.endIndex, let open = content.range(of: "<w:r", range: i..<content.endIndex) {
+            i = open.upperBound
+            guard open.upperBound < content.endIndex else { break }
+            let next = content[open.upperBound]
+            guard next == ">" || next == " " else { continue }
+            guard let tag = scanTag(in: content, from: open.lowerBound) else { break }
+            if tag.selfClosing { i = tag.end; continue }
+            guard let runSpan = elementSpan(name: "w:r", openingAt: open.lowerBound, in: content) else { break }
+            let run = String(content[runSpan])
+            let textLength = collectTextElements(in: run).count
+            if textLength > bestLength {
+                bestLength = textLength
+                best = ""
+                var k = tag.end
+                while k < runSpan.upperBound, isXMLWhitespace(content[k]) {
+                    k = content.index(after: k)
+                }
+                if content[k...].hasPrefix("<w:rPr") {
+                    if let rPrSpan = elementSpan(name: "w:rPr", openingAt: k, in: content),
+                       rPrSpan.upperBound <= runSpan.upperBound {
+                        best = String(content[rPrSpan])
                     }
                 }
-                i = runSpan.upperBound
-                continue
             }
-            if !tag.selfClosing { depth += 1 }
-            i = tag.end
+            i = runSpan.upperBound
         }
         return best
     }

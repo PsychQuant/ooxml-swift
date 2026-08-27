@@ -181,9 +181,12 @@ public enum ScriptExporter {
                         break
                     }
                 }
+                let rawNote = RawChannelSlotSurgery.documentCarryXML(log: log) == nil
+                    ? " (document has no raw document.xml part)"
+                    : " nor in the raw document.xml part"
                 throw TranscodeError.slotDesignationFailure(
                     name: slot.name,
-                    reason: "paragraph \(slot.paraId) not found in the DSL log nor in the raw document.xml part")
+                    reason: "paragraph \(slot.paraId) not found in the DSL log\(rawNote)")
             }
             // Its text must be substitutable: either the paragraph is
             // DSL-spellable (script-text parameter, the plain path) OR it is a
@@ -578,7 +581,7 @@ public enum ScriptImporter {
         let opLevelSlots = collectOpLevelSlots(source: source)  // paraId -> name
         // Raw-channel slots (raw-channel-slot-support, #171): `// @slot-raw`
         // directives target paragraphs inside a carried document.xml part.
-        let rawChannelSlots = collectRawChannelSlots(source: source)  // paraId -> name
+        let rawChannelSlots = try collectRawChannelSlots(source: source)  // paraId -> name
 
         let lines = source.components(separatedBy: "\n")
         for (idx, rawLine) in lines.enumerated() {
@@ -841,16 +844,24 @@ public enum ScriptImporter {
     }
 
     /// Pre-pass collecting `// @slot-raw <name> <paraId>` directives
-    /// (raw-channel-slot-support, #171). Returns paraId → slot name; malformed
-    /// lines are skipped exactly like the `// @slot` pre-pass above.
-    private static func collectRawChannelSlots(source: String) -> [String: String] {
+    /// (raw-channel-slot-support, #171). Returns paraId → slot name. Unlike
+    /// the `// @slot` pre-pass, a malformed `// @slot-raw` line THROWS: a
+    /// mangled directive would otherwise leave its makeDocument parameter
+    /// unconsumed and render an unfilled form byte-equal to a correct
+    /// all-default run — the fail-silent class this feature refuses
+    /// (verify round 2, N1).
+    private static func collectRawChannelSlots(source: String) throws -> [String: String] {
         var slots: [String: String] = [:]
-        for rawLine in source.components(separatedBy: "\n") {
+        for (idx, rawLine) in source.components(separatedBy: "\n").enumerated() {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard line.hasPrefix("// @slot-raw ") else { continue }
-            let parts = line.dropFirst("// @slot-raw ".count)
-                .split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-            guard parts.count == 2 else { continue }
+            guard line.hasPrefix("// @slot-raw") else { continue }
+            let parts = line.dropFirst("// @slot-raw".count)
+                .split(separator: " ", omittingEmptySubsequences: true)
+            guard parts.count == 2 else {
+                throw TranscodeError.unsupportedSyntax(
+                    line: idx + 1, column: 1,
+                    reason: "malformed // @slot-raw directive (expected `// @slot-raw <name> <paraId>`): \(line.prefix(60))")
+            }
             slots[String(parts[1])] = String(parts[0])
         }
         return slots
