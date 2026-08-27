@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-08-27
+
 ### Added
 
 - Raw-channel slot support (`// @slot-raw <name> <paraId>` grammar token,
