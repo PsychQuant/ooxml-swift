@@ -42,6 +42,12 @@ public enum TranscodeError: Error, Equatable {
     /// Phase D task 4.1). Strict mode never guesses: an unusable designation
     /// fails loudly instead of silently degrading to verbatim content.
     case slotDesignationFailure(name: String, reason: String)
+    /// A raw-channel slot could not be applied at execution time
+    /// (raw-channel-slot-support, #171): stale directive, paraId no longer
+    /// unique, value outside XML 1.0, or post-surgery well-formedness
+    /// failure. Import re-applies the designation guards — a silently
+    /// unfilled or corrupted official form is worse than a loud stop.
+    case rawSlotExecutionFailure(name: String, reason: String)
 }
 
 // MARK: - SlotDesignation (format-alignment-engine Phase D, task 4.1)
@@ -155,18 +161,24 @@ public enum ScriptExporter {
                 // Raw-channel fallback (raw-channel-slot-support, #171): a
                 // document whose word/document.xml failed the DSL upgrade has
                 // no paragraph-level ops — the paragraph may still live inside
-                // the carried part's XML. Exactly one occurrence designates a
-                // raw-channel slot; ambiguity and absence fail loudly.
+                // the carried part's XML. Structure-aware location; exactly
+                // one <w:p> carrier designates a raw-channel slot, everything
+                // else fails loudly (closed refusal list, per spec).
                 if let xml = RawChannelSlotSurgery.documentCarryXML(log: log) {
-                    let count = RawChannelSlotSurgery.occurrences(paraId: slot.paraId, in: xml)
-                    if count == 1 {
+                    switch RawChannelSlotSurgery.locate(paraId: slot.paraId, in: xml) {
+                    case .unique:
                         rawChannelParaIds.insert(slot.paraId)
                         continue
-                    }
-                    if count > 1 {
+                    case .duplicate(let count):
                         throw TranscodeError.slotDesignationFailure(
                             name: slot.name,
-                            reason: "paragraph \(slot.paraId) occurs \(count) times in the raw document.xml part — refusing to guess")
+                            reason: "paragraph \(slot.paraId) is carried by \(count) <w:p> elements in the raw document.xml part — refusing to guess")
+                    case .notOnParagraph(let carrier):
+                        throw TranscodeError.slotDesignationFailure(
+                            name: slot.name,
+                            reason: "id \(slot.paraId) in the raw document.xml part is carried by <\(carrier)>, not a paragraph — refusing")
+                    case .absent:
+                        break
                     }
                 }
                 throw TranscodeError.slotDesignationFailure(
@@ -221,8 +233,8 @@ public enum ScriptExporter {
             // Raw-channel default: the designated paragraph's concatenated
             // <w:t> text inside the carried document.xml.
             if let xml = RawChannelSlotSurgery.documentCarryXML(log: log),
-               let range = RawChannelSlotSurgery.paragraphFragmentRange(paraId: paraId, in: xml) {
-                defaults[slot.name] = RawChannelSlotSurgery.paragraphText(fragment: String(xml[range]))
+               case .unique(let span) = RawChannelSlotSurgery.locate(paraId: paraId, in: xml) {
+                defaults[slot.name] = RawChannelSlotSurgery.paragraphText(in: span, xml: xml)
             } else {
                 defaults[slot.name] = ""
             }
@@ -777,9 +789,11 @@ public enum ScriptImporter {
         // Raw-channel slot substitution (raw-channel-slot-support, #171):
         // run-level surgery on the carried document.xml. A value equal to the
         // paragraph's current text leaves the part untouched (identity
-        // shortcut), so an all-default execution stays byte-equal.
+        // shortcut), so an all-default execution stays byte-equal. Guards
+        // re-apply at import time and post-surgery well-formedness is
+        // verified — failures throw, never silently skip.
         if !rawChannelSlots.isEmpty {
-            log = RawChannelSlotSurgery.apply(
+            log = try RawChannelSlotSurgery.apply(
                 log, rawSlots: rawChannelSlots, bindings: slotBindings)
         }
         return log

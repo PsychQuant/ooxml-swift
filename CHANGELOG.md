@@ -8,6 +8,18 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Raw-channel slot support (`// @slot-raw <name> <paraId>` grammar token,
+  PsychQuant/macdoc#171): slot designation and run-level text substitution on
+  documents whose `word/document.xml` rides the raw channel. Structure-aware
+  paraId location (only `<w:p>`-owned attributes anchor; `<w:tr>` ids and
+  text-content occurrences refuse loudly), depth-aware surgery (`w:txbxContent`
+  nesting, `w:pPrChange`/`w:rPrChange`), identity-shortcut defaults keeping
+  all-default replay byte-equal, import-time guard re-application, and
+  post-surgery well-formedness verification. New error case
+  `TranscodeError.rawSlotExecutionFailure`.
+
 ## [3.4.0] - 2026-08-20
 
 ### Fixed
