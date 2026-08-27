@@ -246,10 +246,12 @@ final class RawChannelSlotTests: XCTestCase {
 
 extension RawChannelSlotTests {
 
-    /// A malformed `// @slot-raw` line (missing paraId) is skipped exactly
-    /// like the existing `// @slot` pre-pass — parsing succeeds and the
-    /// execution stays byte-equal.
-    func testMalformedRawSlotDirectiveIsIgnored() throws {
+    /// A malformed `// @slot-raw` line (missing paraId) FAILS LOUDLY at
+    /// parse: a mangled directive would leave its makeDocument parameter
+    /// unconsumed and render an unfilled form byte-equal to a correct
+    /// all-default run — the fail-silent class this feature refuses
+    /// (verify round 2, N1; supersedes the round-1 silent-skip pin).
+    func testMalformedRawSlotDirectiveFailsLoudly() throws {
         let reference = try makeTableReference()
         let log = try reverseExpectingRaw(reference)
         var script = try ScriptExporter.exportSwift(log: log, slots: [
@@ -258,9 +260,78 @@ extension RawChannelSlotTests {
         script = script.replacingOccurrences(
             of: "// @slot-raw amendment BBBB2222",
             with: "// @slot-raw malformed-only-one-token")
+        XCTAssertThrowsError(try ScriptImporter.parse(source: script)) { error in
+            guard case TranscodeError.unsupportedSyntax(_, _, let reason) = error else {
+                return XCTFail("expected unsupportedSyntax, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("@slot-raw"), "reason names the directive: \(reason)")
+        }
+    }
+
+    /// Overlapping designated paragraphs (outer + one nested in its
+    /// w:txbxContent) refuse at import — substituting one would silently
+    /// discard the other, order-dependently (verify round 2, Codex HIGH).
+    func testOverlappingNestedSlotDesignationsRefuse() throws {
+        let xml = """
+            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:v="urn:schemas-microsoft-com:vml"><w:body><w:p w14:paraId="ZZZZ0001"><w:r><w:t>outer</w:t></w:r><w:r><w:pict><v:shape><v:textbox><w:txbxContent><w:p w14:paraId="AAAA0001"><w:r><w:t>inner</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p><w:tbl><w:tblPr/><w:tr><w:tc><w:p w14:paraId="CELL0001"><w:r><w:t>格</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr/></w:body></w:document>
+            """
+        let reference = try makeTableReference(documentXML: xml)
+        let log = try reverseExpectingRaw(reference)
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "outer", paraId: "ZZZZ0001"),
+            SlotDesignation(name: "inner", paraId: "AAAA0001"),
+        ])
+        script = script.replacingOccurrences(
+            of: "inner: \"inner\"", with: "inner: \"new\"")
+        XCTAssertThrowsError(try execute(script: script)) { error in
+            guard case TranscodeError.rawSlotExecutionFailure(_, let reason) = error else {
+                return XCTFail("expected rawSlotExecutionFailure, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("overlap"), "reason names the overlap: \(reason)")
+        }
+    }
+
+    /// A `// @slot-raw` directive in a script with NO word/document.xml
+    /// carryPart refuses — never a silent no-op (verify round 2, Codex HIGH).
+    func testRawDirectiveWithoutDocumentCarryRefuses() throws {
+        let script = """
+            // @slot-raw ghost DEAD0000
+            import WordDSLSwift
+
+            let document = WordDocument {
+                Section(id: "main") {
+                }
+            }
+            """
+        XCTAssertThrowsError(try ScriptImporter.parse(source: script)) { error in
+            guard case TranscodeError.rawSlotExecutionFailure(_, let reason) = error else {
+                return XCTFail("expected rawSlotExecutionFailure, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("no word/document.xml"),
+                          "reason names the missing carry: \(reason)")
+        }
+    }
+
+    /// A paragraph whose only formatted run lives inside an inline wrapper
+    /// (w:hyperlink) still contributes its rPr to the collapsed run
+    /// (verify round 2, N2 — fidelity regression fix).
+    func testHyperlinkWrappedRunContributesDominantRPr() throws {
+        let xml = Self.tableDocumentXML.replacingOccurrences(
+            of: "<w:p w14:paraId=\"AAAA1111\"><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>表單標題</w:t></w:r></w:p>",
+            with: "<w:p w14:paraId=\"AAAA1111\"><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:hyperlink><w:r><w:rPr><w:b/></w:rPr><w:t>表單標題</w:t></w:r></w:hyperlink></w:p>")
+        let reference = try makeTableReference(documentXML: xml)
+        let log = try reverseExpectingRaw(reference)
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "title", paraId: "AAAA1111"),
+        ])
+        script = script.replacingOccurrences(
+            of: "title: \"表單標題\"", with: "title: \"新標題\"")
         let rebuilt = try execute(script: script)
-        XCTAssertTrue(PartFidelity.stageB(reference: reference, rebuilt: rebuilt),
-                      "malformed directive must be ignored; replay stays byte-equal")
+        let outXML = String(data: rebuilt["word/document.xml"]!, encoding: .utf8)!
+        XCTAssertTrue(outXML.contains("新標題"))
+        XCTAssertTrue(outXML.contains("<w:b/>"),
+                      "the hyperlink-wrapped run's rPr must survive as the dominant rPr")
     }
 }
 
