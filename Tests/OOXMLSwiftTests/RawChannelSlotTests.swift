@@ -66,11 +66,11 @@ final class RawChannelSlotTests: XCTestCase {
     /// changes run structure INSIDE the paragraph by design, so the honest
     /// invariant is byte-identity of the remainders.
     private func excisingParagraph(_ xml: String, paraId: String) -> String {
-        guard let range = RawChannelSlotSurgery.paragraphFragmentRange(paraId: paraId, in: xml) else {
+        guard case .unique(let span) = RawChannelSlotSurgery.locate(paraId: paraId, in: xml) else {
             return xml
         }
         var out = xml
-        out.removeSubrange(range)
+        out.removeSubrange(span.range)
         return out
     }
 
@@ -261,5 +261,262 @@ extension RawChannelSlotTests {
         let rebuilt = try execute(script: script)
         XCTAssertTrue(PartFidelity.stageB(reference: reference, rebuilt: rebuilt),
                       "malformed directive must be ignored; replay stays byte-equal")
+    }
+}
+
+// MARK: - Verify round 1 hardening (structure-aware locator, fail-loud import)
+
+extension RawChannelSlotTests {
+
+    private func assertWellFormed(_ data: Data, _ message: String,
+                                  file: StaticString = #filePath, line: UInt = #line) {
+        let parser = XMLParser(data: data)
+        XCTAssertTrue(parser.parse(),
+                      "\(message) — XML must be well-formed; parser error: \(String(describing: parser.parserError))",
+                      file: file, line: line)
+    }
+
+    /// A designated paragraph containing a text box: `w:p` nests through
+    /// `w:txbxContent`, so depth-aware close matching is required. Surgery
+    /// must replace the WHOLE outer paragraph and stay well-formed.
+    func testTextboxNestedParagraphSubstitutionStaysWellFormed() throws {
+        let xml = """
+            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:v="urn:schemas-microsoft-com:vml"><w:body><w:p w14:paraId="TBOX0001"><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>外層文字</w:t></w:r><w:r><w:pict><v:shape><v:textbox><w:txbxContent><w:p w14:paraId="INNER001"><w:r><w:t>盒內文字</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p><w:tbl><w:tblPr/><w:tr><w:tc><w:p w14:paraId="CELL0001"><w:r><w:t>格</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr/></w:body></w:document>
+            """
+        let reference = try makeTableReference(documentXML: xml)
+        let log = try reverseExpectingRaw(reference)
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "outer", paraId: "TBOX0001"),
+        ])
+        script = script.replacingOccurrences(
+            of: "outer: \"外層文字盒內文字\"", with: "outer: \"換掉了\"")
+        let rebuilt = try execute(script: script)
+        let out = rebuilt["word/document.xml"]!
+        assertWellFormed(out, "textbox-nested substitution")
+        let outXML = String(data: out, encoding: .utf8)!
+        XCTAssertTrue(outXML.contains("換掉了"))
+        XCTAssertFalse(outXML.contains("txbxContent"),
+                       "the whole outer paragraph (including the text box) must be replaced")
+        XCTAssertTrue(outXML.contains("<w:tbl>"), "the sibling table must be untouched")
+        XCTAssertTrue(outXML.contains("CELL0001"), "table cell paragraph must survive")
+    }
+
+    /// Word writes `w14:paraId` on `<w:tr>` too (REC-O-01: 20 of 115).
+    /// Designating a row-owned id must refuse naming the carrier — never
+    /// corrupt the table.
+    func testTableRowParaIdRefusesNamingCarrier() throws {
+        let xml = Self.tableDocumentXML.replacingOccurrences(
+            of: "<w:tr><w:tc>", with: "<w:tr w14:paraId=\"TROW0001\"><w:tc>")
+        let log = try reverseExpectingRaw(try makeTableReference(documentXML: xml))
+        XCTAssertThrowsError(try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "row", paraId: "TROW0001"),
+        ])) { error in
+            guard case TranscodeError.slotDesignationFailure(_, let reason) = error else {
+                return XCTFail("expected slotDesignationFailure, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("w:tr"), "reason must name the actual carrier: \(reason)")
+        }
+    }
+
+    /// The literal token inside `<w:t>` text content is never a designation
+    /// anchor — absence refusal, not a ghost match.
+    func testParaIdOnlyInTextContentRefuses() throws {
+        let xml = Self.tableDocumentXML.replacingOccurrences(
+            of: "<w:t>表單標題</w:t>", with: "<w:t>w14:paraId=\"FAKE0001\" 假錨</w:t>")
+        let log = try reverseExpectingRaw(try makeTableReference(documentXML: xml))
+        XCTAssertThrowsError(try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "ghost", paraId: "FAKE0001"),
+        ])) { error in
+            guard case TranscodeError.slotDesignationFailure(_, let reason) = error else {
+                return XCTFail("expected slotDesignationFailure, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("log") && reason.contains("raw"),
+                          "text content never anchors — absence refusal: \(reason)")
+        }
+    }
+
+    /// A slot value containing the literal `w14:paraId="…"` token of ANOTHER
+    /// slot must not redirect that slot's surgery (attribute-position
+    /// anchoring, not token search).
+    func testQuoteForgingValueCannotRedirectLaterSlot() throws {
+        let reference = try makeTableReference()
+        let log = try reverseExpectingRaw(reference)
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "title", paraId: "AAAA1111"),
+            SlotDesignation(name: "amendment", paraId: "BBBB2222"),
+        ])
+        script = script.replacingOccurrences(
+            of: "title: \"表單標題\"",
+            with: "title: \"w14:paraId=\\\"BBBB2222\\\" 偽造\"")
+        script = script.replacingOccurrences(
+            of: "amendment: \"申請修正第1次\"", with: "amendment: \"申請修正第3次\"")
+        let rebuilt = try execute(script: script)
+        let out = rebuilt["word/document.xml"]!
+        assertWellFormed(out, "quote-forging value")
+        let outXML = String(data: out, encoding: .utf8)!
+        XCTAssertTrue(outXML.contains("申請修正第3次"),
+                      "the later slot must land in its own paragraph")
+        XCTAssertTrue(outXML.contains("<w:jc w:val=\"both\"/>"),
+                      "the later slot's paragraph pPr must be preserved")
+        XCTAssertTrue(outXML.contains("偽造"), "the forged text lands as inert text")
+    }
+
+    /// `w:pPrChange` nests a `w:pPr` inside the paragraph's `w:pPr`
+    /// (track-changes documents). The preserved pPr block must be the whole
+    /// outer block — depth-aware, not first `</w:pPr>`.
+    func testPPrChangeNestedPPrPreservedAndWellFormed() throws {
+        let xml = Self.tableDocumentXML.replacingOccurrences(
+            of: "<w:pPr><w:jc w:val=\"both\"/></w:pPr>",
+            with: "<w:pPr><w:jc w:val=\"both\"/><w:pPrChange w:id=\"1\"><w:pPr><w:jc w:val=\"center\"/></w:pPrChange></w:pPr>")
+            .replacingOccurrences(
+                of: "<w:pPrChange w:id=\"1\"><w:pPr><w:jc w:val=\"center\"/></w:pPrChange>",
+                with: "<w:pPrChange w:id=\"1\"><w:pPr><w:jc w:val=\"center\"/></w:pPr></w:pPrChange>")
+        let reference = try makeTableReference(documentXML: xml)
+        let log = try reverseExpectingRaw(reference)
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "amendment", paraId: "BBBB2222"),
+        ])
+        script = script.replacingOccurrences(
+            of: "amendment: \"申請修正第1次\"", with: "amendment: \"申請修正第4次\"")
+        let rebuilt = try execute(script: script)
+        let out = rebuilt["word/document.xml"]!
+        assertWellFormed(out, "pPrChange-nested substitution")
+        let outXML = String(data: out, encoding: .utf8)!
+        XCTAssertTrue(outXML.contains("<w:pPrChange w:id=\"1\">"),
+                      "the whole outer pPr block including pPrChange must be preserved")
+        XCTAssertTrue(outXML.contains("申請修正第4次"))
+    }
+
+    /// Values containing characters forbidden by XML 1.0 are refused, not
+    /// written into the part.
+    func testControlCharacterValueRefuses() throws {
+        let reference = try makeTableReference()
+        let log = try reverseExpectingRaw(reference)
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "amendment", paraId: "BBBB2222"),
+        ])
+        script = script.replacingOccurrences(
+            of: "amendment: \"申請修正第1次\"", with: "amendment: \"bad\u{0}value\"")
+        XCTAssertThrowsError(try execute(script: script)) { error in
+            guard case TranscodeError.rawSlotExecutionFailure = error else {
+                return XCTFail("expected rawSlotExecutionFailure, got \(error)")
+            }
+        }
+    }
+
+    /// Numeric character references decode into the exported default, and the
+    /// identity shortcut fires for the decoded value.
+    func testNumericCharacterReferenceDefaultAndIdentity() throws {
+        let xml = Self.tableDocumentXML.replacingOccurrences(
+            of: "<w:t>表單標題</w:t>", with: "<w:t>&#x41;&#66;</w:t>")
+        let reference = try makeTableReference(documentXML: xml)
+        let log = try reverseExpectingRaw(reference)
+        let script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "title", paraId: "AAAA1111"),
+        ])
+        XCTAssertTrue(script.contains("title: \"AB\""),
+                      "numeric character references must decode into the default")
+        let rebuilt = try execute(script: script)
+        XCTAssertTrue(PartFidelity.stageB(reference: reference, rebuilt: rebuilt),
+                      "decoded default must take the identity shortcut — byte-equal replay")
+    }
+
+    /// A collected directive whose paraId no longer resolves fails loudly at
+    /// import — a stale directive must never silently render an unfilled form.
+    func testImportStaleDirectiveFailsLoudly() throws {
+        let reference = try makeTableReference()
+        let log = try reverseExpectingRaw(reference)
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "amendment", paraId: "BBBB2222"),
+        ])
+        script = script.replacingOccurrences(
+            of: "// @slot-raw amendment BBBB2222",
+            with: "// @slot-raw amendment DEAD0000")
+        XCTAssertThrowsError(try execute(script: script)) { error in
+            guard case TranscodeError.rawSlotExecutionFailure(_, let reason) = error else {
+                return XCTFail("expected rawSlotExecutionFailure, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("DEAD0000"), "reason must name the paraId: \(reason)")
+        }
+    }
+
+    /// Duplicate paraId introduced AFTER export (hand-edited script) fails
+    /// loudly at import — the guards re-apply at execution time.
+    func testImportDuplicateParaIdFailsLoudly() throws {
+        let reference = try makeTableReference()
+        let log = try reverseExpectingRaw(reference)
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "amendment", paraId: "BBBB2222"),
+        ])
+        // Duplicate the paraId inside the carried XML (JSON-escaped in @op).
+        script = script.replacingOccurrences(
+            of: "w14:paraId=\\\"AAAA1111\\\"", with: "w14:paraId=\\\"BBBB2222\\\"")
+        script = script.replacingOccurrences(
+            of: "amendment: \"申請修正第1次\"", with: "amendment: \"值\"")
+        XCTAssertThrowsError(try execute(script: script)) { error in
+            guard case TranscodeError.rawSlotExecutionFailure(_, let reason) = error else {
+                return XCTFail("expected rawSlotExecutionFailure, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("2"), "reason must name the count: \(reason)")
+        }
+    }
+}
+
+extension RawChannelSlotTests {
+
+    /// Verify-round-1 regression pin: sweep EVERY unique paraId in the real
+    /// REC-O-01 fixture through the substitution path. Round 1 measured
+    /// 88 ok / 19 silent table corruption / 2 malformed with the lexical
+    /// locator. The structure-aware contract: every substitution that
+    /// succeeds yields WELL-FORMED XML, and every non-`<w:p>` id refuses at
+    /// designation. Zero corruption, zero silent failure.
+    func testRECFixtureFullParaIdSweepZeroCorruption() throws {
+        let reference = try RawPartChannel.readAllParts(from: try recFixtureURL())
+        let result = try ReverseExtractor.reverse(parts: reference)
+        let xml = String(data: reference["word/document.xml"]!, encoding: .utf8)!
+        var ids: [String] = []
+        var seen = Set<String>()
+        var search = xml.startIndex
+        while let r = xml.range(of: "w14:paraId=\"", range: search..<xml.endIndex) {
+            guard let end = xml[r.upperBound...].firstIndex(of: "\"") else { break }
+            let id = String(xml[r.upperBound..<end])
+            if seen.insert(id).inserted { ids.append(id) }
+            search = xml.index(after: end)
+        }
+        XCTAssertGreaterThan(ids.count, 100, "fixture should carry 100+ unique paraIds")
+        var ok = 0, refused = 0
+        for id in ids {
+            let script: String
+            do {
+                script = try ScriptExporter.exportSwift(log: result.log, slots: [
+                    SlotDesignation(name: "field", paraId: id)])
+            } catch {
+                guard case TranscodeError.slotDesignationFailure = error else {
+                    return XCTFail("id \(id): unexpected designation error \(error)")
+                }
+                refused += 1
+                continue
+            }
+            guard let dr = script.range(of: "field: \""),
+                  let dEnd = script[dr.upperBound...].firstIndex(of: "\"") else {
+                return XCTFail("id \(id): no call-site default")
+            }
+            let def = String(script[dr.upperBound..<dEnd])
+            let mutated = script.replacingOccurrences(
+                of: "field: \"\(def)\"", with: "field: \"SWEEPVALUE\"")
+            let log2 = try ScriptImporter.parse(source: mutated)
+            for entry in log2.entries {
+                if case .carryPart(let p, let x) = entry.op, p == "word/document.xml" {
+                    let parser = XMLParser(data: Data(x.utf8))
+                    XCTAssertTrue(parser.parse(),
+                                  "id \(id): substituted part must be well-formed")
+                    ok += 1
+                }
+            }
+        }
+        XCTAssertEqual(ok + refused, ids.count, "every id accounted for")
+        XCTAssertGreaterThan(refused, 0,
+                             "fixture carries w:tr-owned ids — some refusals expected")
     }
 }
