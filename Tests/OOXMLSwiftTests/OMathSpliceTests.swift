@@ -673,22 +673,39 @@ final class OMathSpliceTests: XCTestCase {
     }
 
     func testVendorOMathNamedRawXMLRemainsExactReplacement() {
-        let vendorXML = #"<x:oMath xmlns:x="urn:vendor:not-omml"><x:data/></x:oMath>"#
+        let vendorFragments = [
+            #"<x:oMath xmlns:x="urn:vendor:not-omml"><x:data/></x:oMath>"#,
+            #"<x:oMath xmlns:x='urn:vendor:not-omml'><x:data/></x:oMath>"#,
+        ]
+        for vendorXML in vendorFragments {
+            var run = Run(text: "")
+            run.rawXML = vendorXML
+            run.properties.bold = true
+
+            XCTAssertEqual(
+                run.toXML(),
+                vendorXML,
+                "same local name in a non-OMML namespace must keep generic rawXML replacement semantics"
+            )
+
+            let paragraphXML = Paragraph(runs: [run]).toXML()
+            XCTAssertEqual(
+                paragraphXML,
+                "<w:p>\(vendorXML)</w:p>",
+                "Paragraph.emitRun must use the same namespace-aware classification"
+            )
+        }
+    }
+
+    func testStandardOMathSingleQuotedNamespaceStillUsesRunCarrier() {
+        let omathXML = #"<m:oMath xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/math'><m:r><m:t>α</m:t></m:r></m:oMath>"#
         var run = Run(text: "")
-        run.rawXML = vendorXML
+        run.rawXML = omathXML
         run.properties.bold = true
 
         XCTAssertEqual(
             run.toXML(),
-            vendorXML,
-            "same local name in a non-OMML namespace must keep generic rawXML replacement semantics"
-        )
-
-        let paragraphXML = Paragraph(runs: [run]).toXML()
-        XCTAssertEqual(
-            paragraphXML,
-            "<w:p>\(vendorXML)</w:p>",
-            "Paragraph.emitRun must use the same namespace-aware classification"
+            "<w:r><w:rPr><w:b/></w:rPr>\(omathXML)</w:r>"
         )
     }
 

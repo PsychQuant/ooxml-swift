@@ -110,7 +110,7 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 [**Risk: rPr silently omitted for inline splice**] → Mitigation: both serializers recognize an OMath-root `Run.rawXML` fragment as a Run child rather than a complete Run replacement. Focused tests assert `<w:rPr>` precedes `<m:oMath>` for `.full` and `.omathOnly`, assert `.discard` emits no `<w:rPr>`, exercise chained splice and strict-prefix inspection, and perform a second dirty save after reload (#117).
 
-[**Risk: a vendor element with the same local name loses generic raw replacement semantics**] → Mitigation: the root classifier rejects an explicitly declared namespace unless it is the standard OMML URI. A non-OMML `<x:oMath>` regression test asserts exact `Run.rawXML` replacement through both Run and Paragraph serializers (#117).
+[**Risk: a vendor element with the same local name loses generic raw replacement semantics**] → Mitigation: the root classifier rejects an explicitly declared namespace unless it is the standard OMML URI. Namespace parsing accepts both XML-legal quote styles. Non-OMML `<x:oMath>` regression fixtures assert exact `Run.rawXML` replacement through both Run and Paragraph serializers, while a single-quoted standard OMML fixture still receives the Run carrier (#117).
 
 [**Risk: anchor-Run split with whitespace-sensitive `<w:t xml:space="preserve">`**] → Mitigation: copy `xml:space` attribute when splitting; existing `replaceText` code path tested with similar fixtures. Add explicit test case for whitespace-bearing anchor.
 
