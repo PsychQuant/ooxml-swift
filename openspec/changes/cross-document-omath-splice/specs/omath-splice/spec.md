@@ -29,6 +29,7 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 - **WHEN** the source direct child root is `<m:oMathPara>`
 - **THEN** the target `UnrecognizedChild.name` SHALL be `oMathPara`
 - **AND** save/reload and subsequent extraction SHALL preserve matching metadata and raw root
+- **AND** a direct-child carrier whose stored `name` disagrees with the validated raw root local name SHALL throw `OMathSpliceMalformedXMLError` before mutation
 
 #### Scenario: At-end follows every paragraph carrier
 
@@ -208,6 +209,12 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 - **WHEN** multiple OMath blocks share the same anchor, including consecutive leading equations
 - **THEN** their final serialized order SHALL equal source-document order
 - **AND** identical text snippets at different source occurrences SHALL map to the corresponding target occurrence rather than always instance 1
+
+#### Scenario: Batch context follows paragraph serializer order
+
+- **WHEN** Run array order differs from positive `position` order, or a text Run and direct OMath share the same positive/non-positive position
+- **THEN** context derivation SHALL follow the same absolute-start / positive / non-positive / absolute-end order as `Paragraph.toXML()`
+- **AND** Runs SHALL contribute visible prose before direct unrecognized children at equal serializer positions
 
 #### Scenario: Re-extraction follows absolute boundary order
 

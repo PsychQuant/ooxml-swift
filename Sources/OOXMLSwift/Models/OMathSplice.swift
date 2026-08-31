@@ -227,6 +227,10 @@ internal enum OMathNamespace {
         parseRootTag(in: xml)?.nameEnd
     }
 
+    internal static func validatedRootLocalName(in xml: String) -> String? {
+        validatedFragmentRoot(in: xml)?.localName
+    }
+
     private static func rootLocalName(in xml: String) -> String? {
         let fragment = trimmingXMLS(in: xml)
         if let qualifiedName = rootQualifiedName(in: fragment) {

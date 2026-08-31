@@ -61,6 +61,7 @@ extension WordDocument {
             throw OMathSpliceError.omathIndexOutOfRange(requested: omathIndex, available: extracted.count)
         }
         let omath = extracted[omathIndex]
+        try Self.validateExtractedOMath(omath)
 
         // === Namespace policy check (Q6) ===
         if case .paragraph(let targetPara) = body.children[bodyChildIdx] {
@@ -122,10 +123,10 @@ extension WordDocument {
         // namespace policy regardless of source order, so scan every source
         // and the relevant initial-target fragment before comparing any URI.
         for omath in extracted {
-            try Self.validateOMathFragment(omath.xml)
+            try Self.validateExtractedOMath(omath)
         }
         if let existingTarget = OMathExtractor.extract(from: initialTarget).first {
-            try Self.validateOMathFragment(existingTarget.xml)
+            try Self.validateExtractedOMath(existingTarget)
         }
 
         // Phase 2 — namespace policy. Only a fully valid batch reaches this
@@ -269,7 +270,7 @@ extension WordDocument {
         var targetURI: String = standardOMMLURI
         var targetPrefix: String = "m"
         if let existing = OMathExtractor.extract(from: targetParagraph).first {
-            try validateOMathFragment(existing.xml)
+            try validateExtractedOMath(existing)
             guard let uri = OMathNamespace.extractURI(from: existing.xml) else {
                 throw OMathSpliceMalformedXMLError()
             }
@@ -288,9 +289,22 @@ extension WordDocument {
     /// XML admission primitive deliberately separated from namespace policy.
     /// Batch mode runs this for the entire source set first so a malformed item
     /// always wins over URI/prefix mismatches in earlier items.
-    internal static func validateOMathFragment(_ xml: String) throws {
+    @discardableResult
+    internal static func validateOMathFragment(_ xml: String) throws -> String {
         guard OMathNamespace.isWellFormed(xml),
-              OMathNamespace.extractURI(from: xml) != nil else {
+              OMathNamespace.extractURI(from: xml) != nil,
+              let localName = OMathNamespace.validatedRootLocalName(in: xml) else {
+            throw OMathSpliceMalformedXMLError()
+        }
+        return localName
+    }
+
+    /// Direct-child typed metadata and payload root are one contract. A valid
+    /// XML fragment with mismatched `name` is still an invalid extracted carrier.
+    internal static func validateExtractedOMath(_ omath: ExtractedOMath) throws {
+        let rootLocalName = try validateOMathFragment(omath.xml)
+        if omath.kind == .directChild,
+           omath.directChildName != rootLocalName {
             throw OMathSpliceMalformedXMLError()
         }
     }
@@ -954,6 +968,19 @@ extension WordDocument {
         }
     }
 
+    private struct ContextEvent {
+        enum Kind {
+            case prose(String)
+            case omath(Int)
+        }
+
+        let bucket: Int
+        let order: Int
+        let collection: Int
+        let arrayIndex: Int
+        let kind: Kind
+    }
+
     /// For each extracted OMath in source order, derive a context anchor (~N chars of
     /// plain prose immediately preceding the OMath) for batch splice.
     ///
@@ -966,8 +993,6 @@ extension WordDocument {
         charsBefore: Int
     ) -> [DerivedContextAnchor?] {
         var anchors = [DerivedContextAnchor?](repeating: nil, count: extracted.count)
-        var matchedExtractedIndices = Set<Int>()
-        var proseAccumulator = ""
 
         // Boundary lanes are authoritative metadata, not prose-derived hints.
         // Preserve both start and end so an empty-prose end source cannot be
@@ -979,58 +1004,111 @@ extension WordDocument {
                     instance: 1,
                     boundaryPlacement: placement
                 )
-                matchedExtractedIndices.insert(i)
             }
         }
 
-        // Walk runs in array order; whenever a run's rawXML matches an extracted OMath,
-        // capture the trailing N chars of proseAccumulator.
-        for run in sourceParagraph.runs {
-            if let raw = run.rawXML, OMathNamespace.hasOMathRoot(in: raw) {
-                // Find which extracted index this run corresponds to (by xml byte equality).
-                for (i, ex) in extracted.enumerated() where !matchedExtractedIndices.contains(i) {
-                    if ex.kind == .inRun
-                        && ex.xml == OMathExtractor.ensureXmlnsDeclared(in: raw) {
-                        let trailing = String(proseAccumulator.suffix(charsBefore)).trimmingCharacters(in: .whitespaces)
-                        anchors[i] = DerivedContextAnchor(
-                            snippet: trailing,
-                            instance: trailing.isEmpty
-                                ? 1
-                                : occurrenceCount(of: trailing, in: proseAccumulator)
-                        )
-                        matchedExtractedIndices.insert(i)
-                        break
-                    }
-                }
-                continue
-            }
-            if let visibleText = serializedTypedText(in: run) {
-                proseAccumulator += visibleText
-            }
-        }
+        // Map the extractor's stable carrier sequence back to the sorted result.
+        let extractedIndexBySequence = Dictionary(
+            uniqueKeysWithValues: extracted.indices.map { (extracted[$0].sourceSequence, $0) }
+        )
+        var events: [ContextEvent] = []
+        var mathSequence = 0
 
-        // Direct-child OMath in unrecognizedChildren — derive from its source position
-        // by walking runs up to that position.
-        for (i, ex) in extracted.enumerated() where ex.kind == .directChild && !matchedExtractedIndices.contains(i) {
-            // For direct-child OMath, use the prose accumulated up to the OMath's position.
-            // (Best-effort — direct-child OMath typically doesn't have meaningful surrounding prose.)
-            guard let omathPos = ex.sourcePosition else { continue }
-            var prose = ""
-            for run in sourceParagraph.runs {
-                if let runPos = run.position, runPos < omathPos {
-                    if let visibleText = serializedTypedText(in: run) {
-                        prose += visibleText
-                    }
-                }
-            }
-            let trailing = String(prose.suffix(charsBefore)).trimmingCharacters(in: .whitespaces)
-            anchors[i] = DerivedContextAnchor(
-                snippet: trailing,
-                instance: trailing.isEmpty ? 1 : occurrenceCount(of: trailing, in: prose)
+        // Paragraph serializer appends every Run collection entry before any
+        // UnrecognizedChild at equal positions/post buckets.
+        for (arrayIndex, run) in sourceParagraph.runs.enumerated() {
+            let key = contextSerializerKey(
+                boundaryPlacement: run.paragraphBoundaryPlacement,
+                boundaryOrder: run.paragraphBoundaryOrder,
+                position: run.position
             )
+            if let raw = run.rawXML, OMathNamespace.hasOMathRoot(in: raw) {
+                if let extractedIndex = extractedIndexBySequence[mathSequence] {
+                    events.append(ContextEvent(
+                        bucket: key.bucket,
+                        order: key.order,
+                        collection: 0,
+                        arrayIndex: arrayIndex,
+                        kind: .omath(extractedIndex)
+                    ))
+                }
+                mathSequence += 1
+            } else if let visibleText = serializedTypedText(in: run) {
+                events.append(ContextEvent(
+                    bucket: key.bucket,
+                    order: key.order,
+                    collection: 0,
+                    arrayIndex: arrayIndex,
+                    kind: .prose(visibleText)
+                ))
+            }
+        }
+
+        for (arrayIndex, child) in sourceParagraph.unrecognizedChildren.enumerated()
+            where child.name == "oMath" || child.name == "oMathPara" {
+            let key = contextSerializerKey(
+                boundaryPlacement: child.paragraphBoundaryPlacement,
+                boundaryOrder: child.paragraphBoundaryOrder,
+                position: child.position
+            )
+            if let extractedIndex = extractedIndexBySequence[mathSequence] {
+                events.append(ContextEvent(
+                    bucket: key.bucket,
+                    order: key.order,
+                    collection: 1,
+                    arrayIndex: arrayIndex,
+                    kind: .omath(extractedIndex)
+                ))
+            }
+            mathSequence += 1
+        }
+
+        events.sort { lhs, rhs in
+            if lhs.bucket != rhs.bucket { return lhs.bucket < rhs.bucket }
+            if lhs.order != rhs.order { return lhs.order < rhs.order }
+            if lhs.collection != rhs.collection { return lhs.collection < rhs.collection }
+            return lhs.arrayIndex < rhs.arrayIndex
+        }
+
+        var proseAccumulator = ""
+        for event in events {
+            switch event.kind {
+            case .prose(let text):
+                proseAccumulator += text
+            case .omath(let i):
+                guard anchors[i] == nil else { continue }
+                // A direct child with neither source position nor explicit
+                // boundary metadata is intentionally unmatched/fail-loud.
+                if extracted[i].kind == .directChild,
+                   extracted[i].sourcePosition == nil {
+                    continue
+                }
+                let trailing = String(proseAccumulator.suffix(charsBefore))
+                    .trimmingCharacters(in: .whitespaces)
+                anchors[i] = DerivedContextAnchor(
+                    snippet: trailing,
+                    instance: trailing.isEmpty
+                        ? 1
+                        : occurrenceCount(of: trailing, in: proseAccumulator)
+                )
+            }
         }
 
         return anchors
+    }
+
+    private static func contextSerializerKey(
+        boundaryPlacement: ParagraphBoundaryPlacement?,
+        boundaryOrder: Int?,
+        position: Int?
+    ) -> (bucket: Int, order: Int) {
+        switch boundaryPlacement {
+        case .start?: return (0, boundaryOrder ?? 0)
+        case .end?: return (3, boundaryOrder ?? 0)
+        case nil:
+            if let position, position > 0 { return (1, position) }
+            return (2, 0)
+        }
     }
 
     private static func occurrenceCount(of needle: String, in haystack: String) -> Int {

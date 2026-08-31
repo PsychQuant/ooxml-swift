@@ -81,6 +81,8 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 **Rationale**: The former empty-string sentinel conflated leading and unmatched equations, while hard-coded `instance: 1` misplaced repeated prose. Global reverse mutation also left later equations behind when an earlier source item failed. XML admission is global and separated from namespace policy so malformed input always fails with `OMathSpliceMalformedXMLError`, independent of source order, before any mutation; partial-success semantics apply only to later context-anchor group failures. Explicit occurrence state plus source-ordered, group-atomic application makes failure loud, partial success inspectable, and final document order stable (#125).
 
+Context derivation consumes a Run/direct-OMath event stream sorted by the same four regions as `Paragraph.toXML()`: absolute start, positive positions, non-positive post-content, and absolute end. Runs precede direct unrecognized children at equal positive/non-positive positions, matching collection emission order. Array order alone is never used as document order.
+
 ### Direct-child text anchors
 
 **Decision**: Direct-child OMath uses the same Run-anchor resolution as inline OMath. The target Run is split at the original UTF-16 boundary, surrounding carriers are shifted in the canonical position space, and the direct child receives the unique position between prefix and suffix.
@@ -96,6 +98,8 @@ When a visible-text Run also carries post-text `rawElements`, splitting clears t
 **Decision**: Carry the source direct-child local name through extraction and use it when creating the target `UnrecognizedChild`.
 
 **Rationale**: Hardcoding `oMath` made typed metadata disagree with an `oMathPara` raw root and broke subsequent carrier-sensitive operations (#124).
+
+Validation also rejects a source or relevant target direct-child carrier when its stored `name` disagrees with the validated raw root local name. Both values must describe the same carrier before mutation.
 
 ### Default `OMathSpliceRpRMode = .full`
 
