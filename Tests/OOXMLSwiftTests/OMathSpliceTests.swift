@@ -1217,6 +1217,42 @@ final class OMathSpliceTests: XCTestCase {
         )
     }
 
+    func testBoundaryDirectChildCanBeReusedAsBatchSourceBeforeReload() throws {
+        let source = try parseParagraph(xml: Self.sourceDirectChildOMath)
+        var intermediate = makeDocument(with: Paragraph(runs: [Run(text: " suffix")]))
+        try intermediate.spliceOMath(from: source, toBodyParagraphIndex: 0, position: .atStart)
+        guard case .paragraph(let boundarySource) = intermediate.body.children[0] else { XCTFail(); return }
+
+        var target = makeDocument(with: Paragraph(runs: [Run(text: " suffix")]))
+        XCTAssertEqual(
+            try target.spliceParagraphOMath(from: boundarySource, toBodyParagraphIndex: 0),
+            1
+        )
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        let xml = result.toXML()
+        XCTAssertLessThan(
+            try XCTUnwrap(xml.range(of: "<m:oMath")?.lowerBound),
+            try XCTUnwrap(xml.range(of: " suffix")?.lowerBound)
+        )
+    }
+
+    func testNegativePositionCarrierSurvivesAbsoluteBoundarySplice() throws {
+        let source = try parseParagraph(xml: Self.sourceInlineRunOMath)
+        var negative = Run(text: "NEGATIVE_SENTINEL")
+        negative.position = -7
+        var target = makeDocument(with: Paragraph(runs: [negative]))
+
+        try target.spliceOMath(from: source, toBodyParagraphIndex: 0, position: .atEnd)
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        let xml = result.toXML()
+        XCTAssertTrue(xml.contains("NEGATIVE_SENTINEL"))
+        XCTAssertLessThan(
+            try XCTUnwrap(xml.range(of: "NEGATIVE_SENTINEL")?.lowerBound),
+            try XCTUnwrap(xml.range(of: "<m:oMath")?.lowerBound)
+        )
+        XCTAssertEqual(OMathExtractor.extract(from: result).count, 1)
+    }
+
     func testNamespacePolicyDecodesEntitiesFailsClosedAndHandlesDefaultStrict() throws {
         let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
         let entityURI = "http://schemas.openxmlformats.org/officeDocument/2006/&#x6D;ath"
@@ -1279,6 +1315,62 @@ final class OMathSpliceTests: XCTestCase {
             position: .atEnd,
             namespacePolicy: .strict
         ))
+
+        var directFirst = Paragraph()
+        directFirst.unrecognizedChildren = [
+            UnrecognizedChild(
+                name: "oMath",
+                rawXML: "<mml:oMath xmlns:mml='\(uri)'><mml:r/></mml:oMath>",
+                position: 1
+            )
+        ]
+        var laterRun = Run(text: "")
+        laterRun.rawXML = "<m:oMath xmlns:m='\(uri)'><m:r/></m:oMath>"
+        laterRun.position = 2
+        directFirst.runs = [laterRun]
+        var directFirstDocument = makeDocument(with: directFirst)
+        XCTAssertThrowsError(try directFirstDocument.spliceOMath(
+            from: Paragraph(runs: [mSource]),
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            namespacePolicy: .strict
+        )) { error in
+            guard case .namespaceMismatch = error as? OMathSpliceError else {
+                return XCTFail("Expected first direct-child prefix mismatch, got \(error)")
+            }
+        }
+    }
+
+    func testNamespaceValidityGateRejectsInvalidXMLWithoutMutation() throws {
+        let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        let invalidFragments = [
+            "<m:oMath xmlns:m='\(uri)' xmlns:m='\(uri)'/>",
+            "<m:oMath xmlns:m='\(uri)'><m:r p:flag='1'/></m:oMath>",
+            "<:oMath xmlns='\(uri)'/>",
+            "<m:oMath xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/&#X6D;ath'/>",
+            "<m:oMath xmlns:m='\(uri)'><m:t>&#0;</m:t></m:oMath>",
+        ]
+
+        for fragment in invalidFragments {
+            var run = Run(text: "")
+            run.rawXML = fragment
+            var target = makeDocument(with: Paragraph(runs: [Run(text: "UNCHANGED")]))
+            XCTAssertThrowsError(
+                try target.spliceOMath(
+                    from: Paragraph(runs: [run]),
+                    toBodyParagraphIndex: 0,
+                    position: .atEnd
+                ),
+                "Expected malformed rejection for \(fragment)"
+            ) { error in
+                guard case .malformedOMathXML = error as? OMathSpliceError else {
+                    return XCTFail("Expected malformedOMathXML, got \(error) for \(fragment)")
+                }
+            }
+            guard case .paragraph(let unchanged) = target.body.children[0] else { XCTFail(); return }
+            XCTAssertEqual(unchanged.text, "UNCHANGED")
+            XCTAssertFalse(unchanged.toXML().contains("oMath"))
+        }
     }
 
     // MARK: - No regression (6.14)

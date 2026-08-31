@@ -796,7 +796,7 @@ extension Paragraph {
         // unconditionally → API-built marker (constructed with position 0)
         // sorted BEFORE every source-loaded child (position >= 1) and
         // landed at paragraph head. Post-content section below emits the
-        // position-0 entries in append position to mirror the
+        // non-positive entries in append position to mirror the
         // contentControls + runs / hyperlinks / fieldSimples /
         // alternateContents handling.
         for marker in bookmarkMarkers where (marker.position ?? 0) > 0 {
@@ -824,7 +824,7 @@ extension Paragraph {
             positioned.append((child.position!, .xml(child.rawXML)))
         }
         // v0.19.4+ (#56 R3-NEW-2): paragraph-level <w:sdt> with source position
-        // joins the sorted emit. Position-0 controls are API-built and stay on
+        // joins the sorted emit. Non-positive controls are API-built/legacy and stay on
         // the post-content legacy path below for backward-compatibility.
         for control in contentControls where (control.position ?? 0) > 0 {
             positioned.append((control.position!, .xml(control.toXML())))
@@ -878,58 +878,58 @@ extension Paragraph {
         // children emitted. For source-loaded paragraphs these collections are
         // empty (parser populates the positioned variants instead).
         //
-        // v0.19.4+ (#56 R3-NEW-2): only emit position-0 contentControls here
+        // v0.19.4+ (#56 R3-NEW-2): only emit non-positive contentControls here
         // (API-built). Position>0 controls were already emitted in the sorted
         // list above at their source position; emitting them again would
         // duplicate the SDT in the output.
-        for control in contentControls where (control.position ?? 0) == 0 {
+        for control in contentControls where (control.position ?? 0) <= 0 {
             xml += control.toXML()
         }
         // v0.19.5+ (#56 R5-CONT P0 #6): symmetric post-content emit for
-        // API-built (position == 0) runs / hyperlinks / fieldSimples /
+        // API-built/legacy (position <= 0) runs / hyperlinks / fieldSimples /
         // alternateContents. Pre-fix these defaulted to position 0 in
         // the positioned-list and sorted BEFORE every source child
         // (position >= 1), so an MCP `insertText` against a source-loaded
         // paragraph silently relocated text to the paragraph head. Now they
         // emit AFTER source-loaded children, matching the append semantics
         // that contentControls (R5 P0 #2) and the legacy emit path use.
-        for run in runs where run.paragraphBoundaryPlacement == nil && (run.position ?? 0) == 0 {
+        for run in runs where run.paragraphBoundaryPlacement == nil && (run.position ?? 0) <= 0 {
             xml += Self.emitRun(run, asDelText: false, paragraphRevisions: revisions)
         }
-        for hyperlink in hyperlinks where (hyperlink.position ?? 0) == 0 {
+        for hyperlink in hyperlinks where (hyperlink.position ?? 0) <= 0 {
             xml += hyperlink.toXML()
         }
-        for field in fieldSimples where (field.position ?? 0) == 0 {
+        for field in fieldSimples where (field.position ?? 0) <= 0 {
             xml += Self.emitFieldSimple(field)
         }
-        for ac in alternateContents where (ac.position ?? 0) == 0 {
+        for ac in alternateContents where (ac.position ?? 0) <= 0 {
             xml += ac.rawXML
         }
         // v0.19.5+ (#56 R5-CONT-2 P0 #4): post-content emit for the 8
-        // remaining position-0 collections — completes the sweep
+        // remaining non-positive collections — completes the sweep
         // R5-CONT P0 #6 only half-covered. Symmetric with the above.
-        for marker in bookmarkMarkers where (marker.position ?? 0) == 0 {
+        for marker in bookmarkMarkers where (marker.position ?? 0) <= 0 {
             xml += Self.emitBookmarkMarker(marker, paragraph: self)
         }
-        for marker in commentRangeMarkers where (marker.position ?? 0) == 0 {
+        for marker in commentRangeMarkers where (marker.position ?? 0) <= 0 {
             xml += Self.emitCommentRangeMarker(marker)
         }
-        for marker in permissionRangeMarkers where (marker.position ?? 0) == 0 {
+        for marker in permissionRangeMarkers where (marker.position ?? 0) <= 0 {
             xml += Self.emitPermissionRangeMarker(marker)
         }
-        for marker in proofErrorMarkers where (marker.position ?? 0) == 0 {
+        for marker in proofErrorMarkers where (marker.position ?? 0) <= 0 {
             xml += "<w:proofErr w:type=\"\(marker.type.rawValue)\"/>"
         }
-        for tag in smartTags where (tag.position ?? 0) == 0 {
+        for tag in smartTags where (tag.position ?? 0) <= 0 {
             xml += tag.rawXML
         }
-        for block in customXmlBlocks where (block.position ?? 0) == 0 {
+        for block in customXmlBlocks where (block.position ?? 0) <= 0 {
             xml += block.rawXML
         }
-        for block in bidiOverrides where (block.position ?? 0) == 0 {
+        for block in bidiOverrides where (block.position ?? 0) <= 0 {
             xml += block.rawXML
         }
-        for child in unrecognizedChildren where child.paragraphBoundaryPlacement == nil && (child.position ?? 0) == 0 {
+        for child in unrecognizedChildren where child.paragraphBoundaryPlacement == nil && (child.position ?? 0) <= 0 {
             xml += child.rawXML
         }
         // v0.19.4+ (#56 R3-NEW-3): per-id gate (see pre-content emit above).

@@ -94,8 +94,9 @@ internal enum OMathExtractor {
     /// 2. `Paragraph.unrecognizedChildren` where `name == "oMath" || "oMathPara"`
     ///    (direct-child OMath, per #99/#100/#101/#102)
     ///
-    /// Joint sort by `position ?? 0` to implement caller-intuitive index semantics:
-    /// "Nth OMath in source-document order, regardless of carrier" (Decision Q2).
+    /// Joint sort mirrors Paragraph's four serializer regions: absolute start,
+    /// positive positions, non-positive post-content, and absolute end.
+    /// Stable collection sequence breaks ties across Run/direct-child carriers.
     ///
     /// Spec: Carrier preservation strategy (Decision Q1)
     static func extract(from paragraph: Paragraph) -> [ExtractedOMath] {
@@ -218,7 +219,16 @@ internal enum OMathNamespace {
     }
 
     internal static func isWellFormed(_ xml: String) -> Bool {
-        (try? XmlTreeReader.parse(Data(xml.utf8))) != nil
+        // XmlTreeReader is intentionally a lossless OOXML subset parser and
+        // does not enforce every namespace/QName/XML 1.0 validity rule. Use
+        // Foundation/libxml2 as the strict admission gate; reject DTDs because
+        // OMath fragments never require them and external entities are out of scope.
+        guard !xml.localizedCaseInsensitiveContains("<!DOCTYPE"),
+              let document = try? XMLDocument(data: Data(xml.utf8)),
+              document.rootElement() != nil else {
+            return false
+        }
+        return true
     }
 
     private static func prefix(fromQualifiedName qualifiedName: String) -> String? {

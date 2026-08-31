@@ -37,6 +37,7 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 - **THEN** every existing carrier SHALL retain its relative serialized order
 - **AND** the new OMath SHALL serialize after all of them
 - **AND** hostile or API-built positions such as `Int.max` SHALL neither overflow nor be rewritten for ordinary boundary insertion
+- **AND** negative-position carriers SHALL remain visible in the non-positive post-content bucket rather than being dropped
 
 #### Scenario: At-start precedes every paragraph carrier
 
@@ -118,7 +119,7 @@ The system SHALL provide `OMathSpliceRpRMode` with three modes controlling how t
 #### Scenario: .omathOnly mode copies whitelisted fields
 
 - **WHEN** caller invokes `spliceOMath(..., rPrMode: .omathOnly)`
-- **THEN** the new OMath Run's `properties` SHALL contain ONLY `rFonts`, `sz`, `szCs`, `lang`, `bold`, `italic` from the source
+- **THEN** the new OMath Run's `properties` SHALL contain ONLY `rFonts`, legacy `fontName`, `fontSize`, `lang`, `bold`, and `italic` from the source
 - **AND** all other fields (`rStyle`, `color`, `highlight`, `verticalAlign`, etc.) SHALL be `nil` / default
 
 #### Scenario: .discard mode resets to default rPr
@@ -157,6 +158,7 @@ The system SHALL provide `OMathSpliceNamespacePolicy` with `.lenient` (default) 
 - **WHEN** the source OMath root or namespace attributes are not well-formed XML
 - **THEN** splice SHALL throw `OMathSpliceError.malformedOMathXML`
 - **AND** the target paragraph SHALL remain unchanged
+- **AND** duplicate namespace attributes, unbound prefixes, invalid QNames, forbidden XML 1.0 character references, and DTD-bearing fragments SHALL be rejected
 
 ### Requirement: Paragraph-level batch splice with auto-anchor derivation
 
@@ -197,6 +199,7 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 
 - **WHEN** multiple inline and/or direct-child OMath carriers are inserted into the same absolute boundary
 - **THEN** `OMathExtractor.extract` and `omathIndex` SHALL expose them in the same order as paragraph serialization
+- **AND** an unsaved direct-child absolute-boundary paragraph SHALL be usable immediately as a batch source
 
 #### Scenario: Context anchor not found for one OMath
 
