@@ -33,7 +33,7 @@
 - [x] 5.1 Implement public `WordDocument.spliceParagraphOMath(from:toBodyParagraphIndex:rPrMode:namespacePolicy:)` per Two-tier API: `spliceOMath` (single) + `spliceParagraphOMath` (batch) decision
 - [x] 5.2 For each extracted OMath, derive up to 10 trailing prose characters plus the source occurrence instance
 - [x] 5.3 Derive `(prefix, occurrence instance, absolute boundary placement)`, group shared boundaries, and call `spliceOMath` right-to-left for start/text groups or left-to-right for end groups
-- [x] 5.4 Globally preflight all XML fragments before anchor derivation/mutation; then preflight each anchor group and preserve only earlier source groups on later context failure
+- [x] 5.4 Run a complete global XML-validity phase before namespace policy and anchor derivation/mutation; then preflight each anchor group and preserve only earlier source groups on later context failure
 
 ## 6. Tests
 
@@ -80,8 +80,8 @@
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
 - [x] 10.7 Derive anchor occurrence instances; preserve explicit start/end lane metadata; apply source-ordered start/text groups right-to-left and end groups left-to-right
 - [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, quote-complete namespace checks, and structural single-fragment admission limited to XML 1.0 `S` framing
-- [x] 10.9 Run `OMathSpliceTests`: 57 tests, 0 failures
-- [x] 10.10 Re-run full package regression: 1,485 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-10 remediation commit
+- [x] 10.9 Run `OMathSpliceTests`: 58 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,486 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-11 remediation commit
 
 ## 11. Reload fidelity contract remediation (#123)
 

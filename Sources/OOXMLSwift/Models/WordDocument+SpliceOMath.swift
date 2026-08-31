@@ -118,10 +118,18 @@ extension WordDocument {
             throw OMathSpliceError.targetParagraphOutOfRange(toBodyParagraphIndex)
         }
 
-        // Malformed XML is a global admission failure, not an anchor-group
-        // failure. Validate every extracted source fragment (and the initial
-        // target OMath, when present) before deriving contexts or mutating any
-        // earlier group. This preserves error precedence and target atomicity.
+        // Phase 1 — XML validity only. Malformed XML has precedence over
+        // namespace policy regardless of source order, so scan every source
+        // and the relevant initial-target fragment before comparing any URI.
+        for omath in extracted {
+            try Self.validateOMathFragment(omath.xml)
+        }
+        if let existingTarget = OMathExtractor.extract(from: initialTarget).first {
+            try Self.validateOMathFragment(existingTarget.xml)
+        }
+
+        // Phase 2 — namespace policy. Only a fully valid batch reaches this
+        // phase; policy errors therefore cannot mask a later malformed item.
         for omath in extracted {
             try Self.checkNamespacePolicy(
                 source: omath.xml,
@@ -249,8 +257,8 @@ extension WordDocument {
         policy: OMathSpliceNamespacePolicy
     ) throws {
         let standardOMMLURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
-        guard OMathNamespace.isWellFormed(source),
-              let sourceURI = OMathNamespace.extractURI(from: source) else {
+        try validateOMathFragment(source)
+        guard let sourceURI = OMathNamespace.extractURI(from: source) else {
             throw OMathSpliceMalformedXMLError()
         }
         let sourcePrefix = OMathNamespace.extractPrefix(from: source) ?? ""
@@ -261,8 +269,8 @@ extension WordDocument {
         var targetURI: String = standardOMMLURI
         var targetPrefix: String = "m"
         if let existing = OMathExtractor.extract(from: targetParagraph).first {
-            guard OMathNamespace.isWellFormed(existing.xml),
-                  let uri = OMathNamespace.extractURI(from: existing.xml) else {
+            try validateOMathFragment(existing.xml)
+            guard let uri = OMathNamespace.extractURI(from: existing.xml) else {
                 throw OMathSpliceMalformedXMLError()
             }
             targetURI = uri
@@ -274,6 +282,16 @@ extension WordDocument {
         }
         if policy == .strict && sourcePrefix != targetPrefix {
             throw OMathSpliceError.namespaceMismatch(sourceURI: sourceURI, targetURI: targetURI)
+        }
+    }
+
+    /// XML admission primitive deliberately separated from namespace policy.
+    /// Batch mode runs this for the entire source set first so a malformed item
+    /// always wins over URI/prefix mismatches in earlier items.
+    internal static func validateOMathFragment(_ xml: String) throws {
+        guard OMathNamespace.isWellFormed(xml),
+              OMathNamespace.extractURI(from: xml) != nil else {
+            throw OMathSpliceMalformedXMLError()
         }
     }
 

@@ -983,6 +983,33 @@ final class OMathSpliceTests: XCTestCase {
         XCTAssertEqual(result, originalTarget, "Global malformed preflight must precede every group mutation")
     }
 
+    func testBatchMalformedPrecedesNamespaceMismatchInEitherSourceOrder() throws {
+        let standardURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        var vendor = Run(text: "")
+        vendor.rawXML = "<v:oMath xmlns:v='http://example.com/vendor/math'/>"
+        var malformed = Run(text: "")
+        malformed.rawXML = "<m:oMath xmlns:m='\(standardURI)' xmlns:m='\(standardURI)'/>"
+
+        for mathRuns in [[vendor, malformed], [malformed, vendor]] {
+            let source = Paragraph(runs: [
+                Run(text: "first "), mathRuns[0],
+                Run(text: " second "), mathRuns[1],
+            ])
+            let originalTarget = Paragraph(runs: [Run(text: "first  second ")])
+            var target = makeDocument(with: originalTarget)
+
+            XCTAssertThrowsError(
+                try target.spliceParagraphOMath(from: source, toBodyParagraphIndex: 0)
+            ) { error in
+                guard error is OMathSpliceMalformedXMLError else {
+                    return XCTFail("Malformed validity must precede namespace policy in either order, got \(error)")
+                }
+            }
+            guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+            XCTAssertEqual(result, originalTarget)
+        }
+    }
+
     func testMathScriptInsensitiveAnchorOptionIsApplied() throws {
         let source = try parseParagraph(xml: Self.sourceInlineRunOMath)
         var target = makeDocument(with: Paragraph(runs: [Run(text: "H₀ result")]))
