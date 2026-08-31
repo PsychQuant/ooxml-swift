@@ -71,6 +71,63 @@ internal func rootElementLocalName(in xml: String) -> String? {
     return String(qualifiedName.split(separator: ":").last ?? "")
 }
 
+/// Reads one actual attribute from the root start tag. The tokenizer is
+/// quote-aware, so namespace-looking text inside an unrelated attribute value
+/// is never mistaken for a declaration. An explicitly empty value is returned
+/// as `""`, distinct from an absent attribute (`nil`).
+internal func rootElementAttributeValue(named targetName: String, in xml: String) -> String? {
+    guard let startTag = rootElementStartTag(in: xml),
+          let qualifiedName = rootElementQualifiedName(in: startTag),
+          let rootRange = startTag.range(of: "<\(qualifiedName)") else {
+        return nil
+    }
+
+    var index = rootRange.upperBound
+    func skipWhitespace() {
+        while index < startTag.endIndex, startTag[index].isWhitespace {
+            index = startTag.index(after: index)
+        }
+    }
+
+    while index < startTag.endIndex {
+        skipWhitespace()
+        guard index < startTag.endIndex,
+              startTag[index] != ">",
+              startTag[index] != "/" else { return nil }
+
+        let nameStart = index
+        while index < startTag.endIndex {
+            let character = startTag[index]
+            if character.isWhitespace || character == "=" || character == ">" || character == "/" {
+                break
+            }
+            index = startTag.index(after: index)
+        }
+        guard index > nameStart else { return nil }
+        let attributeName = String(startTag[nameStart..<index])
+
+        skipWhitespace()
+        guard index < startTag.endIndex, startTag[index] == "=" else { return nil }
+        index = startTag.index(after: index)
+        skipWhitespace()
+        guard index < startTag.endIndex,
+              startTag[index] == "\"" || startTag[index] == "'" else { return nil }
+
+        let quote = startTag[index]
+        index = startTag.index(after: index)
+        let valueStart = index
+        while index < startTag.endIndex, startTag[index] != quote {
+            index = startTag.index(after: index)
+        }
+        guard index < startTag.endIndex else { return nil }
+        let value = String(startTag[valueStart..<index])
+        index = startTag.index(after: index)
+
+        if attributeName == targetName { return value }
+    }
+    return nil
+}
+
 public struct Run {
     /// v0.31.1+ (Spectra `sibling-types-tree-projection-impl`,
     /// `word-aligned-state-sync` Phase 1 task 2.2): when non-nil, this Run is

@@ -677,8 +677,11 @@ final class OMathSpliceTests: XCTestCase {
             #"<x:oMath xmlns:x="urn:vendor:not-omml"><x:data/></x:oMath>"#,
             #"<x:oMath xmlns:x='urn:vendor:not-omml'><x:data/></x:oMath>"#,
             #"<m.math:oMath xmlns:m.math="urn:vendor:not-omml"><m.math:data/></m.math:oMath>"#,
+            #"<m:oMath note="xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/math'" xmlns:m="urn:vendor:not-omml"><m:data/></m:oMath>"#,
             #"<oMath xmlns="urn:vendor:not-omml"><data/></oMath>"#,
             #"<oMath xmlns='urn:vendor:not-omml'><data/></oMath>"#,
+            #"<oMath note='xmlns="http://schemas.openxmlformats.org/officeDocument/2006/math"' xmlns="urn:vendor:not-omml"><data/></oMath>"#,
+            #"<oMath xmlns=""><data/></oMath>"#,
         ]
         for vendorXML in vendorFragments {
             var run = Run(text: "")
@@ -704,8 +707,10 @@ final class OMathSpliceTests: XCTestCase {
         let standardFragments = [
             #"<m:oMath xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/math'><m:r><m:t>α</m:t></m:r></m:oMath>"#,
             #"<m.math:oMath xmlns:m.math="http://schemas.openxmlformats.org/officeDocument/2006/math"><m.math:r/></m.math:oMath>"#,
+            #"<m:oMath note="xmlns:m='urn:vendor:fake'" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r/></m:oMath>"#,
             #"<oMath xmlns="http://schemas.openxmlformats.org/officeDocument/2006/math"><r><t>α</t></r></oMath>"#,
             #"<oMath xmlns='http://schemas.openxmlformats.org/officeDocument/2006/math'><r><t>α</t></r></oMath>"#,
+            #"<oMath note='xmlns="urn:vendor:fake"' xmlns="http://schemas.openxmlformats.org/officeDocument/2006/math"><r/></oMath>"#,
             #"<m:oMath><m:r xmlns:m="urn:vendor:nested-shadow"><m:t>α</m:t></m:r></m:oMath>"#,
             #"<oMath><r xmlns="urn:vendor:nested-shadow"><t>α</t></r></oMath>"#,
         ]
@@ -751,6 +756,24 @@ final class OMathSpliceTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at: url) }
             try DocxWriter.write(target, to: url)
             XCTAssertNoThrow(try DocxReader.read(from: url), "Self-contained root namespace must reload")
+        }
+    }
+
+    func testNamespaceLookingAttributeTextDoesNotSuppressRootInjection() {
+        let standardURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        let cases = [
+            (
+                #"<m:oMath note="xmlns:m='urn:vendor:fake'"><m:r/></m:oMath>"#,
+                #"<m:oMath xmlns:m="\#(standardURI)""#
+            ),
+            (
+                #"<oMath note='xmlns="urn:vendor:fake"'><r/></oMath>"#,
+                #"<oMath xmlns="\#(standardURI)""#
+            ),
+        ]
+        for (fragment, expectedPrefix) in cases {
+            let ensured = OMathExtractor.ensureXmlnsDeclared(in: fragment)
+            XCTAssertTrue(ensured.hasPrefix(expectedPrefix), "Got: \(ensured)")
         }
     }
 
