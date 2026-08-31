@@ -3,6 +3,7 @@
 - [x] 1.1 Create `Sources/OOXMLSwift/Models/OMathSplice.swift` with `OMathSplicePosition`, `OMathSpliceRpRMode`, `OMathSpliceNamespacePolicy`, `OMathSpliceError` enums (Decision: Lenient namespace policy by default; Decision: Default `OMathSpliceRpRMode = .full`)
 - [x] 1.2 Add `ExtractedOMath` carrier, boundary placement/order, source position, and stable sequence metadata supporting joint serializer-order `omathIndex`
 - [x] 1.3 Reuse existing `AnchorLookupOptions` from `InsertLocation.swift` for `.afterText` / `.beforeText` parameter types
+- [x] 1.4 Keep the released six-case `OMathSpliceError` source-compatible; report malformed fragments through additive `OMathSpliceMalformedXMLError`
 
 ## 2. Source extraction
 
@@ -79,8 +80,8 @@
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
 - [x] 10.7 Derive anchor occurrence instances; preserve explicit start/end lane metadata; apply source-ordered start/text groups right-to-left and end groups left-to-right
 - [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, quote-complete namespace checks, and structural single-fragment admission limited to XML 1.0 `S` framing
-- [x] 10.9 Run `OMathSpliceTests`: 54 tests, 0 failures
-- [x] 10.10 Re-run full package regression: 1,482 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-7 remediation commit
+- [x] 10.9 Run `OMathSpliceTests`: 55 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,483 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-9 remediation commit
 
 ## 11. Reload fidelity contract remediation (#123)
 

@@ -34,7 +34,8 @@ extension WordDocument {
     ///   - rPrMode: how to propagate source Run rPr to the new OMath Run (Q4)
     ///   - namespacePolicy: how to handle prefix / URI mismatch (Q6)
     /// - Returns: number of OMath blocks spliced (always 1 in this single-OMath API)
-    /// - Throws: `OMathSpliceError` per the failure taxonomy
+    /// - Throws: `OMathSpliceError` for splice/anchor/namespace failures, or
+    ///   `OMathSpliceMalformedXMLError` when a source/target OMath fragment is invalid
     @discardableResult
     public mutating func spliceOMath(
         from sourceParagraph: Paragraph,
@@ -247,7 +248,7 @@ extension WordDocument {
         let standardOMMLURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
         guard OMathNamespace.isWellFormed(source),
               let sourceURI = OMathNamespace.extractURI(from: source) else {
-            throw OMathSpliceError.malformedOMathXML
+            throw OMathSpliceMalformedXMLError()
         }
         let sourcePrefix = OMathNamespace.extractPrefix(from: source) ?? ""
 
@@ -259,7 +260,7 @@ extension WordDocument {
         if let existing = OMathExtractor.extract(from: targetParagraph).first {
             guard OMathNamespace.isWellFormed(existing.xml),
                   let uri = OMathNamespace.extractURI(from: existing.xml) else {
-                throw OMathSpliceError.malformedOMathXML
+                throw OMathSpliceMalformedXMLError()
             }
             targetURI = uri
             targetPrefix = OMathNamespace.extractPrefix(from: existing.xml) ?? ""
