@@ -1452,17 +1452,27 @@ final class OMathSpliceTests: XCTestCase {
 
     func testNamespaceValidityGateAllowsOnlyXMLSOutsidePayloadRoot() throws {
         let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
-        var run = Run(text: "")
-        run.rawXML = " \t\n<m:oMath xmlns:m='\(uri)'/>\r "
-        var target = makeDocument(with: Paragraph(runs: [Run(text: "UNCHANGED")]))
+        let framings = [
+            (" \t\n", "\r "),
+            ("\r\n", ""),
+            ("", "\r\n"),
+            ("\r\n", "\r\n"),
+            (" \t\r\n", "\r\n "),
+        ]
 
-        XCTAssertNoThrow(try target.spliceOMath(
-            from: Paragraph(runs: [run]),
-            toBodyParagraphIndex: 0,
-            position: .atEnd
-        ))
-        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
-        XCTAssertTrue(result.toXML().contains("<m:oMath"))
+        for (leading, trailing) in framings {
+            var run = Run(text: "")
+            run.rawXML = "\(leading)<m:oMath xmlns:m='\(uri)'/>\(trailing)"
+            var target = makeDocument(with: Paragraph(runs: [Run(text: "UNCHANGED")]))
+
+            XCTAssertNoThrow(try target.spliceOMath(
+                from: Paragraph(runs: [run]),
+                toBodyParagraphIndex: 0,
+                position: .atEnd
+            ), "Expected XML S framing to remain legal: \(leading.debugDescription) / \(trailing.debugDescription)")
+            guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+            XCTAssertTrue(result.toXML().contains("<m:oMath"))
+        }
     }
 
     // MARK: - No regression (6.14)

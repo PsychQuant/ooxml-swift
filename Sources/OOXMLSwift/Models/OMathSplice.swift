@@ -275,21 +275,23 @@ internal enum OMathNamespace {
     /// requiring the first remaining character to be `<` keeps admission,
     /// retained rawXML, and serialization consistent.
     private static func trimmingXMLS(in xml: String) -> Substring {
-        var lower = xml.startIndex
-        var upper = xml.endIndex
-        while lower < upper, isXMLS(xml[lower]) {
-            lower = xml.index(after: lower)
+        let scalars = xml.unicodeScalars
+        var lower = scalars.startIndex
+        var upper = scalars.endIndex
+        while lower < upper, isXMLS(scalars[lower]) {
+            lower = scalars.index(after: lower)
         }
         while upper > lower {
-            let previous = xml.index(before: upper)
-            guard isXMLS(xml[previous]) else { break }
+            let previous = scalars.index(before: upper)
+            guard isXMLS(scalars[previous]) else { break }
             upper = previous
         }
         return xml[lower..<upper]
     }
 
-    private static func isXMLS(_ character: Character) -> Bool {
-        character == " " || character == "\t" || character == "\r" || character == "\n"
+    private static func isXMLS(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.value == 0x20 || scalar.value == 0x09
+            || scalar.value == 0x0D || scalar.value == 0x0A
     }
 
     private static func prefix(fromQualifiedName qualifiedName: String) -> String? {
