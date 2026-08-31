@@ -124,11 +124,19 @@ extension WordDocument {
         )
 
         var spliced = 0
-        for (i, omath) in extracted.enumerated() {
-            let snippet = prefixContexts[i]
-            // Empty prefix → fall back to .atEnd (OMath at start of paragraph).
+        // Apply from right to left. Multiple OMath blocks can share the same
+        // text anchor (including an empty leading anchor); reverse mutation
+        // keeps their final document order equal to source order.
+        for i in extracted.indices.reversed() {
+            guard let snippet = prefixContexts[i] else {
+                throw OMathSpliceError.contextAnchorNotFound(
+                    omathIndex: i,
+                    snippet: ""
+                )
+            }
+            // A matched empty prefix means the OMath leads the source paragraph.
             let position: OMathSplicePosition = snippet.isEmpty
-                ? .atEnd
+                ? .atStart
                 : .afterText(snippet, instance: 1, options: AnchorLookupOptions())
 
             do {
@@ -148,7 +156,6 @@ extension WordDocument {
                 )
             }
         }
-        _ = extracted  // retain captured array (loop already used); silences Swift hint
         return spliced
     }
 
@@ -236,15 +243,14 @@ extension WordDocument {
 
         switch position {
         case .atStart:
-            // Position 0 routes through the post-content legacy path and emits at end.
-            // To get "atStart" semantically, give it a position smaller than any existing.
-            let minPos = targetPara.runs.compactMap { $0.position }.min() ?? 1
-            omathRun.position = max(1, minPos - 1)
+            materializePostContentPositions(in: &targetPara)
+            shiftAllPositionedContentForward(in: &targetPara)
+            omathRun.position = 1
             targetPara.runs.insert(omathRun, at: 0)
 
         case .atEnd:
-            // Place after all current content. Use max existing position + 1.
-            let maxPos = targetPara.runs.compactMap { $0.position }.max() ?? 0
+            materializePostContentPositions(in: &targetPara)
+            let maxPos = paragraphAllPositions(targetPara).max() ?? 0
             omathRun.position = maxPos + 1
             targetPara.runs.append(omathRun)
 
@@ -456,10 +462,12 @@ extension WordDocument {
         var newPos: Int
         switch position {
         case .atStart:
-            let allPositions = paragraphAllPositions(targetPara)
-            newPos = max(1, (allPositions.min() ?? 1) - 1)
+            materializePostContentPositions(in: &targetPara)
+            shiftAllPositionedContentForward(in: &targetPara)
+            newPos = 1
 
         case .atEnd:
+            materializePostContentPositions(in: &targetPara)
             let allPositions = paragraphAllPositions(targetPara)
             newPos = (allPositions.max() ?? 0) + 1
 
@@ -472,13 +480,20 @@ extension WordDocument {
         }
 
         targetPara.unrecognizedChildren.append(
-            UnrecognizedChild(name: "oMath", rawXML: omath.xml, position: newPos)
+            UnrecognizedChild(
+                name: omath.directChildName ?? "oMath",
+                rawXML: omath.xml,
+                position: newPos
+            )
         )
     }
 
     private static func paragraphAllPositions(_ para: Paragraph) -> [Int] {
         var positions: [Int] = []
         positions += para.runs.compactMap { $0.position }
+        positions += para.hyperlinks.compactMap { $0.position }
+        positions += para.fieldSimples.compactMap { $0.position }
+        positions += para.alternateContents.compactMap { $0.position }
         positions += para.unrecognizedChildren.compactMap { $0.position }
         positions += para.bookmarkMarkers.compactMap { $0.position }
         positions += para.commentRangeMarkers.compactMap { $0.position }
@@ -491,6 +506,74 @@ extension WordDocument {
         return positions
     }
 
+    /// Convert nil/zero position carriers into the same order in which
+    /// Paragraph's post-content serializer currently emits them. Existing
+    /// positive positions remain untouched, so the serialized order is stable
+    /// while a subsequent append can receive a true maximum position.
+    private static func materializePostContentPositions(in para: inout Paragraph) {
+        var next = (paragraphAllPositions(para).filter { $0 > 0 }.max() ?? 0) + 1
+
+        materializePositions(in: &para.contentControls, at: \ContentControl.position, next: &next)
+
+        var runs = para.runs
+        materializePositions(in: &runs, at: \Run.position, next: &next)
+        para.runs = runs
+
+        materializePositions(in: &para.hyperlinks, at: \Hyperlink.position, next: &next)
+        materializePositions(in: &para.fieldSimples, at: \FieldSimple.position, next: &next)
+        materializePositions(in: &para.alternateContents, at: \AlternateContent.position, next: &next)
+        materializePositions(in: &para.bookmarkMarkers, at: \BookmarkRangeMarker.position, next: &next)
+        materializePositions(in: &para.commentRangeMarkers, at: \CommentRangeMarker.position, next: &next)
+        materializePositions(in: &para.permissionRangeMarkers, at: \PermissionRangeMarker.position, next: &next)
+        materializePositions(in: &para.proofErrorMarkers, at: \ProofErrorMarker.position, next: &next)
+        materializePositions(in: &para.smartTags, at: \SmartTagBlock.position, next: &next)
+        materializePositions(in: &para.customXmlBlocks, at: \CustomXmlBlock.position, next: &next)
+        materializePositions(in: &para.bidiOverrides, at: \BidiOverrideBlock.position, next: &next)
+        materializePositions(in: &para.unrecognizedChildren, at: \UnrecognizedChild.position, next: &next)
+    }
+
+    private static func materializePositions<Element>(
+        in elements: inout [Element],
+        at keyPath: WritableKeyPath<Element, Int?>,
+        next: inout Int
+    ) {
+        for index in elements.indices where (elements[index][keyPath: keyPath] ?? 0) <= 0 {
+            elements[index][keyPath: keyPath] = next
+            next += 1
+        }
+    }
+
+    private static func shiftAllPositionedContentForward(in para: inout Paragraph) {
+        shiftPositions(in: &para.contentControls, at: \ContentControl.position)
+
+        var runs = para.runs
+        shiftPositions(in: &runs, at: \Run.position)
+        para.runs = runs
+
+        shiftPositions(in: &para.hyperlinks, at: \Hyperlink.position)
+        shiftPositions(in: &para.fieldSimples, at: \FieldSimple.position)
+        shiftPositions(in: &para.alternateContents, at: \AlternateContent.position)
+        shiftPositions(in: &para.bookmarkMarkers, at: \BookmarkRangeMarker.position)
+        shiftPositions(in: &para.commentRangeMarkers, at: \CommentRangeMarker.position)
+        shiftPositions(in: &para.permissionRangeMarkers, at: \PermissionRangeMarker.position)
+        shiftPositions(in: &para.proofErrorMarkers, at: \ProofErrorMarker.position)
+        shiftPositions(in: &para.smartTags, at: \SmartTagBlock.position)
+        shiftPositions(in: &para.customXmlBlocks, at: \CustomXmlBlock.position)
+        shiftPositions(in: &para.bidiOverrides, at: \BidiOverrideBlock.position)
+        shiftPositions(in: &para.unrecognizedChildren, at: \UnrecognizedChild.position)
+    }
+
+    private static func shiftPositions<Element>(
+        in elements: inout [Element],
+        at keyPath: WritableKeyPath<Element, Int?>
+    ) {
+        for index in elements.indices {
+            if let position = elements[index][keyPath: keyPath] {
+                elements[index][keyPath: keyPath] = position + 1
+            }
+        }
+    }
+
     /// For each extracted OMath in source order, derive a context anchor (~N chars of
     /// plain prose immediately preceding the OMath) for batch splice.
     ///
@@ -501,8 +584,8 @@ extension WordDocument {
         from sourceParagraph: Paragraph,
         forExtracted extracted: [ExtractedOMath],
         charsBefore: Int
-    ) -> [String] {
-        var anchors = [String](repeating: "", count: extracted.count)
+    ) -> [String?] {
+        var anchors = [String?](repeating: nil, count: extracted.count)
         var matchedExtractedIndices = Set<Int>()
         var proseAccumulator = ""
 
@@ -513,7 +596,8 @@ extension WordDocument {
                (raw.contains(":oMath") || raw.contains("<oMath") || raw.contains(":oMathPara") || raw.contains("<oMathPara")) {
                 // Find which extracted index this run corresponds to (by xml byte equality).
                 for (i, ex) in extracted.enumerated() where !matchedExtractedIndices.contains(i) {
-                    if ex.kind == .inRun && ex.xml == raw {
+                    if ex.kind == .inRun
+                        && ex.xml == OMathExtractor.ensureXmlnsDeclared(in: raw) {
                         let trailing = String(proseAccumulator.suffix(charsBefore)).trimmingCharacters(in: .whitespaces)
                         anchors[i] = trailing
                         matchedExtractedIndices.insert(i)
