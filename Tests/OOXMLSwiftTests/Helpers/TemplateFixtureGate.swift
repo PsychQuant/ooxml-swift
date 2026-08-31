@@ -17,6 +17,13 @@ enum TemplateFixtureGate {
     /// design.
     static var baselineTemplateName: String { "90_template_ja.docx" }
 
+    /// Private real-world REC form used by the raw-channel slot E2E matrix.
+    /// The filename is stable, but the document lives outside version control
+    /// and is supplied through the same MACDOC_TEMPLATE_DIR gate.
+    static var recFixtureName: String {
+        "REC-O-01-新案審查送件核對單-20250220公告.docx"
+    }
+
     /// Resolves a real-template fixture `name` under the gate directory
     /// (`dirOverride` when given — for tests injecting a temp dir without
     /// mutating process env — otherwise `$MACDOC_TEMPLATE_DIR`). Throws
