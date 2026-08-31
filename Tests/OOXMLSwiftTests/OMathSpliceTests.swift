@@ -1137,6 +1137,84 @@ final class OMathSpliceTests: XCTestCase {
         XCTAssertLessThan(secondPrefix, betaIndex, "Second equation must use second occurrence: \(xml)")
     }
 
+    func testTargetAnchorInstancesFollowParagraphSerializerOrder() throws {
+        let source = try parseParagraph(xml: Self.sourceInlineRunOMath)
+        func reversedTarget() -> WordDocument {
+            var second = Run(text: "ANCHOR_TWO")
+            second.position = 3
+            var first = Run(text: "ANCHOR_ONE")
+            first.position = 1
+            return makeDocument(with: Paragraph(runs: [second, first]))
+        }
+
+        var firstTarget = reversedTarget()
+        try firstTarget.spliceOMath(
+            from: source,
+            toBodyParagraphIndex: 0,
+            position: .afterText("ANCHOR", instance: 1)
+        )
+        guard case .paragraph(let firstResult) = firstTarget.body.children[0] else { XCTFail(); return }
+        let firstXML = firstResult.toXML()
+        XCTAssertLessThan(
+            try XCTUnwrap(firstXML.range(of: "<m:oMath")?.lowerBound),
+            try XCTUnwrap(firstXML.range(of: "_ONE")?.lowerBound)
+        )
+        XCTAssertLessThan(
+            try XCTUnwrap(firstXML.range(of: "_ONE")?.lowerBound),
+            try XCTUnwrap(firstXML.range(of: "ANCHOR_TWO")?.lowerBound)
+        )
+
+        var secondTarget = reversedTarget()
+        try secondTarget.spliceOMath(
+            from: source,
+            toBodyParagraphIndex: 0,
+            position: .afterText("ANCHOR", instance: 2)
+        )
+        guard case .paragraph(let secondResult) = secondTarget.body.children[0] else { XCTFail(); return }
+        let secondXML = secondResult.toXML()
+        XCTAssertLessThan(
+            try XCTUnwrap(secondXML.range(of: "ANCHOR_ONE")?.lowerBound),
+            try XCTUnwrap(secondXML.range(of: "<m:oMath")?.lowerBound)
+        )
+        XCTAssertLessThan(
+            try XCTUnwrap(secondXML.range(of: "<m:oMath")?.lowerBound),
+            try XCTUnwrap(secondXML.range(of: "_TWO")?.lowerBound)
+        )
+
+        var batchMath = Run(text: "")
+        batchMath.rawXML = "<m:oMath><m:r><m:t>β</m:t></m:r></m:oMath>"
+        let batchSource = Paragraph(runs: [Run(text: "ANCHOR"), batchMath])
+        var batchTarget = reversedTarget()
+        XCTAssertEqual(try batchTarget.spliceParagraphOMath(from: batchSource, toBodyParagraphIndex: 0), 1)
+        guard case .paragraph(let batchResult) = batchTarget.body.children[0] else { XCTFail(); return }
+        let batchXML = batchResult.toXML()
+        XCTAssertLessThan(
+            try XCTUnwrap(batchXML.range(of: "<m:oMath")?.lowerBound),
+            try XCTUnwrap(batchXML.range(of: "_ONE")?.lowerBound)
+        )
+
+        var equalFirst = Run(text: "ANCHOR_FIRST")
+        equalFirst.position = 1
+        var equalSecond = Run(text: "ANCHOR_SECOND")
+        equalSecond.position = 1
+        var equalTarget = makeDocument(with: Paragraph(runs: [equalFirst, equalSecond]))
+        try equalTarget.spliceOMath(
+            from: source,
+            toBodyParagraphIndex: 0,
+            position: .afterText("ANCHOR", instance: 1)
+        )
+        guard case .paragraph(let equalResult) = equalTarget.body.children[0] else { XCTFail(); return }
+        let equalXML = equalResult.toXML()
+        XCTAssertLessThan(
+            try XCTUnwrap(equalXML.range(of: "<m:oMath")?.lowerBound),
+            try XCTUnwrap(equalXML.range(of: "_FIRST")?.lowerBound)
+        )
+        XCTAssertLessThan(
+            try XCTUnwrap(equalXML.range(of: "_FIRST")?.lowerBound),
+            try XCTUnwrap(equalXML.range(of: "ANCHOR_SECOND")?.lowerBound)
+        )
+    }
+
     func testBatchFailurePreservesOnlyEarlierSourceGroups() throws {
         var alpha = Run(text: "")
         alpha.rawXML = "<m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>"

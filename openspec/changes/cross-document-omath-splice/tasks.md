@@ -29,6 +29,7 @@
 - [x] 4.5 Throw `.anchorNotFound(searchText, instance:)` when anchor not present in target paragraph
 - [x] 4.6 Exclude serializer-hidden typed text from Runs overridden by `rawXML`, `RunProperties.rawXML`, or `drawing`
 - [x] 4.7 Preserve post-text `rawElements` exactly once on the split suffix, including an empty-text suffix
+- [x] 4.8 Count target anchor occurrences in Paragraph serializer order while retaining original Run indices for mutation
 
 ## 5. Paragraph-level batch splice (high-level API)
 
@@ -82,8 +83,8 @@
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
 - [x] 10.7 Derive anchor occurrence instances in Paragraph serializer order; preserve explicit start/end lane metadata; apply source-ordered start/text groups right-to-left and end groups left-to-right
 - [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, quote-complete namespace checks, and structural single-fragment admission limited to XML 1.0 `S` framing
-- [x] 10.9 Run `OMathSpliceTests`: 65 tests, 0 failures
-- [x] 10.10 Re-run full package regression: 1,493 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-15 remediation commit
+- [x] 10.9 Run `OMathSpliceTests`: 66 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,494 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-16 remediation commit
 
 ## 11. Reload fidelity contract remediation (#123)
 

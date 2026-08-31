@@ -109,6 +109,7 @@ The system SHALL support `OMathSplicePosition.afterText(_, instance:, options:)`
 
 - **WHEN** caller invokes `spliceOMath` with `position: .afterText("檢定", instance: 2)` and the target paragraph contains "檢定" three times at character offsets 10, 30, 50
 - **THEN** the system SHALL splice the OMath at offset 32 (immediately after the second "檢定" occurrence)
+- **AND** occurrence counting SHALL follow Paragraph serializer order rather than Run array order when positions differ
 
 #### Scenario: Direct-child carrier honors text anchor
 
