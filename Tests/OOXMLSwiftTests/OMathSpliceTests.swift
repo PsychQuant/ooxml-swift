@@ -374,7 +374,11 @@ final class OMathSpliceTests: XCTestCase {
         }
         XCTAssertEqual(run.properties.lang, LanguageProperties(val: "en-US", eastAsia: "zh-TW"))
         XCTAssertNil(run.properties.rStyle)
+        XCTAssertEqual(run.properties.rFonts, RFontsProperties(ascii: "Cambria Math"))
+        XCTAssertEqual(run.properties.fontName, "Cambria Math")
         XCTAssertEqual(run.properties.fontSize, 24)
+        XCTAssertFalse(run.properties.strikethrough)
+        XCTAssertNil(run.properties.color)
     }
 
     // MARK: - Namespace policy tests (6.10)
@@ -1173,6 +1177,27 @@ final class OMathSpliceTests: XCTestCase {
             "<m:oMath xmlns:m='\(uri)' xmlns:p='unbound:p' p:flag='1'/>",
             "<m:oMath xmlns:m='\(uri)' p:flag='1'/>"
         ))
+
+        let undeclaredDefault = "<oMath xmlns='\(uri)'><r><t xmlns=''>plain</t></r></oMath>"
+        let neverDefaulted = "<m:oMath xmlns:m='\(uri)'><m:r><t>plain</t></m:r></m:oMath>"
+        let mathNamespacedText = "<m:oMath xmlns:m='\(uri)'><m:r><m:t>plain</m:t></m:r></m:oMath>"
+        XCTAssertTrue(
+            try OMathSemanticXML.isEquivalent(undeclaredDefault, neverDefaulted),
+            "xmlns='' must remove the inherited default namespace"
+        )
+        XCTAssertFalse(try OMathSemanticXML.isEquivalent(undeclaredDefault, mathNamespacedText))
+
+        let literalTab = "<m:oMath xmlns:m='\(uri)' note='a\tb'/>"
+        let normalizedSpace = "<m:oMath xmlns:m='\(uri)' note='a b'/>"
+        let referencedTab = "<m:oMath xmlns:m='\(uri)' note='a&#x9;b'/>"
+        XCTAssertTrue(
+            try OMathSemanticXML.isEquivalent(literalTab, normalizedSpace),
+            "XML processors normalize literal attribute whitespace to spaces"
+        )
+        XCTAssertFalse(
+            try OMathSemanticXML.isEquivalent(literalTab, referencedTab),
+            "A character-referenced tab remains a tab and must not collide with normalized literal whitespace"
+        )
     }
 
     func testOMathSemanticContractSurvivesActualSpliceWriteReload() throws {
@@ -1234,6 +1259,32 @@ final class OMathSpliceTests: XCTestCase {
             try XCTUnwrap(xml.range(of: "<m:oMath")?.lowerBound),
             try XCTUnwrap(xml.range(of: " suffix")?.lowerBound)
         )
+    }
+
+    func testBoundaryEndDirectChildrenRemainAtEndAndInSourceOrderDuringBatchBeforeReload() throws {
+        let alphaSource = try parseParagraph(xml: Self.sourceDirectChildOMath)
+        let betaSource = try parseParagraph(
+            xml: "<w:p \(Self.mNS)><m:oMath><m:r><m:t>β</m:t></m:r></m:oMath></w:p>"
+        )
+        var intermediate = makeDocument(with: Paragraph())
+        try intermediate.spliceOMath(from: alphaSource, toBodyParagraphIndex: 0, position: .atEnd)
+        try intermediate.spliceOMath(from: betaSource, toBodyParagraphIndex: 0, position: .atEnd)
+        guard case .paragraph(let boundarySource) = intermediate.body.children[0] else {
+            return XCTFail("Missing boundary source")
+        }
+
+        var target = makeDocument(with: Paragraph(runs: [Run(text: "BODY_SENTINEL")]))
+        XCTAssertEqual(
+            try target.spliceParagraphOMath(from: boundarySource, toBodyParagraphIndex: 0),
+            2
+        )
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        let xml = result.toXML()
+        let body = try XCTUnwrap(xml.range(of: "BODY_SENTINEL")?.lowerBound)
+        let alpha = try XCTUnwrap(xml.range(of: "<m:t>α</m:t>")?.lowerBound)
+        let beta = try XCTUnwrap(xml.range(of: "<m:t>β</m:t>")?.lowerBound)
+        XCTAssertLessThan(body, alpha, "Absolute end-lane OMath must remain after prose")
+        XCTAssertLessThan(alpha, beta, "Batch must retain source order within the absolute end lane")
     }
 
     func testNegativePositionCarrierSurvivesAbsoluteBoundarySplice() throws {
@@ -1349,6 +1400,12 @@ final class OMathSpliceTests: XCTestCase {
             "<:oMath xmlns='\(uri)'/>",
             "<m:oMath xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/&#X6D;ath'/>",
             "<m:oMath xmlns:m='\(uri)'><m:t>&#0;</m:t></m:oMath>",
+            "<?xml version='1.0'?><m:oMath xmlns:m='\(uri)'/>",
+            "<!DOCTYPE m:oMath><m:oMath xmlns:m='\(uri)'/>",
+            "<!--document framing--><m:oMath xmlns:m='\(uri)'/>",
+            "framing text<m:oMath xmlns:m='\(uri)'/>",
+            "<m:oMath xmlns:m='\(uri)'/><m:oMath xmlns:m='\(uri)'/>",
+            "<wrapper><m:oMath xmlns:m='\(uri)'/></wrapper>",
         ]
 
         for fragment in invalidFragments {
@@ -1371,6 +1428,21 @@ final class OMathSpliceTests: XCTestCase {
             XCTAssertEqual(unchanged.text, "UNCHANGED")
             XCTAssertFalse(unchanged.toXML().contains("oMath"))
         }
+    }
+
+    func testNamespaceValidityGateAllowsDoctypeTextInsidePayloadCommentAndCDATA() throws {
+        let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        var run = Run(text: "")
+        run.rawXML = "<m:oMath xmlns:m='\(uri)'><!-- literal <!DOCTYPE text --><m:r><m:t><![CDATA[<!DOCTYPE text]]></m:t></m:r></m:oMath>"
+        var target = makeDocument(with: Paragraph(runs: [Run(text: "UNCHANGED")]))
+
+        XCTAssertNoThrow(try target.spliceOMath(
+            from: Paragraph(runs: [run]),
+            toBodyParagraphIndex: 0,
+            position: .atEnd
+        ))
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        XCTAssertTrue(result.toXML().contains("<!DOCTYPE text"))
     }
 
     // MARK: - No regression (6.14)

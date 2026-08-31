@@ -219,16 +219,46 @@ internal enum OMathNamespace {
     }
 
     internal static func isWellFormed(_ xml: String) -> Bool {
-        // XmlTreeReader is intentionally a lossless OOXML subset parser and
-        // does not enforce every namespace/QName/XML 1.0 validity rule. Use
-        // Foundation/libxml2 as the strict admission gate; reject DTDs because
-        // OMath fragments never require them and external entities are out of scope.
-        guard !xml.localizedCaseInsensitiveContains("<!DOCTYPE"),
-              let document = try? XMLDocument(data: Data(xml.utf8)),
-              document.rootElement() != nil else {
-            return false
+        validatedFragmentRoot(in: xml) != nil
+    }
+
+    /// Parses an embeddable OMath fragment rather than a complete XML document.
+    /// Wrapping the candidate makes document-level declarations and DTDs invalid
+    /// at their actual syntactic positions while leaving the same text inside an
+    /// OMath comment or CDATA section legal. The wrapper-child check also rejects
+    /// leading/trailing comments, processing instructions, non-whitespace text,
+    /// and multiple roots.
+    internal static func validatedFragmentRoot(in xml: String) -> XMLElement? {
+        let wrapped = "<iddOMathFragment>\(xml)</iddOMathFragment>"
+        guard let document = try? XMLDocument(data: Data(wrapped.utf8)),
+              let wrapper = document.rootElement(),
+              wrapper.localName == "iddOMathFragment" else {
+            return nil
         }
-        return true
+
+        var roots: [XMLElement] = []
+        for child in wrapper.children ?? [] {
+            switch child.kind {
+            case .text:
+                guard (child.stringValue ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty else {
+                    return nil
+                }
+            case .element:
+                guard let element = child as? XMLElement else { return nil }
+                roots.append(element)
+            default:
+                return nil
+            }
+        }
+
+        guard roots.count == 1,
+              let localName = roots[0].localName,
+              localName == "oMath" || localName == "oMathPara" else {
+            return nil
+        }
+        return roots[0]
     }
 
     private static func prefix(fromQualifiedName qualifiedName: String) -> String? {
@@ -329,94 +359,74 @@ internal enum OMathNamespace {
 /// declaration placement, attribute order/quote style, and entity spelling,
 /// while preserving namespace-expanded names, values, text, and child order.
 internal enum OMathSemanticXML {
-    private static let xmlNamespaceURI = "http://www.w3.org/XML/1998/namespace"
-
     static func canonicalRepresentation(of xml: String) throws -> String {
-        let data = Data(xml.utf8)
-        let tree = try XmlTreeReader.parse(data)
-        return canonicalNode(
-            tree.root,
-            inheritedNamespaces: ["xml": xmlNamespaceURI]
-        )
+        guard let root = OMathNamespace.validatedFragmentRoot(in: xml) else {
+            throw OMathSpliceError.malformedOMathXML
+        }
+        return canonicalElement(root)
     }
 
     static func isEquivalent(_ lhs: String, _ rhs: String) throws -> Bool {
-        try canonicalRepresentation(of: lhs) == canonicalRepresentation(of: rhs)
-    }
-
-    private static func canonicalNode(
-        _ node: XmlNode,
-        inheritedNamespaces: [String: String]
-    ) -> String {
-        switch node.kind {
-        case .element:
-            var namespaces = inheritedNamespaces
-            for attribute in node.attributes where attribute.isNamespaceDeclaration {
-                namespaces[attribute.declaredNamespacePrefix ?? ""] = attribute.value
-            }
-
-            let elementName = namespaceKey(
-                prefix: node.prefix,
-                namespaces: namespaces,
-                defaultApplies: true
-            ) + framed(node.localName)
-            let attributes = node.attributes
-                .filter { !$0.isNamespaceDeclaration }
-                .map { attribute -> String in
-                    let namespace = namespaceKey(
-                        prefix: attribute.prefix,
-                        namespaces: namespaces,
-                        defaultApplies: false
-                    )
-                    return framed(namespace + framed(attribute.localName))
-                        + framed(attribute.value)
-                }
-                .sorted()
-                .joined()
-            var children = ""
-            var pendingText = ""
-            func flushText() -> String {
-                guard !pendingText.isEmpty else { return "" }
-                defer { pendingText = "" }
-                return "T" + framed(pendingText)
-            }
-            for child in node.children {
-                if child.kind == .text {
-                    pendingText += child.textContent
-                } else {
-                    children += flushText()
-                    children += canonicalNode(child, inheritedNamespaces: namespaces)
-                }
-            }
-            children += flushText()
-            return "E" + framed(elementName) + "A" + framed(attributes) + "C" + framed(children)
-
-        case .text:
-            return "T" + framed(node.textContent)
-
-        case .comment:
-            return "M" + framed(node.textContent)
-
-        case .processingInstruction:
-            return "P" + framed(node.processingInstructionTarget) + framed(node.textContent)
+        do {
+            return try canonicalRepresentation(of: lhs) == canonicalRepresentation(of: rhs)
+        } catch {
+            return false
         }
     }
 
-    private static func namespaceKey(
-        prefix: String?,
-        namespaces: [String: String],
-        defaultApplies: Bool
-    ) -> String {
-        if let prefix {
-            if let namespaceURI = namespaces[prefix] {
-                return "B" + framed(namespaceURI)
+    /// Foundation/libxml2 supplies the XML-processor semantics that matter for
+    /// this contract: namespace scope (including `xmlns=""` undeclaration),
+    /// entity expansion, and XML attribute whitespace normalization. Prefixes,
+    /// namespace declaration placement, quote style, and attribute order are
+    /// intentionally absent from the representation.
+    private static func canonicalElement(_ element: XMLElement) -> String {
+        let elementName = namespaceKey(uri: element.uri) + framed(element.localName ?? element.name ?? "")
+        let attributes = (element.attributes ?? [])
+            .filter { attribute in
+                attribute.name != "xmlns" && attribute.prefix != "xmlns"
             }
-            return "U" + framed(prefix)
+            .map { attribute -> String in
+                let name = namespaceKey(uri: attribute.uri)
+                    + framed(attribute.localName ?? attribute.name ?? "")
+                return framed(name) + framed(attribute.stringValue ?? "")
+            }
+            .sorted()
+            .joined()
+
+        var children = ""
+        var pendingText = ""
+        func flushText() -> String {
+            guard !pendingText.isEmpty else { return "" }
+            defer { pendingText = "" }
+            return "T" + framed(pendingText)
         }
-        if defaultApplies, let namespaceURI = namespaces[""] {
-            return "B" + framed(namespaceURI)
+        for child in element.children ?? [] {
+            switch child.kind {
+            case .text:
+                pendingText += child.stringValue ?? ""
+            case .element:
+                children += flushText()
+                if let childElement = child as? XMLElement {
+                    children += canonicalElement(childElement)
+                }
+            case .comment:
+                children += flushText()
+                children += "M" + framed(child.stringValue ?? "")
+            case .processingInstruction:
+                children += flushText()
+                children += "P" + framed(child.name ?? "") + framed(child.stringValue ?? "")
+            default:
+                children += flushText()
+                children += "X" + framed(child.xmlString)
+            }
         }
-        return "N"
+        children += flushText()
+        return "E" + framed(elementName) + "A" + framed(attributes) + "C" + framed(children)
+    }
+
+    private static func namespaceKey(uri: String?) -> String {
+        guard let uri, !uri.isEmpty else { return "N" }
+        return "B" + framed(uri)
     }
 
     private static func framed(_ value: String) -> String {

@@ -154,7 +154,8 @@ extension WordDocument {
         // only earlier source groups. Within one shared boundary, apply from
         // right to left so the final OMath order remains source order.
         for group in groups {
-            if !group.anchor.snippet.isEmpty,
+            if group.anchor.boundaryPlacement == nil,
+               !group.anchor.snippet.isEmpty,
                Self.resolveRunAnchor(
                    anchor: group.anchor.snippet,
                    instance: group.anchor.instance,
@@ -177,15 +178,29 @@ extension WordDocument {
                 )
             }
 
-            let position: OMathSplicePosition = group.anchor.snippet.isEmpty
-                ? .atStart
-                : .afterText(
-                    group.anchor.snippet,
-                    instance: group.anchor.instance,
-                    options: AnchorLookupOptions()
-                )
+            let position: OMathSplicePosition
+            switch group.anchor.boundaryPlacement {
+            case .start?:
+                position = .atStart
+            case .end?:
+                position = .atEnd
+            case nil:
+                position = group.anchor.snippet.isEmpty
+                    ? .atStart
+                    : .afterText(
+                        group.anchor.snippet,
+                        instance: group.anchor.instance,
+                        options: AnchorLookupOptions()
+                    )
+            }
 
-            for i in group.indices.reversed() {
+            // Start/text insertion prepends at a shared boundary and therefore
+            // applies right-to-left. End-lane insertion appends, so it must apply
+            // left-to-right to retain source order.
+            let applicationIndices = group.anchor.boundaryPlacement == .end
+                ? group.indices
+                : Array(group.indices.reversed())
+            for i in applicationIndices {
                 do {
                     try self.spliceOMath(
                         from: sourceParagraph,
@@ -895,6 +910,17 @@ extension WordDocument {
     internal struct DerivedContextAnchor: Equatable {
         let snippet: String
         let instance: Int
+        let boundaryPlacement: ParagraphBoundaryPlacement?
+
+        init(
+            snippet: String,
+            instance: Int,
+            boundaryPlacement: ParagraphBoundaryPlacement? = nil
+        ) {
+            self.snippet = snippet
+            self.instance = instance
+            self.boundaryPlacement = boundaryPlacement
+        }
     }
 
     /// For each extracted OMath in source order, derive a context anchor (~N chars of
@@ -911,6 +937,20 @@ extension WordDocument {
         var anchors = [DerivedContextAnchor?](repeating: nil, count: extracted.count)
         var matchedExtractedIndices = Set<Int>()
         var proseAccumulator = ""
+
+        // Boundary lanes are authoritative metadata, not prose-derived hints.
+        // Preserve both start and end so an empty-prose end source cannot be
+        // reclassified as a leading equation during batch reuse before reload.
+        for (i, ex) in extracted.enumerated() {
+            if let placement = ex.boundaryPlacement {
+                anchors[i] = DerivedContextAnchor(
+                    snippet: "",
+                    instance: 1,
+                    boundaryPlacement: placement
+                )
+                matchedExtractedIndices.insert(i)
+            }
+        }
 
         // Walk runs in array order; whenever a run's rawXML matches an extracted OMath,
         // capture the trailing N chars of proseAccumulator.
@@ -940,28 +980,6 @@ extension WordDocument {
         // Direct-child OMath in unrecognizedChildren — derive from its source position
         // by walking runs up to that position.
         for (i, ex) in extracted.enumerated() where ex.kind == .directChild && !matchedExtractedIndices.contains(i) {
-            if ex.boundaryPlacement == .start {
-                anchors[i] = DerivedContextAnchor(snippet: "", instance: 1)
-                continue
-            }
-
-            if ex.boundaryPlacement == .end {
-                let prose = sourceParagraph.runs
-                    .filter { run in
-                        guard let raw = run.rawXML else { return true }
-                        return !raw.contains(":oMath") && !raw.contains("<oMath")
-                    }
-                    .map(\.text)
-                    .joined()
-                let trailing = String(prose.suffix(charsBefore))
-                    .trimmingCharacters(in: .whitespaces)
-                anchors[i] = DerivedContextAnchor(
-                    snippet: trailing,
-                    instance: trailing.isEmpty ? 1 : occurrenceCount(of: trailing, in: prose)
-                )
-                continue
-            }
-
             // For direct-child OMath, use the prose accumulated up to the OMath's position.
             // (Best-effort — direct-child OMath typically doesn't have meaningful surrounding prose.)
             guard let omathPos = ex.sourcePosition else { continue }

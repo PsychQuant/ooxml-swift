@@ -16,7 +16,7 @@
 - [x] 3.2 Validate inputs: throw `.targetParagraphOutOfRange` if `toBodyParagraphIndex` invalid; throw `.sourceHasNoOMath` if extraction returns empty; throw `.omathIndexOutOfRange` if `omathIndex >= extracted.count`
 - [x] 3.3 Implement namespace policy check (lenient: throw only on URI mismatch; strict: throw on prefix or URI mismatch) per the Namespace policy controls prefix/URI mismatch handling requirement
 - [x] 3.4 Branch on extracted OMath kind: inRun → wrap in new `Run` with rawXML; directChild → append to target paragraph's `unrecognizedChildren` (Carrier preservation strategy)
-- [x] 3.5 Apply `OMathSpliceRpRMode` for source Run rPr propagation: `.full` deep-copy, `.omathOnly` whitelist (rFonts/sz/szCs/lang/bold/italic), `.discard` empty (rPr propagation modes requirement)
+- [x] 3.5 Apply `OMathSpliceRpRMode` for source Run rPr propagation: `.full` deep-copy, `.omathOnly` whitelist (`rFonts` / legacy `fontName` / `fontSize`, which emits `w:sz` and `w:szCs` / `lang` / `bold` / `italic`), `.discard` empty (rPr propagation modes requirement)
 - [x] 3.6 Resolve `.atStart` / `.atEnd` through absolute-boundary serializer lanes; resolve `.afterText` / `.beforeText` with `AnchorLookupOptions`
 
 ## 4. Mid-paragraph anchor-Run split
@@ -31,7 +31,7 @@
 
 - [x] 5.1 Implement public `WordDocument.spliceParagraphOMath(from:toBodyParagraphIndex:rPrMode:namespacePolicy:)` per Two-tier API: `spliceOMath` (single) + `spliceParagraphOMath` (batch) decision
 - [x] 5.2 For each extracted OMath, derive up to 10 trailing prose characters plus the source occurrence instance
-- [x] 5.3 Derive `(prefix, occurrence instance)`, group shared boundaries, and call `spliceOMath` right-to-left within source-ordered groups
+- [x] 5.3 Derive `(prefix, occurrence instance, absolute boundary placement)`, group shared boundaries, and call `spliceOMath` right-to-left for start/text groups or left-to-right for end groups
 - [x] 5.4 Preflight each anchor group; on failure throw `.contextAnchorNotFound(omathIndex:, snippet:)` while preserving only earlier source groups
 
 ## 6. Tests
@@ -77,15 +77,15 @@
 - [x] 10.4 Carry direct-child local name and preserve `oMathPara` through save/reload/extraction
 - [x] 10.5 Distinguish unmatched, leading-empty, and text batch anchors
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
-- [x] 10.7 Derive anchor occurrence instances; apply source-ordered groups right-to-left within each shared boundary
-- [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, and quote-complete namespace checks
-- [x] 10.9 Run `OMathSpliceTests`: 51 tests, 0 failures
-- [x] 10.10 Re-run full package regression: 1,479 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-5 remediation commit
+- [x] 10.7 Derive anchor occurrence instances; preserve explicit start/end lane metadata; apply source-ordered start/text groups right-to-left and end groups left-to-right
+- [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, quote-complete namespace checks, and structural single-fragment admission
+- [x] 10.9 Run `OMathSpliceTests`: 53 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,481 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-6 remediation commit
 
 ## 11. Reload fidelity contract remediation (#123)
 
 - [x] 11.1 Diagnose typed XML normalization versus lexical byte identity
 - [x] 11.2 Choose canonical semantic XML equivalence as the explicit reload contract
-- [x] 11.3 Cover entity spelling, attribute order/quotes, namespace placement, prefix variants, and semantic inequality
+- [x] 11.3 Cover entity spelling, XML attribute-whitespace normalization, attribute order/quotes, namespace placement/undeclaration, prefix variants, and semantic inequality
 - [x] 11.4 Re-baseline proposal, design, spec, and historical task wording
-- [x] 11.5 Verify actual splice/write/reload canonical equivalence and collision-resistant namespace/text handling
+- [x] 11.5 Verify actual splice/write/reload canonical equivalence and collision-resistant namespace/text/attribute handling

@@ -201,6 +201,13 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 - **THEN** `OMathExtractor.extract` and `omathIndex` SHALL expose them in the same order as paragraph serialization
 - **AND** an unsaved direct-child absolute-boundary paragraph SHALL be usable immediately as a batch source
 
+#### Scenario: Unsaved absolute-end batch source remains at end
+
+- **WHEN** one or more OMath carriers with explicit absolute-end metadata are reused as a batch source before save/reload
+- **THEN** batch splice SHALL map the group to `.atEnd` even when the source has no preceding prose
+- **AND** the target SHALL serialize the group after all prose and legacy post-content carriers
+- **AND** multiple members of the end group SHALL retain source-document order
+
 #### Scenario: Context anchor not found for one OMath
 
 - **WHEN** source paragraph has OMath at position whose preceding context is "大小效果"
@@ -221,6 +228,14 @@ The OMath XML written into the target paragraph by `spliceOMath` or `spliceParag
 - **AND** entity versus literal spelling, attribute order/quotes, namespace declaration placement, and equivalent element-prefix variants SHALL compare equal
 - **AND** a changed element, semantic attribute value, child order, or resolved text value SHALL compare unequal
 - **AND** adjacent ordinary text and CDATA segments with the same resolved text SHALL compare equal
+- **AND** `xmlns=""` SHALL remove an inherited default namespace for the element and its descendants
+- **AND** literal attribute tabs/newlines/carriage returns SHALL compare according to XML whitespace normalization, while a character-referenced tab SHALL remain semantically distinct from a normalized space
+
+#### Scenario: Admission requires one embeddable OMath fragment
+
+- **WHEN** extracted raw XML contains an XML declaration, an actual DTD, document-level comment/PI, non-whitespace framing text, multiple roots, or a non-OMath root
+- **THEN** splice SHALL throw `OMathSpliceError.malformedOMathXML` before target mutation
+- **AND** a valid OMath whose internal comment or CDATA contains the ordinary text `<!DOCTYPE` SHALL remain admissible
 
 ### Requirement: No regression on existing OMath round-trip behavior
 
