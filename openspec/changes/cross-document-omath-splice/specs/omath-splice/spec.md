@@ -152,9 +152,15 @@ The system SHALL provide `OMathSpliceNamespacePolicy` with `.lenient` (default) 
 - **AND** namespace declarations using either single or double quotes SHALL be parsed equivalently
 - **AND** a prefix-less extracted OMath fragment SHALL receive a self-contained default OMML namespace declaration
 
+#### Scenario: Malformed source OMath fails before mutation
+
+- **WHEN** the source OMath root or namespace attributes are not well-formed XML
+- **THEN** splice SHALL throw `OMathSpliceError.malformedOMathXML`
+- **AND** the target paragraph SHALL remain unchanged
+
 ### Requirement: Paragraph-level batch splice with auto-anchor derivation
 
-The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraphIndex:rPrMode:namespacePolicy:)` that copies all OMath blocks from one source paragraph to a corresponding target paragraph in source-document order, auto-deriving the splice anchor for each OMath from its source-text-context (5-10 chars on each side).
+The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraphIndex:rPrMode:namespacePolicy:)` that copies all OMath blocks from one source paragraph to a corresponding target paragraph in source-document order, auto-deriving each anchor from up to 10 trailing prose characters plus its occurrence instance.
 
 #### Scenario: All OMath blocks spliced in source order
 
@@ -187,6 +193,11 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 - **THEN** their final serialized order SHALL equal source-document order
 - **AND** identical text snippets at different source occurrences SHALL map to the corresponding target occurrence rather than always instance 1
 
+#### Scenario: Re-extraction follows absolute boundary order
+
+- **WHEN** multiple inline and/or direct-child OMath carriers are inserted into the same absolute boundary
+- **THEN** `OMathExtractor.extract` and `omathIndex` SHALL expose them in the same order as paragraph serialization
+
 #### Scenario: Context anchor not found for one OMath
 
 - **WHEN** source paragraph has OMath at position whose preceding context is "大小效果"
@@ -206,6 +217,7 @@ The OMath XML written into the target paragraph by `spliceOMath` or `spliceParag
 - **THEN** the reloaded OMath subtree SHALL have the same `OMathSemanticXML` canonical representation as the extracted source subtree
 - **AND** entity versus literal spelling, attribute order/quotes, namespace declaration placement, and equivalent element-prefix variants SHALL compare equal
 - **AND** a changed element, semantic attribute value, child order, or resolved text value SHALL compare unequal
+- **AND** adjacent ordinary text and CDATA segments with the same resolved text SHALL compare equal
 
 ### Requirement: No regression on existing OMath round-trip behavior
 

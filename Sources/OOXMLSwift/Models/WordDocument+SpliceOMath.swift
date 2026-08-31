@@ -230,23 +230,24 @@ extension WordDocument {
         policy: OMathSpliceNamespacePolicy
     ) throws {
         let standardOMMLURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
-        let sourceURI = OMathNamespace.extractURI(from: source) ?? standardOMMLURI
+        guard OMathNamespace.isWellFormed(source),
+              let sourceURI = OMathNamespace.extractURI(from: source) else {
+            throw OMathSpliceError.malformedOMathXML
+        }
         let sourcePrefix = OMathNamespace.extractPrefix(from: source) ?? ""
 
-        // Find target OMath URI/prefix from existing OMath in target paragraph (if any).
+        // Find the first target OMath in the same joint serializer order used
+        // by omathIndex. Only a paragraph with no OMath uses the standard m:
+        // baseline; an explicit default namespace has prefix "".
         var targetURI: String = standardOMMLURI
         var targetPrefix: String = "m"
-        for run in targetParagraph.runs {
-            if let raw = run.rawXML, raw.contains(":oMath") || raw.contains("<oMath") {
-                if let uri = OMathNamespace.extractURI(from: raw) { targetURI = uri }
-                if let pre = OMathNamespace.extractPrefix(from: raw) { targetPrefix = pre }
-                break
+        if let existing = OMathExtractor.extract(from: targetParagraph).first {
+            guard OMathNamespace.isWellFormed(existing.xml),
+                  let uri = OMathNamespace.extractURI(from: existing.xml) else {
+                throw OMathSpliceError.malformedOMathXML
             }
-        }
-        for child in targetParagraph.unrecognizedChildren where child.name == "oMath" || child.name == "oMathPara" {
-            if let uri = OMathNamespace.extractURI(from: child.rawXML) { targetURI = uri }
-            if let pre = OMathNamespace.extractPrefix(from: child.rawXML) { targetPrefix = pre }
-            break
+            targetURI = uri
+            targetPrefix = OMathNamespace.extractPrefix(from: existing.xml) ?? ""
         }
 
         if sourceURI != targetURI {

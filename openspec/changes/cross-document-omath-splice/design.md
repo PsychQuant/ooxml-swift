@@ -33,7 +33,6 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 - Document-level batch API (`spliceAllOMath` across entire WordDocument) — paragraph-matching algorithm is caller-specific (different consumers want different matchers); keep matching in caller layer to prevent scope creep
 - Cross-document `paragraph` formatting copy — only OMath + its enclosing Run rPr; surrounding paragraph properties stay target's
 - Auto-rewrite of namespace prefix — `.lenient` mode accepts mixed prefixes (ECMA-376 compliant); `.strict` mode throws on any mismatch. No string substitution on source XML
-- Bulk splice of all OMath from one paragraph in a single call — caller loops `spliceOMath` with incrementing `omathIndex` (or uses `spliceParagraphOMath` for context-anchor auto-derivation)
 - Splicing into headers / footers / footnotes / endnotes — body paragraphs only in v0.1 (target indexed by `toBodyParagraphIndex: Int`)
 
 ## Decisions
@@ -127,11 +126,11 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 **Rationale**: ECMA-376 explicitly allows mixed prefixes within one document (each namespace declaration scopes locally). 99% of real docx files use the standard `m:` prefix anyway, making this almost a no-op safeguard. URI mismatch (rare; would mean the source uses a vendor-extended namespace not in the OMML schema) is a real semantic mismatch and warrants a throw.
 
-Namespace inspection accepts both XML quote styles. Extracted prefix-less fragments receive a local default OMML declaration so the copied raw subtree is self-contained; an explicitly declared non-standard URI is never defaulted to the standard URI.
+Namespace inspection accepts both XML quote styles and resolves character/entity references through `XmlTreeReader`. Extracted prefix-less fragments receive a local default OMML declaration so the copied raw subtree is self-contained; malformed fragments fail closed and an explicitly declared non-standard URI is never defaulted to the standard URI. Strict target comparison uses the first OMath in joint serializer order, including an explicit empty prefix for a default namespace.
 
 ## Risks / Trade-offs
 
-[**Risk: round-trip semantic loss after splice**] → Mitigation: save/reload tests verify preserved OMath carrier metadata and content, while `OMathSemanticXML` canonical coverage equates entity spelling, attribute order/quotes, namespace declaration placement, and element/attribute-prefix variants but rejects structural, resolved-text, or semantic-attribute changes (#123). Exact lexical bytes are not promised after XML parsing.
+[**Risk: round-trip semantic loss after splice**] → Mitigation: an end-to-end splice/write/reload test compares extracted source and reloaded OMath through `OMathSemanticXML`. Canonical coverage equates entity spelling, adjacent text/CDATA segmentation, attribute order/quotes, namespace declaration placement, and element/attribute-prefix variants; it rejects namespace-expanded name, structure, child-order, resolved-text, and semantic-attribute changes without sentinel collisions (#123). Exact lexical bytes are not promised after XML parsing.
 
 [**Risk: anchor-Run split with whitespace-sensitive `<w:t xml:space="preserve">`**] → Mitigation: copy `xml:space` attribute when splitting; existing `replaceText` code path tested with similar fixtures. Add explicit test case for whitespace-bearing anchor.
 

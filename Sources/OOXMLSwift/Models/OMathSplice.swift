@@ -34,8 +34,8 @@ public enum OMathSpliceRpRMode: Equatable {
 /// `.lenient` accepts prefix mismatch with same URI — the spliced XML carries its
 /// own `xmlns:` declaration so mixed prefixes within one document are spec-legal
 /// (ECMA-376 allows local namespace declarations). Throws only when URIs differ.
-/// `.strict` throws on any prefix or URI mismatch — useful for byte-equal
-/// round-trip fixtures or callers requiring single-prefix output.
+/// `.strict` throws on any prefix or URI mismatch — useful for callers
+/// requiring a single-prefix output convention.
 public enum OMathSpliceNamespacePolicy: Equatable {
     case lenient
     case strict
@@ -49,6 +49,7 @@ public enum OMathSpliceError: Error, Equatable {
     case anchorNotFound(String, instance: Int)
     case namespaceMismatch(sourceURI: String, targetURI: String)
     case contextAnchorNotFound(omathIndex: Int, snippet: String)
+    case malformedOMathXML
 }
 
 // MARK: - Internal: extracted OMath descriptor
@@ -65,6 +66,11 @@ internal struct ExtractedOMath {
     /// Original local name for a paragraph direct-child carrier.
     /// Nil for inline Run carriers.
     let directChildName: String?
+    /// Absolute serializer lane metadata used by atStart/atEnd insertions.
+    let boundaryPlacement: ParagraphBoundaryPlacement?
+    let boundaryOrder: Int?
+    /// Deterministic tie-breaker matching the serializer's collection order.
+    let sourceSequence: Int
     /// Source-document byte position (filled by DocxReader for both Run and UnrecognizedChild).
     /// Used for joint sort across the two carriers. May be nil for API-built paragraphs.
     let sourcePosition: Int?
@@ -94,6 +100,7 @@ internal enum OMathExtractor {
     /// Spec: Carrier preservation strategy (Decision Q1)
     static func extract(from paragraph: Paragraph) -> [ExtractedOMath] {
         var collected: [ExtractedOMath] = []
+        var sourceSequence = 0
 
         // Carrier 1: Run.rawXML (inline OMath in Run)
         for run in paragraph.runs {
@@ -109,9 +116,13 @@ internal enum OMathExtractor {
                 xml: ensureXmlnsDeclared(in: raw),
                 kind: .inRun,
                 directChildName: nil,
+                boundaryPlacement: run.paragraphBoundaryPlacement,
+                boundaryOrder: run.paragraphBoundaryOrder,
+                sourceSequence: sourceSequence,
                 sourcePosition: run.position,
                 sourceRunProperties: run.properties
             ))
+            sourceSequence += 1
         }
 
         // Carrier 2: Paragraph.unrecognizedChildren (direct-child OMath)
@@ -120,14 +131,36 @@ internal enum OMathExtractor {
                 xml: ensureXmlnsDeclared(in: child.rawXML),
                 kind: .directChild,
                 directChildName: child.name,
+                boundaryPlacement: child.paragraphBoundaryPlacement,
+                boundaryOrder: child.paragraphBoundaryOrder,
+                sourceSequence: sourceSequence,
                 sourcePosition: child.position,
                 sourceRunProperties: nil
             ))
+            sourceSequence += 1
         }
 
-        // Sort by source-document position (joint document-order index — Decision Q2).
-        // Stable sort preserves insertion order on equal positions.
-        return collected.sorted { ($0.sourcePosition ?? 0) < ($1.sourcePosition ?? 0) }
+        // Mirror Paragraph's four serializer regions: absolute start, positive
+        // position window, nil/zero post-content buckets, absolute end.
+        return collected.sorted { lhs, rhs in
+            let left = serializerSortKey(lhs)
+            let right = serializerSortKey(rhs)
+            if left.bucket != right.bucket { return left.bucket < right.bucket }
+            if left.order != right.order { return left.order < right.order }
+            return lhs.sourceSequence < rhs.sourceSequence
+        }
+    }
+
+    private static func serializerSortKey(_ omath: ExtractedOMath) -> (bucket: Int, order: Int) {
+        switch omath.boundaryPlacement {
+        case .start?: return (0, omath.boundaryOrder ?? 0)
+        case .end?: return (3, omath.boundaryOrder ?? 0)
+        case nil:
+            if let position = omath.sourcePosition, position > 0 {
+                return (1, position)
+            }
+            return (2, 0)
+        }
     }
 
     /// If the given OMath rawXML's opening tag lacks an `xmlns:<prefix>="<URI>"`
@@ -166,15 +199,11 @@ internal enum OMathNamespace {
     /// Extracts the `xmlns:` URI for the OMath prefix in the given XML fragment.
     /// Returns the URI string, or nil if no `xmlns:` declaration found.
     ///
-    /// Heuristic: scans for `xmlns:<prefix>="<URI>"` where the prefix is the same
-    /// one used in the opening element name (e.g. `<mml:oMath xmlns:mml="...">` → `mml`).
-    /// Falls back to scanning for any `xmlns:` declaration if prefix detection fails.
+    /// Parses the complete fragment with XmlTreeReader so namespace attribute
+    /// character references are resolved and malformed XML fails closed.
     static func extractURI(from xml: String) -> String? {
-        guard let root = parseRootTag(in: xml) else { return nil }
-        if let prefix = prefix(fromQualifiedName: root.qualifiedName) {
-            return root.attributes["xmlns:\(prefix)"]
-        }
-        return root.attributes["xmlns"]
+        guard let tree = try? XmlTreeReader.parse(Data(xml.utf8)) else { return nil }
+        return tree.root.namespaceURI
     }
 
     /// Extracts the OMath prefix (e.g. "m" or "mml") from the opening element.
@@ -186,6 +215,10 @@ internal enum OMathNamespace {
 
     internal static func rootNameEnd(in xml: String) -> String.Index? {
         parseRootTag(in: xml)?.nameEnd
+    }
+
+    internal static func isWellFormed(_ xml: String) -> Bool {
+        (try? XmlTreeReader.parse(Data(xml.utf8))) != nil
     }
 
     private static func prefix(fromQualifiedName qualifiedName: String) -> String? {
@@ -291,7 +324,10 @@ internal enum OMathSemanticXML {
     static func canonicalRepresentation(of xml: String) throws -> String {
         let data = Data(xml.utf8)
         let tree = try XmlTreeReader.parse(data)
-        return canonicalNode(tree.root, inheritedNamespaces: [:])
+        return canonicalNode(
+            tree.root,
+            inheritedNamespaces: ["xml": xmlNamespaceURI]
+        )
     }
 
     static func isEquivalent(_ lhs: String, _ rhs: String) throws -> Bool {
@@ -309,32 +345,40 @@ internal enum OMathSemanticXML {
                 namespaces[attribute.declaredNamespacePrefix ?? ""] = attribute.value
             }
 
-            let elementName = expandedName(
-                namespaceURI: node.namespaceURI ?? "",
-                localName: node.localName
-            )
+            let elementName = namespaceKey(
+                prefix: node.prefix,
+                namespaces: namespaces,
+                defaultApplies: true
+            ) + framed(node.localName)
             let attributes = node.attributes
                 .filter { !$0.isNamespaceDeclaration }
                 .map { attribute -> String in
-                    let namespaceURI: String
-                    if let prefix = attribute.prefix {
-                        namespaceURI = prefix == "xml"
-                            ? xmlNamespaceURI
-                            : namespaces[prefix, default: "unbound:\(prefix)"]
-                    } else {
-                        // XML default namespaces never apply to attributes.
-                        namespaceURI = ""
-                    }
-                    return framed(expandedName(
-                        namespaceURI: namespaceURI,
-                        localName: attribute.localName
-                    )) + framed(attribute.value)
+                    let namespace = namespaceKey(
+                        prefix: attribute.prefix,
+                        namespaces: namespaces,
+                        defaultApplies: false
+                    )
+                    return framed(namespace + framed(attribute.localName))
+                        + framed(attribute.value)
                 }
                 .sorted()
                 .joined()
-            let children = node.children
-                .map { canonicalNode($0, inheritedNamespaces: namespaces) }
-                .joined()
+            var children = ""
+            var pendingText = ""
+            func flushText() -> String {
+                guard !pendingText.isEmpty else { return "" }
+                defer { pendingText = "" }
+                return "T" + framed(pendingText)
+            }
+            for child in node.children {
+                if child.kind == .text {
+                    pendingText += child.textContent
+                } else {
+                    children += flushText()
+                    children += canonicalNode(child, inheritedNamespaces: namespaces)
+                }
+            }
+            children += flushText()
             return "E" + framed(elementName) + "A" + framed(attributes) + "C" + framed(children)
 
         case .text:
@@ -348,8 +392,21 @@ internal enum OMathSemanticXML {
         }
     }
 
-    private static func expandedName(namespaceURI: String, localName: String) -> String {
-        "{\(namespaceURI)}\(localName)"
+    private static func namespaceKey(
+        prefix: String?,
+        namespaces: [String: String],
+        defaultApplies: Bool
+    ) -> String {
+        if let prefix {
+            if let namespaceURI = namespaces[prefix] {
+                return "B" + framed(namespaceURI)
+            }
+            return "U" + framed(prefix)
+        }
+        if defaultApplies, let namespaceURI = namespaces[""] {
+            return "B" + framed(namespaceURI)
+        }
+        return "N"
     }
 
     private static func framed(_ value: String) -> String {
@@ -364,7 +421,7 @@ internal extension RunProperties {
     ///
     /// - `.full`: returns self verbatim (deep copy via Equatable struct semantics).
     /// - `.omathOnly`: returns a new `RunProperties` with only OMath-rendering-relevant fields:
-    ///   `rFonts`, `fontName`, `fontSize`, `bold`, `italic`. Other fields (rStyle / color /
+    ///   `rFonts`, `fontName`, `fontSize`, `bold`, `italic`, `lang`. Other fields (rStyle / color /
     ///   highlight / verticalAlign / etc.) are dropped.
     /// - `.discard`: returns `RunProperties()` (default-initialized).
     ///
@@ -380,6 +437,7 @@ internal extension RunProperties {
             out.fontSize = self.fontSize
             out.bold = self.bold
             out.italic = self.italic
+            out.lang = self.lang
             return out
         case .discard:
             return RunProperties()
