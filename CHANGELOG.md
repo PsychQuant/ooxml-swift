@@ -15,7 +15,7 @@ All notable changes to ooxml-swift will be documented in this file.
   embeddable XML fragment before mutation. Malformed fragments throw the new
   additive `OMathSpliceMalformedXMLError`; the released six-case
   `OMathSpliceError` enum remains unchanged so external exhaustive switches
-  continue to compile. Focused coverage: 57 tests; full suite: 1,485 tests with
+  continue to compile. Focused coverage: 58 tests; full suite: 1,486 tests with
   31 conditional skips and no failures.
 
 ## [3.5.0] - 2026-08-27
