@@ -108,6 +108,74 @@ final class RunPropertyOnOffTests: XCTestCase {
         XCTAssertTrue(xml.contains("GAMMA delta"), "Got: \(xml)")
     }
 
+    func testRevisionPreviousFormatEmitsExplicitOffProperties() {
+        var previous = RunProperties()
+        previous.bold = false
+        previous.italic = false
+        previous.strikethrough = false
+        previous.noProof = false
+        previous.underline = nil
+
+        let xml = previous.toChangeXML()
+
+        XCTAssertTrue(xml.contains(#"<w:b w:val="0"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:i w:val="0"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:strike w:val="0"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:noProof w:val="0"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:u w:val="none"/>"#), "Got: \(xml)")
+    }
+
+    func testTreeBackedAppendPreservesExplicitOffRunProperties() throws {
+        let source = try buildFixture(documentXML: documentXML(firstRunProperties: ""))
+        defer { try? FileManager.default.removeItem(at: source) }
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("run-on-off-append-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        var document = try DocxReader.read(from: source)
+        defer { document.close() }
+        var properties = RunProperties()
+        properties.bold = false
+        properties.italic = false
+        properties.strikethrough = false
+        properties.noProof = false
+        properties.underline = nil
+        document.appendParagraph(Paragraph(runs: [Run(text: "appended", properties: properties)]))
+        try DocxWriter.write(document, to: output)
+
+        let extracted = try ZipHelper.unzip(output)
+        defer { ZipHelper.cleanup(extracted) }
+        let xml = try String(
+            contentsOf: extracted.appendingPathComponent("word/document.xml"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(xml.contains(#"<w:b w:val="0"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:i w:val="0"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:strike w:val="0"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:noProof w:val="0"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:u w:val="none"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains("appended"), "Got: \(xml)")
+    }
+
+    func testAlternateWordprocessingMLPrefixParsesExplicitOff() throws {
+        let xml = try XMLDocument(xmlString: #"""
+        <x:r xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <x:rPr><x:b x:val="0"/><x:i x:val="off"/><x:strike x:val="false"/><x:noProof x:val="0"/></x:rPr>
+          <x:t>text</x:t>
+        </x:r>
+        """#)
+        let element = try XCTUnwrap(xml.rootElement())
+        let run = try DocxReader.parseRun(
+            from: element,
+            relationships: RelationshipsCollection()
+        )
+
+        XCTAssertFalse(run.properties.bold)
+        XCTAssertFalse(run.properties.italic)
+        XCTAssertFalse(run.properties.strikethrough)
+        XCTAssertFalse(run.properties.noProof)
+    }
+
     private func documentXML(firstRunProperties: String) -> String {
         """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>

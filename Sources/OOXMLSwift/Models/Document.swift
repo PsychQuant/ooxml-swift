@@ -393,13 +393,15 @@ public struct WordDocument: Equatable {
                 let rp = run.properties
                 return RunPayload(
                     text: run.text,
-                    bold: rp.bold ? true : nil,
-                    italic: rp.italic ? true : nil,
+                    bold: rp.specifiedBold,
+                    italic: rp.specifiedItalic,
+                    strikethrough: rp.specifiedStrikethrough,
+                    noProof: rp.specifiedNoProof,
                     color: rp.color,
                     fontAscii: rp.rFonts?.ascii ?? rp.fontName,
                     fontEastAsia: rp.rFonts?.eastAsia ?? rp.fontName,
                     sizeHalfPoints: rp.fontSize,
-                    underline: rp.underline?.rawValue,
+                    underline: rp.specifiedUnderlineRawValue,
                     vertAlign: rp.verticalAlign?.rawValue,
                     fontHAnsi: rp.rFonts?.hAnsi ?? rp.fontName,
                     fontHint: rp.rFonts?.hint)
