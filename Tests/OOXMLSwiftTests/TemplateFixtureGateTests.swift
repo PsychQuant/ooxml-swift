@@ -97,6 +97,10 @@ final class TemplateFixtureGateTests: XCTestCase {
             .appendingPathComponent("tmpl-empty-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
+        let message = TemplateFixtureGate.missingFixtureMessage(for: "absent.docx")
+        XCTAssertTrue(message.contains("MACDOC_TEMPLATE_DIR"), "Got: \(message)")
+        XCTAssertTrue(message.contains("absent.docx"), "Got: \(message)")
+        XCTAssertFalse(message.contains(dir.path), "Must not leak host path: \(message)")
         XCTAssertThrowsError(try TemplateFixtureGate.requireTemplate("absent.docx", dirOverride: dir.path)) { error in
             XCTAssertTrue(error is XCTSkip)
         }
