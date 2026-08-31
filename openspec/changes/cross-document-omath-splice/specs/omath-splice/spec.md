@@ -47,8 +47,9 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 
 #### Scenario: Source paragraph has no OMath
 
-- **WHEN** caller invokes `spliceOMath` with a `sourceParagraph` whose runs contain no `Run.rawXML` matching `<m:oMath` AND whose `unrecognizedChildren` contain no entry with `name == "oMath" || "oMathPara"`
+- **WHEN** caller invokes `spliceOMath` with a `sourceParagraph` whose runs contain no `Run.rawXML` rooted at `oMath`/`oMathPara` AND whose `unrecognizedChildren` contain no entry with `name == "oMath" || "oMathPara"`
 - **THEN** the system SHALL throw `OMathSpliceError.sourceHasNoOMath`
+- **AND** matching character data, attribute values, descendants, and lookalike root names SHALL NOT classify ordinary `Run.rawXML` as inline OMath
 
 #### Scenario: omathIndex out of range
 

@@ -482,8 +482,7 @@ extension WordDocument {
         var runSpans: [(runIdx: Int, text: String, startGlobal: Int)] = []
         var globalOffset = 0
         for (i, run) in para.runs.enumerated() {
-            if let raw = run.rawXML, raw.contains(":oMath") || raw.contains("<oMath")
-                || raw.contains(":oMathPara") || raw.contains("<oMathPara") {
+            if let raw = run.rawXML, OMathNamespace.hasOMathRoot(in: raw) {
                 continue
             }
             runSpans.append((i, run.text, globalOffset))
@@ -977,8 +976,7 @@ extension WordDocument {
         // Walk runs in array order; whenever a run's rawXML matches an extracted OMath,
         // capture the trailing N chars of proseAccumulator.
         for run in sourceParagraph.runs {
-            if let raw = run.rawXML,
-               (raw.contains(":oMath") || raw.contains("<oMath") || raw.contains(":oMathPara") || raw.contains("<oMathPara")) {
+            if let raw = run.rawXML, OMathNamespace.hasOMathRoot(in: raw) {
                 // Find which extracted index this run corresponds to (by xml byte equality).
                 for (i, ex) in extracted.enumerated() where !matchedExtractedIndices.contains(i) {
                     if ex.kind == .inRun
@@ -1008,7 +1006,11 @@ extension WordDocument {
             var prose = ""
             for run in sourceParagraph.runs {
                 if let runPos = run.position, runPos < omathPos {
-                    if run.rawXML?.contains("oMath") != true {
+                    if let raw = run.rawXML {
+                        if !OMathNamespace.hasOMathRoot(in: raw) {
+                            prose += run.text
+                        }
+                    } else {
                         prose += run.text
                     }
                 }
