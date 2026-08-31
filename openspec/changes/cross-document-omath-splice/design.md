@@ -72,15 +72,21 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 ### Boundary insertion across mixed carrier modes
 
-**Decision**: Before `.atStart` or `.atEnd`, materialize nil/zero position-indexed carriers into positive positions following Paragraph's existing post-content emission order. `.atStart` then shifts all positioned carriers forward and inserts at position 1; `.atEnd` appends after the new maximum.
+**Decision**: Before `.atStart` or `.atEnd`, project both position-indexed carriers and legacy fixed-order carriers (page break, legacy bookmark/comment boundaries, footnote/endnote references) into one ordered position space. Compact positive renumbering preserves the paragraph's current serialized order, neutralizes hostile `Int.max` values, and makes a true first/last position representable. `.atStart` reserves position 1; `.atEnd` uses the next compact position.
 
-**Rationale**: Paragraph serializes positive-position carriers first and nil/zero carriers afterward in type buckets. Assigning a new positive position without materializing post-content entries places it before API-built content. Materialization preserves the current serialization order while making a true boundary position representable for both inline Run and direct-child OMath (#122).
+**Rationale**: Paragraph serializes legacy pre-content, positive positions, nil/zero type buckets, and legacy post-content through separate paths. Assigning only a new positive position cannot represent a boundary outside all four regions. Canonicalization preserves relative order (numeric source offsets are diagnostic metadata, not an ordering contract after mutation) while making true boundaries safe for both inline Run and direct-child OMath (#122).
 
 ### Batch anchor state and mutation direction
 
-**Decision**: `deriveContextAnchors` returns optional anchors: nil is unmatched, an empty string is a matched leading OMath, and a non-empty string is a text anchor. Inline XML comparison uses the same self-contained namespace normalization as extraction. Resolved batch insertions are applied from right to left so equations sharing an anchor retain source order.
+**Decision**: `deriveContextAnchors` returns optional `(snippet, instance)` anchors: nil is unmatched, an empty string is a matched leading OMath, and a non-empty string includes its source occurrence number. Inline XML comparison uses the same self-contained namespace normalization as extraction. Anchor groups run in source order for partial-success semantics; each shared-boundary group is preflighted and applied right-to-left so equations retain source order.
 
-**Rationale**: The former empty-string sentinel conflated leading and unmatched equations. Forward mutation reverses consecutive insertions at the same boundary. Explicit state plus reverse application makes failure loud and final document order stable (#125).
+**Rationale**: The former empty-string sentinel conflated leading and unmatched equations, while hard-coded `instance: 1` misplaced repeated prose. Global reverse mutation also left later equations behind when an earlier source item failed. Explicit occurrence state plus source-ordered, group-atomic application makes failure loud, partial success inspectable, and final document order stable (#125).
+
+### Direct-child text anchors
+
+**Decision**: Direct-child OMath uses the same Run-anchor resolution as inline OMath. The target Run is split at the original UTF-16 boundary, surrounding carriers are shifted in the canonical position space, and the direct child receives the unique position between prefix and suffix.
+
+**Rationale**: Silently degrading `.afterText` / `.beforeText` to paragraph end violates both the public position enum and batch failure contract. Unique positions are required because the serializer's cross-collection stable tie order cannot place an `UnrecognizedChild` between two equal-position Runs.
 
 ### Direct-child local-name preservation
 
@@ -121,6 +127,8 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 **Rationale**: ECMA-376 explicitly allows mixed prefixes within one document (each namespace declaration scopes locally). 99% of real docx files use the standard `m:` prefix anyway, making this almost a no-op safeguard. URI mismatch (rare; would mean the source uses a vendor-extended namespace not in the OMML schema) is a real semantic mismatch and warrants a throw.
 
+Namespace inspection accepts both XML quote styles. Extracted prefix-less fragments receive a local default OMML declaration so the copied raw subtree is self-contained; an explicitly declared non-standard URI is never defaulted to the standard URI.
+
 ## Risks / Trade-offs
 
 [**Risk: round-trip lossy after splice**] → Mitigation: 8 round-trip test fixtures in `Tests/OOXMLSwiftTests/OMathSpliceTests.swift` enforce byte-equal `DocxReader.read()` of spliced output vs original `<m:oMath>` block. PR merge blocked on any byte mismatch.
@@ -129,7 +137,7 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 [**Risk: cross-doc rStyle reference broken in target (e.g., `<w:rStyle w:val="MathStyle">` where target lacks that style ID)**] → Mitigation: documented as `.full` mode caveat; provide `.omathOnly` (strips rStyle) as opt-out. Real risk is low — Cambria Math is typically applied via direct `rFonts`, not via style reference, in NTPU/Word output.
 
-[**Risk: position-renumber regression**] → Mitigation: split-point share-position approach explicitly avoids renumbering; existing #56 / #99-103 round-trip suites run on every PR and would catch ordering drift.
+[**Risk: position-renumber regression**] → Mitigation: mid-Run inline splice keeps the narrow shared-position approach; boundary and direct-child paths compact only when cross-collection placement requires it and pin relative order across legacy plus all 13 position-indexed carriers. Existing #56 / #99-103 round-trip suites run on every PR.
 
 [**Risk: mixed-prefix output rejected by strict XML validators**] → Mitigation: default `.lenient` produces ECMA-376-compliant output (mixed prefixes are spec-legal); `.strict` mode available for callers needing single-prefix output for downstream tooling.
 

@@ -30,18 +30,19 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 - **THEN** the target `UnrecognizedChild.name` SHALL be `oMathPara`
 - **AND** save/reload and subsequent extraction SHALL preserve matching metadata and raw root
 
-#### Scenario: At-end follows mixed and API-built carriers
+#### Scenario: At-end follows every paragraph carrier
 
-- **GIVEN** a target paragraph containing positive-position carriers and nil/zero-position API-built carriers
+- **GIVEN** a target paragraph containing positive-position carriers, nil/zero-position API-built carriers, and legacy pre/post carriers such as page breaks, comments, footnotes, endnotes, or bookmarks
 - **WHEN** caller splices inline or direct-child OMath at `.atEnd`
-- **THEN** every existing position-indexed carrier SHALL retain its relative serialized order
-- **AND** the new OMath SHALL serialize after them
+- **THEN** every existing carrier SHALL retain its relative serialized order
+- **AND** the new OMath SHALL serialize after all of them
+- **AND** hostile or API-built positions such as `Int.max` SHALL be compacted without overflow
 
-#### Scenario: At-start precedes mixed and API-built carriers
+#### Scenario: At-start precedes every paragraph carrier
 
-- **GIVEN** a target paragraph containing positive-position and nil/zero-position carriers
+- **GIVEN** a target paragraph containing position-indexed and legacy pre/post carriers
 - **WHEN** caller splices inline or direct-child OMath at `.atStart`
-- **THEN** the new OMath SHALL serialize before every existing position-indexed carrier
+- **THEN** the new OMath SHALL serialize before every existing carrier
 
 #### Scenario: Source paragraph has no OMath
 
@@ -93,6 +94,18 @@ The system SHALL support `OMathSplicePosition.afterText(_, instance:, options:)`
 - **WHEN** caller invokes `spliceOMath` with `position: .afterText("檢定", instance: 2)` and the target paragraph contains "檢定" three times at character offsets 10, 30, 50
 - **THEN** the system SHALL splice the OMath at offset 32 (immediately after the second "檢定" occurrence)
 
+#### Scenario: Direct-child carrier honors text anchor
+
+- **WHEN** the source OMath is a paragraph direct child and caller uses `.afterText` or `.beforeText`
+- **THEN** the direct child SHALL serialize at the resolved boundary between split target Runs
+- **AND** a missing anchor SHALL throw `anchorNotFound` instead of appending at paragraph end
+
+#### Scenario: Math-script-insensitive anchor retains original split offsets
+
+- **WHEN** caller enables `AnchorLookupOptions(mathScriptInsensitive: true)` and the target contains a Unicode math-script variant such as `H₀`
+- **THEN** an ASCII anchor such as `H0` SHALL resolve
+- **AND** the Run SHALL split on valid original UTF-16 boundaries
+
 ### Requirement: rPr propagation modes
 
 The system SHALL provide `OMathSpliceRpRMode` with three modes controlling how the source Run's `rPr` is copied to the spliced OMath Run.
@@ -136,6 +149,8 @@ The system SHALL provide `OMathSpliceNamespacePolicy` with `.lenient` (default) 
 - **WHEN** source URI is `http://example.com/vendor/math` and target standard URI is `http://schemas.openxmlformats.org/officeDocument/2006/math`
 - **AND** caller invokes `spliceOMath(...)` with either policy
 - **THEN** the system SHALL throw `OMathSpliceError.namespaceMismatch(sourceURI:, targetURI:)`
+- **AND** namespace declarations using either single or double quotes SHALL be parsed equivalently
+- **AND** a prefix-less extracted OMath fragment SHALL receive a self-contained default OMML namespace declaration
 
 ### Requirement: Paragraph-level batch splice with auto-anchor derivation
 
@@ -170,6 +185,7 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 
 - **WHEN** multiple OMath blocks share the same anchor, including consecutive leading equations
 - **THEN** their final serialized order SHALL equal source-document order
+- **AND** identical text snippets at different source occurrences SHALL map to the corresponding target occurrence rather than always instance 1
 
 #### Scenario: Context anchor not found for one OMath
 
@@ -177,7 +193,8 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 - **AND** target paragraph's prose says "規模效果" (e.g., advisor changed wording)
 - **AND** caller invokes `spliceParagraphOMath(...)`
 - **THEN** the system SHALL throw `OMathSpliceError.contextAnchorNotFound(omathIndex: <N>, snippet: "大小效果")`
-- **AND** any OMath blocks that were already spliced before this failure SHALL remain in target (partial-success state; caller can inspect target paragraph)
+- **AND** any earlier source anchor groups that were already spliced before this failure SHALL remain in target
+- **AND** the failing shared-anchor group SHALL be preflighted as a unit so it does not partially mutate the target
 
 ### Requirement: Round-trip lossless guarantee
 
@@ -196,7 +213,7 @@ The introduction of `spliceOMath` / `spliceParagraphOMath` APIs SHALL NOT alter 
 
 - **WHEN** target paragraph already contains 2 OMath blocks before splice
 - **AND** caller splices a 3rd OMath block via `spliceOMath(..., position: .atEnd, ...)`
-- **THEN** the original 2 OMath blocks SHALL remain in target with original `rawXML` and `position`
+- **THEN** the original 2 OMath blocks SHALL remain in target with original `rawXML` and relative serialized order (numeric positions MAY be compacted to represent a true boundary safely)
 - **AND** only the new 3rd OMath block SHALL be added at the end
 
 #### Scenario: Existing #85 / #92 / #99-103 fixture suites pass unchanged

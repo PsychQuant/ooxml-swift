@@ -72,11 +72,12 @@
 ## 10. Boundary, metadata, and batch-anchor remediations (#122, #124, #125)
 
 - [x] 10.1 Add RED coverage for inline/direct `.atEnd` after API-built and mixed carriers
-- [x] 10.2 Materialize nil/zero position carriers in current post-content order before boundary insertion
-- [x] 10.3 Shift all positioned carriers for true inline/direct `.atStart`
+- [x] 10.2 Canonicalize all position-indexed and legacy fixed-order carriers without `Int.max` overflow
+- [x] 10.3 Reserve true inline/direct `.atStart` and `.atEnd` positions outside every existing carrier
 - [x] 10.4 Carry direct-child local name and preserve `oMathPara` through save/reload/extraction
 - [x] 10.5 Distinguish unmatched, leading-empty, and text batch anchors
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
-- [x] 10.7 Apply batch mutations right-to-left to preserve repeated-anchor source order
-- [x] 10.8 Run `OMathSpliceTests`: 25 tests, 0 failures
-- [x] 10.9 Run full package regression: 1,453 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the committed PR head
+- [x] 10.7 Derive anchor occurrence instances; apply source-ordered groups right-to-left within each shared boundary
+- [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, and quote-complete namespace checks
+- [x] 10.9 Run `OMathSpliceTests`: 39 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,467 tests, 31 conditional skips, 0 failures; IDD cluster re-verification follows on the remediation commit
