@@ -719,6 +719,39 @@ final class OMathSpliceTests: XCTestCase {
         }
     }
 
+    func testInheritedNamespaceInjectionIgnoresNestedShadowing() throws {
+        let standardURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        let inheritedFragments = [
+            (
+                #"<mml:oMath><mml:r xmlns:mml="urn:vendor:nested-shadow"><mml:t>α</mml:t></mml:r></mml:oMath>"#,
+                #"<mml:oMath xmlns:mml="\#(standardURI)">"#
+            ),
+            (
+                #"<oMath><r xmlns="urn:vendor:nested-shadow"><t>α</t></r></oMath>"#,
+                #"<oMath xmlns="\#(standardURI)">"#
+            ),
+        ]
+
+        for (fragment, expectedRoot) in inheritedFragments {
+            var sourceRun = Run(text: "")
+            sourceRun.rawXML = fragment
+            let source = Paragraph(runs: [sourceRun])
+            var target = makeDocument(with: try parseParagraph(xml: Self.targetEmpty))
+
+            try target.spliceOMath(from: source, toBodyParagraphIndex: 0, position: .atEnd)
+            guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+            let spliced = try XCTUnwrap(result.runs.first(where: { omathXML(in: $0) != nil })?.rawXML)
+            XCTAssertTrue(spliced.hasPrefix(expectedRoot), "Root declaration missing: \(spliced)")
+            XCTAssertTrue(spliced.contains("urn:vendor:nested-shadow"), "Nested shadow must remain verbatim")
+
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("OMathSpliceTests-inherited-ns-\(UUID().uuidString).docx")
+            defer { try? FileManager.default.removeItem(at: url) }
+            try DocxWriter.write(target, to: url)
+            XCTAssertNoThrow(try DocxReader.read(from: url), "Self-contained root namespace must reload")
+        }
+    }
+
     // MARK: - No regression (6.14)
 
     /// Pre-existing OMath in target paragraph must be preserved during splice.

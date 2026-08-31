@@ -131,29 +131,26 @@ internal enum OMathExtractor {
     /// `<w:p>` but `XMLElement.xmlString` doesn't carry inherited declarations
     /// — the extracted rawXML must be self-contained for round-trip correctness.
     static func ensureXmlnsDeclared(in xml: String) -> String {
-        guard let prefix = OMathNamespace.extractPrefix(from: xml), !prefix.isEmpty else {
-            // Default-namespace OMath — assume xmlns="..." declared elsewhere or not needed.
+        guard let rootStartTag = rootElementStartTag(in: xml),
+              let qualifiedName = rootElementQualifiedName(in: rootStartTag) else {
             return xml
         }
-        // Already declared?
-        if xml.contains("xmlns:\(prefix)=") || xml.contains("xmlns:\(prefix) =") {
+        // Only a declaration on the root binds the root QName. A nested
+        // declaration of the same prefix must not suppress self-containment.
+        if OMathNamespace.extractURI(from: rootStartTag) != nil {
             return xml
         }
-        // Inject after the opening element name. Find the first `<prefix:` and inject
-        // ` xmlns:prefix="..."` after the element name (before any other attributes).
-        let openTag = "<\(prefix):"
+        // Inject after the root element name, before any existing attributes.
+        let openTag = "<\(qualifiedName)"
         guard let openIdx = xml.range(of: openTag) else { return xml }
-        // Find end of element name (first whitespace or `>` or `/`).
-        var nameEnd = openIdx.upperBound
-        while nameEnd < xml.endIndex,
-              !xml[nameEnd].isWhitespace,
-              xml[nameEnd] != ">",
-              xml[nameEnd] != "/" {
-            nameEnd = xml.index(after: nameEnd)
-        }
         let standardURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
-        let injection = " xmlns:\(prefix)=\"\(standardURI)\""
-        return String(xml[..<nameEnd]) + injection + String(xml[nameEnd...])
+        let declaration: String
+        if let prefix = OMathNamespace.extractPrefix(from: rootStartTag) {
+            declaration = " xmlns:\(prefix)=\"\(standardURI)\""
+        } else {
+            declaration = " xmlns=\"\(standardURI)\""
+        }
+        return String(xml[..<openIdx.upperBound]) + declaration + String(xml[openIdx.upperBound...])
     }
 }
 
