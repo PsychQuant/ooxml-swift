@@ -168,17 +168,10 @@ internal enum OMathNamespace {
         // Restrict prefix detection to the root QName. Searching the whole
         // fragment would mistake the colon in a default URI such as
         // `xmlns="urn:vendor"` for an element prefix.
-        guard let prefix = extractPrefix(from: rootStartTag) else {
-            // Could be default-namespace OMath (no prefix). Scan for any `xmlns="..."`.
-            return extractURIByPattern(
-                xml: rootStartTag,
-                pattern: #"\bxmlns\s*=\s*(?:"([^"]+)"|'([^']+)')"#
-            )
+        if let prefix = extractPrefix(from: rootStartTag) {
+            return rootElementAttributeValue(named: "xmlns:\(prefix)", in: rootStartTag)
         }
-        // XML permits either quote style around attribute values.
-        let pattern = #"\bxmlns:"# + NSRegularExpression.escapedPattern(for: prefix)
-            + #"\s*=\s*(?:"([^"]+)"|'([^']+)')"#
-        return extractURIByPattern(xml: rootStartTag, pattern: pattern)
+        return rootElementAttributeValue(named: "xmlns", in: rootStartTag)
     }
 
     /// Extracts the OMath prefix (e.g. "m" or "mml") from the opening element.
@@ -198,19 +191,6 @@ internal enum OMathNamespace {
         return String(components[0])
     }
 
-    private static func extractURIByPattern(xml: String, pattern: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let ns = xml as NSString
-        guard let match = regex.firstMatch(in: xml, range: NSRange(location: 0, length: ns.length)),
-              match.numberOfRanges > 1 else { return nil }
-        for captureIndex in 1..<match.numberOfRanges {
-            let range = match.range(at: captureIndex)
-            if range.location != NSNotFound {
-                return ns.substring(with: range)
-            }
-        }
-        return nil
-    }
 }
 
 // MARK: - Internal: rPr propagation modes
