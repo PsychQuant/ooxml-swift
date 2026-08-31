@@ -12,7 +12,7 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 - Add `OMathSpliceRpRMode` enum: `.full` (default) / `.omathOnly` / `.discard` — controls source-Run rPr (font/size/lang) propagation to target
 - Add `OMathSpliceNamespacePolicy` enum: `.lenient` (default) / `.strict` — controls behavior on namespace prefix vs URI mismatch
 - Add `OMathSpliceError` enum: 6 cases covering the failure taxonomy
-- Carrier preservation: source's `Run.rawXML` OMath splices into target as a `Run` whose `rawElements` contains the verbatim OMath child; source's direct-child `unrecognizedChildren` OMath splices into target as `unrecognizedChildren` (visual semantics — inline stays inline, display stays display). The inline target MUST NOT use `Run.rawXML`, because that field replaces the complete serialized Run and bypasses rPr emission (#117).
+- Carrier preservation: source's `Run.rawXML` OMath splices into target as `Run.rawXML`; source's direct-child `unrecognizedChildren` OMath splices into target as `unrecognizedChildren` (visual semantics — inline stays inline, display stays display). Serializers MUST distinguish an OMath-root raw fragment from a complete raw Run replacement so the inline target retains `<w:r>` and rPr (#117).
 - Mid-paragraph splice via anchor-Run split (does not touch the other 12 position-indexed paragraph carriers — isolated blast radius; mirrors `replaceText` pattern)
 
 ## Non-Goals (optional)
@@ -27,7 +27,9 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 
 ### Correctness remediation
 
-- PsychQuant/ooxml-swift#117 corrects the inline target representation from a complete-Run raw-XML replacement to a Run-carried raw OMath child. This makes all three rPr propagation modes observable in serialized OOXML and preserves the inline carrier across save/reload.
+- PsychQuant/ooxml-swift#117 keeps the established inline raw-XML representation for compatibility with flattened text, anchor lookup, and existing callers, but changes serialization semantics when the raw fragment's root is an OMath element. Such a fragment is emitted as a child of the typed Run, making all three rPr propagation modes observable and preserving the inline carrier across later dirty saves.
+
+Verification also surfaced separate pre-existing concerns tracked independently as #122 (boundary ordering), #123 (byte-equality contract), and #124 (direct-child OMath paragraph metadata).
 
 ### Modified Capabilities
 

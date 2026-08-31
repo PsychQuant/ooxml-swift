@@ -14,6 +14,35 @@ public struct RawElement: Equatable {
     }
 }
 
+/// Returns the local name of the root element in a raw XML fragment.
+///
+/// Raw carrier fragments are produced from `XMLElement.xmlString`, so they
+/// start at the element itself (no XML declaration). Keeping this parser tiny
+/// avoids reparsing a fragment solely to distinguish `<m:oMath>` from a full
+/// `<w:r>` raw replacement.
+internal func rootElementLocalName(in xml: String) -> String? {
+    let trimmed = xml.drop(while: { $0.isWhitespace })
+    guard trimmed.first == "<" else { return nil }
+    let nameStart = trimmed.index(after: trimmed.startIndex)
+    guard nameStart < trimmed.endIndex,
+          trimmed[nameStart] != "/",
+          trimmed[nameStart] != "!",
+          trimmed[nameStart] != "?" else {
+        return nil
+    }
+
+    var nameEnd = nameStart
+    while nameEnd < trimmed.endIndex {
+        let character = trimmed[nameEnd]
+        if character.isWhitespace || character == ">" || character == "/" {
+            break
+        }
+        nameEnd = trimmed.index(after: nameEnd)
+    }
+    guard nameEnd > nameStart else { return nil }
+    return String(trimmed[nameStart..<nameEnd].split(separator: ":").last ?? "")
+}
+
 public struct Run {
     /// v0.31.1+ (Spectra `sibling-types-tree-projection-impl`,
     /// `word-aligned-state-sync` Phase 1 task 2.2): when non-nil, this Run is
@@ -484,10 +513,25 @@ public enum VerticalAlign: String, Codable {
 // MARK: - XML 生成
 
 extension Run {
+    /// A rawXML payload whose root is an inline OMML element is a child of the
+    /// logical Run, not a complete serialized Run replacement. Source-loaded
+    /// OMath remains in `rawXML` for API compatibility, but serializers must
+    /// wrap this fragment so rPr and the `<w:r>` carrier survive dirty resaves.
+    internal var rawOMathFragment: String? {
+        guard let rawXML,
+              let localName = rootElementLocalName(in: rawXML),
+              localName == "oMath" || localName == "oMathPara" else {
+            return nil
+        }
+        return rawXML
+    }
+
     /// 轉換為 OOXML XML 字串
     func toXML() -> String {
-        // 如果 Run 本身有原始 XML，直接輸出（用於欄位代碼、SDT 等）
-        if let rawXML = self.rawXML {
+        // Complete raw Run replacements still bypass typed serialization.
+        // An OMath root is different: it is a Run child and must be wrapped.
+        let rawOMathFragment = self.rawOMathFragment
+        if let rawXML = self.rawXML, rawOMathFragment == nil {
             return rawXML
         }
 
@@ -507,6 +551,8 @@ extension Run {
         // Drawing (圖片) - 如果有圖片，優先輸出圖片
         if let drawing = drawing {
             xml += drawing.toXML()
+        } else if let rawOMathFragment {
+            xml += rawOMathFragment
         } else if !text.isEmpty || (rawElements?.isEmpty ?? true) {
             // v0.14.0+ (che-word-mcp#52): when a Run carries only rawElements
             // (e.g., VML watermark with no text child), suppress the synthetic

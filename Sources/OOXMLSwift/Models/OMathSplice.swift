@@ -213,7 +213,7 @@ internal extension RunProperties {
     ///
     /// - `.full`: returns self verbatim (deep copy via Equatable struct semantics).
     /// - `.omathOnly`: returns a new `RunProperties` with only OMath-rendering-relevant fields:
-    ///   `rFonts`, `fontName`, `fontSize`, `bold`, `italic`. Other fields (rStyle / color /
+    ///   `rFonts`, `fontName`, `fontSize` (sz + szCs), `lang`, `bold`, `italic`. Other fields (rStyle / color /
     ///   highlight / verticalAlign / etc.) are dropped.
     /// - `.discard`: returns `RunProperties()` (default-initialized).
     ///
@@ -227,6 +227,7 @@ internal extension RunProperties {
             out.rFonts = self.rFonts
             out.fontName = self.fontName
             out.fontSize = self.fontSize
+            out.lang = self.lang
             if let bold = self.specifiedBold { out.bold = bold }
             if let italic = self.specifiedItalic { out.italic = italic }
             return out
