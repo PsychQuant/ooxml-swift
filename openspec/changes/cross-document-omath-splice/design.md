@@ -89,6 +89,8 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 Anchor resolution uses the same serializer-visible typed-text rule as batch derivation. Matching hidden `Run.text` beneath `rawXML`, `RunProperties.rawXML`, or `drawing` would split a carrier whose prefix and suffix both retain the opaque override, duplicating content.
 
+When a visible-text Run also carries post-text `rawElements`, splitting clears them from the prefix and keeps them on the suffix only. An empty-text suffix is retained for this purpose, preserving the opaque child exactly once and after the original text/insertion boundary.
+
 ### Direct-child local-name preservation
 
 **Decision**: Carry the source direct-child local name through extraction and use it when creating the target `UnrecognizedChild`.

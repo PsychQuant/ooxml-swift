@@ -15,10 +15,11 @@ All notable changes to ooxml-swift will be documented in this file.
   embeddable XML fragment before mutation. Inline raw carriers are classified
   by root local name rather than full-string substring matches. Anchor/context
   matching excludes typed text hidden by raw overrides or drawings, preventing
-  opaque carrier duplication. Malformed fragments throw the new
+  opaque carrier duplication. Post-text `rawElements` stay once on the split
+  suffix rather than being copied to both segments. Malformed fragments throw the new
   additive `OMathSpliceMalformedXMLError`; the released six-case
   `OMathSpliceError` enum remains unchanged so external exhaustive switches
-  continue to compile. Focused coverage: 62 tests; full suite: 1,490 tests with
+  continue to compile. Focused coverage: 63 tests; full suite: 1,491 tests with
   31 conditional skips and no failures.
 
 ## [3.5.0] - 2026-08-27
