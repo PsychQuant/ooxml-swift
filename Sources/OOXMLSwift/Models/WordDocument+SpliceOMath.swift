@@ -489,13 +489,29 @@ extension WordDocument {
     ) -> RunAnchorResolution? {
         guard !anchor.isEmpty, instance >= 1 else { return nil }
 
-        // Build (runIdx, runText, startGlobal) excluding OMath-bearing runs.
-        var runSpans: [(runIdx: Int, text: String, startGlobal: Int)] = []
-        var globalOffset = 0
+        // Build serializer-ordered visible Run candidates while retaining each
+        // original array index for the eventual mutation.
+        var candidates: [(bucket: Int, order: Int, runIdx: Int, text: String)] = []
         for (i, run) in para.runs.enumerated() {
             guard let visibleText = serializedTypedText(in: run) else { continue }
-            runSpans.append((i, visibleText, globalOffset))
-            globalOffset += visibleText.utf16.count
+            let key = contextSerializerKey(
+                boundaryPlacement: run.paragraphBoundaryPlacement,
+                boundaryOrder: run.paragraphBoundaryOrder,
+                position: run.position
+            )
+            candidates.append((key.bucket, key.order, i, visibleText))
+        }
+        candidates.sort { lhs, rhs in
+            if lhs.bucket != rhs.bucket { return lhs.bucket < rhs.bucket }
+            if lhs.order != rhs.order { return lhs.order < rhs.order }
+            return lhs.runIdx < rhs.runIdx
+        }
+
+        var runSpans: [(runIdx: Int, text: String, startGlobal: Int)] = []
+        var globalOffset = 0
+        for candidate in candidates {
+            runSpans.append((candidate.runIdx, candidate.text, globalOffset))
+            globalOffset += candidate.text.utf16.count
         }
 
         let combined = runSpans.map { $0.text }.joined()

@@ -83,6 +83,8 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 Context derivation consumes a Run/direct-OMath event stream sorted by the same four regions as `Paragraph.toXML()`: absolute start, positive positions, non-positive post-content, and absolute end. Runs precede direct unrecognized children at equal positive/non-positive positions, matching collection emission order. Array order alone is never used as document order.
 
+Target anchor resolution sorts serializer-visible Run spans by the same region/order key before assigning global occurrence offsets, while retaining original Run array indices for mutation. Repeated `instance` values therefore refer to visible XML order even when Run storage order differs from `position` order.
+
 ### Direct-child text anchors
 
 **Decision**: Direct-child OMath uses the same Run-anchor resolution as inline OMath. The target Run is split at the original UTF-16 boundary, surrounding carriers are shifted in the canonical position space, and the direct child receives the unique position between prefix and suffix.
