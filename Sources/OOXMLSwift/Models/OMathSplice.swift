@@ -167,17 +167,16 @@ internal enum OMathNamespace {
     /// one used in the opening element name (e.g. `<mml:oMath xmlns:mml="...">` → `mml`).
     /// Falls back to scanning for any `xmlns:` declaration if prefix detection fails.
     static func extractURI(from xml: String) -> String? {
-        // Find the prefix from the opening tag (e.g. `<m:oMath` → "m", `<mml:oMath` → "mml").
-        guard let lessThan = xml.firstIndex(of: "<") else { return nil }
-        let afterLT = xml.index(after: lessThan)
-        guard let colonIdx = xml[afterLT...].firstIndex(of: ":") else {
+        // Restrict prefix detection to the root QName. Searching the whole
+        // fragment would mistake the colon in a default URI such as
+        // `xmlns="urn:vendor"` for an element prefix.
+        guard let prefix = extractPrefix(from: xml) else {
             // Could be default-namespace OMath (no prefix). Scan for any `xmlns="..."`.
             return extractURIByPattern(
                 xml: xml,
                 pattern: #"\bxmlns\s*=\s*(?:"([^"]+)"|'([^']+)')"#
             )
         }
-        let prefix = String(xml[afterLT..<colonIdx])
         // XML permits either quote style around attribute values.
         let pattern = #"\bxmlns:"# + NSRegularExpression.escapedPattern(for: prefix)
             + #"\s*=\s*(?:"([^"]+)"|'([^']+)')"#
@@ -187,13 +186,9 @@ internal enum OMathNamespace {
     /// Extracts the OMath prefix (e.g. "m" or "mml") from the opening element.
     /// Returns nil if no prefix used (default namespace).
     static func extractPrefix(from xml: String) -> String? {
-        guard let lessThan = xml.firstIndex(of: "<") else { return nil }
-        let afterLT = xml.index(after: lessThan)
-        guard let colonIdx = xml[afterLT...].firstIndex(of: ":") else {
-            return nil
-        }
-        // Verify the colon belongs to the element name (no whitespace before it).
-        let candidate = String(xml[afterLT..<colonIdx])
+        guard let qualifiedName = rootElementQualifiedName(in: xml),
+              let colonIdx = qualifiedName.firstIndex(of: ":") else { return nil }
+        let candidate = String(qualifiedName[..<colonIdx])
         guard !candidate.isEmpty,
               candidate.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }) else {
             return nil

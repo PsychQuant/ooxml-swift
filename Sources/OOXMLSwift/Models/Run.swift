@@ -14,13 +14,13 @@ public struct RawElement: Equatable {
     }
 }
 
-/// Returns the local name of the root element in a raw XML fragment.
+/// Returns the qualified name of the root element in a raw XML fragment.
 ///
 /// Raw carrier fragments are produced from `XMLElement.xmlString`, so they
 /// start at the element itself (no XML declaration). Keeping this parser tiny
 /// avoids reparsing a fragment solely to distinguish `<m:oMath>` from a full
 /// `<w:r>` raw replacement.
-internal func rootElementLocalName(in xml: String) -> String? {
+internal func rootElementQualifiedName(in xml: String) -> String? {
     let trimmed = xml.drop(while: { $0.isWhitespace })
     guard trimmed.first == "<" else { return nil }
     let nameStart = trimmed.index(after: trimmed.startIndex)
@@ -40,7 +40,13 @@ internal func rootElementLocalName(in xml: String) -> String? {
         nameEnd = trimmed.index(after: nameEnd)
     }
     guard nameEnd > nameStart else { return nil }
-    return String(trimmed[nameStart..<nameEnd].split(separator: ":").last ?? "")
+    return String(trimmed[nameStart..<nameEnd])
+}
+
+/// Returns the namespace-independent local name of a raw fragment's root.
+internal func rootElementLocalName(in xml: String) -> String? {
+    guard let qualifiedName = rootElementQualifiedName(in: xml) else { return nil }
+    return String(qualifiedName.split(separator: ":").last ?? "")
 }
 
 public struct Run {
