@@ -217,7 +217,9 @@ extension WordDocument {
         }
     }
 
-    /// Splice OMath as a new `Run.rawXML` into target paragraph.
+    /// Splice OMath as a child of a new `<w:r>` carrier. `rawXML` cannot be
+    /// used here because Run.toXML() treats it as a complete replacement and
+    /// would bypass the copied rPr entirely.
     private static func spliceAsRun(
         into targetPara: inout Paragraph,
         omath: ExtractedOMath,
@@ -226,7 +228,8 @@ extension WordDocument {
     ) throws {
         // Build the new OMath Run.
         var omathRun = Run(text: "")
-        omathRun.rawXML = omath.xml
+        let elementName = omath.xml.contains("oMathPara") ? "oMathPara" : "oMath"
+        omathRun.rawElements = [RawElement(name: elementName, xml: omath.xml)]
         if let sourceRpR = omath.sourceRunProperties {
             omathRun.properties = sourceRpR.filteredForOMathSplice(mode: rPrMode)
         } else {
