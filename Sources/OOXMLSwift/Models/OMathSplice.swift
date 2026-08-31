@@ -136,17 +136,16 @@ internal enum OMathExtractor {
     /// `<w:p>` but `XMLElement.xmlString` doesn't carry inherited declarations
     /// — the extracted rawXML must be self-contained for round-trip correctness.
     static func ensureXmlnsDeclared(in xml: String) -> String {
-        guard let prefix = OMathNamespace.extractPrefix(from: xml), !prefix.isEmpty else {
-            // Default-namespace OMath — assume xmlns="..." declared elsewhere or not needed.
+        let prefix = OMathNamespace.extractPrefix(from: xml)
+        // A local declaration using either legal quote style is already
+        // self-contained. Do not rewrite its URI or lexical form.
+        if OMathNamespace.extractURI(from: xml) != nil {
             return xml
         }
-        // Already declared?
-        if xml.contains("xmlns:\(prefix)=") || xml.contains("xmlns:\(prefix) =") {
-            return xml
-        }
-        // Inject after the opening element name. Find the first `<prefix:` and inject
-        // ` xmlns:prefix="..."` after the element name (before any other attributes).
-        let openTag = "<\(prefix):"
+
+        // Inject after the opening element name. Prefix-less fragments receive
+        // a default OMML namespace; prefixed fragments receive xmlns:prefix.
+        let openTag = prefix.map { "<\($0):" } ?? "<"
         guard let openIdx = xml.range(of: openTag) else { return xml }
         // Find end of element name (first whitespace or `>` or `/`).
         var nameEnd = openIdx.upperBound
@@ -157,7 +156,8 @@ internal enum OMathExtractor {
             nameEnd = xml.index(after: nameEnd)
         }
         let standardURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
-        let injection = " xmlns:\(prefix)=\"\(standardURI)\""
+        let injection = prefix.map { " xmlns:\($0)=\"\(standardURI)\"" }
+            ?? " xmlns=\"\(standardURI)\""
         return String(xml[..<nameEnd]) + injection + String(xml[nameEnd...])
     }
 }
@@ -172,25 +172,27 @@ internal enum OMathNamespace {
     /// one used in the opening element name (e.g. `<mml:oMath xmlns:mml="...">` → `mml`).
     /// Falls back to scanning for any `xmlns:` declaration if prefix detection fails.
     static func extractURI(from xml: String) -> String? {
+        guard let openingTag = rootOpeningTag(in: xml) else { return nil }
         // Find the prefix from the opening tag (e.g. `<m:oMath` → "m", `<mml:oMath` → "mml").
-        guard let lessThan = xml.firstIndex(of: "<") else { return nil }
-        let afterLT = xml.index(after: lessThan)
-        guard let colonIdx = xml[afterLT...].firstIndex(of: ":") else {
+        guard let lessThan = openingTag.firstIndex(of: "<") else { return nil }
+        let afterLT = openingTag.index(after: lessThan)
+        guard let colonIdx = openingTag[afterLT...].firstIndex(of: ":") else {
             // Could be default-namespace OMath (no prefix). Scan for any `xmlns="..."`.
-            return extractURIByPattern(xml: xml, pattern: #"\bxmlns\s*=\s*"([^"]+)""#)
+            return extractURIByPattern(xml: openingTag, pattern: #"\bxmlns\s*=\s*['"]([^'"]+)['"]"#)
         }
-        let prefix = String(xml[afterLT..<colonIdx])
+        let prefix = String(openingTag[afterLT..<colonIdx])
         // Look for `xmlns:<prefix>="<URI>"`.
-        let pattern = #"\bxmlns:"# + NSRegularExpression.escapedPattern(for: prefix) + #"\s*=\s*"([^"]+)""#
-        return extractURIByPattern(xml: xml, pattern: pattern)
+        let pattern = #"\bxmlns:"# + NSRegularExpression.escapedPattern(for: prefix) + #"\s*=\s*['"]([^'"]+)['"]"#
+        return extractURIByPattern(xml: openingTag, pattern: pattern)
     }
 
     /// Extracts the OMath prefix (e.g. "m" or "mml") from the opening element.
     /// Returns nil if no prefix used (default namespace).
     static func extractPrefix(from xml: String) -> String? {
-        guard let lessThan = xml.firstIndex(of: "<") else { return nil }
-        let afterLT = xml.index(after: lessThan)
-        guard let colonIdx = xml[afterLT...].firstIndex(of: ":") else {
+        guard let openingTag = rootOpeningTag(in: xml),
+              let lessThan = openingTag.firstIndex(of: "<") else { return nil }
+        let afterLT = openingTag.index(after: lessThan)
+        guard let colonIdx = openingTag[afterLT...].firstIndex(of: ":") else {
             return nil
         }
         // Verify the colon belongs to the element name (no whitespace before it).
@@ -200,6 +202,24 @@ internal enum OMathNamespace {
             return nil
         }
         return candidate
+    }
+
+    private static func rootOpeningTag(in xml: String) -> String? {
+        guard let start = xml.firstIndex(of: "<") else { return nil }
+        var index = xml.index(after: start)
+        var quote: Character?
+        while index < xml.endIndex {
+            let character = xml[index]
+            if let activeQuote = quote {
+                if character == activeQuote { quote = nil }
+            } else if character == "\"" || character == "'" {
+                quote = character
+            } else if character == ">" {
+                return String(xml[start...index])
+            }
+            index = xml.index(after: index)
+        }
+        return nil
     }
 
     private static func extractURIByPattern(xml: String, pattern: String) -> String? {
