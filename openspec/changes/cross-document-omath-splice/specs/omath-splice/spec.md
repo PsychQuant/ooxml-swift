@@ -30,6 +30,7 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 - **THEN** the target `UnrecognizedChild.name` SHALL be `oMathPara`
 - **AND** save/reload and subsequent extraction SHALL preserve matching metadata and raw root
 - **AND** a direct-child carrier whose stored `name` disagrees with the validated raw root local name SHALL throw `OMathSpliceMalformedXMLError` before mutation
+- **AND** eligibility SHALL consider both stored metadata and raw root, so a custom name cannot hide an OMath-root mismatch
 
 #### Scenario: At-end follows every paragraph carrier
 
@@ -37,6 +38,12 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 - **WHEN** caller splices inline or direct-child OMath at `.atEnd`
 - **THEN** every existing carrier SHALL retain its relative serialized order
 - **AND** the new OMath SHALL serialize after all of them
+
+#### Scenario: Direct mid-anchor preserves legacy post-content order
+
+- **WHEN** an API-built target serializes Runs before a position-less ContentControl
+- **AND** a direct-child OMath is inserted at a text anchor inside a Run
+- **THEN** canonical position assignment SHALL preserve Run/split-OMath/Run before ContentControl order
 - **AND** hostile or API-built positions such as `Int.max` SHALL neither overflow nor be rewritten for ordinary boundary insertion
 - **AND** negative-position carriers SHALL remain visible in the non-positive post-content bucket rather than being dropped
 
@@ -86,6 +93,7 @@ The system SHALL support `OMathSplicePosition.afterText(_, instance:, options:)`
   | 1 | "" | "<m:oMath>...t...</m:oMath>" | 3 |
   | 2 | "檢定：" | nil | 3 |
 - **AND** rPr `{ rFonts: { eastAsia: "DFKai-SB" } }` is copied to runs at indices 0 and 2
+- **AND** exact trailing whitespace in the anchor SHALL remain on the prefix; whitespace-only context SHALL NOT be treated as a leading boundary
 
 #### Scenario: Anchor not found in target paragraph
 
@@ -238,6 +246,13 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 - **THEN** the system SHALL throw `OMathSpliceError.contextAnchorNotFound(omathIndex: <N>, snippet: "大小效果")`
 - **AND** any earlier source anchor groups that were already spliced before this failure SHALL remain in target
 - **AND** the failing shared-anchor group SHALL be preflighted as a unit so it does not partially mutate the target
+- **AND** a later nil-derived anchor SHALL be raised in source-group order after earlier valid groups have been applied
+
+#### Scenario: Tree-backed Paragraph views splice through retained typed state
+
+- **WHEN** source and/or target Paragraphs carry opt-in `xmlNode` tree backing
+- **THEN** splice SHALL operate on detached value copies of their retained typed model
+- **AND** the returned target Paragraph SHALL be detached and save/reload SHALL contain the inserted OMath
 
 ### Requirement: Round-trip semantic XML equivalence
 

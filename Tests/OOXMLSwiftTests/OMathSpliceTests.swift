@@ -333,11 +333,120 @@ final class OMathSpliceTests: XCTestCase {
         }
     }
 
+    func testBatchContextPreservesTrailingWhitespaceBoundaries() throws {
+        func mathRun(_ text: String) -> Run {
+            var run = Run(text: "")
+            run.rawXML = "<m:oMath><m:r><m:t>\(text)</m:t></m:r></m:oMath>"
+            return run
+        }
+
+        let spacedSource = Paragraph(runs: [
+            Run(text: "進行 "), mathRun("S"), Run(text: " 檢定"),
+        ])
+        var spacedTarget = makeDocument(with: Paragraph(runs: [Run(text: "進行  檢定")]))
+        XCTAssertEqual(try spacedTarget.spliceParagraphOMath(from: spacedSource, toBodyParagraphIndex: 0), 1)
+        guard case .paragraph(let spacedResult) = spacedTarget.body.children[0] else { XCTFail(); return }
+        let spacedMathIndex = try XCTUnwrap(spacedResult.runs.firstIndex { $0.rawXML?.contains("<m:t>S</m:t>") == true })
+        XCTAssertEqual(spacedResult.runs[spacedMathIndex - 1].text, "進行 ")
+        XCTAssertEqual(spacedResult.runs[spacedMathIndex + 1].text, " 檢定")
+
+        let whitespaceOnlySource = Paragraph(runs: [Run(text: " "), mathRun("W")])
+        var whitespaceTarget = makeDocument(with: Paragraph(runs: [Run(text: "  tail")]))
+        XCTAssertEqual(try whitespaceTarget.spliceParagraphOMath(from: whitespaceOnlySource, toBodyParagraphIndex: 0), 1)
+        guard case .paragraph(let whitespaceResult) = whitespaceTarget.body.children[0] else { XCTFail(); return }
+        let whitespaceMathIndex = try XCTUnwrap(whitespaceResult.runs.firstIndex { $0.rawXML?.contains("<m:t>W</m:t>") == true })
+        XCTAssertGreaterThan(whitespaceMathIndex, 0)
+        XCTAssertLessThan(whitespaceMathIndex + 1, whitespaceResult.runs.count)
+        guard whitespaceMathIndex > 0,
+              whitespaceMathIndex + 1 < whitespaceResult.runs.count else { return }
+        XCTAssertEqual(whitespaceResult.runs[whitespaceMathIndex - 1].text, " ")
+        XCTAssertEqual(whitespaceResult.runs[whitespaceMathIndex + 1].text, " tail")
+    }
+
+    func testDirectAnchorPreservesLegacyRunBeforeContentControlOrder() throws {
+        var paragraph = Paragraph(runs: [Run(text: "AB")])
+        paragraph.contentControls = [
+            .plainText(tag: "order", alias: "SDT_SENTINEL", content: "CONTROL")
+        ]
+        let before = paragraph.toXML()
+        XCTAssertLessThan(
+            try XCTUnwrap(before.range(of: ">AB<")?.lowerBound),
+            try XCTUnwrap(before.range(of: "SDT_SENTINEL")?.lowerBound)
+        )
+
+        var target = makeDocument(with: paragraph)
+        try target.spliceOMath(
+            from: try parseParagraph(xml: Self.sourceDirectChildOMath),
+            toBodyParagraphIndex: 0,
+            position: .afterText("A")
+        )
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        let xml = result.toXML()
+        let positions = try [">A<", "<m:oMath", ">B<", "SDT_SENTINEL"].map {
+            try XCTUnwrap(xml.range(of: $0)?.lowerBound, "Missing \($0): \(xml)")
+        }
+        for pair in zip(positions, positions.dropFirst()) {
+            XCTAssertLessThan(pair.0, pair.1, xml)
+        }
+    }
+
+    func testTreeBackedSourceAndTargetDetachBeforeSpliceMutation() throws {
+        var treeSource = try parseParagraph(xml: Self.sourceInlineRunOMath)
+        treeSource.xmlNode = try XmlTreeReader.parse(Data(Self.sourceInlineRunOMath.utf8)).root
+        var treeTarget = try parseParagraph(xml: Self.targetWithMatchingAnchors)
+        treeTarget.xmlNode = try XmlTreeReader.parse(Data(Self.targetWithMatchingAnchors.utf8)).root
+
+        var single = makeDocument(with: treeTarget)
+        XCTAssertEqual(try single.spliceOMath(
+            from: treeSource,
+            toBodyParagraphIndex: 0,
+            position: .atEnd
+        ), 1)
+        guard case .paragraph(let singleResult) = single.body.children[0] else { XCTFail(); return }
+        XCTAssertNil(singleResult.xmlNode)
+        XCTAssertTrue(singleResult.toXML().contains("<m:oMath"))
+
+        var batch = makeDocument(with: treeTarget)
+        XCTAssertEqual(try batch.spliceParagraphOMath(
+            from: treeSource,
+            toBodyParagraphIndex: 0
+        ), 1)
+        guard case .paragraph(let batchResult) = batch.body.children[0] else { XCTFail(); return }
+        XCTAssertNil(batchResult.xmlNode)
+        XCTAssertTrue(batchResult.toXML().contains("<m:oMath"))
+
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OMathSplice-tree-backed-\(UUID().uuidString)")
+        let sourceURL = base.appendingPathExtension("source.docx")
+        let targetURL = base.appendingPathExtension("target.docx")
+        let outputURL = base.appendingPathExtension("output.docx")
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: targetURL)
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+        try DocxWriter.write(makeDocument(with: try parseParagraph(xml: Self.sourceInlineRunOMath)), to: sourceURL)
+        try DocxWriter.write(makeDocument(with: try parseParagraph(xml: Self.targetWithMatchingAnchors)), to: targetURL)
+        let loadedSource = try DocxReader.read(from: sourceURL, wireTreeBackedViews: true)
+        guard case .paragraph(let loadedSourceParagraph) = loadedSource.body.children[0] else { XCTFail(); return }
+        var loadedTarget = try DocxReader.read(from: targetURL, wireTreeBackedViews: true)
+        XCTAssertEqual(try loadedTarget.spliceOMath(
+            from: loadedSourceParagraph,
+            toBodyParagraphIndex: 0,
+            position: .atEnd
+        ), 1)
+        try DocxWriter.write(loadedTarget, to: outputURL)
+        let reloaded = try DocxReader.read(from: outputURL)
+        guard case .paragraph(let reloadedParagraph) = reloaded.body.children[0] else { XCTFail(); return }
+        XCTAssertEqual(OMathExtractor.extract(from: reloadedParagraph).count, 1)
+    }
+
     func testDirectChildMetadataMustMatchValidatedRawRoot() throws {
         let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
         let mismatches = [
             ("oMath", "<m:oMathPara xmlns:m='\(uri)'><m:oMath/></m:oMathPara>"),
             ("oMathPara", "<m:oMath xmlns:m='\(uri)'/>"),
+            ("custom", "<m:oMath xmlns:m='\(uri)'/>"),
         ]
 
         for (name, rawXML) in mismatches {
@@ -884,9 +993,9 @@ final class OMathSpliceTests: XCTestCase {
         XCTAssertEqual(try target.spliceParagraphOMath(from: source, toBodyParagraphIndex: 0), 1)
         guard case .paragraph(let paragraph) = target.body.children[0] else { XCTFail(); return }
         let xml = paragraph.toXML()
-        let prefix = try XCTUnwrap(xml.range(of: ">prefix<")?.lowerBound)
+        let prefix = try XCTUnwrap(xml.range(of: ">prefix </w:t>")?.lowerBound)
         let math = try XCTUnwrap(xml.range(of: "<mml:oMath")?.lowerBound)
-        let suffix = try XCTUnwrap(xml.range(of: ">  suffix<")?.lowerBound)
+        let suffix = try XCTUnwrap(xml.range(of: "> suffix</w:t>")?.lowerBound)
         XCTAssertLessThan(prefix, math, "Batch math must follow its prefix: \(xml)")
         XCTAssertLessThan(math, suffix, "Batch math must precede its suffix: \(xml)")
     }
@@ -934,10 +1043,10 @@ final class OMathSpliceTests: XCTestCase {
         XCTAssertEqual(try target.spliceParagraphOMath(from: source, toBodyParagraphIndex: 0), 2)
         guard case .paragraph(let paragraph) = target.body.children[0] else { XCTFail(); return }
         let xml = paragraph.toXML()
-        let prefixIndex = try XCTUnwrap(xml.range(of: ">prefix<")?.lowerBound)
+        let prefixIndex = try XCTUnwrap(xml.range(of: ">prefix </w:t>")?.lowerBound)
         let alphaIndex = try XCTUnwrap(xml.range(of: "<m:t>α</m:t>")?.lowerBound)
         let betaIndex = try XCTUnwrap(xml.range(of: "<m:t>β</m:t>")?.lowerBound)
-        let suffixIndex = try XCTUnwrap(xml.range(of: ">  suffix<")?.lowerBound)
+        let suffixIndex = try XCTUnwrap(xml.range(of: "> suffix</w:t>")?.lowerBound)
         XCTAssertLessThan(prefixIndex, alphaIndex, "Equations must follow their shared anchor: \(xml)")
         XCTAssertLessThan(alphaIndex, betaIndex, "Shared-anchor equations reversed: \(xml)")
         XCTAssertLessThan(betaIndex, suffixIndex, "Equations must precede suffix: \(xml)")
@@ -1239,6 +1348,33 @@ final class OMathSpliceTests: XCTestCase {
         let xml = result.toXML()
         XCTAssertTrue(xml.contains("<m:t>α</m:t>"), "Earlier source group must remain: \(xml)")
         XCTAssertFalse(xml.contains("<m:t>β</m:t>"), "Later failing group must not mutate target: \(xml)")
+    }
+
+    func testBatchLaterNilAnchorPreservesEarlierSourceGroup() throws {
+        var alpha = Run(text: "")
+        alpha.rawXML = "<m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>"
+        var source = Paragraph(runs: [Run(text: "good"), alpha])
+        source.unrecognizedChildren = [
+            UnrecognizedChild(
+                name: "oMath",
+                rawXML: "<m:oMath xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/math'><m:r><m:t>β</m:t></m:r></m:oMath>",
+                position: nil
+            )
+        ]
+        var target = makeDocument(with: Paragraph(runs: [Run(text: "good target")]))
+
+        XCTAssertThrowsError(
+            try target.spliceParagraphOMath(from: source, toBodyParagraphIndex: 0)
+        ) { error in
+            guard case .contextAnchorNotFound(let index, "") = error as? OMathSpliceError else {
+                return XCTFail("Expected later nil anchor failure, got \(error)")
+            }
+            XCTAssertEqual(index, 1)
+        }
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        let xml = result.toXML()
+        XCTAssertTrue(xml.contains("<m:t>α</m:t>"))
+        XCTAssertFalse(xml.contains("<m:t>β</m:t>"))
     }
 
     func testBatchMalformedUnmatchedSourceFailsBeforeAnchorErrorAndMutation() throws {
