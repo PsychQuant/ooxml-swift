@@ -108,6 +108,7 @@ The system SHALL provide `OMathSpliceRpRMode` with three modes controlling how t
 - **AND** the serializer SHALL NOT add a `<w:r>` carrier or copied rPr
 - **AND** classification SHALL behave identically for single-quoted and double-quoted namespace declarations
 - **AND** classification SHALL behave identically for prefixed and default namespace declarations
+- **AND** valid dotted namespace prefixes SHALL be resolved without changing generic replacement semantics
 - **AND** namespace declarations on nested descendants SHALL NOT be mistaken for the root element's binding
 - **AND** a root that inherited the standard OMML namespace SHALL receive a self-contained root declaration when spliced into another document, even if a descendant shadows the same prefix or default namespace
 

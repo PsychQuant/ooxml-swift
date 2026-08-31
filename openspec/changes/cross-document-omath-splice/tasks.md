@@ -82,5 +82,6 @@
 - [x] 10.9 Restrict prefix detection to the root QName and cover prefixed/default namespace matrices
 - [x] 10.10 Restrict URI lookup to the root start tag and cover inherited-standard roots with nested namespace shadowing
 - [x] 10.11 Scope self-contained namespace injection to the root start tag and verify prefixed/default splice→write→reload under nested shadowing
-- [x] 10.12 Run `OMathSpliceTests`: 21 tests, 0 failures
-- [ ] 10.13 Run the complete package regression suite and repeat IDD multi-agent verification on the final commit
+- [x] 10.12 Accept valid dotted namespace prefixes without a narrow custom character allowlist
+- [x] 10.13 Run `OMathSpliceTests`: 21 tests, 0 failures
+- [ ] 10.14 Run the complete package regression suite and repeat IDD multi-agent verification on the final commit

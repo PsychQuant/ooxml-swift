@@ -184,14 +184,18 @@ internal enum OMathNamespace {
     /// Extracts the OMath prefix (e.g. "m" or "mml") from the opening element.
     /// Returns nil if no prefix used (default namespace).
     static func extractPrefix(from xml: String) -> String? {
-        guard let qualifiedName = rootElementQualifiedName(in: xml),
-              let colonIdx = qualifiedName.firstIndex(of: ":") else { return nil }
-        let candidate = String(qualifiedName[..<colonIdx])
-        guard !candidate.isEmpty,
-              candidate.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }) else {
-            return nil
-        }
-        return candidate
+        guard let qualifiedName = rootElementQualifiedName(in: xml) else { return nil }
+        let components = qualifiedName.split(
+            separator: ":",
+            omittingEmptySubsequences: false
+        )
+        // QName syntax permits exactly one namespace separator. Avoid a
+        // hand-written NCName character allowlist: valid prefixes may contain
+        // dots and non-ASCII name characters.
+        guard components.count == 2,
+              !components[0].isEmpty,
+              !components[1].isEmpty else { return nil }
+        return String(components[0])
     }
 
     private static func extractURIByPattern(xml: String, pattern: String) -> String? {

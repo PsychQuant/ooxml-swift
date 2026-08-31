@@ -676,6 +676,7 @@ final class OMathSpliceTests: XCTestCase {
         let vendorFragments = [
             #"<x:oMath xmlns:x="urn:vendor:not-omml"><x:data/></x:oMath>"#,
             #"<x:oMath xmlns:x='urn:vendor:not-omml'><x:data/></x:oMath>"#,
+            #"<m.math:oMath xmlns:m.math="urn:vendor:not-omml"><m.math:data/></m.math:oMath>"#,
             #"<oMath xmlns="urn:vendor:not-omml"><data/></oMath>"#,
             #"<oMath xmlns='urn:vendor:not-omml'><data/></oMath>"#,
         ]
@@ -702,6 +703,7 @@ final class OMathSpliceTests: XCTestCase {
     func testStandardOMathSingleQuotedNamespaceStillUsesRunCarrier() {
         let standardFragments = [
             #"<m:oMath xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/math'><m:r><m:t>α</m:t></m:r></m:oMath>"#,
+            #"<m.math:oMath xmlns:m.math="http://schemas.openxmlformats.org/officeDocument/2006/math"><m.math:r/></m.math:oMath>"#,
             #"<oMath xmlns="http://schemas.openxmlformats.org/officeDocument/2006/math"><r><t>α</t></r></oMath>"#,
             #"<oMath xmlns='http://schemas.openxmlformats.org/officeDocument/2006/math'><r><t>α</t></r></oMath>"#,
             #"<m:oMath><m:r xmlns:m="urn:vendor:nested-shadow"><m:t>α</m:t></m:r></m:oMath>"#,
