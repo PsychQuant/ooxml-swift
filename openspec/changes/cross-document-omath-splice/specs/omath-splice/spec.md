@@ -7,7 +7,7 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 #### Scenario: Inline OMath spliced from source Run.rawXML to target paragraph end
 
 - **WHEN** caller invokes `target.spliceOMath(from: sourceParagraph, toBodyParagraphIndex: 5, position: .atEnd, omathIndex: 0)` with `sourceParagraph` containing one OMath stored in `Run.rawXML`
-- **THEN** the system SHALL append a new `Run` with `rawXML` byte-equal to the source OMath block to `target.body.children[5].runs`
+- **THEN** the system SHALL append a new `Run` whose `rawXML` equals the extractor's self-contained OMath fragment to `target.body.children[5].runs`
 - **AND** the spliced Run's `properties` SHALL match the source Run's properties when `rPrMode == .full`
 - **AND** the call SHALL return `1` indicating one OMath block was spliced
 
@@ -15,7 +15,7 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 
 - **GIVEN** source paragraph with run containing `rawXML = "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:r><m:t>α</m:t></m:r></m:oMath>"` and rPr `{ rFonts: { ascii: "Cambria Math" }, sz: 24 }`
 - **WHEN** caller invokes `target.spliceOMath(from: source, toBodyParagraphIndex: 5, position: .atEnd, omathIndex: 0, rPrMode: .full)`
-- **THEN** target.body.children[5].runs gains one Run whose `rawXML` equals the source OMath XML byte-for-byte
+- **THEN** target.body.children[5].runs gains one Run whose `rawXML` equals the extractor's self-contained OMath XML
 - **AND** that Run's `properties` equals `{ rFonts: { ascii: "Cambria Math" }, sz: 24 }`
 
 #### Scenario: Direct-child OMath spliced preserving carrier
@@ -24,10 +24,33 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 - **THEN** the system SHALL append an `UnrecognizedChild(name: "oMath", rawXML: <source OMath XML>, position: <appropriate>)` to `target.body.children[targetIdx].unrecognizedChildren`
 - **AND** the spliced OMath SHALL NOT be placed inside a `Run` (carrier shape is preserved)
 
+#### Scenario: Direct-child OMathPara preserves local-name metadata
+
+- **WHEN** the source direct child root is `<m:oMathPara>`
+- **THEN** the target `UnrecognizedChild.name` SHALL be `oMathPara`
+- **AND** save/reload and subsequent extraction SHALL preserve matching metadata and raw root
+- **AND** a direct-child carrier whose stored `name` disagrees with the validated raw root local name SHALL throw `OMathSpliceMalformedXMLError` before mutation
+
+#### Scenario: At-end follows every paragraph carrier
+
+- **GIVEN** a target paragraph containing positive-position carriers, nil/zero-position API-built carriers, and legacy pre/post carriers such as page breaks, comments, footnotes, endnotes, or bookmarks
+- **WHEN** caller splices inline or direct-child OMath at `.atEnd`
+- **THEN** every existing carrier SHALL retain its relative serialized order
+- **AND** the new OMath SHALL serialize after all of them
+- **AND** hostile or API-built positions such as `Int.max` SHALL neither overflow nor be rewritten for ordinary boundary insertion
+- **AND** negative-position carriers SHALL remain visible in the non-positive post-content bucket rather than being dropped
+
+#### Scenario: At-start precedes every paragraph carrier
+
+- **GIVEN** a target paragraph containing position-indexed and legacy pre/post carriers
+- **WHEN** caller splices inline or direct-child OMath at `.atStart`
+- **THEN** the new OMath SHALL serialize before every existing carrier
+
 #### Scenario: Source paragraph has no OMath
 
-- **WHEN** caller invokes `spliceOMath` with a `sourceParagraph` whose runs contain no `Run.rawXML` matching `<m:oMath` AND whose `unrecognizedChildren` contain no entry with `name == "oMath" || "oMathPara"`
+- **WHEN** caller invokes `spliceOMath` with a `sourceParagraph` whose runs contain no `Run.rawXML` rooted at `oMath`/`oMathPara` AND whose `unrecognizedChildren` contain no entry with `name == "oMath" || "oMathPara"`
 - **THEN** the system SHALL throw `OMathSpliceError.sourceHasNoOMath`
+- **AND** matching character data, attribute values, descendants, and lookalike root names SHALL NOT classify ordinary `Run.rawXML` as inline OMath
 
 #### Scenario: omathIndex out of range
 
@@ -66,13 +89,39 @@ The system SHALL support `OMathSplicePosition.afterText(_, instance:, options:)`
 
 #### Scenario: Anchor not found in target paragraph
 
-- **WHEN** caller invokes `spliceOMath` with `position: .afterText("nonexistent text", instance: 1)` and the target paragraph's `flattenedDisplayText()` does not contain `"nonexistent text"`
+- **WHEN** caller invokes `spliceOMath` with `position: .afterText("nonexistent text", instance: 1)` and the target paragraph's serializer-visible typed Run text does not contain `"nonexistent text"`
 - **THEN** the system SHALL throw `OMathSpliceError.anchorNotFound("nonexistent text", instance: 1)`
+
+#### Scenario: Opaque Run overrides do not expose hidden typed text
+
+- **WHEN** a Run's typed `text` contains the anchor but `rawXML`, `RunProperties.rawXML`, or `drawing` replaces that text in `Run.toXML()`
+- **THEN** the hidden typed text SHALL NOT resolve a single or batch anchor
+- **AND** the opaque content SHALL remain single and unchanged rather than being copied into split prefix/suffix Runs
+
+#### Scenario: Visible text with post-text raw elements preserves one opaque copy
+
+- **WHEN** an anchor splits a Run whose visible typed text is followed by `rawElements`
+- **THEN** the prefix SHALL contain no copied `rawElements`
+- **AND** the suffix SHALL retain the original `rawElements` exactly once, including when suffix text is empty
+- **AND** inline, direct-child, and batch splice SHALL preserve the same ordering
 
 #### Scenario: Anchor instance > 1 resolves to Nth occurrence
 
 - **WHEN** caller invokes `spliceOMath` with `position: .afterText("檢定", instance: 2)` and the target paragraph contains "檢定" three times at character offsets 10, 30, 50
 - **THEN** the system SHALL splice the OMath at offset 32 (immediately after the second "檢定" occurrence)
+- **AND** occurrence counting SHALL follow Paragraph serializer order rather than Run array order when positions differ
+
+#### Scenario: Direct-child carrier honors text anchor
+
+- **WHEN** the source OMath is a paragraph direct child and caller uses `.afterText` or `.beforeText`
+- **THEN** the direct child SHALL serialize at the resolved boundary between split target Runs
+- **AND** a missing anchor SHALL throw `anchorNotFound` instead of appending at paragraph end
+
+#### Scenario: Math-script-insensitive anchor retains original split offsets
+
+- **WHEN** caller enables `AnchorLookupOptions(mathScriptInsensitive: true)` and the target contains a Unicode math-script variant such as `H₀`
+- **THEN** an ASCII anchor such as `H0` SHALL resolve
+- **AND** the Run SHALL split on valid original UTF-16 boundaries
 
 ### Requirement: rPr propagation modes
 
@@ -86,7 +135,7 @@ The system SHALL provide `OMathSpliceRpRMode` with three modes controlling how t
 #### Scenario: .omathOnly mode copies whitelisted fields
 
 - **WHEN** caller invokes `spliceOMath(..., rPrMode: .omathOnly)`
-- **THEN** the new OMath Run's `properties` SHALL contain ONLY `rFonts`, `sz`, `szCs`, `lang`, `bold`, `italic` from the source
+- **THEN** the new OMath Run's `properties` SHALL contain ONLY `rFonts`, legacy `fontName`, `fontSize`, `lang`, `bold`, and `italic` from the source
 - **AND** all other fields (`rStyle`, `color`, `highlight`, `verticalAlign`, etc.) SHALL be `nil` / default
 
 #### Scenario: .discard mode resets to default rPr
@@ -117,10 +166,19 @@ The system SHALL provide `OMathSpliceNamespacePolicy` with `.lenient` (default) 
 - **WHEN** source URI is `http://example.com/vendor/math` and target standard URI is `http://schemas.openxmlformats.org/officeDocument/2006/math`
 - **AND** caller invokes `spliceOMath(...)` with either policy
 - **THEN** the system SHALL throw `OMathSpliceError.namespaceMismatch(sourceURI:, targetURI:)`
+- **AND** namespace declarations using either single or double quotes SHALL be parsed equivalently
+- **AND** a prefix-less extracted OMath fragment SHALL receive a self-contained default OMML namespace declaration
+
+#### Scenario: Malformed source OMath fails before mutation
+
+- **WHEN** the source OMath root or namespace attributes are not well-formed XML
+- **THEN** splice SHALL throw `OMathSpliceMalformedXMLError`
+- **AND** the target paragraph SHALL remain unchanged
+- **AND** duplicate namespace attributes, unbound prefixes, invalid QNames, forbidden XML 1.0 character references, and DTD-bearing fragments SHALL be rejected
 
 ### Requirement: Paragraph-level batch splice with auto-anchor derivation
 
-The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraphIndex:rPrMode:namespacePolicy:)` that copies all OMath blocks from one source paragraph to a corresponding target paragraph in source-document order, auto-deriving the splice anchor for each OMath from its source-text-context (5-10 chars on each side).
+The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraphIndex:rPrMode:namespacePolicy:)` that copies all OMath blocks from one source paragraph to a corresponding target paragraph in source-document order, auto-deriving each anchor from up to 10 trailing prose characters plus its occurrence instance.
 
 #### Scenario: All OMath blocks spliced in source order
 
@@ -130,22 +188,80 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 - **THEN** the system SHALL splice all 3 OMath blocks at the corresponding target locations
 - **AND** the call SHALL return `3`
 
+#### Scenario: Leading OMath maps to target start
+
+- **WHEN** a source OMath has a successfully derived empty prefix because it leads the paragraph
+- **THEN** batch splice SHALL map it to `.atStart`, not `.atEnd`
+
+#### Scenario: Namespace self-containment does not break source matching
+
+- **WHEN** extraction adds a root namespace declaration to an inline OMath fragment
+- **THEN** batch anchor derivation SHALL still match it to the originating Run
+- **AND** the OMath SHALL serialize between its corresponding target prefix and suffix
+
+#### Scenario: Unmatched batch anchor fails loudly
+
+- **WHEN** an extracted OMath cannot be matched to source text context
+- **THEN** batch splice SHALL throw `contextAnchorNotFound`
+- **AND** it SHALL NOT silently append the OMath at a boundary
+
+#### Scenario: Repeated boundary anchors preserve source order
+
+- **WHEN** multiple OMath blocks share the same anchor, including consecutive leading equations
+- **THEN** their final serialized order SHALL equal source-document order
+- **AND** identical text snippets at different source occurrences SHALL map to the corresponding target occurrence rather than always instance 1
+
+#### Scenario: Batch context follows paragraph serializer order
+
+- **WHEN** Run array order differs from positive `position` order, or a text Run and direct OMath share the same positive/non-positive position
+- **THEN** context derivation SHALL follow the same absolute-start / positive / non-positive / absolute-end order as `Paragraph.toXML()`
+- **AND** Runs SHALL contribute visible prose before direct unrecognized children at equal serializer positions
+
+#### Scenario: Re-extraction follows absolute boundary order
+
+- **WHEN** multiple inline and/or direct-child OMath carriers are inserted into the same absolute boundary
+- **THEN** `OMathExtractor.extract` and `omathIndex` SHALL expose them in the same order as paragraph serialization
+- **AND** an unsaved direct-child absolute-boundary paragraph SHALL be usable immediately as a batch source
+
+#### Scenario: Unsaved absolute-end batch source remains at end
+
+- **WHEN** one or more OMath carriers with explicit absolute-end metadata are reused as a batch source before save/reload
+- **THEN** batch splice SHALL map the group to `.atEnd` even when the source has no preceding prose
+- **AND** the target SHALL serialize the group after all prose and legacy post-content carriers
+- **AND** multiple members of the end group SHALL retain source-document order
+
 #### Scenario: Context anchor not found for one OMath
 
 - **WHEN** source paragraph has OMath at position whose preceding context is "大小效果"
 - **AND** target paragraph's prose says "規模效果" (e.g., advisor changed wording)
 - **AND** caller invokes `spliceParagraphOMath(...)`
 - **THEN** the system SHALL throw `OMathSpliceError.contextAnchorNotFound(omathIndex: <N>, snippet: "大小效果")`
-- **AND** any OMath blocks that were already spliced before this failure SHALL remain in target (partial-success state; caller can inspect target paragraph)
+- **AND** any earlier source anchor groups that were already spliced before this failure SHALL remain in target
+- **AND** the failing shared-anchor group SHALL be preflighted as a unit so it does not partially mutate the target
 
-### Requirement: Round-trip lossless guarantee
+### Requirement: Round-trip semantic XML equivalence
 
-The OMath XML written into the target paragraph by `spliceOMath` or `spliceParagraphOMath` SHALL be byte-equal to the source OMath XML when the target document is subsequently saved with `DocxWriter.write` and reloaded with `DocxReader.read`.
+The OMath XML written into the target paragraph by `spliceOMath` or `spliceParagraphOMath` SHALL be semantically XML-equivalent to the extracted source OMath when the target document is subsequently saved with `DocxWriter.write` and reloaded with `DocxReader.read`. Equivalence SHALL compare namespace-expanded element identity, semantic attributes independent of order/quote style, ordered child structure, and resolved text values. Namespace prefix spelling/declaration placement and character/entity spelling SHALL NOT be treated as semantic differences.
 
-#### Scenario: Saved target reloads with spliced OMath byte-equal to source
+#### Scenario: Saved target reloads with semantically equivalent OMath
 
 - **WHEN** caller splices OMath block X from source, calls `DocxWriter.write(target, to: tempURL)`, and reads `let reloaded = try DocxReader.read(from: tempURL)`
-- **THEN** the corresponding `Run.rawXML` (or `unrecognizedChildren[].rawXML`) in `reloaded` SHALL equal source's OMath XML byte-for-byte
+- **THEN** the reloaded OMath subtree SHALL have the same `OMathSemanticXML` canonical representation as the extracted source subtree
+- **AND** entity versus literal spelling, attribute order/quotes, namespace declaration placement, and equivalent element-prefix variants SHALL compare equal
+- **AND** a changed element, semantic attribute value, child order, or resolved text value SHALL compare unequal
+- **AND** adjacent ordinary text and CDATA segments with the same resolved text SHALL compare equal
+- **AND** `xmlns=""` SHALL remove an inherited default namespace for the element and its descendants
+- **AND** literal attribute tabs/newlines/carriage returns SHALL compare according to XML whitespace normalization, while a character-referenced tab SHALL remain semantically distinct from a normalized space
+
+#### Scenario: Admission requires one embeddable OMath fragment
+
+- **WHEN** extracted raw XML contains an XML declaration, an actual DTD, document-level comment/PI, non-whitespace framing text, multiple roots, or a non-OMath root
+- **THEN** splice SHALL throw `OMathSpliceMalformedXMLError` before target mutation
+- **AND** only XML 1.0 `S` characters (space, tab, carriage return, line feed) MAY surround the root; U+FEFF, non-XML whitespace, or document-level CDATA SHALL be rejected
+- **AND** a valid OMath whose internal comment or CDATA contains the ordinary text `<!DOCTYPE` SHALL remain admissible
+- **AND** paragraph-level batch splice SHALL validate every extracted source fragment and the initial target before anchor derivation or any group mutation
+- **AND** the complete XML-validity scan SHALL precede namespace URI/prefix policy checks, so malformed-input error precedence is independent of source order
+- **AND** malformed XML in any batch item SHALL leave the entire target unchanged, independent of source group order or anchor availability
 
 ### Requirement: No regression on existing OMath round-trip behavior
 
@@ -155,7 +271,7 @@ The introduction of `spliceOMath` / `spliceParagraphOMath` APIs SHALL NOT alter 
 
 - **WHEN** target paragraph already contains 2 OMath blocks before splice
 - **AND** caller splices a 3rd OMath block via `spliceOMath(..., position: .atEnd, ...)`
-- **THEN** the original 2 OMath blocks SHALL remain in target with original `rawXML` and `position`
+- **THEN** the original 2 OMath blocks SHALL remain in target with original `rawXML`, numeric positions, and relative serialized order
 - **AND** only the new 3rd OMath block SHALL be added at the end
 
 #### Scenario: Existing #85 / #92 / #99-103 fixture suites pass unchanged

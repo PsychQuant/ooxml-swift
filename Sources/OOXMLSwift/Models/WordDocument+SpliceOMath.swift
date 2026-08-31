@@ -34,7 +34,8 @@ extension WordDocument {
     ///   - rPrMode: how to propagate source Run rPr to the new OMath Run (Q4)
     ///   - namespacePolicy: how to handle prefix / URI mismatch (Q6)
     /// - Returns: number of OMath blocks spliced (always 1 in this single-OMath API)
-    /// - Throws: `OMathSpliceError` per the failure taxonomy
+    /// - Throws: `OMathSpliceError` for splice/anchor/namespace failures, or
+    ///   `OMathSpliceMalformedXMLError` when a source/target OMath fragment is invalid
     @discardableResult
     public mutating func spliceOMath(
         from sourceParagraph: Paragraph,
@@ -60,6 +61,7 @@ extension WordDocument {
             throw OMathSpliceError.omathIndexOutOfRange(requested: omathIndex, available: extracted.count)
         }
         let omath = extracted[omathIndex]
+        try Self.validateExtractedOMath(omath)
 
         // === Namespace policy check (Q6) ===
         if case .paragraph(let targetPara) = body.children[bodyChildIdx] {
@@ -92,13 +94,13 @@ extension WordDocument {
     /// the splice anchor for each OMath from its source-text-context (Q5).
     ///
     /// For each OMath in source order, this method:
-    /// 1. Slices `flattenedDisplayText()` ~10 chars before and after the OMath's source position
-    /// 2. Routes to `spliceOMath(..., position: .afterText(prefix, instance: 1), ...)` for the
-    ///    target side
-    /// 3. Throws `.contextAnchorNotFound(omathIndex:, snippet:)` per OMath where prefix lookup fails
+    /// 1. Derives the trailing ~10-character prose prefix and its source occurrence instance
+    /// 2. Routes to `.atStart` for a matched leading OMath or `.afterText(prefix, instance:)`
+    /// 3. Globally preflights every XML fragment before anchor derivation/mutation
+    /// 4. Preflights each shared-anchor group and throws `.contextAnchorNotFound` on failure
     ///
-    /// Partial-success semantics: any OMath blocks already spliced before a failure remain
-    /// in target — caller can inspect target paragraph state.
+    /// Partial-success semantics: earlier source anchor groups remain after a later group fails;
+    /// a failing shared-anchor group does not partially mutate the target.
     @discardableResult
     public mutating func spliceParagraphOMath(
         from sourceParagraph: Paragraph,
@@ -109,6 +111,32 @@ extension WordDocument {
         let extracted = OMathExtractor.extract(from: sourceParagraph)
         guard !extracted.isEmpty else {
             return 0  // No OMath to splice — graceful no-op for batch driver loops
+        }
+
+        let targetParagraphIndices = Self.bodyParagraphIndices(in: body)
+        guard toBodyParagraphIndex >= 0 && toBodyParagraphIndex < targetParagraphIndices.count,
+              case .paragraph(let initialTarget) = body.children[targetParagraphIndices[toBodyParagraphIndex]] else {
+            throw OMathSpliceError.targetParagraphOutOfRange(toBodyParagraphIndex)
+        }
+
+        // Phase 1 — XML validity only. Malformed XML has precedence over
+        // namespace policy regardless of source order, so scan every source
+        // and the relevant initial-target fragment before comparing any URI.
+        for omath in extracted {
+            try Self.validateExtractedOMath(omath)
+        }
+        if let existingTarget = OMathExtractor.extract(from: initialTarget).first {
+            try Self.validateExtractedOMath(existingTarget)
+        }
+
+        // Phase 2 — namespace policy. Only a fully valid batch reaches this
+        // phase; policy errors therefore cannot mask a later malformed item.
+        for omath in extracted {
+            try Self.checkNamespacePolicy(
+                source: omath.xml,
+                targetParagraph: initialTarget,
+                policy: namespacePolicy
+            )
         }
 
         // Build a flattened text view of source paragraph WITH OMath visibleText included.
@@ -123,32 +151,87 @@ extension WordDocument {
             charsBefore: 10
         )
 
-        var spliced = 0
-        for (i, omath) in extracted.enumerated() {
-            let snippet = prefixContexts[i]
-            // Empty prefix → fall back to .atEnd (OMath at start of paragraph).
-            let position: OMathSplicePosition = snippet.isEmpty
-                ? .atEnd
-                : .afterText(snippet, instance: 1, options: AnchorLookupOptions())
+        struct AnchorGroup {
+            let anchor: DerivedContextAnchor
+            var indices: [Int]
+        }
 
-            do {
-                try self.spliceOMath(
-                    from: sourceParagraph,
-                    toBodyParagraphIndex: toBodyParagraphIndex,
-                    position: position,
-                    omathIndex: i,
-                    rPrMode: rPrMode,
-                    namespacePolicy: namespacePolicy
-                )
-                spliced += 1
-            } catch OMathSpliceError.anchorNotFound(_, _) {
+        var groups: [AnchorGroup] = []
+        for i in extracted.indices {
+            guard let anchor = prefixContexts[i] else {
                 throw OMathSpliceError.contextAnchorNotFound(
                     omathIndex: i,
-                    snippet: snippet
+                    snippet: ""
                 )
             }
+
+            if let groupIndex = groups.firstIndex(where: { $0.anchor == anchor }) {
+                groups[groupIndex].indices.append(i)
+            } else {
+                groups.append(AnchorGroup(anchor: anchor, indices: [i]))
+            }
         }
-        _ = extracted  // retain captured array (loop already used); silences Swift hint
+
+        var spliced = 0
+        // Process anchor groups in source order so a later failure preserves
+        // only earlier source groups. Within one shared boundary, apply from
+        // right to left so the final OMath order remains source order.
+        for group in groups {
+            if group.anchor.boundaryPlacement == nil,
+               !group.anchor.snippet.isEmpty,
+               Self.resolveRunAnchor(
+                   anchor: group.anchor.snippet,
+                   instance: group.anchor.instance,
+                   options: AnchorLookupOptions(),
+                   in: initialTarget
+               ) == nil {
+                throw OMathSpliceError.contextAnchorNotFound(
+                    omathIndex: group.indices[0],
+                    snippet: group.anchor.snippet
+                )
+            }
+
+            let position: OMathSplicePosition
+            switch group.anchor.boundaryPlacement {
+            case .start?:
+                position = .atStart
+            case .end?:
+                position = .atEnd
+            case nil:
+                position = group.anchor.snippet.isEmpty
+                    ? .atStart
+                    : .afterText(
+                        group.anchor.snippet,
+                        instance: group.anchor.instance,
+                        options: AnchorLookupOptions()
+                    )
+            }
+
+            // Start/text insertion prepends at a shared boundary and therefore
+            // applies right-to-left. End-lane insertion appends, so it must apply
+            // left-to-right to retain source order.
+            let applicationIndices = group.anchor.boundaryPlacement == .end
+                ? group.indices
+                : Array(group.indices.reversed())
+            for i in applicationIndices {
+                do {
+                    try self.spliceOMath(
+                        from: sourceParagraph,
+                        toBodyParagraphIndex: toBodyParagraphIndex,
+                        position: position,
+                        omathIndex: i,
+                        rPrMode: rPrMode,
+                        namespacePolicy: namespacePolicy
+                    )
+                    spliced += 1
+                } catch OMathSpliceError.anchorNotFound(_, _) {
+                    throw OMathSpliceError.contextAnchorNotFound(
+                        omathIndex: i,
+                        snippet: group.anchor.snippet
+                    )
+                }
+            }
+        }
         return spliced
     }
 
@@ -175,23 +258,24 @@ extension WordDocument {
         policy: OMathSpliceNamespacePolicy
     ) throws {
         let standardOMMLURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
-        let sourceURI = OMathNamespace.extractURI(from: source) ?? standardOMMLURI
+        try validateOMathFragment(source)
+        guard let sourceURI = OMathNamespace.extractURI(from: source) else {
+            throw OMathSpliceMalformedXMLError()
+        }
         let sourcePrefix = OMathNamespace.extractPrefix(from: source) ?? ""
 
-        // Find target OMath URI/prefix from existing OMath in target paragraph (if any).
+        // Find the first target OMath in the same joint serializer order used
+        // by omathIndex. Only a paragraph with no OMath uses the standard m:
+        // baseline; an explicit default namespace has prefix "".
         var targetURI: String = standardOMMLURI
         var targetPrefix: String = "m"
-        for run in targetParagraph.runs {
-            if let raw = run.rawXML, raw.contains(":oMath") || raw.contains("<oMath") {
-                if let uri = OMathNamespace.extractURI(from: raw) { targetURI = uri }
-                if let pre = OMathNamespace.extractPrefix(from: raw) { targetPrefix = pre }
-                break
+        if let existing = OMathExtractor.extract(from: targetParagraph).first {
+            try validateExtractedOMath(existing)
+            guard let uri = OMathNamespace.extractURI(from: existing.xml) else {
+                throw OMathSpliceMalformedXMLError()
             }
-        }
-        for child in targetParagraph.unrecognizedChildren where child.name == "oMath" || child.name == "oMathPara" {
-            if let uri = OMathNamespace.extractURI(from: child.rawXML) { targetURI = uri }
-            if let pre = OMathNamespace.extractPrefix(from: child.rawXML) { targetPrefix = pre }
-            break
+            targetURI = uri
+            targetPrefix = OMathNamespace.extractPrefix(from: existing.xml) ?? ""
         }
 
         if sourceURI != targetURI {
@@ -199,6 +283,29 @@ extension WordDocument {
         }
         if policy == .strict && sourcePrefix != targetPrefix {
             throw OMathSpliceError.namespaceMismatch(sourceURI: sourceURI, targetURI: targetURI)
+        }
+    }
+
+    /// XML admission primitive deliberately separated from namespace policy.
+    /// Batch mode runs this for the entire source set first so a malformed item
+    /// always wins over URI/prefix mismatches in earlier items.
+    @discardableResult
+    internal static func validateOMathFragment(_ xml: String) throws -> String {
+        guard OMathNamespace.isWellFormed(xml),
+              OMathNamespace.extractURI(from: xml) != nil,
+              let localName = OMathNamespace.validatedRootLocalName(in: xml) else {
+            throw OMathSpliceMalformedXMLError()
+        }
+        return localName
+    }
+
+    /// Direct-child typed metadata and payload root are one contract. A valid
+    /// XML fragment with mismatched `name` is still an invalid extracted carrier.
+    internal static func validateExtractedOMath(_ omath: ExtractedOMath) throws {
+        let rootLocalName = try validateOMathFragment(omath.xml)
+        if omath.kind == .directChild,
+           omath.directChildName != rootLocalName {
+            throw OMathSpliceMalformedXMLError()
         }
     }
 
@@ -236,16 +343,21 @@ extension WordDocument {
 
         switch position {
         case .atStart:
-            // Position 0 routes through the post-content legacy path and emits at end.
-            // To get "atStart" semantically, give it a position smaller than any existing.
-            let minPos = targetPara.runs.compactMap { $0.position }.min() ?? 1
-            omathRun.position = max(1, minPos - 1)
+            omathRun.paragraphBoundaryPlacement = .start
+            omathRun.paragraphBoundaryOrder = prepareBoundaryInsertion(
+                placement: .start,
+                prepend: true,
+                in: &targetPara
+            )
             targetPara.runs.insert(omathRun, at: 0)
 
         case .atEnd:
-            // Place after all current content. Use max existing position + 1.
-            let maxPos = targetPara.runs.compactMap { $0.position }.max() ?? 0
-            omathRun.position = maxPos + 1
+            omathRun.paragraphBoundaryPlacement = .end
+            omathRun.paragraphBoundaryOrder = prepareBoundaryInsertion(
+                placement: .end,
+                prepend: false,
+                in: &targetPara
+            )
             targetPara.runs.append(omathRun)
 
         case .afterText(let anchor, let instance, let options):
@@ -292,6 +404,7 @@ extension WordDocument {
         guard let resolved = resolveRunAnchor(
             anchor: anchor,
             instance: instance,
+            options: options,
             in: para
         ) else {
             throw OMathSpliceError.anchorNotFound(anchor, instance: instance)
@@ -312,7 +425,7 @@ extension WordDocument {
             newRuns.append(prefix)
         }
         newRuns.append(newOmath)
-        if !suffix.text.isEmpty || suffix.rawXML != nil {
+        if !suffix.text.isEmpty || suffix.rawXML != nil || !(suffix.rawElements?.isEmpty ?? true) {
             newRuns.append(suffix)
         }
 
@@ -320,9 +433,9 @@ extension WordDocument {
     }
 
     /// Splits a run's `text` at the given UTF-16 character offset, returning prefix and suffix.
-    /// `properties`, `position`, `rawXML`, etc. are deep-copied to both sides (rawXML stays
-    /// only on whichever segment carries the underlying content — but for plain-text runs,
-    /// rawXML is typically nil, so both sides get nil).
+    /// `properties` and `position` are copied to both sides. Opaque `rawElements`
+    /// serialize after typed text, so they move to the suffix only and remain
+    /// exactly once (including when the suffix text is empty).
     internal static func splitRun(_ original: Run, atCharOffset offset: Int) -> (prefix: Run, suffix: Run) {
         let text = original.text
         let utf16 = text.utf16
@@ -343,10 +456,7 @@ extension WordDocument {
 
         var prefixRun = original
         prefixRun.text = prefixStr
-        // Prefix keeps drawing/rawXML/etc. only if it's non-text content (rare). For
-        // plain text runs, drawing/rawXML are typically nil — they pass through.
-        // For OMath-bearing runs, we shouldn't be splitting them in the first place
-        // (anchor resolution skips them). So this is safe.
+        prefixRun.rawElements = nil
 
         var suffixRun = original
         suffixRun.text = suffixStr
@@ -374,25 +484,56 @@ extension WordDocument {
     internal static func resolveRunAnchor(
         anchor: String,
         instance: Int,
+        options: AnchorLookupOptions = AnchorLookupOptions(),
         in para: Paragraph
     ) -> RunAnchorResolution? {
         guard !anchor.isEmpty, instance >= 1 else { return nil }
-        let anchorUtf16 = Array(anchor.utf16)
 
-        // Build (runIdx, runText, startGlobal) excluding OMath-bearing runs.
+        // Build serializer-ordered visible Run candidates while retaining each
+        // original array index for the eventual mutation.
+        var candidates: [(bucket: Int, order: Int, runIdx: Int, text: String)] = []
+        for (i, run) in para.runs.enumerated() {
+            guard let visibleText = serializedTypedText(in: run) else { continue }
+            let key = contextSerializerKey(
+                boundaryPlacement: run.paragraphBoundaryPlacement,
+                boundaryOrder: run.paragraphBoundaryOrder,
+                position: run.position
+            )
+            candidates.append((key.bucket, key.order, i, visibleText))
+        }
+        candidates.sort { lhs, rhs in
+            if lhs.bucket != rhs.bucket { return lhs.bucket < rhs.bucket }
+            if lhs.order != rhs.order { return lhs.order < rhs.order }
+            return lhs.runIdx < rhs.runIdx
+        }
+
         var runSpans: [(runIdx: Int, text: String, startGlobal: Int)] = []
         var globalOffset = 0
-        for (i, run) in para.runs.enumerated() {
-            if let raw = run.rawXML, raw.contains(":oMath") || raw.contains("<oMath")
-                || raw.contains(":oMathPara") || raw.contains("<oMathPara") {
-                continue
-            }
-            runSpans.append((i, run.text, globalOffset))
-            globalOffset += run.text.utf16.count
+        for candidate in candidates {
+            runSpans.append((candidate.runIdx, candidate.text, globalOffset))
+            globalOffset += candidate.text.utf16.count
         }
 
         let combined = runSpans.map { $0.text }.joined()
-        let combinedUtf16 = Array(combined.utf16)
+        let anchorText = options.mathScriptInsensitive
+            ? AnchorLookupOptions.canonicalizeMathScriptVariants(anchor)
+            : anchor
+        let anchorUtf16 = Array(anchorText.utf16)
+        guard !anchorUtf16.isEmpty else { return nil }
+
+        let combinedUtf16: [UInt16]
+        let originalStarts: [Int]
+        let originalEnds: [Int]
+        if options.mathScriptInsensitive {
+            let normalized = normalizedUTF16WithOriginalOffsets(combined)
+            combinedUtf16 = normalized.units
+            originalStarts = normalized.originalStarts
+            originalEnds = normalized.originalEnds
+        } else {
+            combinedUtf16 = Array(combined.utf16)
+            originalStarts = Array(combinedUtf16.indices)
+            originalEnds = combinedUtf16.indices.map { $0 + 1 }
+        }
         guard combinedUtf16.count >= anchorUtf16.count else { return nil }
 
         var occurrencesFound = 0
@@ -408,8 +549,8 @@ extension WordDocument {
             if match {
                 occurrencesFound += 1
                 if occurrencesFound == instance {
-                    let globalStart = searchStart
-                    let globalEnd = searchStart + anchorUtf16.count
+                    let globalStart = originalStarts[searchStart]
+                    let globalEnd = originalEnds[searchStart + anchorUtf16.count - 1]
 
                     // Find run containing globalStart.
                     var startSpan: (runIdx: Int, text: String, startGlobal: Int)? = nil
@@ -447,48 +588,413 @@ extension WordDocument {
         return nil
     }
 
+    /// Typed `Run.text` participates in anchors only when `Run.toXML()` would
+    /// actually serialize it. Raw run overrides, raw property overrides, and
+    /// drawings all replace the typed text branch; matching their hidden text
+    /// would split and duplicate opaque content.
+    private static func serializedTypedText(in run: Run) -> String? {
+        guard run.rawXML == nil,
+              run.properties.rawXML == nil,
+              run.drawing == nil else {
+            return nil
+        }
+        return run.text
+    }
+
+    /// Normalize one extended grapheme at a time and retain a map from every
+    /// normalized UTF-16 unit back to the original UTF-16 span. This lets
+    /// math-script-insensitive lookup still split the original Run at a valid
+    /// boundary after folding subscripts, superscripts, and combining marks.
+    private static func normalizedUTF16WithOriginalOffsets(
+        _ text: String
+    ) -> (units: [UInt16], originalStarts: [Int], originalEnds: [Int]) {
+        var units: [UInt16] = []
+        var starts: [Int] = []
+        var ends: [Int] = []
+        var originalOffset = 0
+
+        for character in text {
+            let original = String(character)
+            let originalLength = original.utf16.count
+            let normalized = AnchorLookupOptions.canonicalizeMathScriptVariants(original)
+            for unit in normalized.utf16 {
+                units.append(unit)
+                starts.append(originalOffset)
+                ends.append(originalOffset + originalLength)
+            }
+            originalOffset += originalLength
+        }
+
+        return (units, starts, ends)
+    }
+
     /// Splice OMath as a direct child of `<w:p>` via `unrecognizedChildren`.
     private static func spliceAsDirectChild(
         into targetPara: inout Paragraph,
         omath: ExtractedOMath,
         position: OMathSplicePosition
     ) throws {
-        var newPos: Int
         switch position {
         case .atStart:
-            let allPositions = paragraphAllPositions(targetPara)
-            newPos = max(1, (allPositions.min() ?? 1) - 1)
+            var child = UnrecognizedChild(
+                name: omath.directChildName ?? "oMath",
+                rawXML: omath.xml,
+                position: nil
+            )
+            child.paragraphBoundaryPlacement = .start
+            child.paragraphBoundaryOrder = prepareBoundaryInsertion(
+                placement: .start,
+                prepend: true,
+                in: &targetPara
+            )
+            targetPara.unrecognizedChildren.append(child)
+            return
 
         case .atEnd:
-            let allPositions = paragraphAllPositions(targetPara)
-            newPos = (allPositions.max() ?? 0) + 1
+            var child = UnrecognizedChild(
+                name: omath.directChildName ?? "oMath",
+                rawXML: omath.xml,
+                position: nil
+            )
+            child.paragraphBoundaryPlacement = .end
+            child.paragraphBoundaryOrder = prepareBoundaryInsertion(
+                placement: .end,
+                prepend: false,
+                in: &targetPara
+            )
+            targetPara.unrecognizedChildren.append(child)
+            return
 
-        case .afterText, .beforeText:
-            // For direct-child OMath splice with anchor, insert at end as a v0.1 simplification.
-            // (Direct-child OMath is rarely mid-paragraph in practice — typically Pandoc
-            // display equations stand alone in their paragraph.)
-            let allPositions = paragraphAllPositions(targetPara)
-            newPos = (allPositions.max() ?? 0) + 1
+        case .afterText(let anchor, let instance, let options):
+            try insertDirectChildAtAnchor(
+                anchor: anchor,
+                instance: instance,
+                options: options,
+                side: .after,
+                omath: omath,
+                in: &targetPara
+            )
+            return
+
+        case .beforeText(let anchor, let instance, let options):
+            try insertDirectChildAtAnchor(
+                anchor: anchor,
+                instance: instance,
+                options: options,
+                side: .before,
+                omath: omath,
+                in: &targetPara
+            )
+            return
+        }
+    }
+
+    private static func insertDirectChildAtAnchor(
+        anchor: String,
+        instance: Int,
+        options: AnchorLookupOptions,
+        side: AnchorSide,
+        omath: ExtractedOMath,
+        in para: inout Paragraph
+    ) throws {
+        _ = canonicalizeParagraphCarriers(in: &para, startingAt: 1)
+        guard let resolved = resolveRunAnchor(
+            anchor: anchor,
+            instance: instance,
+            options: options,
+            in: para
+        ) else {
+            throw OMathSpliceError.anchorNotFound(anchor, instance: instance)
         }
 
-        targetPara.unrecognizedChildren.append(
-            UnrecognizedChild(name: "oMath", rawXML: omath.xml, position: newPos)
+        let splitRunIndex = side == .after ? resolved.endRunIdx : resolved.startRunIdx
+        let offset = side == .after ? resolved.endOffsetInEndRun : resolved.startOffsetInStartRun
+        let original = para.runs[splitRunIndex]
+        let originalPosition = original.position ?? 1
+        let (prefix, suffix) = splitRun(original, atCharOffset: offset)
+        let hasPrefix = !prefix.text.isEmpty || prefix.rawXML != nil
+        let hasSuffix = !suffix.text.isEmpty
+            || suffix.rawXML != nil
+            || !(suffix.rawElements?.isEmpty ?? true)
+        let componentCount = (hasPrefix ? 1 : 0) + 1 + (hasSuffix ? 1 : 0)
+        shiftCarrierPositions(
+            after: originalPosition,
+            by: componentCount - 1,
+            in: &para
+        )
+
+        var cursor = originalPosition
+        var replacementRuns: [Run] = []
+        if hasPrefix {
+            var positionedPrefix = prefix
+            positionedPrefix.position = cursor
+            replacementRuns.append(positionedPrefix)
+            cursor += 1
+        }
+
+        let childPosition = cursor
+        cursor += 1
+
+        if hasSuffix {
+            var positionedSuffix = suffix
+            positionedSuffix.position = cursor
+            replacementRuns.append(positionedSuffix)
+        }
+
+        var runs = para.runs
+        runs.replaceSubrange(splitRunIndex...splitRunIndex, with: replacementRuns)
+        para.runs = runs
+        para.unrecognizedChildren.append(
+            UnrecognizedChild(
+                name: omath.directChildName ?? "oMath",
+                rawXML: omath.xml,
+                position: childPosition
+            )
         )
     }
 
-    private static func paragraphAllPositions(_ para: Paragraph) -> [Int] {
-        var positions: [Int] = []
-        positions += para.runs.compactMap { $0.position }
-        positions += para.unrecognizedChildren.compactMap { $0.position }
-        positions += para.bookmarkMarkers.compactMap { $0.position }
-        positions += para.commentRangeMarkers.compactMap { $0.position }
-        positions += para.permissionRangeMarkers.compactMap { $0.position }
-        positions += para.proofErrorMarkers.compactMap { $0.position }
-        positions += para.smartTags.compactMap { $0.position }
-        positions += para.customXmlBlocks.compactMap { $0.position }
-        positions += para.bidiOverrides.compactMap { $0.position }
-        positions += para.contentControls.compactMap { $0.position }
-        return positions
+    private enum ParagraphCarrierReference: Hashable {
+        case run(Int)
+        case hyperlink(Int)
+        case fieldSimple(Int)
+        case alternateContent(Int)
+        case bookmarkMarker(Int)
+        case commentMarker(Int)
+        case permissionMarker(Int)
+        case proofError(Int)
+        case smartTag(Int)
+        case customXml(Int)
+        case bidiOverride(Int)
+        case unrecognized(Int)
+        case contentControl(Int)
+    }
+
+    /// Normalize only existing absolute-boundary OMath carriers and reserve
+    /// an order for the new carrier. The normal paragraph arrays remain the
+    /// typed source of truth; no page-break/note/bookmark state is rewritten.
+    private static func prepareBoundaryInsertion(
+        placement: ParagraphBoundaryPlacement,
+        prepend: Bool,
+        in para: inout Paragraph
+    ) -> Int {
+        var refs: [(order: Int, stable: Int, ref: ParagraphCarrierReference)] = []
+        var stable = 0
+        for index in para.runs.indices where para.runs[index].paragraphBoundaryPlacement == placement {
+            refs.append((para.runs[index].paragraphBoundaryOrder ?? 0, stable, .run(index)))
+            stable += 1
+        }
+        for index in para.unrecognizedChildren.indices
+            where para.unrecognizedChildren[index].paragraphBoundaryPlacement == placement {
+            refs.append((
+                para.unrecognizedChildren[index].paragraphBoundaryOrder ?? 0,
+                stable,
+                .unrecognized(index)
+            ))
+            stable += 1
+        }
+        refs.sort {
+            $0.order == $1.order ? $0.stable < $1.stable : $0.order < $1.order
+        }
+
+        for (offset, entry) in refs.enumerated() {
+            setBoundaryOrder(entry.ref, to: prepend ? offset + 1 : offset, in: &para)
+        }
+        return prepend ? 0 : refs.count
+    }
+
+    private static func setBoundaryOrder(
+        _ ref: ParagraphCarrierReference,
+        to order: Int,
+        in para: inout Paragraph
+    ) {
+        switch ref {
+        case .run(let index):
+            var runs = para.runs
+            runs[index].paragraphBoundaryOrder = order
+            para.runs = runs
+        case .unrecognized(let index):
+            para.unrecognizedChildren[index].paragraphBoundaryOrder = order
+        default:
+            break
+        }
+    }
+
+    /// Compact the 13 position-indexed collections in their current serialized
+    /// order. Used only when a direct-child mid-text splice needs a unique
+    /// cross-collection slot; absolute boundaries use the separate serializer
+    /// lane and never rewrite legacy typed state or existing positions.
+    @discardableResult
+    private static func canonicalizeParagraphCarriers(
+        in para: inout Paragraph,
+        startingAt firstPosition: Int
+    ) -> Int {
+        var positive: [(position: Int, stableOrder: Int, ref: ParagraphCarrierReference)] = []
+        var postContent: [ParagraphCarrierReference] = []
+        var stableOrder = 0
+
+        func collect(_ refs: [ParagraphCarrierReference], postContentOrder: Bool = false) {
+            for ref in refs {
+                let position = carrierPosition(ref, in: para) ?? 0
+                if postContentOrder {
+                    if position <= 0 { postContent.append(ref) }
+                } else if position > 0 {
+                    positive.append((position, stableOrder, ref))
+                    stableOrder += 1
+                }
+            }
+        }
+
+        // Positive-position collection order mirrors Paragraph's sorted-list
+        // builder and supplies an explicit stable tie-breaker.
+        collect(para.runs.indices.map(ParagraphCarrierReference.run))
+        collect(para.hyperlinks.indices.map(ParagraphCarrierReference.hyperlink))
+        collect(para.fieldSimples.indices.map(ParagraphCarrierReference.fieldSimple))
+        collect(para.alternateContents.indices.map(ParagraphCarrierReference.alternateContent))
+        collect(para.bookmarkMarkers.indices.map(ParagraphCarrierReference.bookmarkMarker))
+        collect(para.commentRangeMarkers.indices.map(ParagraphCarrierReference.commentMarker))
+        collect(para.permissionRangeMarkers.indices.map(ParagraphCarrierReference.permissionMarker))
+        collect(para.proofErrorMarkers.indices.map(ParagraphCarrierReference.proofError))
+        collect(para.smartTags.indices.map(ParagraphCarrierReference.smartTag))
+        collect(para.customXmlBlocks.indices.map(ParagraphCarrierReference.customXml))
+        collect(para.bidiOverrides.indices.map(ParagraphCarrierReference.bidiOverride))
+        collect(para.unrecognizedChildren.indices.map(ParagraphCarrierReference.unrecognized))
+        collect(para.contentControls.indices.map(ParagraphCarrierReference.contentControl))
+
+        // Nil/zero/negative entries follow Paragraph's legacy post-content
+        // bucket order. Negative positions are normalized instead of silently
+        // disappearing from both serializer predicates.
+        collect(para.contentControls.indices.map(ParagraphCarrierReference.contentControl), postContentOrder: true)
+        collect(para.runs.indices.map(ParagraphCarrierReference.run), postContentOrder: true)
+        collect(para.hyperlinks.indices.map(ParagraphCarrierReference.hyperlink), postContentOrder: true)
+        collect(para.fieldSimples.indices.map(ParagraphCarrierReference.fieldSimple), postContentOrder: true)
+        collect(para.alternateContents.indices.map(ParagraphCarrierReference.alternateContent), postContentOrder: true)
+        collect(para.bookmarkMarkers.indices.map(ParagraphCarrierReference.bookmarkMarker), postContentOrder: true)
+        collect(para.commentRangeMarkers.indices.map(ParagraphCarrierReference.commentMarker), postContentOrder: true)
+        collect(para.permissionRangeMarkers.indices.map(ParagraphCarrierReference.permissionMarker), postContentOrder: true)
+        collect(para.proofErrorMarkers.indices.map(ParagraphCarrierReference.proofError), postContentOrder: true)
+        collect(para.smartTags.indices.map(ParagraphCarrierReference.smartTag), postContentOrder: true)
+        collect(para.customXmlBlocks.indices.map(ParagraphCarrierReference.customXml), postContentOrder: true)
+        collect(para.bidiOverrides.indices.map(ParagraphCarrierReference.bidiOverride), postContentOrder: true)
+        collect(para.unrecognizedChildren.indices.map(ParagraphCarrierReference.unrecognized), postContentOrder: true)
+
+        positive.sort {
+            $0.position == $1.position
+                ? $0.stableOrder < $1.stableOrder
+                : $0.position < $1.position
+        }
+        let ordered = positive.map(\.ref) + postContent
+
+        var next = firstPosition
+        for ref in ordered {
+            setCarrierPosition(ref, to: next, in: &para)
+            if next < Int.max { next += 1 }
+        }
+        return next
+    }
+
+    private static func carrierPosition(
+        _ ref: ParagraphCarrierReference,
+        in para: Paragraph
+    ) -> Int? {
+        switch ref {
+        case .run(let i): return para.runs[i].position
+        case .hyperlink(let i): return para.hyperlinks[i].position
+        case .fieldSimple(let i): return para.fieldSimples[i].position
+        case .alternateContent(let i): return para.alternateContents[i].position
+        case .bookmarkMarker(let i): return para.bookmarkMarkers[i].position
+        case .commentMarker(let i): return para.commentRangeMarkers[i].position
+        case .permissionMarker(let i): return para.permissionRangeMarkers[i].position
+        case .proofError(let i): return para.proofErrorMarkers[i].position
+        case .smartTag(let i): return para.smartTags[i].position
+        case .customXml(let i): return para.customXmlBlocks[i].position
+        case .bidiOverride(let i): return para.bidiOverrides[i].position
+        case .unrecognized(let i): return para.unrecognizedChildren[i].position
+        case .contentControl(let i): return para.contentControls[i].position
+        }
+    }
+
+    private static func setCarrierPosition(
+        _ ref: ParagraphCarrierReference,
+        to position: Int,
+        in para: inout Paragraph
+    ) {
+        switch ref {
+        case .run(let i):
+            var runs = para.runs
+            runs[i].position = position
+            para.runs = runs
+        case .hyperlink(let i): para.hyperlinks[i].position = position
+        case .fieldSimple(let i): para.fieldSimples[i].position = position
+        case .alternateContent(let i): para.alternateContents[i].position = position
+        case .bookmarkMarker(let i): para.bookmarkMarkers[i].position = position
+        case .commentMarker(let i): para.commentRangeMarkers[i].position = position
+        case .permissionMarker(let i): para.permissionRangeMarkers[i].position = position
+        case .proofError(let i): para.proofErrorMarkers[i].position = position
+        case .smartTag(let i): para.smartTags[i].position = position
+        case .customXml(let i): para.customXmlBlocks[i].position = position
+        case .bidiOverride(let i): para.bidiOverrides[i].position = position
+        case .unrecognized(let i): para.unrecognizedChildren[i].position = position
+        case .contentControl(let i): para.contentControls[i].position = position
+        }
+    }
+
+    private static func shiftCarrierPositions(
+        after boundary: Int,
+        by delta: Int,
+        in para: inout Paragraph
+    ) {
+        guard delta > 0 else { return }
+        let refs = allCarrierReferences(in: para)
+        for ref in refs {
+            guard let position = carrierPosition(ref, in: para), position > boundary else { continue }
+            let shifted = position.addingReportingOverflow(delta)
+            setCarrierPosition(ref, to: shifted.overflow ? Int.max : shifted.partialValue, in: &para)
+        }
+    }
+
+    private static func allCarrierReferences(in para: Paragraph) -> [ParagraphCarrierReference] {
+        para.runs.indices.map(ParagraphCarrierReference.run)
+            + para.hyperlinks.indices.map(ParagraphCarrierReference.hyperlink)
+            + para.fieldSimples.indices.map(ParagraphCarrierReference.fieldSimple)
+            + para.alternateContents.indices.map(ParagraphCarrierReference.alternateContent)
+            + para.bookmarkMarkers.indices.map(ParagraphCarrierReference.bookmarkMarker)
+            + para.commentRangeMarkers.indices.map(ParagraphCarrierReference.commentMarker)
+            + para.permissionRangeMarkers.indices.map(ParagraphCarrierReference.permissionMarker)
+            + para.proofErrorMarkers.indices.map(ParagraphCarrierReference.proofError)
+            + para.smartTags.indices.map(ParagraphCarrierReference.smartTag)
+            + para.customXmlBlocks.indices.map(ParagraphCarrierReference.customXml)
+            + para.bidiOverrides.indices.map(ParagraphCarrierReference.bidiOverride)
+            + para.unrecognizedChildren.indices.map(ParagraphCarrierReference.unrecognized)
+            + para.contentControls.indices.map(ParagraphCarrierReference.contentControl)
+    }
+
+    internal struct DerivedContextAnchor: Equatable {
+        let snippet: String
+        let instance: Int
+        let boundaryPlacement: ParagraphBoundaryPlacement?
+
+        init(
+            snippet: String,
+            instance: Int,
+            boundaryPlacement: ParagraphBoundaryPlacement? = nil
+        ) {
+            self.snippet = snippet
+            self.instance = instance
+            self.boundaryPlacement = boundaryPlacement
+        }
+    }
+
+    private struct ContextEvent {
+        enum Kind {
+            case prose(String)
+            case omath(Int)
+        }
+
+        let bucket: Int
+        let order: Int
+        let collection: Int
+        let arrayIndex: Int
+        let kind: Kind
     }
 
     /// For each extracted OMath in source order, derive a context anchor (~N chars of
@@ -501,48 +1007,136 @@ extension WordDocument {
         from sourceParagraph: Paragraph,
         forExtracted extracted: [ExtractedOMath],
         charsBefore: Int
-    ) -> [String] {
-        var anchors = [String](repeating: "", count: extracted.count)
-        var matchedExtractedIndices = Set<Int>()
-        var proseAccumulator = ""
+    ) -> [DerivedContextAnchor?] {
+        var anchors = [DerivedContextAnchor?](repeating: nil, count: extracted.count)
 
-        // Walk runs in array order; whenever a run's rawXML matches an extracted OMath,
-        // capture the trailing N chars of proseAccumulator.
-        for run in sourceParagraph.runs {
-            if let raw = run.rawXML,
-               (raw.contains(":oMath") || raw.contains("<oMath") || raw.contains(":oMathPara") || raw.contains("<oMathPara")) {
-                // Find which extracted index this run corresponds to (by xml byte equality).
-                for (i, ex) in extracted.enumerated() where !matchedExtractedIndices.contains(i) {
-                    if ex.kind == .inRun && ex.xml == raw {
-                        let trailing = String(proseAccumulator.suffix(charsBefore)).trimmingCharacters(in: .whitespaces)
-                        anchors[i] = trailing
-                        matchedExtractedIndices.insert(i)
-                        break
-                    }
-                }
-                continue
+        // Boundary lanes are authoritative metadata, not prose-derived hints.
+        // Preserve both start and end so an empty-prose end source cannot be
+        // reclassified as a leading equation during batch reuse before reload.
+        for (i, ex) in extracted.enumerated() {
+            if let placement = ex.boundaryPlacement {
+                anchors[i] = DerivedContextAnchor(
+                    snippet: "",
+                    instance: 1,
+                    boundaryPlacement: placement
+                )
             }
-            proseAccumulator += run.text
         }
 
-        // Direct-child OMath in unrecognizedChildren — derive from its source position
-        // by walking runs up to that position.
-        for (i, ex) in extracted.enumerated() where ex.kind == .directChild && !matchedExtractedIndices.contains(i) {
-            // For direct-child OMath, use the prose accumulated up to the OMath's position.
-            // (Best-effort — direct-child OMath typically doesn't have meaningful surrounding prose.)
-            guard let omathPos = ex.sourcePosition else { continue }
-            var prose = ""
-            for run in sourceParagraph.runs {
-                if let runPos = run.position, runPos < omathPos {
-                    if run.rawXML?.contains("oMath") != true {
-                        prose += run.text
-                    }
+        // Map the extractor's stable carrier sequence back to the sorted result.
+        let extractedIndexBySequence = Dictionary(
+            uniqueKeysWithValues: extracted.indices.map { (extracted[$0].sourceSequence, $0) }
+        )
+        var events: [ContextEvent] = []
+        var mathSequence = 0
+
+        // Paragraph serializer appends every Run collection entry before any
+        // UnrecognizedChild at equal positions/post buckets.
+        for (arrayIndex, run) in sourceParagraph.runs.enumerated() {
+            let key = contextSerializerKey(
+                boundaryPlacement: run.paragraphBoundaryPlacement,
+                boundaryOrder: run.paragraphBoundaryOrder,
+                position: run.position
+            )
+            if let raw = run.rawXML, OMathNamespace.hasOMathRoot(in: raw) {
+                if let extractedIndex = extractedIndexBySequence[mathSequence] {
+                    events.append(ContextEvent(
+                        bucket: key.bucket,
+                        order: key.order,
+                        collection: 0,
+                        arrayIndex: arrayIndex,
+                        kind: .omath(extractedIndex)
+                    ))
                 }
+                mathSequence += 1
+            } else if let visibleText = serializedTypedText(in: run) {
+                events.append(ContextEvent(
+                    bucket: key.bucket,
+                    order: key.order,
+                    collection: 0,
+                    arrayIndex: arrayIndex,
+                    kind: .prose(visibleText)
+                ))
             }
-            anchors[i] = String(prose.suffix(charsBefore)).trimmingCharacters(in: .whitespaces)
+        }
+
+        for (arrayIndex, child) in sourceParagraph.unrecognizedChildren.enumerated()
+            where child.name == "oMath" || child.name == "oMathPara" {
+            let key = contextSerializerKey(
+                boundaryPlacement: child.paragraphBoundaryPlacement,
+                boundaryOrder: child.paragraphBoundaryOrder,
+                position: child.position
+            )
+            if let extractedIndex = extractedIndexBySequence[mathSequence] {
+                events.append(ContextEvent(
+                    bucket: key.bucket,
+                    order: key.order,
+                    collection: 1,
+                    arrayIndex: arrayIndex,
+                    kind: .omath(extractedIndex)
+                ))
+            }
+            mathSequence += 1
+        }
+
+        events.sort { lhs, rhs in
+            if lhs.bucket != rhs.bucket { return lhs.bucket < rhs.bucket }
+            if lhs.order != rhs.order { return lhs.order < rhs.order }
+            if lhs.collection != rhs.collection { return lhs.collection < rhs.collection }
+            return lhs.arrayIndex < rhs.arrayIndex
+        }
+
+        var proseAccumulator = ""
+        for event in events {
+            switch event.kind {
+            case .prose(let text):
+                proseAccumulator += text
+            case .omath(let i):
+                guard anchors[i] == nil else { continue }
+                // A direct child with neither source position nor explicit
+                // boundary metadata is intentionally unmatched/fail-loud.
+                if extracted[i].kind == .directChild,
+                   extracted[i].sourcePosition == nil {
+                    continue
+                }
+                let trailing = String(proseAccumulator.suffix(charsBefore))
+                    .trimmingCharacters(in: .whitespaces)
+                anchors[i] = DerivedContextAnchor(
+                    snippet: trailing,
+                    instance: trailing.isEmpty
+                        ? 1
+                        : occurrenceCount(of: trailing, in: proseAccumulator)
+                )
+            }
         }
 
         return anchors
+    }
+
+    private static func contextSerializerKey(
+        boundaryPlacement: ParagraphBoundaryPlacement?,
+        boundaryOrder: Int?,
+        position: Int?
+    ) -> (bucket: Int, order: Int) {
+        switch boundaryPlacement {
+        case .start?: return (0, boundaryOrder ?? 0)
+        case .end?: return (3, boundaryOrder ?? 0)
+        case nil:
+            if let position, position > 0 { return (1, position) }
+            return (2, 0)
+        }
+    }
+
+    private static func occurrenceCount(of needle: String, in haystack: String) -> Int {
+        guard !needle.isEmpty else { return 1 }
+        var count = 0
+        var searchStart = haystack.startIndex
+        while searchStart < haystack.endIndex,
+              let range = haystack.range(of: needle, range: searchStart..<haystack.endIndex) {
+            count += 1
+            searchStart = haystack.index(after: range.lowerBound)
+        }
+        return max(count, 1)
     }
 }
 

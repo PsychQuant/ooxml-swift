@@ -25,7 +25,7 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 - Preserve source Run's `rPr` (font/size/lang) by default, with escape hatches for cross-doc style/theme conflicts
 - Support mid-paragraph splice via `.afterText(...)` / `.beforeText(...)` anchors mirroring existing `InsertLocation` API
 - Provide both single-OMath low-level API (full caller control) and paragraph-level batch API (convenient for cross-doc rescue scenarios)
-- Maintain round-trip lossless guarantee — `DocxReader.read()` of the spliced doc returns OMath XML byte-equal to source
+- Maintain round-trip semantic fidelity — `DocxReader.read()` of the spliced doc returns an OMath subtree with the same namespace-expanded structure, attributes, and resolved text
 
 **Non-Goals:**
 
@@ -33,7 +33,6 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 - Document-level batch API (`spliceAllOMath` across entire WordDocument) — paragraph-matching algorithm is caller-specific (different consumers want different matchers); keep matching in caller layer to prevent scope creep
 - Cross-document `paragraph` formatting copy — only OMath + its enclosing Run rPr; surrounding paragraph properties stay target's
 - Auto-rewrite of namespace prefix — `.lenient` mode accepts mixed prefixes (ECMA-376 compliant); `.strict` mode throws on any mismatch. No string substitution on source XML
-- Bulk splice of all OMath from one paragraph in a single call — caller loops `spliceOMath` with incrementing `omathIndex` (or uses `spliceParagraphOMath` for context-anchor auto-derivation)
 - Splicing into headers / footers / footnotes / endnotes — body paragraphs only in v0.1 (target indexed by `toBodyParagraphIndex: Int`)
 
 ## Decisions
@@ -51,13 +50,13 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 ### Joint document-order index for `omathIndex`
 
-**Decision**: When source paragraph contains OMath in both carriers, sort by `position: Int?` (filled by DocxReader for both `Run` and `UnrecognizedChild` from source byte offset) and treat `omathIndex` as "Nth OMath in source-document order, regardless of carrier."
+**Decision**: Treat `omathIndex` as "Nth OMath in actual paragraph serialization order, regardless of carrier." The extractor uses the same four regions as Paragraph: absolute start boundary, positive-position window, non-positive post-content buckets, and absolute end boundary; boundary order/position plus stable Run-before-direct collection sequence resolve ties.
 
 **Alternatives considered**:
 
 - *Per-carrier separate index*: caller specifies `sourceCarrier: .inRun(index: Int) | .directChild(index: Int)`. **Rejected** — exposes implementation detail; caller usually thinks in source-document order, not carrier order
 
-**Rationale**: Joint sort is robust because DocxReader fills `position` for both carriers (verified at `DocxReader.swift:1005` for runs, `DocxReader.swift:1399-1405` for default-case unrecognized children). API-built paragraphs have nil positions but never appear as splice sources in practice (sources are always source-loaded).
+**Rationale**: DocxReader fills positive positions for loaded carriers, while API-built and in-memory boundary paragraphs legitimately carry nil/non-positive positions or absolute-boundary metadata and can immediately become splice sources. Mirroring serializer regions keeps extraction, strict namespace target selection, batch anchors, and visible XML order consistent.
 
 ### Mid-paragraph splice via anchor-Run split
 
@@ -65,14 +64,48 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 **Alternatives considered**:
 
-- *Renumber whole paragraph's positioned entries*: re-sequence all 13 carrier types. **Rejected** — touches every carrier kind (each is a separate array; missing one causes silent ordering bug; this is the fragile area #56 series fixed). Renumber also loses correspondence between `position` and source byte offset, breaking byte-equal round-trip diagnostics
+- *Renumber whole paragraph's positioned entries*: re-sequence all 13 carrier types. **Rejected for inline anchors** — touches every carrier kind (each is a separate array; missing one causes silent ordering bug; this is the fragile area #56 series fixed) and discards useful source-offset diagnostics. Direct-child mid-text insertion is the narrow exception because cross-collection placement requires a unique slot.
 - *Append-only API (no mid-paragraph)*: only support `.atStart` / `.atEnd`. **Rejected** — thesis use case requires mid-paragraph (e.g., "進行 t 檢定" needs splicing the OMath `t` between "進行 " and " 檢定")
 
 **Rationale**: Run-split isolates blast radius to `runs[]` array; the other 12 carriers are untouched. This is the same anchor-split approach `WordDocument+ReplaceTextWithBoundaryDetection.swift` already implements — proven robust by the existing test suite.
 
+### Boundary insertion across mixed carrier modes
+
+**Decision**: `.atStart` and `.atEnd` use an internal absolute-boundary serializer lane on the newly inserted Run or UnrecognizedChild. The lane emits before legacy pre-content or after legacy post-content, respectively, and remains outside the ordinary position-sorted window.
+
+**Rationale**: Paragraph serializes legacy pre-content, positive positions, nil/zero type buckets, and legacy post-content through separate paths. A numeric position cannot represent a point outside all four regions, and projecting legacy typed state into raw carriers breaks later page-break/note/bookmark mutations. The dedicated lane preserves all public typed fields and existing numeric positions while making true boundaries safe, including hostile `Int.max` inputs (#122).
+
+### Batch anchor state and mutation direction
+
+**Decision**: Before deriving any anchor, batch splice uses two global preflight phases: (1) validate every extracted source fragment and the relevant initial target fragment for XML/namespace identity, then (2) enforce URI/prefix policy only after the entire validity scan succeeds. `deriveContextAnchors` then returns optional `(snippet, instance, boundaryPlacement)` anchors: nil is unmatched, an empty string without boundary metadata is a matched leading OMath, a non-empty string includes its source occurrence number, and explicit start/end metadata remains authoritative for an unsaved boundary source. Prose comes only from typed Run text that `Run.toXML()` would serialize; raw run/property overrides and drawings hide typed text and are excluded. Inline XML comparison uses the same self-contained namespace normalization as extraction. Anchor groups run in source order for partial-success semantics; shared start/text boundaries apply right-to-left, while an absolute-end group applies left-to-right because end insertion appends.
+
+**Rationale**: The former empty-string sentinel conflated leading and unmatched equations, while hard-coded `instance: 1` misplaced repeated prose. Global reverse mutation also left later equations behind when an earlier source item failed. XML admission is global and separated from namespace policy so malformed input always fails with `OMathSpliceMalformedXMLError`, independent of source order, before any mutation; partial-success semantics apply only to later context-anchor group failures. Explicit occurrence state plus source-ordered, group-atomic application makes failure loud, partial success inspectable, and final document order stable (#125).
+
+Context derivation consumes a Run/direct-OMath event stream sorted by the same four regions as `Paragraph.toXML()`: absolute start, positive positions, non-positive post-content, and absolute end. Runs precede direct unrecognized children at equal positive/non-positive positions, matching collection emission order. Array order alone is never used as document order.
+
+Target anchor resolution sorts serializer-visible Run spans by the same region/order key before assigning global occurrence offsets, while retaining original Run array indices for mutation. Repeated `instance` values therefore refer to visible XML order even when Run storage order differs from `position` order.
+
+### Direct-child text anchors
+
+**Decision**: Direct-child OMath uses the same Run-anchor resolution as inline OMath. The target Run is split at the original UTF-16 boundary, surrounding carriers are shifted in the canonical position space, and the direct child receives the unique position between prefix and suffix.
+
+**Rationale**: Silently degrading `.afterText` / `.beforeText` to paragraph end violates both the public position enum and batch failure contract. Unique positions are required because the serializer's cross-collection stable tie order cannot place an `UnrecognizedChild` between two equal-position Runs.
+
+Anchor resolution uses the same serializer-visible typed-text rule as batch derivation. Matching hidden `Run.text` beneath `rawXML`, `RunProperties.rawXML`, or `drawing` would split a carrier whose prefix and suffix both retain the opaque override, duplicating content.
+
+When a visible-text Run also carries post-text `rawElements`, splitting clears them from the prefix and keeps them on the suffix only. An empty-text suffix is retained for this purpose, preserving the opaque child exactly once and after the original text/insertion boundary.
+
+### Direct-child local-name preservation
+
+**Decision**: Carry the source direct-child local name through extraction and use it when creating the target `UnrecognizedChild`.
+
+**Rationale**: Hardcoding `oMath` made typed metadata disagree with an `oMathPara` raw root and broke subsequent carrier-sensitive operations (#124).
+
+Validation also rejects a source or relevant target direct-child carrier when its stored `name` disagrees with the validated raw root local name. Both values must describe the same carrier before mutation.
+
 ### Default `OMathSpliceRpRMode = .full`
 
-**Decision**: Default to verbatim `rPr` copy from source Run to the new target OMath Run. Provide `.omathOnly` (whitelist: rFonts/sz/lang only) and `.discard` (empty rPr) as escape hatches.
+**Decision**: Default to verbatim `rPr` copy from source Run to the new target OMath Run. Provide `.omathOnly` (whitelist: `rFonts`, legacy `fontName`, `fontSize`, `lang`, `bold`, `italic`) and `.discard` (empty rPr) as escape hatches.
 
 **Alternatives considered**:
 
@@ -83,7 +116,7 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 ### Two-tier API: `spliceOMath` (single) + `spliceParagraphOMath` (batch)
 
-**Decision**: Provide both single-OMath low-level entry point and paragraph-level batch entry point. The batch variant auto-derives anchor for each OMath from its source-text-context (~5-10 chars on each side via `flattenedDisplayText` slicing) and routes to `.afterText(prefix, instance: 1)`. Throws `OMathSpliceError.contextAnchorNotFound(omathIndex:, snippet:)` per OMath that fails to resolve.
+**Decision**: Provide both single-OMath low-level entry point and paragraph-level batch entry point. The batch variant preserves explicit absolute-boundary metadata or derives a trailing source-text prefix plus its occurrence instance, groups OMath sharing one boundary, and routes each group to `.atStart`, `.atEnd`, or `.afterText(prefix, instance:)`. Throws `OMathSpliceError.contextAnchorNotFound(omathIndex:, snippet:)` when a prose-derived group cannot resolve.
 
 **Alternatives considered**:
 
@@ -103,15 +136,21 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 **Rationale**: ECMA-376 explicitly allows mixed prefixes within one document (each namespace declaration scopes locally). 99% of real docx files use the standard `m:` prefix anyway, making this almost a no-op safeguard. URI mismatch (rare; would mean the source uses a vendor-extended namespace not in the OMML schema) is a real semantic mismatch and warrants a throw.
 
+Namespace inspection accepts both XML quote styles and resolves character/entity references through `XmlTreeReader`. Foundation `XMLDocument` is the strict validity gate because the lossless tree parser intentionally does not enforce every namespace/QName/XML 1.0 rule. The candidate is trimmed only by XML 1.0 `S` (space, tab, carriage return, line feed), must begin directly with a root start tag, and is parsed inside a synthetic wrapper as exactly one `oMath`/`oMathPara` element. XML declarations, actual DTDs, U+FEFF/non-XML framing whitespace, document-level comments/PIs/CDATA, extra text, and multiple roots therefore fail structurally, while the same `<!DOCTYPE` text inside an OMath comment or CDATA section remains legal. Extracted prefix-less fragments receive a local default OMML declaration so the copied raw subtree is self-contained; malformed fragments fail before target mutation and an explicitly declared non-standard URI is never defaulted to the standard URI. Strict target comparison uses the first OMath in joint serializer order, including an explicit empty prefix for a default namespace.
+
+Inline carrier discovery uses only the raw fragment's document-element local name (`oMath` or `oMathPara`). Attribute values, character data, descendants, and lookalike root names never opt an ordinary `Run.rawXML` fragment into extraction. The same root classifier is reused by anchor lookup and batch context derivation.
+
+Malformed fragment admission throws the additive `OMathSpliceMalformedXMLError` type rather than adding a case to the already released `OMathSpliceError` enum. This preserves source compatibility for external consumers whose switches exhaustively cover the enum's original six cases.
+
 ## Risks / Trade-offs
 
-[**Risk: round-trip lossy after splice**] → Mitigation: 8 round-trip test fixtures in `Tests/OOXMLSwiftTests/OMathSpliceTests.swift` enforce byte-equal `DocxReader.read()` of spliced output vs original `<m:oMath>` block. PR merge blocked on any byte mismatch.
+[**Risk: round-trip semantic loss after splice**] → Mitigation: an end-to-end splice/write/reload test compares extracted source and reloaded OMath through `OMathSemanticXML`. Foundation's parsed semantic tree supplies namespace scope (including `xmlns=""` undeclaration) and XML attribute-whitespace normalization. Canonical coverage equates entity spelling, adjacent text/CDATA segmentation, attribute order/quotes, namespace declaration placement, and element/attribute-prefix variants; it rejects namespace-expanded name, structure, child-order, resolved-text, character-reference whitespace, and semantic-attribute changes without sentinel collisions (#123). Exact lexical bytes are not promised after XML parsing.
 
 [**Risk: anchor-Run split with whitespace-sensitive `<w:t xml:space="preserve">`**] → Mitigation: copy `xml:space` attribute when splitting; existing `replaceText` code path tested with similar fixtures. Add explicit test case for whitespace-bearing anchor.
 
 [**Risk: cross-doc rStyle reference broken in target (e.g., `<w:rStyle w:val="MathStyle">` where target lacks that style ID)**] → Mitigation: documented as `.full` mode caveat; provide `.omathOnly` (strips rStyle) as opt-out. Real risk is low — Cambria Math is typically applied via direct `rFonts`, not via style reference, in NTPU/Word output.
 
-[**Risk: position-renumber regression**] → Mitigation: split-point share-position approach explicitly avoids renumbering; existing #56 / #99-103 round-trip suites run on every PR and would catch ordering drift.
+[**Risk: position-renumber regression**] → Mitigation: ordinary boundary insertion does not renumber existing carriers; only direct-child mid-text insertion compacts the position-indexed window needed for a unique cross-collection slot. A sentinel matrix pins all 13 position-indexed collections plus legacy pre/post carriers for inline/direct `.atStart` and `.atEnd`.
 
 [**Risk: mixed-prefix output rejected by strict XML validators**] → Mitigation: default `.lenient` produces ECMA-376-compliant output (mixed prefixes are spec-legal); `.strict` mode available for callers needing single-prefix output for downstream tooling.
 

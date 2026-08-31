@@ -11,9 +11,9 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 - Add `OMathSplicePosition` enum: `.atStart` / `.atEnd` / `.afterText(_, instance:, options:)` / `.beforeText(_, instance:, options:)` — mirrors existing `InsertLocation` anchor pattern
 - Add `OMathSpliceRpRMode` enum: `.full` (default) / `.omathOnly` / `.discard` — controls source-Run rPr (font/size/lang) propagation to target
 - Add `OMathSpliceNamespacePolicy` enum: `.lenient` (default) / `.strict` — controls behavior on namespace prefix vs URI mismatch
-- Add `OMathSpliceError` enum: 6 cases covering the failure taxonomy
+- Preserve the released six-case `OMathSpliceError` enum and add source-compatible `OMathSpliceMalformedXMLError` for malformed source/target XML fragments
 - Carrier preservation: source's `Run.rawXML` OMath splices into target as `Run.rawXML`; source's direct-child `unrecognizedChildren` OMath splices into target as `unrecognizedChildren` (visual semantics — inline stays inline, display stays display)
-- Mid-paragraph splice via anchor-Run split (does not touch the other 12 position-indexed paragraph carriers — isolated blast radius; mirrors `replaceText` pattern)
+- Inline mid-paragraph splice via shared-position anchor-Run split; direct-child anchors compact the 13 positioned collections to create one unique cross-collection slot
 
 ## Non-Goals (optional)
 
@@ -28,6 +28,13 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 ### Modified Capabilities
 
 (none — additive feature; existing OMath round-trip behavior at issues #85, #92, and #99 through #103 is unaffected)
+
+### Correctness remediations
+
+- #122 makes start/end boundaries honor all position-indexed and legacy fixed-order paragraph carriers without integer overflow.
+- #124 preserves direct-child OMath paragraph local-name metadata.
+- #125 distinguishes leading, matched, and unmatched batch anchors, derives repeated-text occurrence instances, honors direct-child anchors, and preserves partial-success/source order by anchor group.
+- #123 re-baselines save/reload fidelity from impossible lexical byte identity to canonical semantic XML equivalence.
 
 ## Impact
 

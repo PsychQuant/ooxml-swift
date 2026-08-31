@@ -8,6 +8,23 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Cross-document OMath splice now preserves absolute paragraph boundaries and
+  direct-child metadata, uses explicit batch-anchor states, and validates one
+  embeddable XML fragment before mutation. Inline raw carriers are classified
+  by root local name rather than full-string substring matches. Anchor/context
+  matching excludes typed text hidden by raw overrides or drawings, preventing
+  opaque carrier duplication. Post-text `rawElements` stay once on the split
+  suffix rather than being copied to both segments. Batch context follows the
+  same four serializer regions as `Paragraph.toXML()`, and direct-child metadata
+  must match its validated raw root. Target anchor occurrence counting uses the
+  same serializer order rather than Run storage order. Malformed fragments throw the new
+  additive `OMathSpliceMalformedXMLError`; the released six-case
+  `OMathSpliceError` enum remains unchanged so external exhaustive switches
+  continue to compile. Focused coverage: 66 tests; full suite: 1,494 tests with
+  31 conditional skips and no failures.
+
 ## [3.5.0] - 2026-08-27
 
 ### Added
