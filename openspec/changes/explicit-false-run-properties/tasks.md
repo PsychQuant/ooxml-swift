@@ -17,3 +17,4 @@
 - [x] 3.3 Verify PsychQuant/che-word-mcp#197 against frozen `4a26b6d`: focused 2/2 and full 347 tests with 12 skips, 0 failures; draft PR #198 head `51d6986` pins the exact revision pending release.
 - [x] 3.4 Close verify R1 blockers with RED→GREEN coverage: `.omathOnly` preserves absent vs explicit-off bold/italic; non-standard `no` follows the frozen unknown/default-on rule; authoritative diff hygiene is clean.
 - [x] 3.5 Close verify R2 blockers with RED→GREEN coverage: tree-backed append/RunPayload and `rPrChange` previous-format paths preserve explicit-off peers and underline `none`; alternate WordprocessingML prefix regression confirms URI-aware parsing. File pre-existing OMath rPr carrier defect as #117 rather than expanding #115.
+- [x] 3.6 Close verify R4 canonical-order blocker: `rPrChange` delegates to the single `RunProperties.toXML()` CT_RPr pipeline; mixed rFonts/b/i/strike/noProof/color/sz/u RED→GREEN locks order and half-point size semantics.
