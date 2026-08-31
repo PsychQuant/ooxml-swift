@@ -482,11 +482,9 @@ extension WordDocument {
         var runSpans: [(runIdx: Int, text: String, startGlobal: Int)] = []
         var globalOffset = 0
         for (i, run) in para.runs.enumerated() {
-            if let raw = run.rawXML, OMathNamespace.hasOMathRoot(in: raw) {
-                continue
-            }
-            runSpans.append((i, run.text, globalOffset))
-            globalOffset += run.text.utf16.count
+            guard let visibleText = serializedTypedText(in: run) else { continue }
+            runSpans.append((i, visibleText, globalOffset))
+            globalOffset += visibleText.utf16.count
         }
 
         let combined = runSpans.map { $0.text }.joined()
@@ -561,6 +559,19 @@ extension WordDocument {
             }
         }
         return nil
+    }
+
+    /// Typed `Run.text` participates in anchors only when `Run.toXML()` would
+    /// actually serialize it. Raw run overrides, raw property overrides, and
+    /// drawings all replace the typed text branch; matching their hidden text
+    /// would split and duplicate opaque content.
+    private static func serializedTypedText(in run: Run) -> String? {
+        guard run.rawXML == nil,
+              run.properties.rawXML == nil,
+              run.drawing == nil else {
+            return nil
+        }
+        return run.text
     }
 
     /// Normalize one extended grapheme at a time and retain a map from every
@@ -994,7 +1005,9 @@ extension WordDocument {
                 }
                 continue
             }
-            proseAccumulator += run.text
+            if let visibleText = serializedTypedText(in: run) {
+                proseAccumulator += visibleText
+            }
         }
 
         // Direct-child OMath in unrecognizedChildren — derive from its source position
@@ -1006,12 +1019,8 @@ extension WordDocument {
             var prose = ""
             for run in sourceParagraph.runs {
                 if let runPos = run.position, runPos < omathPos {
-                    if let raw = run.rawXML {
-                        if !OMathNamespace.hasOMathRoot(in: raw) {
-                            prose += run.text
-                        }
-                    } else {
-                        prose += run.text
+                    if let visibleText = serializedTypedText(in: run) {
+                        prose += visibleText
                     }
                 }
             }

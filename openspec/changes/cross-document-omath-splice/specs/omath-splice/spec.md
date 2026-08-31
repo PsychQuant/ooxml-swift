@@ -88,8 +88,14 @@ The system SHALL support `OMathSplicePosition.afterText(_, instance:, options:)`
 
 #### Scenario: Anchor not found in target paragraph
 
-- **WHEN** caller invokes `spliceOMath` with `position: .afterText("nonexistent text", instance: 1)` and the target paragraph's `flattenedDisplayText()` does not contain `"nonexistent text"`
+- **WHEN** caller invokes `spliceOMath` with `position: .afterText("nonexistent text", instance: 1)` and the target paragraph's serializer-visible typed Run text does not contain `"nonexistent text"`
 - **THEN** the system SHALL throw `OMathSpliceError.anchorNotFound("nonexistent text", instance: 1)`
+
+#### Scenario: Opaque Run overrides do not expose hidden typed text
+
+- **WHEN** a Run's typed `text` contains the anchor but `rawXML`, `RunProperties.rawXML`, or `drawing` replaces that text in `Run.toXML()`
+- **THEN** the hidden typed text SHALL NOT resolve a single or batch anchor
+- **AND** the opaque content SHALL remain single and unchanged rather than being copied into split prefix/suffix Runs
 
 #### Scenario: Anchor instance > 1 resolves to Nth occurrence
 

@@ -27,6 +27,7 @@
 - [x] 4.3 Helper SHALL preserve original run's `position` value on all resulting segments (relying on stable sort to retain `runs[]` array order)
 - [x] 4.4 Wire `.afterText` / `.beforeText` resolution in `spliceOMath` through this helper to satisfy the Mid-paragraph splice via anchor-text matching requirement
 - [x] 4.5 Throw `.anchorNotFound(searchText, instance:)` when anchor not present in target paragraph
+- [x] 4.6 Exclude serializer-hidden typed text from Runs overridden by `rawXML`, `RunProperties.rawXML`, or `drawing`
 
 ## 5. Paragraph-level batch splice (high-level API)
 
@@ -80,8 +81,8 @@
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
 - [x] 10.7 Derive anchor occurrence instances; preserve explicit start/end lane metadata; apply source-ordered start/text groups right-to-left and end groups left-to-right
 - [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, quote-complete namespace checks, and structural single-fragment admission limited to XML 1.0 `S` framing
-- [x] 10.9 Run `OMathSpliceTests`: 60 tests, 0 failures
-- [x] 10.10 Re-run full package regression: 1,488 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-12 remediation commit
+- [x] 10.9 Run `OMathSpliceTests`: 62 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,490 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-13 remediation commit
 
 ## 11. Reload fidelity contract remediation (#123)
 

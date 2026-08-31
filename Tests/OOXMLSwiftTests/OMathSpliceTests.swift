@@ -236,6 +236,59 @@ final class OMathSpliceTests: XCTestCase {
         }
     }
 
+    func testSerializerHiddenRunTextCannotAnchorOrDuplicateOpaqueContent() throws {
+        let source = try parseParagraph(xml: Self.sourceInlineRunOMath)
+
+        var rawRun = Run(text: "ANCHOR")
+        rawRun.rawXML = "<w:custom data-id='RAW_SENTINEL'/>"
+
+        var propertiesRawRun = Run(text: "ANCHOR")
+        propertiesRawRun.properties.rawXML = "<w:custom data-id='PROPERTIES_RAW_SENTINEL'/>"
+
+        var drawingRun = Run(text: "ANCHOR")
+        drawingRun.drawing = Drawing(width: 100, height: 100, imageId: "rIdHiddenText")
+
+        let targets = [rawRun, propertiesRawRun, drawingRun]
+        for targetRun in targets {
+            var target = makeDocument(with: Paragraph(runs: [targetRun]))
+            let before = targetRun.rawXML ?? targetRun.properties.rawXML ?? targetRun.drawing?.toXML() ?? ""
+
+            XCTAssertThrowsError(
+                try target.spliceOMath(
+                    from: source,
+                    toBodyParagraphIndex: 0,
+                    position: .afterText("ANCHOR")
+                )
+            ) { error in
+                guard case .anchorNotFound("ANCHOR", 1) = error as? OMathSpliceError else {
+                    return XCTFail("Serializer-hidden text must not resolve, got \(error)")
+                }
+            }
+            guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+            let xml = result.toXML()
+            XCTAssertEqual(xml.components(separatedBy: before).count - 1, 1)
+            XCTAssertFalse(xml.contains("<m:oMath"))
+        }
+    }
+
+    func testBatchContextIgnoresSerializerHiddenOpaqueRunText() throws {
+        var opaque = Run(text: "ANCHOR")
+        opaque.rawXML = "<w:custom data-id='SOURCE_OPAQUE'/>"
+        var math = Run(text: "")
+        math.rawXML = "<m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>"
+        let source = Paragraph(runs: [opaque, math])
+        var target = makeDocument(with: Paragraph(runs: [Run(text: "ANCHOR body")]))
+
+        XCTAssertEqual(try target.spliceParagraphOMath(from: source, toBodyParagraphIndex: 0), 1)
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        let xml = result.toXML()
+        XCTAssertLessThan(
+            try XCTUnwrap(xml.range(of: "<m:oMath")?.lowerBound),
+            try XCTUnwrap(xml.range(of: "ANCHOR body")?.lowerBound),
+            "Hidden source text must not become a batch context anchor"
+        )
+    }
+
     /// Test 6.5: omathIndex out of range → throws .omathIndexOutOfRange.
     func testOMathIndexOutOfRangeThrows() throws {
         let sourcePara = try parseParagraph(xml: Self.sourceInlineRunOMath)
