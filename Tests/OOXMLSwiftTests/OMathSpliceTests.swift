@@ -289,6 +289,88 @@ final class OMathSpliceTests: XCTestCase {
         )
     }
 
+    func testBatchContextUsesParagraphSerializerOrder() throws {
+        let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        func assertTextBeforeMath(source: Paragraph, targetText: String, mathText: String) throws {
+            var target = makeDocument(with: Paragraph(runs: [Run(text: targetText + " tail")]))
+            XCTAssertEqual(try target.spliceParagraphOMath(from: source, toBodyParagraphIndex: 0), 1)
+            guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+            let xml = result.toXML()
+            XCTAssertLessThan(
+                try XCTUnwrap(xml.range(of: targetText)?.lowerBound),
+                try XCTUnwrap(xml.range(of: mathText)?.lowerBound),
+                xml
+            )
+        }
+
+        var reversedMath = Run(text: "")
+        reversedMath.rawXML = "<m:oMath xmlns:m='\(uri)'><m:r><m:t>R</m:t></m:r></m:oMath>"
+        reversedMath.position = 2
+        var earlierText = Run(text: "REVERSED")
+        earlierText.position = 1
+        try assertTextBeforeMath(
+            source: Paragraph(runs: [reversedMath, earlierText]),
+            targetText: "REVERSED",
+            mathText: "<m:t>R</m:t>"
+        )
+
+        for position in [1, 0, -3] {
+            var text = Run(text: "EQUAL\(position)")
+            text.position = position
+            var source = Paragraph(runs: [text])
+            source.unrecognizedChildren = [
+                UnrecognizedChild(
+                    name: "oMath",
+                    rawXML: "<m:oMath xmlns:m='\(uri)'><m:r><m:t>D\(position)</m:t></m:r></m:oMath>",
+                    position: position
+                )
+            ]
+            try assertTextBeforeMath(
+                source: source,
+                targetText: "EQUAL\(position)",
+                mathText: "<m:t>D\(position)</m:t>"
+            )
+        }
+    }
+
+    func testDirectChildMetadataMustMatchValidatedRawRoot() throws {
+        let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        let mismatches = [
+            ("oMath", "<m:oMathPara xmlns:m='\(uri)'><m:oMath/></m:oMathPara>"),
+            ("oMathPara", "<m:oMath xmlns:m='\(uri)'/>"),
+        ]
+
+        for (name, rawXML) in mismatches {
+            var source = Paragraph()
+            source.unrecognizedChildren = [
+                UnrecognizedChild(name: name, rawXML: rawXML, position: 1)
+            ]
+            let originalTarget = Paragraph(runs: [Run(text: "UNCHANGED")])
+
+            var singleTarget = makeDocument(with: originalTarget)
+            XCTAssertThrowsError(
+                try singleTarget.spliceOMath(from: source, toBodyParagraphIndex: 0, position: .atEnd)
+            ) { error in
+                guard error is OMathSpliceMalformedXMLError else {
+                    return XCTFail("Expected metadata/root mismatch error, got \(error)")
+                }
+            }
+            guard case .paragraph(let singleResult) = singleTarget.body.children[0] else { XCTFail(); return }
+            XCTAssertEqual(singleResult, originalTarget)
+
+            var batchTarget = makeDocument(with: originalTarget)
+            XCTAssertThrowsError(
+                try batchTarget.spliceParagraphOMath(from: source, toBodyParagraphIndex: 0)
+            ) { error in
+                guard error is OMathSpliceMalformedXMLError else {
+                    return XCTFail("Expected batch metadata/root mismatch error, got \(error)")
+                }
+            }
+            guard case .paragraph(let batchResult) = batchTarget.body.children[0] else { XCTFail(); return }
+            XCTAssertEqual(batchResult, originalTarget)
+        }
+    }
+
     func testRawElementsRemainSingleAcrossInlineDirectAndBatchSplits() throws {
         let raw = RawElement(name: "object", xml: "<w:object data-id='OPAQUE_CHILD'/>")
         func makeTarget() -> WordDocument {
