@@ -110,16 +110,10 @@ internal enum OMathExtractor {
         var collected: [ExtractedOMath] = []
         var sourceSequence = 0
 
-        // Carrier 1: Run.rawXML (inline OMath in Run)
+        // Carrier 1: Run.rawXML whose fragment root is OMath.
         for run in paragraph.runs {
             guard let raw = run.rawXML, raw.contains("<") else { continue }
-            // Substring match for `:oMath` or `<oMath` to handle prefix or default namespace.
-            // Specific match handles both `<m:oMath` / `<mml:oMath` / `<oMath`.
-            let hasOMath = raw.contains(":oMath")
-                || raw.contains(":oMathPara")
-                || raw.contains("<oMath")
-                || raw.contains("<oMathPara")
-            guard hasOMath else { continue }
+            guard OMathNamespace.hasOMathRoot(in: raw) else { continue }
             collected.append(ExtractedOMath(
                 xml: ensureXmlnsDeclared(in: raw),
                 kind: .inRun,
@@ -221,8 +215,72 @@ internal enum OMathNamespace {
         return prefix(fromQualifiedName: root.qualifiedName)
     }
 
+    /// Classifies a raw carrier from its document-element local name only.
+    /// Attribute values, text, descendants, and similarly named roots cannot
+    /// opt an ordinary raw fragment into the OMath splice pipeline.
+    static func hasOMathRoot(in xml: String) -> Bool {
+        guard let localName = rootLocalName(in: xml) else { return false }
+        return localName == "oMath" || localName == "oMathPara"
+    }
+
     internal static func rootNameEnd(in xml: String) -> String.Index? {
         parseRootTag(in: xml)?.nameEnd
+    }
+
+    private static func rootLocalName(in xml: String) -> String? {
+        let fragment = trimmingXMLS(in: xml)
+        if let qualifiedName = rootQualifiedName(in: fragment) {
+            return localName(fromQualifiedName: qualifiedName)
+        }
+
+        // The lossless parser safely skips XML declarations, comments, PIs,
+        // and DTD framing. Admission later rejects those for embeddability,
+        // but classification still recognizes the intended OMath root so the
+        // caller receives a malformed-fragment error.
+        if let tree = try? XmlTreeReader.parse(Data(xml.utf8)) {
+            return tree.root.localName
+        }
+
+        // Non-XML framing text/BOM makes the document parser fail. Inspect only
+        // the first element-looking tag; never scan beyond a successfully parsed
+        // non-OMath root into its attributes, text, or descendants.
+        var search = fragment.startIndex
+        while search < fragment.endIndex,
+              let lessThan = fragment[search...].firstIndex(of: "<") {
+            let suffix = fragment[lessThan...]
+            if let qualifiedName = rootQualifiedName(in: suffix) {
+                return localName(fromQualifiedName: qualifiedName)
+            }
+            search = fragment.index(after: lessThan)
+        }
+        return nil
+    }
+
+    /// Tokenize only the candidate start tag's QName. Attribute syntax is not
+    /// inspected here: a malformed OMath opening tag must still enter the
+    /// admission path and report `OMathSpliceMalformedXMLError`.
+    private static func rootQualifiedName(in xml: Substring) -> String? {
+        guard xml.first == "<" else { return nil }
+        var cursor = xml.index(after: xml.startIndex)
+        guard cursor < xml.endIndex,
+              xml[cursor] != "?", xml[cursor] != "!", xml[cursor] != "/" else {
+            return nil
+        }
+        let start = cursor
+        while cursor < xml.endIndex,
+              !xml[cursor].isWhitespace,
+              xml[cursor] != "/",
+              xml[cursor] != ">" {
+            cursor = xml.index(after: cursor)
+        }
+        guard cursor > start else { return nil }
+        return String(xml[start..<cursor])
+    }
+
+    private static func localName(fromQualifiedName qualifiedName: String) -> String? {
+        let parts = qualifiedName.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count <= 2, let last = parts.last, !last.isEmpty else { return nil }
+        return String(last)
     }
 
     internal static func isWellFormed(_ xml: String) -> Bool {

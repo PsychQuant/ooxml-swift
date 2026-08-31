@@ -206,6 +206,36 @@ final class OMathSpliceTests: XCTestCase {
         }
     }
 
+    func testNonOMathRawXMLSubstringDoesNotCreateInlineCarrier() throws {
+        let wURI = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        let rawFragments = [
+            "<w:custom xmlns:w='\(wURI)' data-note='literal :oMath'/>",
+            "<w:custom xmlns:w='\(wURI)'>literal :oMathPara</w:custom>",
+            "<w:custom xmlns:w='\(wURI)'><w:oMathLike/></w:custom>",
+        ]
+
+        for raw in rawFragments {
+            var run = Run(text: "ordinary")
+            run.rawXML = raw
+            let source = Paragraph(runs: [run])
+            let originalTarget = Paragraph(runs: [Run(text: "UNCHANGED")])
+
+            var singleTarget = makeDocument(with: originalTarget)
+            XCTAssertThrowsError(
+                try singleTarget.spliceOMath(from: source, toBodyParagraphIndex: 0, position: .atEnd)
+            ) { error in
+                XCTAssertEqual(error as? OMathSpliceError, .sourceHasNoOMath)
+            }
+            guard case .paragraph(let singleResult) = singleTarget.body.children[0] else { XCTFail(); return }
+            XCTAssertEqual(singleResult, originalTarget)
+
+            var batchTarget = makeDocument(with: originalTarget)
+            XCTAssertEqual(try batchTarget.spliceParagraphOMath(from: source, toBodyParagraphIndex: 0), 0)
+            guard case .paragraph(let batchResult) = batchTarget.body.children[0] else { XCTFail(); return }
+            XCTAssertEqual(batchResult, originalTarget)
+        }
+    }
+
     /// Test 6.5: omathIndex out of range → throws .omathIndexOutOfRange.
     func testOMathIndexOutOfRangeThrows() throws {
         let sourcePara = try parseParagraph(xml: Self.sourceInlineRunOMath)
@@ -1501,7 +1531,6 @@ final class OMathSpliceTests: XCTestCase {
             "<![CDATA[]]><m:oMath xmlns:m='\(uri)'/>",
             "<m:oMath xmlns:m='\(uri)'/><![CDATA[]]>",
             "<m:oMath xmlns:m='\(uri)'/><m:oMath xmlns:m='\(uri)'/>",
-            "<wrapper><m:oMath xmlns:m='\(uri)'/></wrapper>",
         ]
 
         for fragment in invalidFragments {
@@ -1524,6 +1553,30 @@ final class OMathSpliceTests: XCTestCase {
             XCTAssertEqual(unchanged.text, "UNCHANGED")
             XCTAssertFalse(unchanged.toXML().contains("oMath"))
         }
+    }
+
+    func testDirectOMathMetadataWithWrongRawRootIsMalformed() throws {
+        let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        var source = Paragraph()
+        source.unrecognizedChildren = [
+            UnrecognizedChild(
+                name: "oMath",
+                rawXML: "<wrapper><m:oMath xmlns:m='\(uri)'/></wrapper>",
+                position: 1
+            )
+        ]
+        let originalTarget = Paragraph(runs: [Run(text: "UNCHANGED")])
+        var target = makeDocument(with: originalTarget)
+
+        XCTAssertThrowsError(
+            try target.spliceOMath(from: source, toBodyParagraphIndex: 0, position: .atEnd)
+        ) { error in
+            guard error is OMathSpliceMalformedXMLError else {
+                return XCTFail("Expected metadata/payload root mismatch to be malformed, got \(error)")
+            }
+        }
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        XCTAssertEqual(result, originalTarget)
     }
 
     func testNamespaceValidityGateAllowsDoctypeTextInsidePayloadCommentAndCDATA() throws {

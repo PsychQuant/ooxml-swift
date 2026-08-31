@@ -7,7 +7,7 @@
 
 ## 2. Source extraction
 
-- [x] 2.1 Implement internal `extractOMath(from para: Paragraph) -> [ExtractedOMath]` that scans `para.runs[].rawXML` for `<m:oMath` and `para.unrecognizedChildren` for entries where `name == "oMath" || "oMathPara"` (Carrier preservation strategy)
+- [x] 2.1 Implement internal `extractOMath(from para: Paragraph) -> [ExtractedOMath]` that classifies `para.runs[].rawXML` by root local name and scans `para.unrecognizedChildren` entries where `name == "oMath" || "oMathPara"` (Carrier preservation strategy)
 - [x] 2.2 Sort extracted OMath by absolute-start / positive / non-positive post-content / absolute-end serializer regions with stable carrier tie-breaking
 - [x] 2.3 Implement namespace-URI extraction from extracted OMath XML for the lenient/strict policy comparison
 
@@ -80,8 +80,8 @@
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
 - [x] 10.7 Derive anchor occurrence instances; preserve explicit start/end lane metadata; apply source-ordered start/text groups right-to-left and end groups left-to-right
 - [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, quote-complete namespace checks, and structural single-fragment admission limited to XML 1.0 `S` framing
-- [x] 10.9 Run `OMathSpliceTests`: 58 tests, 0 failures
-- [x] 10.10 Re-run full package regression: 1,486 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-11 remediation commit
+- [x] 10.9 Run `OMathSpliceTests`: 60 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,488 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-12 remediation commit
 
 ## 11. Reload fidelity contract remediation (#123)
 
