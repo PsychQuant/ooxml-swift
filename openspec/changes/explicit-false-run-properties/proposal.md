@@ -23,4 +23,3 @@
 - `Sources/OOXMLSwift/IO/DocxReader.swift`
 - `Tests/OOXMLSwiftTests/RunPropertyOnOffTests.swift`
 - Downstream consumer: PsychQuant/che-word-mcp#197
-

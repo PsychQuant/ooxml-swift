@@ -36,4 +36,3 @@ Specified true emits a naked element; specified false emits `w:val="0"`. The rea
 - Synthesized equality will distinguish absent false from explicit false; this is intentional because they have different write/merge semantics.
 - Property observers do not run for initialization; custom initializers and the reader must mark presence explicitly.
 - Partial formatting must never initialize every boolean as specified false.
-

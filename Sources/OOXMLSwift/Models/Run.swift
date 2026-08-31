@@ -351,6 +351,11 @@ public struct RunProperties: Equatable {
     private var isStrikethroughSpecified = false
     private var isNoProofSpecified = false
 
+    /// Internal patch projection used by filtered/copying APIs that must not
+    /// collapse an absent direct property into explicit false.
+    var specifiedBold: Bool? { isBoldSpecified ? bold : nil }
+    var specifiedItalic: Bool? { isItalicSpecified ? italic : nil }
+
     /// v0.20.0+ (#60): `<w:kern w:val="N"/>` — minimum font size threshold for kerning.
     /// OOXML uses half-points (e.g., kern=32 means kern only at 16pt+).
     public var kern: Int?
