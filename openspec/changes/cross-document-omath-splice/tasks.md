@@ -84,5 +84,6 @@
 - [x] 10.11 Scope self-contained namespace injection to the root start tag and verify prefixed/default splice→write→reload under nested shadowing
 - [x] 10.12 Accept valid dotted namespace prefixes without a narrow custom character allowlist
 - [x] 10.13 Replace namespace regex matching with a quote-aware root attribute tokenizer; cover fake declaration text and empty undeclaration
-- [x] 10.14 Run `OMathSpliceTests`: 22 tests, 0 failures
-- [ ] 10.15 Run the complete package regression suite and repeat IDD multi-agent verification on the final commit
+- [x] 10.14 Normalize XML entities and decimal/hex character references before namespace URI comparison
+- [x] 10.15 Run `OMathSpliceTests`: 23 tests, 0 failures
+- [ ] 10.16 Run the complete package regression suite and repeat IDD multi-agent verification on the final commit
