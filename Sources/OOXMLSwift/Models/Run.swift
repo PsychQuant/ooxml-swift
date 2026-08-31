@@ -14,6 +14,27 @@ public struct RawElement: Equatable {
     }
 }
 
+/// Returns the root start tag, stopping only at an unquoted `>`.
+internal func rootElementStartTag(in xml: String) -> String? {
+    let trimmed = xml.drop(while: { $0.isWhitespace })
+    guard trimmed.first == "<" else { return nil }
+
+    var quote: Character?
+    var index = trimmed.index(after: trimmed.startIndex)
+    while index < trimmed.endIndex {
+        let character = trimmed[index]
+        if let activeQuote = quote {
+            if character == activeQuote { quote = nil }
+        } else if character == "\"" || character == "'" {
+            quote = character
+        } else if character == ">" {
+            return String(trimmed[...index])
+        }
+        index = trimmed.index(after: index)
+    }
+    return nil
+}
+
 /// Returns the qualified name of the root element in a raw XML fragment.
 ///
 /// Raw carrier fragments are produced from `XMLElement.xmlString`, so they
@@ -21,7 +42,8 @@ public struct RawElement: Equatable {
 /// avoids reparsing a fragment solely to distinguish `<m:oMath>` from a full
 /// `<w:r>` raw replacement.
 internal func rootElementQualifiedName(in xml: String) -> String? {
-    let trimmed = xml.drop(while: { $0.isWhitespace })
+    guard let startTag = rootElementStartTag(in: xml) else { return nil }
+    let trimmed = startTag[...]
     guard trimmed.first == "<" else { return nil }
     let nameStart = trimmed.index(after: trimmed.startIndex)
     guard nameStart < trimmed.endIndex,

@@ -704,6 +704,8 @@ final class OMathSpliceTests: XCTestCase {
             #"<m:oMath xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/math'><m:r><m:t>α</m:t></m:r></m:oMath>"#,
             #"<oMath xmlns="http://schemas.openxmlformats.org/officeDocument/2006/math"><r><t>α</t></r></oMath>"#,
             #"<oMath xmlns='http://schemas.openxmlformats.org/officeDocument/2006/math'><r><t>α</t></r></oMath>"#,
+            #"<m:oMath><m:r xmlns:m="urn:vendor:nested-shadow"><m:t>α</m:t></m:r></m:oMath>"#,
+            #"<oMath><r xmlns="urn:vendor:nested-shadow"><t>α</t></r></oMath>"#,
         ]
         for omathXML in standardFragments {
             var run = Run(text: "")
