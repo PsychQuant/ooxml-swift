@@ -172,11 +172,15 @@ internal enum OMathNamespace {
         let afterLT = xml.index(after: lessThan)
         guard let colonIdx = xml[afterLT...].firstIndex(of: ":") else {
             // Could be default-namespace OMath (no prefix). Scan for any `xmlns="..."`.
-            return extractURIByPattern(xml: xml, pattern: #"\bxmlns\s*=\s*"([^"]+)""#)
+            return extractURIByPattern(
+                xml: xml,
+                pattern: #"\bxmlns\s*=\s*(?:"([^"]+)"|'([^']+)')"#
+            )
         }
         let prefix = String(xml[afterLT..<colonIdx])
-        // Look for `xmlns:<prefix>="<URI>"`.
-        let pattern = #"\bxmlns:"# + NSRegularExpression.escapedPattern(for: prefix) + #"\s*=\s*"([^"]+)""#
+        // XML permits either quote style around attribute values.
+        let pattern = #"\bxmlns:"# + NSRegularExpression.escapedPattern(for: prefix)
+            + #"\s*=\s*(?:"([^"]+)"|'([^']+)')"#
         return extractURIByPattern(xml: xml, pattern: pattern)
     }
 
@@ -202,7 +206,13 @@ internal enum OMathNamespace {
         let ns = xml as NSString
         guard let match = regex.firstMatch(in: xml, range: NSRange(location: 0, length: ns.length)),
               match.numberOfRanges > 1 else { return nil }
-        return ns.substring(with: match.range(at: 1))
+        for captureIndex in 1..<match.numberOfRanges {
+            let range = match.range(at: captureIndex)
+            if range.location != NSNotFound {
+                return ns.substring(with: range)
+            }
+        }
+        return nil
     }
 }
 

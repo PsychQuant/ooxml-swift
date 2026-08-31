@@ -78,5 +78,6 @@
 - [x] 10.5 Confirm flattened text / anchor lookup compatibility by retaining the established in-memory carrier
 - [x] 10.6 Stack on verified #115 tri-state RunProperties and cover explicit-off `.omathOnly` through first reload plus dirty resave
 - [x] 10.7 Reject explicitly non-OMML namespaces in the root classifier and preserve generic rawXML exact replacement semantics
-- [x] 10.8 Run `OMathSpliceTests`: 19 tests, 0 failures
-- [ ] 10.9 Run the complete package regression suite and repeat IDD multi-agent verification on the final commit
+- [x] 10.8 Accept both XML-legal quote styles in namespace URI extraction and cover vendor plus standard single-quoted declarations
+- [x] 10.9 Run `OMathSpliceTests`: 20 tests, 0 failures
+- [ ] 10.10 Run the complete package regression suite and repeat IDD multi-agent verification on the final commit

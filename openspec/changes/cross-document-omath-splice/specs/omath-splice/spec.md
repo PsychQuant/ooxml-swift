@@ -106,6 +106,7 @@ The system SHALL provide `OMathSpliceRpRMode` with three modes controlling how t
 - **WHEN** the Run is serialized directly or through `Paragraph.toXML()`
 - **THEN** the raw XML SHALL retain the generic exact-replacement behavior
 - **AND** the serializer SHALL NOT add a `<w:r>` carrier or copied rPr
+- **AND** classification SHALL behave identically for single-quoted and double-quoted namespace declarations
 
 #### Scenario: Spliced inline OMath can be used as another splice source
 
