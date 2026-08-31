@@ -95,7 +95,8 @@ extension WordDocument {
     /// For each OMath in source order, this method:
     /// 1. Derives the trailing ~10-character prose prefix and its source occurrence instance
     /// 2. Routes to `.atStart` for a matched leading OMath or `.afterText(prefix, instance:)`
-    /// 3. Preflights each shared-anchor group and throws `.contextAnchorNotFound` on failure
+    /// 3. Globally preflights every XML fragment before anchor derivation/mutation
+    /// 4. Preflights each shared-anchor group and throws `.contextAnchorNotFound` on failure
     ///
     /// Partial-success semantics: earlier source anchor groups remain after a later group fails;
     /// a failing shared-anchor group does not partially mutate the target.
@@ -109,6 +110,24 @@ extension WordDocument {
         let extracted = OMathExtractor.extract(from: sourceParagraph)
         guard !extracted.isEmpty else {
             return 0  // No OMath to splice — graceful no-op for batch driver loops
+        }
+
+        let targetParagraphIndices = Self.bodyParagraphIndices(in: body)
+        guard toBodyParagraphIndex >= 0 && toBodyParagraphIndex < targetParagraphIndices.count,
+              case .paragraph(let initialTarget) = body.children[targetParagraphIndices[toBodyParagraphIndex]] else {
+            throw OMathSpliceError.targetParagraphOutOfRange(toBodyParagraphIndex)
+        }
+
+        // Malformed XML is a global admission failure, not an anchor-group
+        // failure. Validate every extracted source fragment (and the initial
+        // target OMath, when present) before deriving contexts or mutating any
+        // earlier group. This preserves error precedence and target atomicity.
+        for omath in extracted {
+            try Self.checkNamespacePolicy(
+                source: omath.xml,
+                targetParagraph: initialTarget,
+                policy: namespacePolicy
+            )
         }
 
         // Build a flattened text view of source paragraph WITH OMath visibleText included.
@@ -144,12 +163,6 @@ extension WordDocument {
             }
         }
 
-        let targetParagraphIndices = Self.bodyParagraphIndices(in: body)
-        guard toBodyParagraphIndex >= 0 && toBodyParagraphIndex < targetParagraphIndices.count,
-              case .paragraph(let initialTarget) = body.children[targetParagraphIndices[toBodyParagraphIndex]] else {
-            throw OMathSpliceError.targetParagraphOutOfRange(toBodyParagraphIndex)
-        }
-
         var spliced = 0
         // Process anchor groups in source order so a later failure preserves
         // only earlier source groups. Within one shared boundary, apply from
@@ -166,16 +179,6 @@ extension WordDocument {
                 throw OMathSpliceError.contextAnchorNotFound(
                     omathIndex: group.indices[0],
                     snippet: group.anchor.snippet
-                )
-            }
-
-            // Preflight the whole shared-anchor group so it cannot partially
-            // mutate and then fail on namespace policy halfway through.
-            for i in group.indices {
-                try Self.checkNamespacePolicy(
-                    source: extracted[i].xml,
-                    targetParagraph: initialTarget,
-                    policy: namespacePolicy
                 )
             }
 

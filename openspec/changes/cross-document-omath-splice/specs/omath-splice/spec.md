@@ -237,6 +237,8 @@ The OMath XML written into the target paragraph by `spliceOMath` or `spliceParag
 - **THEN** splice SHALL throw `OMathSpliceMalformedXMLError` before target mutation
 - **AND** only XML 1.0 `S` characters (space, tab, carriage return, line feed) MAY surround the root; U+FEFF, non-XML whitespace, or document-level CDATA SHALL be rejected
 - **AND** a valid OMath whose internal comment or CDATA contains the ordinary text `<!DOCTYPE` SHALL remain admissible
+- **AND** paragraph-level batch splice SHALL validate every extracted source fragment and the initial target before anchor derivation or any group mutation
+- **AND** malformed XML in any batch item SHALL leave the entire target unchanged, independent of source group order or anchor availability
 
 ### Requirement: No regression on existing OMath round-trip behavior
 

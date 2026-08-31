@@ -935,6 +935,54 @@ final class OMathSpliceTests: XCTestCase {
         XCTAssertFalse(xml.contains("<m:t>β</m:t>"), "Later failing group must not mutate target: \(xml)")
     }
 
+    func testBatchMalformedUnmatchedSourceFailsBeforeAnchorErrorAndMutation() throws {
+        let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        var source = Paragraph()
+        source.unrecognizedChildren = [
+            UnrecognizedChild(
+                name: "oMath",
+                rawXML: "<m:oMath xmlns:m='\(uri)' xmlns:m='\(uri)'/>",
+                position: nil
+            )
+        ]
+        let originalTarget = Paragraph(runs: [Run(text: "UNCHANGED")])
+        var target = makeDocument(with: originalTarget)
+
+        XCTAssertThrowsError(
+            try target.spliceParagraphOMath(from: source, toBodyParagraphIndex: 0)
+        ) { error in
+            guard error is OMathSpliceMalformedXMLError else {
+                return XCTFail("Expected malformed fragment error before anchor derivation, got \(error)")
+            }
+        }
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        XCTAssertEqual(result, originalTarget)
+    }
+
+    func testBatchMalformedLaterGroupLeavesEntireTargetUnchanged() throws {
+        let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        var valid = Run(text: "")
+        valid.rawXML = "<m:oMath xmlns:m='\(uri)'><m:r><m:t>α</m:t></m:r></m:oMath>"
+        var malformed = Run(text: "")
+        malformed.rawXML = "<m:oMath xmlns:m='\(uri)' xmlns:m='\(uri)'/>"
+        let source = Paragraph(runs: [
+            Run(text: "first "), valid,
+            Run(text: " later "), malformed,
+        ])
+        let originalTarget = Paragraph(runs: [Run(text: "first  later ")])
+        var target = makeDocument(with: originalTarget)
+
+        XCTAssertThrowsError(
+            try target.spliceParagraphOMath(from: source, toBodyParagraphIndex: 0)
+        ) { error in
+            guard error is OMathSpliceMalformedXMLError else {
+                return XCTFail("Expected malformed later-group error, got \(error)")
+            }
+        }
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        XCTAssertEqual(result, originalTarget, "Global malformed preflight must precede every group mutation")
+    }
+
     func testMathScriptInsensitiveAnchorOptionIsApplied() throws {
         let source = try parseParagraph(xml: Self.sourceInlineRunOMath)
         var target = makeDocument(with: Paragraph(runs: [Run(text: "H₀ result")]))
