@@ -229,7 +229,15 @@ internal enum OMathNamespace {
     /// leading/trailing comments, processing instructions, non-whitespace text,
     /// and multiple roots.
     internal static func validatedFragmentRoot(in xml: String) -> XMLElement? {
-        let wrapped = "<iddOMathFragment>\(xml)</iddOMathFragment>"
+        let fragment = trimmingXMLS(in: xml)
+        guard fragment.first == "<",
+              fragment.last == ">",
+              parseRootTag(in: String(fragment)) != nil,
+              (try? XmlTreeReader.parse(Data(fragment.utf8))) != nil else {
+            return nil
+        }
+
+        let wrapped = "<iddOMathFragment>\(fragment)</iddOMathFragment>"
         guard let document = try? XMLDocument(data: Data(wrapped.utf8)),
               let wrapper = document.rootElement(),
               wrapper.localName == "iddOMathFragment" else {
@@ -259,6 +267,29 @@ internal enum OMathNamespace {
             return nil
         }
         return roots[0]
+    }
+
+    /// XML 1.0 `S` is exactly space, tab, carriage return, and line feed.
+    /// Foundation treats a leading U+FEFF as an ignorable BOM even when it is
+    /// interpolated inside the synthetic wrapper; trimming only XML `S` and
+    /// requiring the first remaining character to be `<` keeps admission,
+    /// retained rawXML, and serialization consistent.
+    private static func trimmingXMLS(in xml: String) -> Substring {
+        var lower = xml.startIndex
+        var upper = xml.endIndex
+        while lower < upper, isXMLS(xml[lower]) {
+            lower = xml.index(after: lower)
+        }
+        while upper > lower {
+            let previous = xml.index(before: upper)
+            guard isXMLS(xml[previous]) else { break }
+            upper = previous
+        }
+        return xml[lower..<upper]
+    }
+
+    private static func isXMLS(_ character: Character) -> Bool {
+        character == " " || character == "\t" || character == "\r" || character == "\n"
     }
 
     private static func prefix(fromQualifiedName qualifiedName: String) -> String? {

@@ -235,6 +235,7 @@ The OMath XML written into the target paragraph by `spliceOMath` or `spliceParag
 
 - **WHEN** extracted raw XML contains an XML declaration, an actual DTD, document-level comment/PI, non-whitespace framing text, multiple roots, or a non-OMath root
 - **THEN** splice SHALL throw `OMathSpliceError.malformedOMathXML` before target mutation
+- **AND** only XML 1.0 `S` characters (space, tab, carriage return, line feed) MAY surround the root; U+FEFF, non-XML whitespace, or document-level CDATA SHALL be rejected
 - **AND** a valid OMath whose internal comment or CDATA contains the ordinary text `<!DOCTYPE` SHALL remain admissible
 
 ### Requirement: No regression on existing OMath round-trip behavior

@@ -1404,6 +1404,11 @@ final class OMathSpliceTests: XCTestCase {
             "<!DOCTYPE m:oMath><m:oMath xmlns:m='\(uri)'/>",
             "<!--document framing--><m:oMath xmlns:m='\(uri)'/>",
             "framing text<m:oMath xmlns:m='\(uri)'/>",
+            "\u{FEFF}<m:oMath xmlns:m='\(uri)'/>",
+            "<m:oMath xmlns:m='\(uri)'/>\u{FEFF}",
+            "\u{00A0}<m:oMath xmlns:m='\(uri)'/>",
+            "<![CDATA[]]><m:oMath xmlns:m='\(uri)'/>",
+            "<m:oMath xmlns:m='\(uri)'/><![CDATA[]]>",
             "<m:oMath xmlns:m='\(uri)'/><m:oMath xmlns:m='\(uri)'/>",
             "<wrapper><m:oMath xmlns:m='\(uri)'/></wrapper>",
         ]
@@ -1443,6 +1448,21 @@ final class OMathSpliceTests: XCTestCase {
         ))
         guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
         XCTAssertTrue(result.toXML().contains("<!DOCTYPE text"))
+    }
+
+    func testNamespaceValidityGateAllowsOnlyXMLSOutsidePayloadRoot() throws {
+        let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        var run = Run(text: "")
+        run.rawXML = " \t\n<m:oMath xmlns:m='\(uri)'/>\r "
+        var target = makeDocument(with: Paragraph(runs: [Run(text: "UNCHANGED")]))
+
+        XCTAssertNoThrow(try target.spliceOMath(
+            from: Paragraph(runs: [run]),
+            toBodyParagraphIndex: 0,
+            position: .atEnd
+        ))
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        XCTAssertTrue(result.toXML().contains("<m:oMath"))
     }
 
     // MARK: - No regression (6.14)
