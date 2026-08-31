@@ -30,6 +30,7 @@
 - [x] 4.6 Exclude serializer-hidden typed text from Runs overridden by `rawXML`, `RunProperties.rawXML`, or `drawing`
 - [x] 4.7 Preserve post-text `rawElements` exactly once on the split suffix, including an empty-text suffix
 - [x] 4.8 Count target anchor occurrences in Paragraph serializer order while retaining original Run indices for mutation
+- [x] 4.9 Preserve exact context whitespace and legacy Run-before-ContentControl order during direct anchor canonicalization
 
 ## 5. Paragraph-level batch splice (high-level API)
 
@@ -37,6 +38,7 @@
 - [x] 5.2 Derive up to 10 trailing serializer-visible prose characters plus source occurrence from a four-region Run/direct-OMath event stream
 - [x] 5.3 Derive `(prefix, occurrence instance, absolute boundary placement)`, group shared boundaries, and call `spliceOMath` right-to-left for start/text groups or left-to-right for end groups
 - [x] 5.4 Run a complete global XML-validity phase before namespace policy and anchor derivation/mutation; then preflight each anchor group and preserve only earlier source groups on later context failure
+- [x] 5.5 Defer nil-anchor failure to the source-ordered group loop and detach opt-in tree-backed Paragraph copies before mutation
 
 ## 6. Tests
 
@@ -83,8 +85,8 @@
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
 - [x] 10.7 Derive anchor occurrence instances in Paragraph serializer order; preserve explicit start/end lane metadata; apply source-ordered start/text groups right-to-left and end groups left-to-right
 - [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, quote-complete namespace checks, and structural single-fragment admission limited to XML 1.0 `S` framing
-- [x] 10.9 Run `OMathSpliceTests`: 66 tests, 0 failures
-- [x] 10.10 Re-run full package regression: 1,494 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-16 remediation commit
+- [x] 10.9 Run `OMathSpliceTests`: 70 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,498 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-17 remediation commit
 
 ## 11. Reload fidelity contract remediation (#123)
 

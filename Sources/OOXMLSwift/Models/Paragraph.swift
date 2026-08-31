@@ -882,9 +882,6 @@ extension Paragraph {
         // (API-built). Position>0 controls were already emitted in the sorted
         // list above at their source position; emitting them again would
         // duplicate the SDT in the output.
-        for control in contentControls where (control.position ?? 0) <= 0 {
-            xml += control.toXML()
-        }
         // v0.19.5+ (#56 R5-CONT P0 #6): symmetric post-content emit for
         // API-built/legacy (position <= 0) runs / hyperlinks / fieldSimples /
         // alternateContents. Pre-fix these defaulted to position 0 in
@@ -895,6 +892,9 @@ extension Paragraph {
         // that contentControls (R5 P0 #2) and the legacy emit path use.
         for run in runs where run.paragraphBoundaryPlacement == nil && (run.position ?? 0) <= 0 {
             xml += Self.emitRun(run, asDelText: false, paragraphRevisions: revisions)
+        }
+        for control in contentControls where (control.position ?? 0) <= 0 {
+            xml += control.toXML()
         }
         for hyperlink in hyperlinks where (hyperlink.position ?? 0) <= 0 {
             xml += hyperlink.toXML()

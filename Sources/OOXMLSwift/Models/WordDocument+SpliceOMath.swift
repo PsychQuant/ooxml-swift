@@ -53,7 +53,8 @@ extension WordDocument {
         let bodyChildIdx = targetParagraphIndices[toBodyParagraphIndex]
 
         // === Extract OMath from source ===
-        let extracted = OMathExtractor.extract(from: sourceParagraph)
+        let detachedSource = Self.detachedParagraph(sourceParagraph)
+        let extracted = OMathExtractor.extract(from: detachedSource)
         guard !extracted.isEmpty else {
             throw OMathSpliceError.sourceHasNoOMath
         }
@@ -63,19 +64,16 @@ extension WordDocument {
         let omath = extracted[omathIndex]
         try Self.validateExtractedOMath(omath)
 
-        // === Namespace policy check (Q6) ===
-        if case .paragraph(let targetPara) = body.children[bodyChildIdx] {
-            try Self.checkNamespacePolicy(
-                source: omath.xml,
-                targetParagraph: targetPara,
-                policy: namespacePolicy
-            )
-        }
-
-        // === Splice into target ===
-        guard case .paragraph(var targetPara) = body.children[bodyChildIdx] else {
+        // === Namespace policy check (Q6) + detached mutation target ===
+        guard case .paragraph(let storedTarget) = body.children[bodyChildIdx] else {
             throw OMathSpliceError.targetParagraphOutOfRange(toBodyParagraphIndex)
         }
+        var targetPara = Self.detachedParagraph(storedTarget)
+        try Self.checkNamespacePolicy(
+            source: omath.xml,
+            targetParagraph: targetPara,
+            policy: namespacePolicy
+        )
 
         try Self.performSplice(
             into: &targetPara,
@@ -108,16 +106,18 @@ extension WordDocument {
         rPrMode: OMathSpliceRpRMode = .full,
         namespacePolicy: OMathSpliceNamespacePolicy = .lenient
     ) throws -> Int {
-        let extracted = OMathExtractor.extract(from: sourceParagraph)
+        let detachedSource = Self.detachedParagraph(sourceParagraph)
+        let extracted = OMathExtractor.extract(from: detachedSource)
         guard !extracted.isEmpty else {
             return 0  // No OMath to splice — graceful no-op for batch driver loops
         }
 
         let targetParagraphIndices = Self.bodyParagraphIndices(in: body)
         guard toBodyParagraphIndex >= 0 && toBodyParagraphIndex < targetParagraphIndices.count,
-              case .paragraph(let initialTarget) = body.children[targetParagraphIndices[toBodyParagraphIndex]] else {
+              case .paragraph(let storedInitialTarget) = body.children[targetParagraphIndices[toBodyParagraphIndex]] else {
             throw OMathSpliceError.targetParagraphOutOfRange(toBodyParagraphIndex)
         }
+        let initialTarget = Self.detachedParagraph(storedInitialTarget)
 
         // Phase 1 — XML validity only. Malformed XML has precedence over
         // namespace policy regardless of source order, so scan every source
@@ -146,27 +146,22 @@ extension WordDocument {
         // Approach: walk the source paragraph collecting per-run text, finding each OMath's
         // anchor as the ~10 chars of plain prose immediately preceding it.
         let prefixContexts = Self.deriveContextAnchors(
-            from: sourceParagraph,
+            from: detachedSource,
             forExtracted: extracted,
             charsBefore: 10
         )
 
         struct AnchorGroup {
-            let anchor: DerivedContextAnchor
+            let anchor: DerivedContextAnchor?
             var indices: [Int]
         }
 
         var groups: [AnchorGroup] = []
         for i in extracted.indices {
-            guard let anchor = prefixContexts[i] else {
-                throw OMathSpliceError.contextAnchorNotFound(
-                    omathIndex: i,
-                    snippet: ""
-                )
-            }
-
-            if let groupIndex = groups.firstIndex(where: { $0.anchor == anchor }) {
-                groups[groupIndex].indices.append(i)
+            let anchor = prefixContexts[i]
+            if let lastIndex = groups.indices.last,
+               groups[lastIndex].anchor == anchor {
+                groups[lastIndex].indices.append(i)
             } else {
                 groups.append(AnchorGroup(anchor: anchor, indices: [i]))
             }
@@ -177,32 +172,38 @@ extension WordDocument {
         // only earlier source groups. Within one shared boundary, apply from
         // right to left so the final OMath order remains source order.
         for group in groups {
-            if group.anchor.boundaryPlacement == nil,
-               !group.anchor.snippet.isEmpty,
+            guard let anchor = group.anchor else {
+                throw OMathSpliceError.contextAnchorNotFound(
+                    omathIndex: group.indices[0],
+                    snippet: ""
+                )
+            }
+            if anchor.boundaryPlacement == nil,
+               !anchor.snippet.isEmpty,
                Self.resolveRunAnchor(
-                   anchor: group.anchor.snippet,
-                   instance: group.anchor.instance,
+                   anchor: anchor.snippet,
+                   instance: anchor.instance,
                    options: AnchorLookupOptions(),
                    in: initialTarget
                ) == nil {
                 throw OMathSpliceError.contextAnchorNotFound(
                     omathIndex: group.indices[0],
-                    snippet: group.anchor.snippet
+                    snippet: anchor.snippet
                 )
             }
 
             let position: OMathSplicePosition
-            switch group.anchor.boundaryPlacement {
+            switch anchor.boundaryPlacement {
             case .start?:
                 position = .atStart
             case .end?:
                 position = .atEnd
             case nil:
-                position = group.anchor.snippet.isEmpty
+                position = anchor.snippet.isEmpty
                     ? .atStart
                     : .afterText(
-                        group.anchor.snippet,
-                        instance: group.anchor.instance,
+                        anchor.snippet,
+                        instance: anchor.instance,
                         options: AnchorLookupOptions()
                     )
             }
@@ -210,13 +211,13 @@ extension WordDocument {
             // Start/text insertion prepends at a shared boundary and therefore
             // applies right-to-left. End-lane insertion appends, so it must apply
             // left-to-right to retain source order.
-            let applicationIndices = group.anchor.boundaryPlacement == .end
+            let applicationIndices = anchor.boundaryPlacement == .end
                 ? group.indices
                 : Array(group.indices.reversed())
             for i in applicationIndices {
                 do {
                     try self.spliceOMath(
-                        from: sourceParagraph,
+                        from: detachedSource,
                         toBodyParagraphIndex: toBodyParagraphIndex,
                         position: position,
                         omathIndex: i,
@@ -227,7 +228,7 @@ extension WordDocument {
                 } catch OMathSpliceError.anchorNotFound(_, _) {
                     throw OMathSpliceError.contextAnchorNotFound(
                         omathIndex: i,
-                        snippet: group.anchor.snippet
+                        snippet: anchor.snippet
                     )
                 }
             }
@@ -245,6 +246,17 @@ extension WordDocument {
             if case .paragraph = child { out.append(i) }
         }
         return out
+    }
+
+    /// Tree-backed Paragraph accessors are projection stubs whose Run setter
+    /// writes a ghost buffer. Reader wiring retains the complete detached typed
+    /// model, so splice operates on a value copy with `xmlNode` cleared and
+    /// writes that detached result back to the document.
+    internal static func detachedParagraph(_ paragraph: Paragraph) -> Paragraph {
+        guard paragraph.xmlNode != nil else { return paragraph }
+        var detached = paragraph
+        detached.xmlNode = nil
+        return detached
     }
 
     /// Validates source XML's namespace against target paragraph's first OMath occurrence
@@ -863,8 +875,8 @@ extension WordDocument {
         // Nil/zero/negative entries follow Paragraph's legacy post-content
         // bucket order. Negative positions are normalized instead of silently
         // disappearing from both serializer predicates.
-        collect(para.contentControls.indices.map(ParagraphCarrierReference.contentControl), postContentOrder: true)
         collect(para.runs.indices.map(ParagraphCarrierReference.run), postContentOrder: true)
+        collect(para.contentControls.indices.map(ParagraphCarrierReference.contentControl), postContentOrder: true)
         collect(para.hyperlinks.indices.map(ParagraphCarrierReference.hyperlink), postContentOrder: true)
         collect(para.fieldSimples.indices.map(ParagraphCarrierReference.fieldSimple), postContentOrder: true)
         collect(para.alternateContents.indices.map(ParagraphCarrierReference.alternateContent), postContentOrder: true)
@@ -1061,7 +1073,7 @@ extension WordDocument {
         }
 
         for (arrayIndex, child) in sourceParagraph.unrecognizedChildren.enumerated()
-            where child.name == "oMath" || child.name == "oMathPara" {
+            where OMathExtractor.isDirectOMathCandidate(child) {
             let key = contextSerializerKey(
                 boundaryPlacement: child.paragraphBoundaryPlacement,
                 boundaryOrder: child.paragraphBoundaryOrder,
@@ -1100,7 +1112,6 @@ extension WordDocument {
                     continue
                 }
                 let trailing = String(proseAccumulator.suffix(charsBefore))
-                    .trimmingCharacters(in: .whitespaces)
                 anchors[i] = DerivedContextAnchor(
                     snippet: trailing,
                     instance: trailing.isEmpty

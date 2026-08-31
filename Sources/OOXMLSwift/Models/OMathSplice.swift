@@ -128,7 +128,7 @@ internal enum OMathExtractor {
         }
 
         // Carrier 2: Paragraph.unrecognizedChildren (direct-child OMath)
-        for child in paragraph.unrecognizedChildren where child.name == "oMath" || child.name == "oMathPara" {
+        for child in paragraph.unrecognizedChildren where isDirectOMathCandidate(child) {
             collected.append(ExtractedOMath(
                 xml: ensureXmlnsDeclared(in: child.rawXML),
                 kind: .directChild,
@@ -151,6 +151,15 @@ internal enum OMathExtractor {
             if left.order != right.order { return left.order < right.order }
             return lhs.sourceSequence < rhs.sourceSequence
         }
+    }
+
+    /// Eligibility is deliberately the union of typed metadata and raw-root
+    /// classification. Any disagreement enters validation and fails loudly
+    /// instead of being filtered out as "no OMath".
+    static func isDirectOMathCandidate(_ child: UnrecognizedChild) -> Bool {
+        child.name == "oMath"
+            || child.name == "oMathPara"
+            || OMathNamespace.hasOMathRoot(in: child.rawXML)
     }
 
     private static func serializerSortKey(_ omath: ExtractedOMath) -> (bucket: Int, order: Int) {

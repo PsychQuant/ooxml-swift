@@ -83,6 +83,8 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 Context derivation consumes a Run/direct-OMath event stream sorted by the same four regions as `Paragraph.toXML()`: absolute start, positive positions, non-positive post-content, and absolute end. Runs precede direct unrecognized children at equal positive/non-positive positions, matching collection emission order. Array order alone is never used as document order.
 
+The trailing snippet preserves exact whitespace; it is never trimmed. A space-only snippet is a real text anchor, distinct from an empty leading-boundary anchor.
+
 Target anchor resolution sorts serializer-visible Run spans by the same region/order key before assigning global occurrence offsets, while retaining original Run array indices for mutation. Repeated `instance` values therefore refer to visible XML order even when Run storage order differs from `position` order.
 
 ### Direct-child text anchors
@@ -95,6 +97,8 @@ Anchor resolution uses the same serializer-visible typed-text rule as batch deri
 
 When a visible-text Run also carries post-text `rawElements`, splitting clears them from the prefix and keeps them on the suffix only. An empty-text suffix is retained for this purpose, preserving the opaque child exactly once and after the original text/insertion boundary.
 
+Canonicalization preserves legacy post-content order: Run, then ContentControl, then Hyperlink and the remaining fixed buckets. Routing an API-built paragraph into the position serializer therefore does not move an existing SDT before its Runs.
+
 ### Direct-child local-name preservation
 
 **Decision**: Carry the source direct-child local name through extraction and use it when creating the target `UnrecognizedChild`.
@@ -102,6 +106,8 @@ When a visible-text Run also carries post-text `rawElements`, splitting clears t
 **Rationale**: Hardcoding `oMath` made typed metadata disagree with an `oMathPara` raw root and broke subsequent carrier-sensitive operations (#124).
 
 Validation also rejects a source or relevant target direct-child carrier when its stored `name` disagrees with the validated raw root local name. Both values must describe the same carrier before mutation.
+
+Direct-child eligibility is the union of metadata and raw-root classification. A custom stored name with an OMath raw root is collected specifically so validation can reject the disagreement instead of returning "no OMath".
 
 ### Default `OMathSpliceRpRMode = .full`
 
@@ -124,6 +130,8 @@ Validation also rejects a source or relevant target direct-child carrier when it
 - *Document-level batch (`spliceAllOMath`)*: single call for whole document. **Rejected** — paragraph-matching algorithm is caller-specific (thesis uses 30-char prefix anchor; other use cases want paragraph IDs or content-hash). Putting matcher policy in API leads to scope creep
 
 **Rationale**: Two-tier mirrors common library design (high-level convenience + low-level escape hatch). Paragraph matching stays in caller — `ooxml-swift` doesn't know about thesis vs Pandoc vs other matching strategies.
+
+When a source or target Paragraph is an opt-in tree-backed view, splice clears `xmlNode` on a value copy and operates on the complete retained detached typed model before writing the detached result back. This avoids the tree projection's documented ghost Run setter while preserving actual write/reload behavior.
 
 ### Lenient namespace policy by default
 
