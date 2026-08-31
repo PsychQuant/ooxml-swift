@@ -115,6 +115,9 @@ final class RunPropertyOnOffTests: XCTestCase {
         previous.strikethrough = false
         previous.noProof = false
         previous.underline = nil
+        previous.rFonts = RFontsProperties(ascii: "Calibri")
+        previous.color = "112233"
+        previous.fontSize = 24
 
         let xml = previous.toChangeXML()
 
@@ -123,6 +126,17 @@ final class RunPropertyOnOffTests: XCTestCase {
         XCTAssertTrue(xml.contains(#"<w:strike w:val="0"/>"#), "Got: \(xml)")
         XCTAssertTrue(xml.contains(#"<w:noProof w:val="0"/>"#), "Got: \(xml)")
         XCTAssertTrue(xml.contains(#"<w:u w:val="none"/>"#), "Got: \(xml)")
+        let ordered = [
+            "<w:rFonts", "<w:b ", "<w:i ", "<w:strike ",
+            "<w:noProof ", "<w:color ", "<w:sz ", "<w:u ",
+        ]
+        var cursor = xml.startIndex
+        for needle in ordered {
+            let range = try? XCTUnwrap(xml.range(of: needle, range: cursor..<xml.endIndex))
+            XCTAssertNotNil(range, "Expected \(needle) after prior child. Got: \(xml)")
+            if let range { cursor = range.upperBound }
+        }
+        XCTAssertTrue(xml.contains(#"<w:sz w:val="24"/>"#), "Got: \(xml)")
     }
 
     func testTreeBackedAppendPreservesExplicitOffRunProperties() throws {
