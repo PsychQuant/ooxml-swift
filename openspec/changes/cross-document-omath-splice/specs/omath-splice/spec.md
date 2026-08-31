@@ -91,6 +91,7 @@ The system SHALL provide `OMathSpliceRpRMode` with three modes controlling how t
 - **THEN** the new OMath Run's `properties` SHALL contain ONLY `rFonts`, `sz`, `szCs`, `lang`, `bold`, `italic` from the source
 - **AND** all other fields (`rStyle`, `color`, `highlight`, `verticalAlign`, etc.) SHALL be `nil` / default
 - **AND** `Paragraph.toXML()` SHALL emit the whitelisted fields inside `<w:rPr>` before the OMath child
+- **AND** an explicitly disabled `bold` or `italic` source value SHALL remain explicitly disabled, distinct from an absent property, through save/reload and a later dirty save
 
 #### Scenario: Source-loaded inline OMath survives a later dirty save
 

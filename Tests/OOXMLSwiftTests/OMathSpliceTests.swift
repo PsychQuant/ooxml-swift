@@ -575,6 +575,62 @@ final class OMathSpliceTests: XCTestCase {
         }
     }
 
+    func testOMathOnlyExplicitOffSurvivesCarrierAndDirtyResave() throws {
+        let sourceXML = """
+        <w:p \(Self.mNS)>
+          <w:r>
+            <w:rPr><w:rFonts w:ascii="Cambria Math"/><w:b w:val="0"/><w:i w:val="off"/><w:lang w:val="en-US"/></w:rPr>
+            <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>
+          </w:r>
+        </w:p>
+        """
+        let sourcePara = try parseParagraph(xml: sourceXML)
+        let expectedOMath = try XCTUnwrap(OMathExtractor.extract(from: sourcePara).first?.xml)
+        let firstURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OMathSpliceTests-explicit-off-first-\(UUID().uuidString).docx")
+        let secondURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OMathSpliceTests-explicit-off-second-\(UUID().uuidString).docx")
+        defer {
+            try? FileManager.default.removeItem(at: firstURL)
+            try? FileManager.default.removeItem(at: secondURL)
+        }
+
+        func assertExplicitOff(_ document: WordDocument, stage: String) throws {
+            guard case .paragraph(let paragraph) = document.body.children[0] else {
+                XCTFail("\(stage): expected paragraph")
+                return
+            }
+            let run = try XCTUnwrap(
+                paragraph.runs.first(where: { omathXML(in: $0) != nil }),
+                "\(stage): expected inline OMath Run"
+            )
+            XCTAssertEqual(run.properties.specifiedBold, false, "\(stage): explicit bold off")
+            XCTAssertEqual(run.properties.specifiedItalic, false, "\(stage): explicit italic off")
+            XCTAssertEqual(run.properties.lang?.val, "en-US", "\(stage): lang")
+            XCTAssertEqual(omathXML(in: run), expectedOMath, "\(stage): OMath bytes")
+            let xml = paragraph.toXML()
+            XCTAssertTrue(xml.contains(#"<w:b w:val="0"/>"#), "\(stage): \(xml)")
+            XCTAssertTrue(xml.contains(#"<w:i w:val="0"/>"#), "\(stage): \(xml)")
+            XCTAssertTrue(xml.contains("</w:rPr><m:oMath"), "\(stage): \(xml)")
+        }
+
+        var target = makeDocument(with: try parseParagraph(xml: Self.targetEmpty))
+        try target.spliceOMath(
+            from: sourcePara,
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            rPrMode: .omathOnly
+        )
+        try DocxWriter.write(target, to: firstURL)
+        var firstReload = try DocxReader.read(from: firstURL)
+        try assertExplicitOff(firstReload, stage: "first reload")
+
+        firstReload.markPartDirty("word/document.xml")
+        try DocxWriter.write(firstReload, to: secondURL)
+        let secondReload = try DocxReader.read(from: secondURL)
+        try assertExplicitOff(secondReload, stage: "dirty resave")
+    }
+
     func testSplicedInlineOMathCanBeUsedAsAnotherSpliceSource() throws {
         let sourcePara = try parseParagraph(xml: Self.sourceInlineRunOMath)
         var firstTarget = makeDocument(with: try parseParagraph(xml: Self.targetEmpty))

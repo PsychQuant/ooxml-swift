@@ -28,6 +28,7 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 ### Correctness remediation
 
 - PsychQuant/ooxml-swift#117 keeps the established inline raw-XML representation for compatibility with flattened text, anchor lookup, and existing callers, but changes serialization semantics when the raw fragment's root is an OMath element. Such a fragment is emitted as a child of the typed Run, making all three rPr propagation modes observable and preserving the inline carrier across later dirty saves.
+- The explicit-off portion of the OMath-only mode depends on the verified tri-state RunProperties work from #115. PR #121 is stacked on that branch until PR #116 is human-merged and the dependency can be rebased onto main.
 
 Verification also surfaced separate pre-existing concerns tracked independently as #122 (boundary ordering), #123 (byte-equality contract), and #124 (direct-child OMath paragraph metadata).
 
