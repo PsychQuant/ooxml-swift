@@ -167,20 +167,21 @@ internal enum OMathNamespace {
     /// one used in the opening element name (e.g. `<mml:oMath xmlns:mml="...">` → `mml`).
     /// Falls back to scanning for any `xmlns:` declaration if prefix detection fails.
     static func extractURI(from xml: String) -> String? {
+        guard let rootStartTag = rootElementStartTag(in: xml) else { return nil }
         // Restrict prefix detection to the root QName. Searching the whole
         // fragment would mistake the colon in a default URI such as
         // `xmlns="urn:vendor"` for an element prefix.
-        guard let prefix = extractPrefix(from: xml) else {
+        guard let prefix = extractPrefix(from: rootStartTag) else {
             // Could be default-namespace OMath (no prefix). Scan for any `xmlns="..."`.
             return extractURIByPattern(
-                xml: xml,
+                xml: rootStartTag,
                 pattern: #"\bxmlns\s*=\s*(?:"([^"]+)"|'([^']+)')"#
             )
         }
         // XML permits either quote style around attribute values.
         let pattern = #"\bxmlns:"# + NSRegularExpression.escapedPattern(for: prefix)
             + #"\s*=\s*(?:"([^"]+)"|'([^']+)')"#
-        return extractURIByPattern(xml: xml, pattern: pattern)
+        return extractURIByPattern(xml: rootStartTag, pattern: pattern)
     }
 
     /// Extracts the OMath prefix (e.g. "m" or "mml") from the opening element.
