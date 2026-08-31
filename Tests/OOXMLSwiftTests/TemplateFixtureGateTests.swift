@@ -60,6 +60,9 @@ final class TemplateFixtureGateTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["MACDOC_TEMPLATE_DIR"] == nil else {
             throw XCTSkip("MACDOC_TEMPLATE_DIR is set in this environment; skip the unset-path check")
         }
+        let message = TemplateFixtureGate.missingGateMessage(for: "anything.docx")
+        XCTAssertTrue(message.contains("MACDOC_TEMPLATE_DIR"), "Got: \(message)")
+        XCTAssertTrue(message.contains("anything.docx"), "Got: \(message)")
         XCTAssertThrowsError(try TemplateFixtureGate.requireTemplate("anything.docx")) { error in
             XCTAssertTrue(error is XCTSkip, "missing gate must throw XCTSkip, not a hard failure")
         }
