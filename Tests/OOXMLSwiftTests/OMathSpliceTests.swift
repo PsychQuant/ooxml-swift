@@ -7,6 +7,22 @@ import XCTest
 /// Issue: PsychQuant/ooxml-swift#57
 final class OMathSpliceTests: XCTestCase {
 
+    func testReleasedOMathSpliceErrorCasesRemainSourceCompatible() {
+        func releasedCaseOrdinal(_ error: OMathSpliceError) -> Int {
+            switch error {
+            case .sourceHasNoOMath: return 0
+            case .omathIndexOutOfRange: return 1
+            case .targetParagraphOutOfRange: return 2
+            case .anchorNotFound: return 3
+            case .namespaceMismatch: return 4
+            case .contextAnchorNotFound: return 5
+            }
+        }
+
+        XCTAssertEqual(releasedCaseOrdinal(.sourceHasNoOMath), 0)
+        XCTAssertEqual(releasedCaseOrdinal(.contextAnchorNotFound(omathIndex: 0, snippet: "")), 5)
+    }
+
     // MARK: - Fixture builders
 
     /// Parse an inline `<w:p>` XML into a `Paragraph` via `DocxReader.parseParagraph`
@@ -1319,8 +1335,8 @@ final class OMathSpliceTests: XCTestCase {
                 position: .atEnd
             )
         ) { error in
-            guard case .malformedOMathXML = error as? OMathSpliceError else {
-                return XCTFail("Expected malformedOMathXML, got \(error)")
+            guard error is OMathSpliceMalformedXMLError else {
+                return XCTFail("Expected OMathSpliceMalformedXMLError, got \(error)")
             }
         }
         guard case .paragraph(let unchanged) = malformedTarget.body.children[0] else { XCTFail(); return }
@@ -1425,8 +1441,8 @@ final class OMathSpliceTests: XCTestCase {
                 ),
                 "Expected malformed rejection for \(fragment)"
             ) { error in
-                guard case .malformedOMathXML = error as? OMathSpliceError else {
-                    return XCTFail("Expected malformedOMathXML, got \(error) for \(fragment)")
+                guard error is OMathSpliceMalformedXMLError else {
+                    return XCTFail("Expected OMathSpliceMalformedXMLError, got \(error) for \(fragment)")
                 }
             }
             guard case .paragraph(let unchanged) = target.body.children[0] else { XCTFail(); return }

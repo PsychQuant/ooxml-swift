@@ -11,7 +11,7 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 - Add `OMathSplicePosition` enum: `.atStart` / `.atEnd` / `.afterText(_, instance:, options:)` / `.beforeText(_, instance:, options:)` — mirrors existing `InsertLocation` anchor pattern
 - Add `OMathSpliceRpRMode` enum: `.full` (default) / `.omathOnly` / `.discard` — controls source-Run rPr (font/size/lang) propagation to target
 - Add `OMathSpliceNamespacePolicy` enum: `.lenient` (default) / `.strict` — controls behavior on namespace prefix vs URI mismatch
-- Add `OMathSpliceError` enum: 7 cases covering the failure taxonomy, including malformed source XML
+- Preserve the released six-case `OMathSpliceError` enum and add source-compatible `OMathSpliceMalformedXMLError` for malformed source/target XML fragments
 - Carrier preservation: source's `Run.rawXML` OMath splices into target as `Run.rawXML`; source's direct-child `unrecognizedChildren` OMath splices into target as `unrecognizedChildren` (visual semantics — inline stays inline, display stays display)
 - Inline mid-paragraph splice via shared-position anchor-Run split; direct-child anchors compact the 13 positioned collections to create one unique cross-collection slot
 

@@ -49,7 +49,14 @@ public enum OMathSpliceError: Error, Equatable {
     case anchorNotFound(String, instance: Int)
     case namespaceMismatch(sourceURI: String, targetURI: String)
     case contextAnchorNotFound(omathIndex: Int, snippet: String)
-    case malformedOMathXML
+}
+
+/// A source OMath payload was not one embeddable, namespace-valid XML
+/// fragment. Kept separate from `OMathSpliceError` so adding malformed-input
+/// reporting does not break external exhaustive switches over that released
+/// public enum's original six cases.
+public struct OMathSpliceMalformedXMLError: Error, Equatable {
+    public init() {}
 }
 
 // MARK: - Internal: extracted OMath descriptor
@@ -394,7 +401,7 @@ internal enum OMathNamespace {
 internal enum OMathSemanticXML {
     static func canonicalRepresentation(of xml: String) throws -> String {
         guard let root = OMathNamespace.validatedFragmentRoot(in: xml) else {
-            throw OMathSpliceError.malformedOMathXML
+            throw OMathSpliceMalformedXMLError()
         }
         return canonicalElement(root)
     }

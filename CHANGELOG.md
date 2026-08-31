@@ -8,6 +8,16 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Cross-document OMath splice now preserves absolute paragraph boundaries and
+  direct-child metadata, uses explicit batch-anchor states, and validates one
+  embeddable XML fragment before mutation. Malformed fragments throw the new
+  additive `OMathSpliceMalformedXMLError`; the released six-case
+  `OMathSpliceError` enum remains unchanged so external exhaustive switches
+  continue to compile. Focused coverage: 55 tests; full suite: 1,483 tests with
+  31 conditional skips and no failures.
+
 ## [3.5.0] - 2026-08-27
 
 ### Added

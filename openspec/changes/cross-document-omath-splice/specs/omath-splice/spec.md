@@ -156,7 +156,7 @@ The system SHALL provide `OMathSpliceNamespacePolicy` with `.lenient` (default) 
 #### Scenario: Malformed source OMath fails before mutation
 
 - **WHEN** the source OMath root or namespace attributes are not well-formed XML
-- **THEN** splice SHALL throw `OMathSpliceError.malformedOMathXML`
+- **THEN** splice SHALL throw `OMathSpliceMalformedXMLError`
 - **AND** the target paragraph SHALL remain unchanged
 - **AND** duplicate namespace attributes, unbound prefixes, invalid QNames, forbidden XML 1.0 character references, and DTD-bearing fragments SHALL be rejected
 
@@ -234,7 +234,7 @@ The OMath XML written into the target paragraph by `spliceOMath` or `spliceParag
 #### Scenario: Admission requires one embeddable OMath fragment
 
 - **WHEN** extracted raw XML contains an XML declaration, an actual DTD, document-level comment/PI, non-whitespace framing text, multiple roots, or a non-OMath root
-- **THEN** splice SHALL throw `OMathSpliceError.malformedOMathXML` before target mutation
+- **THEN** splice SHALL throw `OMathSpliceMalformedXMLError` before target mutation
 - **AND** only XML 1.0 `S` characters (space, tab, carriage return, line feed) MAY surround the root; U+FEFF, non-XML whitespace, or document-level CDATA SHALL be rejected
 - **AND** a valid OMath whose internal comment or CDATA contains the ordinary text `<!DOCTYPE` SHALL remain admissible
 
