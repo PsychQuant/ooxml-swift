@@ -682,6 +682,8 @@ final class OMathSpliceTests: XCTestCase {
             #"<oMath xmlns='urn:vendor:not-omml'><data/></oMath>"#,
             #"<oMath note='xmlns="http://schemas.openxmlformats.org/officeDocument/2006/math"' xmlns="urn:vendor:not-omml"><data/></oMath>"#,
             #"<oMath xmlns=""><data/></oMath>"#,
+            #"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/&#X6D;ath"><m:data/></m:oMath>"#,
+            #"<m:oMath xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/&#+109;ath'><m:data/></m:oMath>"#,
         ]
         for vendorXML in vendorFragments {
             var run = Run(text: "")
