@@ -48,7 +48,7 @@ final class RunPropertyOnOffTests: XCTestCase {
     }
 
     func testReaderAcceptsOnSpellingsForTypedBooleans() throws {
-        for value in [nil, "1", "true", "on"] as [String?] {
+        for value in [nil, "1", "true", "on", "no"] as [String?] {
             let attribute = value.map { " w:val=\"\($0)\"" } ?? ""
             let source = try buildFixture(documentXML: documentXML(
                 firstRunProperties: "<w:b\(attribute)/><w:i\(attribute)/><w:strike\(attribute)/><w:noProof\(attribute)/>"
@@ -63,6 +63,21 @@ final class RunPropertyOnOffTests: XCTestCase {
             XCTAssertTrue(properties.noProof, "value=\(String(describing: value))")
             document.close()
         }
+    }
+
+    func testOMathOnlyFilteringPreservesAbsentAndExplicitFalse() {
+        let absent = RunProperties().filteredForOMathSplice(mode: .omathOnly)
+        let absentXML = Run(text: "x", properties: absent).toXML()
+        XCTAssertFalse(absentXML.contains("<w:b"), "Got: \(absentXML)")
+        XCTAssertFalse(absentXML.contains("<w:i"), "Got: \(absentXML)")
+
+        var explicitOff = RunProperties()
+        explicitOff.bold = false
+        explicitOff.italic = false
+        let off = explicitOff.filteredForOMathSplice(mode: .omathOnly)
+        let offXML = Run(text: "x", properties: off).toXML()
+        XCTAssertTrue(offXML.contains(#"<w:b w:val="0"/>"#), "Got: \(offXML)")
+        XCTAssertTrue(offXML.contains(#"<w:i w:val="0"/>"#), "Got: \(offXML)")
     }
 
     func testUnrelatedMutationPreservesExplicitOffRunProperties() throws {

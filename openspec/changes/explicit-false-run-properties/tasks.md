@@ -12,6 +12,7 @@
 
 ## 3. Verification
 
-- [x] 3.1 Run focused Run/reader/writer/on-off suites: 142/142 PASS.
-- [x] 3.2 Run full `swift test`: 1,447 tests, 31 skips, 0 failures; Spectra strict/analyze clean.
+- [x] 3.1 Run focused Run/reader/writer/on-off/OMath suites: 143/143 PASS.
+- [x] 3.2 Run full `swift test`: 1,448 tests, 31 skips, 0 failures; Spectra strict/analyze clean.
 - [ ] 3.3 Verify PsychQuant/che-word-mcp#197 against this commit before release.
+- [x] 3.4 Close verify R1 blockers with RED→GREEN coverage: `.omathOnly` preserves absent vs explicit-off bold/italic; non-standard `no` follows the frozen unknown/default-on rule; authoritative diff hygiene is clean.

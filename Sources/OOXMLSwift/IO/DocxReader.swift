@@ -2718,7 +2718,7 @@ public struct DocxReader {
     private static func parseOnOff(_ element: XMLElement) -> Bool {
         guard let raw = wordAttributeValue(element, localName: "val")?
             .lowercased() else { return true }
-        return !["0", "false", "off", "no"].contains(raw)
+        return !["0", "false", "off"].contains(raw)
     }
 
     private static func parseTable(
