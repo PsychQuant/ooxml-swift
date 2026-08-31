@@ -70,6 +70,24 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 **Rationale**: Run-split isolates blast radius to `runs[]` array; the other 12 carriers are untouched. This is the same anchor-split approach `WordDocument+ReplaceTextWithBoundaryDetection.swift` already implements — proven robust by the existing test suite.
 
+### Boundary insertion across mixed carrier modes
+
+**Decision**: Before `.atStart` or `.atEnd`, materialize nil/zero position-indexed carriers into positive positions following Paragraph's existing post-content emission order. `.atStart` then shifts all positioned carriers forward and inserts at position 1; `.atEnd` appends after the new maximum.
+
+**Rationale**: Paragraph serializes positive-position carriers first and nil/zero carriers afterward in type buckets. Assigning a new positive position without materializing post-content entries places it before API-built content. Materialization preserves the current serialization order while making a true boundary position representable for both inline Run and direct-child OMath (#122).
+
+### Batch anchor state and mutation direction
+
+**Decision**: `deriveContextAnchors` returns optional anchors: nil is unmatched, an empty string is a matched leading OMath, and a non-empty string is a text anchor. Inline XML comparison uses the same self-contained namespace normalization as extraction. Resolved batch insertions are applied from right to left so equations sharing an anchor retain source order.
+
+**Rationale**: The former empty-string sentinel conflated leading and unmatched equations. Forward mutation reverses consecutive insertions at the same boundary. Explicit state plus reverse application makes failure loud and final document order stable (#125).
+
+### Direct-child local-name preservation
+
+**Decision**: Carry the source direct-child local name through extraction and use it when creating the target `UnrecognizedChild`.
+
+**Rationale**: Hardcoding `oMath` made typed metadata disagree with an `oMathPara` raw root and broke subsequent carrier-sensitive operations (#124).
+
 ### Default `OMathSpliceRpRMode = .full`
 
 **Decision**: Default to verbatim `rPr` copy from source Run to the new target OMath Run. Provide `.omathOnly` (whitelist: rFonts/sz/lang only) and `.discard` (empty rPr) as escape hatches.

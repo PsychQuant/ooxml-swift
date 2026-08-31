@@ -24,6 +24,25 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 - **THEN** the system SHALL append an `UnrecognizedChild(name: "oMath", rawXML: <source OMath XML>, position: <appropriate>)` to `target.body.children[targetIdx].unrecognizedChildren`
 - **AND** the spliced OMath SHALL NOT be placed inside a `Run` (carrier shape is preserved)
 
+#### Scenario: Direct-child OMathPara preserves local-name metadata
+
+- **WHEN** the source direct child root is `<m:oMathPara>`
+- **THEN** the target `UnrecognizedChild.name` SHALL be `oMathPara`
+- **AND** save/reload and subsequent extraction SHALL preserve matching metadata and raw root
+
+#### Scenario: At-end follows mixed and API-built carriers
+
+- **GIVEN** a target paragraph containing positive-position carriers and nil/zero-position API-built carriers
+- **WHEN** caller splices inline or direct-child OMath at `.atEnd`
+- **THEN** every existing position-indexed carrier SHALL retain its relative serialized order
+- **AND** the new OMath SHALL serialize after them
+
+#### Scenario: At-start precedes mixed and API-built carriers
+
+- **GIVEN** a target paragraph containing positive-position and nil/zero-position carriers
+- **WHEN** caller splices inline or direct-child OMath at `.atStart`
+- **THEN** the new OMath SHALL serialize before every existing position-indexed carrier
+
 #### Scenario: Source paragraph has no OMath
 
 - **WHEN** caller invokes `spliceOMath` with a `sourceParagraph` whose runs contain no `Run.rawXML` matching `<m:oMath` AND whose `unrecognizedChildren` contain no entry with `name == "oMath" || "oMathPara"`
@@ -129,6 +148,28 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 - **AND** caller invokes `target.spliceParagraphOMath(from: sourcePara, toBodyParagraphIndex: 5)`
 - **THEN** the system SHALL splice all 3 OMath blocks at the corresponding target locations
 - **AND** the call SHALL return `3`
+
+#### Scenario: Leading OMath maps to target start
+
+- **WHEN** a source OMath has a successfully derived empty prefix because it leads the paragraph
+- **THEN** batch splice SHALL map it to `.atStart`, not `.atEnd`
+
+#### Scenario: Namespace self-containment does not break source matching
+
+- **WHEN** extraction adds a root namespace declaration to an inline OMath fragment
+- **THEN** batch anchor derivation SHALL still match it to the originating Run
+- **AND** the OMath SHALL serialize between its corresponding target prefix and suffix
+
+#### Scenario: Unmatched batch anchor fails loudly
+
+- **WHEN** an extracted OMath cannot be matched to source text context
+- **THEN** batch splice SHALL throw `contextAnchorNotFound`
+- **AND** it SHALL NOT silently append the OMath at a boundary
+
+#### Scenario: Repeated boundary anchors preserve source order
+
+- **WHEN** multiple OMath blocks share the same anchor, including consecutive leading equations
+- **THEN** their final serialized order SHALL equal source-document order
 
 #### Scenario: Context anchor not found for one OMath
 

@@ -29,6 +29,12 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 
 (none — additive feature; existing OMath round-trip behavior at issues #85, #92, and #99 through #103 is unaffected)
 
+### Correctness remediations
+
+- #122 makes start/end boundaries honor mixed positive and post-content paragraph carriers.
+- #124 preserves direct-child OMath paragraph local-name metadata.
+- #125 distinguishes leading, matched, and unmatched batch anchors and preserves source order for repeated anchors.
+
 ## Impact
 
 - **Affected specs**: new `specs/omath-splice/spec.md`

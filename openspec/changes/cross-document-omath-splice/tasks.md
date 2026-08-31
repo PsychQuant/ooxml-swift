@@ -68,3 +68,15 @@
 
 - [x] 9.1 Comment on `PsychQuant/che-word-mcp#160` noting v0.24.0 ships and unblocks MCP wrapper implementation
 - [x] 9.2 Comment on `kiki830621/collaboration_guo_analysis#17` noting the upstream API is available; rescue script Phase 7 can proceed
+
+## 10. Boundary, metadata, and batch-anchor remediations (#122, #124, #125)
+
+- [x] 10.1 Add RED coverage for inline/direct `.atEnd` after API-built and mixed carriers
+- [x] 10.2 Materialize nil/zero position carriers in current post-content order before boundary insertion
+- [x] 10.3 Shift all positioned carriers for true inline/direct `.atStart`
+- [x] 10.4 Carry direct-child local name and preserve `oMathPara` through save/reload/extraction
+- [x] 10.5 Distinguish unmatched, leading-empty, and text batch anchors
+- [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
+- [x] 10.7 Apply batch mutations right-to-left to preserve repeated-anchor source order
+- [x] 10.8 Run `OMathSpliceTests`: 25 tests, 0 failures
+- [x] 10.9 Run full package regression: 1,453 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the committed PR head

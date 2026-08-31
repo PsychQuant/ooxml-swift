@@ -62,6 +62,9 @@ internal struct ExtractedOMath {
     let xml: String
     /// Which carrier the OMath was loaded from in the source paragraph.
     let kind: Kind
+    /// Original local name for a paragraph direct-child carrier.
+    /// Nil for inline Run carriers.
+    let directChildName: String?
     /// Source-document byte position (filled by DocxReader for both Run and UnrecognizedChild).
     /// Used for joint sort across the two carriers. May be nil for API-built paragraphs.
     let sourcePosition: Int?
@@ -105,6 +108,7 @@ internal enum OMathExtractor {
             collected.append(ExtractedOMath(
                 xml: ensureXmlnsDeclared(in: raw),
                 kind: .inRun,
+                directChildName: nil,
                 sourcePosition: run.position,
                 sourceRunProperties: run.properties
             ))
@@ -115,6 +119,7 @@ internal enum OMathExtractor {
             collected.append(ExtractedOMath(
                 xml: ensureXmlnsDeclared(in: child.rawXML),
                 kind: .directChild,
+                directChildName: child.name,
                 sourcePosition: child.position,
                 sourceRunProperties: nil
             ))
