@@ -504,7 +504,9 @@ extension Paragraph {
             || !bidiOverrides.isEmpty
             || !unrecognizedChildren.isEmpty
             || runs.contains(where: { ($0.position ?? 0) > 0 })
+            || runs.contains(where: { $0.paragraphBoundaryPlacement != nil })
             || hyperlinks.contains(where: { ($0.position ?? 0) > 0 })
+            || unrecognizedChildren.contains(where: { $0.paragraphBoundaryPlacement != nil })
             // v0.19.4+ (#56 R3-NEW-2): paragraph-level <w:sdt> with source
             // position participates in sort-by-position emit.
             // PsychQuant/ooxml-swift#5 (F6): position is now `Int? = nil` —
@@ -729,6 +731,8 @@ extension Paragraph {
             xml += "</w:pPr>"
         }
 
+        xml += emitParagraphBoundary(.start)
+
         // v0.19.3+ (#56 round 2 P0-5): legacy pre-content collections. Mirrors
         // legacy `toXMLLegacy` ordering. Skipped per-collection when the
         // positioned variant is populated to avoid double-emit — Reader keeps
@@ -738,10 +742,9 @@ extension Paragraph {
         if hasPageBreak {
             xml += "<w:r><w:br w:type=\"page\"/></w:r>"
         }
-        if bookmarkMarkers.isEmpty {
-            for bookmark in bookmarks {
-                xml += bookmark.toBookmarkStartXML()
-            }
+        let bookmarkIdsCoveredByMarkers = Set(bookmarkMarkers.map { $0.id })
+        for bookmark in bookmarks where !bookmarkIdsCoveredByMarkers.contains(bookmark.id) {
+            xml += bookmark.toBookmarkStartXML()
         }
         // v0.19.4+ (#56 R3-NEW-3): per-id gate, not blanket isEmpty.
         // Pre-fix `if commentRangeMarkers.isEmpty` skipped the entire legacy
@@ -774,7 +777,7 @@ extension Paragraph {
         // appended Run with default position 0 sorted before any
         // `position >= 1` source run → text rendered at paragraph head
         // instead of the intended append position (verify R5 P0 #6 / DA C3).
-        for run in runs where (run.position ?? 0) > 0 {
+        for run in runs where run.paragraphBoundaryPlacement == nil && (run.position ?? 0) > 0 {
             positioned.append((run.position!, .run(run)))
         }
         for hyperlink in hyperlinks where (hyperlink.position ?? 0) > 0 {
@@ -817,7 +820,7 @@ extension Paragraph {
         for block in bidiOverrides where (block.position ?? 0) > 0 {
             positioned.append((block.position!, .xml(block.rawXML)))
         }
-        for child in unrecognizedChildren where (child.position ?? 0) > 0 {
+        for child in unrecognizedChildren where child.paragraphBoundaryPlacement == nil && (child.position ?? 0) > 0 {
             positioned.append((child.position!, .xml(child.rawXML)))
         }
         // v0.19.4+ (#56 R3-NEW-2): paragraph-level <w:sdt> with source position
@@ -890,7 +893,7 @@ extension Paragraph {
         // paragraph silently relocated text to the paragraph head. Now they
         // emit AFTER source-loaded children, matching the append semantics
         // that contentControls (R5 P0 #2) and the legacy emit path use.
-        for run in runs where (run.position ?? 0) == 0 {
+        for run in runs where run.paragraphBoundaryPlacement == nil && (run.position ?? 0) == 0 {
             xml += Self.emitRun(run, asDelText: false, paragraphRevisions: revisions)
         }
         for hyperlink in hyperlinks where (hyperlink.position ?? 0) == 0 {
@@ -926,7 +929,7 @@ extension Paragraph {
         for block in bidiOverrides where (block.position ?? 0) == 0 {
             xml += block.rawXML
         }
-        for child in unrecognizedChildren where (child.position ?? 0) == 0 {
+        for child in unrecognizedChildren where child.paragraphBoundaryPlacement == nil && (child.position ?? 0) == 0 {
             xml += child.rawXML
         }
         // v0.19.4+ (#56 R3-NEW-3): per-id gate (see pre-content emit above).
@@ -945,14 +948,39 @@ extension Paragraph {
         for endnoteId in endnoteIds {
             xml += "<w:r><w:rPr><w:rStyle w:val=\"EndnoteReference\"/></w:rPr><w:endnoteReference w:id=\"\(endnoteId)\"/></w:r>"
         }
-        if bookmarkMarkers.isEmpty {
-            for bookmark in bookmarks {
-                xml += bookmark.toBookmarkEndXML()
-            }
+        for bookmark in bookmarks where !bookmarkIdsCoveredByMarkers.contains(bookmark.id) {
+            xml += bookmark.toBookmarkEndXML()
         }
+
+        xml += emitParagraphBoundary(.end)
 
         xml += "</w:p>"
         return xml
+    }
+
+    /// Emit OMath carriers that explicitly occupy an absolute paragraph
+    /// boundary. This lane sits outside both legacy pre/post content and the
+    /// normal position-sorted window, so boundary insertion never needs to
+    /// rewrite public typed state such as page breaks or note identifiers.
+    fileprivate func emitParagraphBoundary(_ placement: ParagraphBoundaryPlacement) -> String {
+        var entries: [(order: Int, stable: Int, xml: String)] = []
+        var stable = 0
+        for run in runs where run.paragraphBoundaryPlacement == placement {
+            entries.append((
+                run.paragraphBoundaryOrder ?? 0,
+                stable,
+                Self.emitRun(run, asDelText: false, paragraphRevisions: revisions)
+            ))
+            stable += 1
+        }
+        for child in unrecognizedChildren where child.paragraphBoundaryPlacement == placement {
+            entries.append((child.paragraphBoundaryOrder ?? 0, stable, child.rawXML))
+            stable += 1
+        }
+        entries.sort {
+            $0.order == $1.order ? $0.stable < $1.stable : $0.order < $1.order
+        }
+        return entries.map(\.xml).joined()
     }
 
     /// v0.19.2+ (#56 F3): Tagged payload for sort-by-position emit so the

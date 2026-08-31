@@ -291,12 +291,21 @@ extension WordDocument {
 
         switch position {
         case .atStart:
-            _ = canonicalizeParagraphCarriers(in: &targetPara, startingAt: 2)
-            omathRun.position = 1
+            omathRun.paragraphBoundaryPlacement = .start
+            omathRun.paragraphBoundaryOrder = prepareBoundaryInsertion(
+                placement: .start,
+                prepend: true,
+                in: &targetPara
+            )
             targetPara.runs.insert(omathRun, at: 0)
 
         case .atEnd:
-            omathRun.position = canonicalizeParagraphCarriers(in: &targetPara, startingAt: 1)
+            omathRun.paragraphBoundaryPlacement = .end
+            omathRun.paragraphBoundaryOrder = prepareBoundaryInsertion(
+                placement: .end,
+                prepend: false,
+                in: &targetPara
+            )
             targetPara.runs.append(omathRun)
 
         case .afterText(let anchor, let instance, let options):
@@ -550,14 +559,36 @@ extension WordDocument {
         omath: ExtractedOMath,
         position: OMathSplicePosition
     ) throws {
-        var newPos: Int
         switch position {
         case .atStart:
-            _ = canonicalizeParagraphCarriers(in: &targetPara, startingAt: 2)
-            newPos = 1
+            var child = UnrecognizedChild(
+                name: omath.directChildName ?? "oMath",
+                rawXML: omath.xml,
+                position: nil
+            )
+            child.paragraphBoundaryPlacement = .start
+            child.paragraphBoundaryOrder = prepareBoundaryInsertion(
+                placement: .start,
+                prepend: true,
+                in: &targetPara
+            )
+            targetPara.unrecognizedChildren.append(child)
+            return
 
         case .atEnd:
-            newPos = canonicalizeParagraphCarriers(in: &targetPara, startingAt: 1)
+            var child = UnrecognizedChild(
+                name: omath.directChildName ?? "oMath",
+                rawXML: omath.xml,
+                position: nil
+            )
+            child.paragraphBoundaryPlacement = .end
+            child.paragraphBoundaryOrder = prepareBoundaryInsertion(
+                placement: .end,
+                prepend: false,
+                in: &targetPara
+            )
+            targetPara.unrecognizedChildren.append(child)
+            return
 
         case .afterText(let anchor, let instance, let options):
             try insertDirectChildAtAnchor(
@@ -581,14 +612,6 @@ extension WordDocument {
             )
             return
         }
-
-        targetPara.unrecognizedChildren.append(
-            UnrecognizedChild(
-                name: omath.directChildName ?? "oMath",
-                rawXML: omath.xml,
-                position: newPos
-            )
-        )
     }
 
     private static func insertDirectChildAtAnchor(
@@ -669,23 +692,71 @@ extension WordDocument {
         case contentControl(Int)
     }
 
-    /// Convert every paragraph child into the position-indexed serializer
-    /// path, then assign compact positive positions in the exact order the
-    /// paragraph currently serializes. Compact renumbering also makes hostile
-    /// or API-built `Int.max` positions safe for boundary insertion.
+    /// Normalize only existing absolute-boundary OMath carriers and reserve
+    /// an order for the new carrier. The normal paragraph arrays remain the
+    /// typed source of truth; no page-break/note/bookmark state is rewritten.
+    private static func prepareBoundaryInsertion(
+        placement: ParagraphBoundaryPlacement,
+        prepend: Bool,
+        in para: inout Paragraph
+    ) -> Int {
+        var refs: [(order: Int, stable: Int, ref: ParagraphCarrierReference)] = []
+        var stable = 0
+        for index in para.runs.indices where para.runs[index].paragraphBoundaryPlacement == placement {
+            refs.append((para.runs[index].paragraphBoundaryOrder ?? 0, stable, .run(index)))
+            stable += 1
+        }
+        for index in para.unrecognizedChildren.indices
+            where para.unrecognizedChildren[index].paragraphBoundaryPlacement == placement {
+            refs.append((
+                para.unrecognizedChildren[index].paragraphBoundaryOrder ?? 0,
+                stable,
+                .unrecognized(index)
+            ))
+            stable += 1
+        }
+        refs.sort {
+            $0.order == $1.order ? $0.stable < $1.stable : $0.order < $1.order
+        }
+
+        for (offset, entry) in refs.enumerated() {
+            setBoundaryOrder(entry.ref, to: prepend ? offset + 1 : offset, in: &para)
+        }
+        return prepend ? 0 : refs.count
+    }
+
+    private static func setBoundaryOrder(
+        _ ref: ParagraphCarrierReference,
+        to order: Int,
+        in para: inout Paragraph
+    ) {
+        switch ref {
+        case .run(let index):
+            var runs = para.runs
+            runs[index].paragraphBoundaryOrder = order
+            para.runs = runs
+        case .unrecognized(let index):
+            para.unrecognizedChildren[index].paragraphBoundaryOrder = order
+        default:
+            break
+        }
+    }
+
+    /// Compact the 13 position-indexed collections in their current serialized
+    /// order. Used only when a direct-child mid-text splice needs a unique
+    /// cross-collection slot; absolute boundaries use the separate serializer
+    /// lane and never rewrite legacy typed state or existing positions.
     @discardableResult
     private static func canonicalizeParagraphCarriers(
         in para: inout Paragraph,
         startingAt firstPosition: Int
     ) -> Int {
-        let legacy = materializeLegacyCarriers(in: &para)
-        let excluded = Set(legacy.pre + legacy.post)
         var positive: [(position: Int, stableOrder: Int, ref: ParagraphCarrierReference)] = []
         var postContent: [ParagraphCarrierReference] = []
         var stableOrder = 0
 
         func collect(_ refs: [ParagraphCarrierReference], postContentOrder: Bool = false) {
-            for ref in refs where !excluded.contains(ref) {
+            for ref in refs {
                 let position = carrierPosition(ref, in: para) ?? 0
                 if postContentOrder {
                     if position <= 0 { postContent.append(ref) }
@@ -734,7 +805,7 @@ extension WordDocument {
                 ? $0.stableOrder < $1.stableOrder
                 : $0.position < $1.position
         }
-        let ordered = legacy.pre + positive.map(\.ref) + postContent + legacy.post
+        let ordered = positive.map(\.ref) + postContent
 
         var next = firstPosition
         for ref in ordered {
@@ -742,80 +813,6 @@ extension WordDocument {
             if next < Int.max { next += 1 }
         }
         return next
-    }
-
-    private static func materializeLegacyCarriers(
-        in para: inout Paragraph
-    ) -> (pre: [ParagraphCarrierReference], post: [ParagraphCarrierReference]) {
-        var pre: [ParagraphCarrierReference] = []
-        var post: [ParagraphCarrierReference] = []
-        var bookmarkEnds: [ParagraphCarrierReference] = []
-
-        if para.hasPageBreak {
-            var pageBreak = Run(text: "")
-            pageBreak.rawXML = "<w:r><w:br w:type=\"page\"/></w:r>"
-            var runs = para.runs
-            runs.append(pageBreak)
-            para.runs = runs
-            pre.append(.run(runs.count - 1))
-            para.hasPageBreak = false
-        }
-
-        if para.bookmarkMarkers.isEmpty {
-            for bookmark in para.bookmarks {
-                para.bookmarkMarkers.append(
-                    BookmarkRangeMarker(kind: .start, id: bookmark.id, name: bookmark.name)
-                )
-                pre.append(.bookmarkMarker(para.bookmarkMarkers.count - 1))
-            }
-            for bookmark in para.bookmarks {
-                para.bookmarkMarkers.append(
-                    BookmarkRangeMarker(kind: .end, id: bookmark.id)
-                )
-                bookmarkEnds.append(.bookmarkMarker(para.bookmarkMarkers.count - 1))
-            }
-        }
-
-        let coveredCommentIds = Set(para.commentRangeMarkers.map(\.id))
-        for commentId in para.commentIds where !coveredCommentIds.contains(commentId) {
-            para.commentRangeMarkers.append(CommentRangeMarker(kind: .start, id: commentId))
-            pre.append(.commentMarker(para.commentRangeMarkers.count - 1))
-            para.commentRangeMarkers.append(CommentRangeMarker(kind: .end, id: commentId))
-            post.append(.commentMarker(para.commentRangeMarkers.count - 1))
-
-            var reference = Run(text: "")
-            reference.rawXML = "<w:r><w:commentReference w:id=\"\(commentId)\"/></w:r>"
-            var runs = para.runs
-            runs.append(reference)
-            para.runs = runs
-            post.append(.run(runs.count - 1))
-        }
-
-        for footnoteId in para.footnoteIds {
-            var reference = Run(text: "")
-            reference.rawXML = "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference w:id=\"\(footnoteId)\"/></w:r>"
-            var runs = para.runs
-            runs.append(reference)
-            para.runs = runs
-            post.append(.run(runs.count - 1))
-        }
-        para.footnoteIds.removeAll()
-
-        for endnoteId in para.endnoteIds {
-            var reference = Run(text: "")
-            reference.rawXML = "<w:r><w:rPr><w:rStyle w:val=\"EndnoteReference\"/></w:rPr><w:endnoteReference w:id=\"\(endnoteId)\"/></w:r>"
-            var runs = para.runs
-            runs.append(reference)
-            para.runs = runs
-            post.append(.run(runs.count - 1))
-        }
-        para.endnoteIds.removeAll()
-
-        // Legacy serializer emits bookmark ends after comment references,
-        // footnotes, and endnotes.
-        post.append(contentsOf: bookmarkEnds)
-
-        return (pre, post)
     }
 
     private static func carrierPosition(

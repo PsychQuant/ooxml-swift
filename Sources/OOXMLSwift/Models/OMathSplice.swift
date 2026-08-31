@@ -143,18 +143,10 @@ internal enum OMathExtractor {
             return xml
         }
 
-        // Inject after the opening element name. Prefix-less fragments receive
-        // a default OMML namespace; prefixed fragments receive xmlns:prefix.
-        let openTag = prefix.map { "<\($0):" } ?? "<"
-        guard let openIdx = xml.range(of: openTag) else { return xml }
-        // Find end of element name (first whitespace or `>` or `/`).
-        var nameEnd = openIdx.upperBound
-        while nameEnd < xml.endIndex,
-              !xml[nameEnd].isWhitespace,
-              xml[nameEnd] != ">",
-              xml[nameEnd] != "/" {
-            nameEnd = xml.index(after: nameEnd)
-        }
+        // Inject after the tokenizer-bounded root QName. Prefix-less fragments
+        // receive a default OMML namespace; prefixed fragments receive
+        // xmlns:prefix. Attribute names/values cannot influence this boundary.
+        guard let nameEnd = OMathNamespace.rootNameEnd(in: xml) else { return xml }
         let standardURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
         let injection = prefix.map { " xmlns:\($0)=\"\(standardURI)\"" }
             ?? " xmlns=\"\(standardURI)\""
@@ -165,6 +157,12 @@ internal enum OMathExtractor {
 // MARK: - Internal: namespace inspection helpers
 
 internal enum OMathNamespace {
+    private struct RootTag {
+        let qualifiedName: String
+        let nameEnd: String.Index
+        let attributes: [String: String]
+    }
+
     /// Extracts the `xmlns:` URI for the OMath prefix in the given XML fragment.
     /// Returns the URI string, or nil if no `xmlns:` declaration found.
     ///
@@ -172,62 +170,190 @@ internal enum OMathNamespace {
     /// one used in the opening element name (e.g. `<mml:oMath xmlns:mml="...">` → `mml`).
     /// Falls back to scanning for any `xmlns:` declaration if prefix detection fails.
     static func extractURI(from xml: String) -> String? {
-        guard let openingTag = rootOpeningTag(in: xml) else { return nil }
-        // Find the prefix from the opening tag (e.g. `<m:oMath` → "m", `<mml:oMath` → "mml").
-        guard let lessThan = openingTag.firstIndex(of: "<") else { return nil }
-        let afterLT = openingTag.index(after: lessThan)
-        guard let colonIdx = openingTag[afterLT...].firstIndex(of: ":") else {
-            // Could be default-namespace OMath (no prefix). Scan for any `xmlns="..."`.
-            return extractURIByPattern(xml: openingTag, pattern: #"\bxmlns\s*=\s*['"]([^'"]+)['"]"#)
+        guard let root = parseRootTag(in: xml) else { return nil }
+        if let prefix = prefix(fromQualifiedName: root.qualifiedName) {
+            return root.attributes["xmlns:\(prefix)"]
         }
-        let prefix = String(openingTag[afterLT..<colonIdx])
-        // Look for `xmlns:<prefix>="<URI>"`.
-        let pattern = #"\bxmlns:"# + NSRegularExpression.escapedPattern(for: prefix) + #"\s*=\s*['"]([^'"]+)['"]"#
-        return extractURIByPattern(xml: openingTag, pattern: pattern)
+        return root.attributes["xmlns"]
     }
 
     /// Extracts the OMath prefix (e.g. "m" or "mml") from the opening element.
     /// Returns nil if no prefix used (default namespace).
     static func extractPrefix(from xml: String) -> String? {
-        guard let openingTag = rootOpeningTag(in: xml),
-              let lessThan = openingTag.firstIndex(of: "<") else { return nil }
-        let afterLT = openingTag.index(after: lessThan)
-        guard let colonIdx = openingTag[afterLT...].firstIndex(of: ":") else {
-            return nil
-        }
-        // Verify the colon belongs to the element name (no whitespace before it).
-        let candidate = String(xml[afterLT..<colonIdx])
-        guard !candidate.isEmpty,
-              candidate.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }) else {
-            return nil
-        }
-        return candidate
+        guard let root = parseRootTag(in: xml) else { return nil }
+        return prefix(fromQualifiedName: root.qualifiedName)
     }
 
-    private static func rootOpeningTag(in xml: String) -> String? {
-        guard let start = xml.firstIndex(of: "<") else { return nil }
-        var index = xml.index(after: start)
-        var quote: Character?
-        while index < xml.endIndex {
-            let character = xml[index]
-            if let activeQuote = quote {
-                if character == activeQuote { quote = nil }
-            } else if character == "\"" || character == "'" {
-                quote = character
-            } else if character == ">" {
-                return String(xml[start...index])
+    internal static func rootNameEnd(in xml: String) -> String.Index? {
+        parseRootTag(in: xml)?.nameEnd
+    }
+
+    private static func prefix(fromQualifiedName qualifiedName: String) -> String? {
+        let parts = qualifiedName.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              !parts[0].isEmpty,
+              !parts[1].isEmpty,
+              parts.allSatisfy({ part in
+                  part.allSatisfy { character in
+                      character.isLetter || character.isNumber
+                          || character == "_" || character == "-" || character == "."
+                  }
+              }) else {
+            return nil
+        }
+        return String(parts[0])
+    }
+
+    /// Quote-aware tokenizer for only the root opening tag. It reads the QName
+    /// before any attribute, then parses actual name="value" pairs. This avoids
+    /// treating URI colons or fake `xmlns` text inside ordinary values as syntax.
+    private static func parseRootTag(in xml: String) -> RootTag? {
+        var cursor = xml.startIndex
+
+        func advancePastWhitespace() {
+            while cursor < xml.endIndex && xml[cursor].isWhitespace {
+                cursor = xml.index(after: cursor)
             }
-            index = xml.index(after: index)
         }
-        return nil
+
+        advancePastWhitespace()
+        guard cursor < xml.endIndex, xml[cursor] == "<" else { return nil }
+        cursor = xml.index(after: cursor)
+        guard cursor < xml.endIndex, xml[cursor] != "?", xml[cursor] != "!", xml[cursor] != "/" else {
+            return nil
+        }
+
+        let nameStart = cursor
+        while cursor < xml.endIndex,
+              !xml[cursor].isWhitespace,
+              xml[cursor] != "/",
+              xml[cursor] != ">" {
+            cursor = xml.index(after: cursor)
+        }
+        guard cursor > nameStart else { return nil }
+        let qualifiedName = String(xml[nameStart..<cursor])
+        let nameEnd = cursor
+        var attributes: [String: String] = [:]
+
+        while cursor < xml.endIndex {
+            advancePastWhitespace()
+            guard cursor < xml.endIndex, xml[cursor] != ">", xml[cursor] != "/" else { break }
+
+            let attributeStart = cursor
+            while cursor < xml.endIndex,
+                  !xml[cursor].isWhitespace,
+                  xml[cursor] != "=",
+                  xml[cursor] != ">",
+                  xml[cursor] != "/" {
+                cursor = xml.index(after: cursor)
+            }
+            let attributeName = String(xml[attributeStart..<cursor])
+            advancePastWhitespace()
+            guard !attributeName.isEmpty,
+                  cursor < xml.endIndex,
+                  xml[cursor] == "=" else {
+                return nil
+            }
+            cursor = xml.index(after: cursor)
+            advancePastWhitespace()
+            guard cursor < xml.endIndex,
+                  xml[cursor] == "\"" || xml[cursor] == "'" else {
+                return nil
+            }
+            let quote = xml[cursor]
+            cursor = xml.index(after: cursor)
+            let valueStart = cursor
+            while cursor < xml.endIndex, xml[cursor] != quote {
+                cursor = xml.index(after: cursor)
+            }
+            guard cursor < xml.endIndex else { return nil }
+            attributes[attributeName] = String(xml[valueStart..<cursor])
+            cursor = xml.index(after: cursor)
+        }
+
+        return RootTag(
+            qualifiedName: qualifiedName,
+            nameEnd: nameEnd,
+            attributes: attributes
+        )
+    }
+}
+
+// MARK: - Internal: semantic XML equivalence (#123)
+
+/// Canonical semantic representation for the public save/reload fidelity
+/// contract. Unlike lexical XML, this representation ignores prefix spelling,
+/// declaration placement, attribute order/quote style, and entity spelling,
+/// while preserving namespace-expanded names, values, text, and child order.
+internal enum OMathSemanticXML {
+    private static let xmlNamespaceURI = "http://www.w3.org/XML/1998/namespace"
+
+    static func canonicalRepresentation(of xml: String) throws -> String {
+        let data = Data(xml.utf8)
+        let tree = try XmlTreeReader.parse(data)
+        return canonicalNode(tree.root, inheritedNamespaces: [:])
     }
 
-    private static func extractURIByPattern(xml: String, pattern: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let ns = xml as NSString
-        guard let match = regex.firstMatch(in: xml, range: NSRange(location: 0, length: ns.length)),
-              match.numberOfRanges > 1 else { return nil }
-        return ns.substring(with: match.range(at: 1))
+    static func isEquivalent(_ lhs: String, _ rhs: String) throws -> Bool {
+        try canonicalRepresentation(of: lhs) == canonicalRepresentation(of: rhs)
+    }
+
+    private static func canonicalNode(
+        _ node: XmlNode,
+        inheritedNamespaces: [String: String]
+    ) -> String {
+        switch node.kind {
+        case .element:
+            var namespaces = inheritedNamespaces
+            for attribute in node.attributes where attribute.isNamespaceDeclaration {
+                namespaces[attribute.declaredNamespacePrefix ?? ""] = attribute.value
+            }
+
+            let elementName = expandedName(
+                namespaceURI: node.namespaceURI ?? "",
+                localName: node.localName
+            )
+            let attributes = node.attributes
+                .filter { !$0.isNamespaceDeclaration }
+                .map { attribute -> String in
+                    let namespaceURI: String
+                    if let prefix = attribute.prefix {
+                        namespaceURI = prefix == "xml"
+                            ? xmlNamespaceURI
+                            : namespaces[prefix, default: "unbound:\(prefix)"]
+                    } else {
+                        // XML default namespaces never apply to attributes.
+                        namespaceURI = ""
+                    }
+                    return framed(expandedName(
+                        namespaceURI: namespaceURI,
+                        localName: attribute.localName
+                    )) + framed(attribute.value)
+                }
+                .sorted()
+                .joined()
+            let children = node.children
+                .map { canonicalNode($0, inheritedNamespaces: namespaces) }
+                .joined()
+            return "E" + framed(elementName) + "A" + framed(attributes) + "C" + framed(children)
+
+        case .text:
+            return "T" + framed(node.textContent)
+
+        case .comment:
+            return "M" + framed(node.textContent)
+
+        case .processingInstruction:
+            return "P" + framed(node.processingInstructionTarget) + framed(node.textContent)
+        }
+    }
+
+    private static func expandedName(namespaceURI: String, localName: String) -> String {
+        "{\(namespaceURI)}\(localName)"
+    }
+
+    private static func framed(_ value: String) -> String {
+        "\(value.utf8.count):\(value)"
     }
 }
 

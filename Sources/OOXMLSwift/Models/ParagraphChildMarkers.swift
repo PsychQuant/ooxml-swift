@@ -1,5 +1,12 @@
 import Foundation
 
+/// Internal serializer lane used by OMath splice to represent a true
+/// paragraph boundary without rewriting public legacy typed state.
+internal enum ParagraphBoundaryPlacement: Equatable {
+    case start
+    case end
+}
+
 // MARK: - Position-indexed paragraph child markers (PsychQuant/che-word-mcp#56)
 //
 // Every legal child of `<w:p>` per ECMA-376 Part 1 §17.3.1 (`CT_P`) needs to
@@ -196,6 +203,8 @@ public struct UnrecognizedChild: Equatable {
     public var name: String
     public var rawXML: String
     public var position: Int?
+    internal var paragraphBoundaryPlacement: ParagraphBoundaryPlacement? = nil
+    internal var paragraphBoundaryOrder: Int? = nil
 
     public init(name: String, rawXML: String, position: Int? = nil) {
         self.name = name

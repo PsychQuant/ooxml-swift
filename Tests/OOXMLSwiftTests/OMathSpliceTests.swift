@@ -942,6 +942,190 @@ final class OMathSpliceTests: XCTestCase {
         )
     }
 
+    func testBoundarySplicePreservesTypedLegacyStateAndNoteDeletion() throws {
+        let source = try parseParagraph(xml: Self.sourceInlineRunOMath)
+        var target = makeDocument(with: Paragraph(runs: [Run(text: "body")]))
+        guard case .paragraph(var paragraph) = target.body.children[0] else { XCTFail(); return }
+        paragraph.hasPageBreak = true
+        target.body.children[0] = .paragraph(paragraph)
+        let footnoteId = try target.insertFootnote(text: "foot", paragraphIndex: 0)
+        let endnoteId = try target.insertEndnote(text: "end", paragraphIndex: 0)
+
+        try target.spliceOMath(from: source, toBodyParagraphIndex: 0, position: .atEnd)
+        guard case .paragraph(let spliced) = target.body.children[0] else { XCTFail(); return }
+        XCTAssertTrue(spliced.hasPageBreak, "Boundary splice must not rewrite typed page-break state")
+        XCTAssertEqual(spliced.footnoteIds, [footnoteId])
+        XCTAssertEqual(spliced.endnoteIds, [endnoteId])
+
+        try target.deleteFootnote(footnoteId: footnoteId)
+        try target.deleteEndnote(endnoteId: endnoteId)
+        guard case .paragraph(let deleted) = target.body.children[0] else { XCTFail(); return }
+        let xml = deleted.toXML()
+        XCTAssertFalse(xml.contains("w:footnoteReference"), "Deleted footnote must not leave a raw dangling reference: \(xml)")
+        XCTAssertFalse(xml.contains("w:endnoteReference"), "Deleted endnote must not leave a raw dangling reference: \(xml)")
+        XCTAssertTrue(deleted.hasPageBreak)
+    }
+
+    func testRootQNameTokenizerHandlesDefaultVendorFakeAndDottedNamespaces() throws {
+        let standardURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        let explicitDefault = "<oMath xmlns:m='urn:unused' xmlns='\(standardURI)'><r/></oMath>"
+        XCTAssertNil(OMathNamespace.extractPrefix(from: explicitDefault))
+        XCTAssertEqual(OMathNamespace.extractURI(from: explicitDefault), standardURI)
+        XCTAssertEqual(OMathExtractor.ensureXmlnsDeclared(in: explicitDefault), explicitDefault)
+
+        let vendorDefault = "<oMath xmlns='https://example.invalid/vendor'><r/></oMath>"
+        XCTAssertEqual(OMathNamespace.extractURI(from: vendorDefault), "https://example.invalid/vendor")
+        var vendorRun = Run(text: "")
+        vendorRun.rawXML = vendorDefault
+        var target = makeDocument(with: Paragraph(runs: [Run(text: "target")]))
+        XCTAssertThrowsError(
+            try target.spliceOMath(
+                from: Paragraph(runs: [vendorRun]),
+                toBodyParagraphIndex: 0,
+                position: .atEnd
+            )
+        ) { error in
+            guard case .namespaceMismatch = error as? OMathSpliceError else {
+                return XCTFail("Expected namespaceMismatch, got \(error)")
+            }
+        }
+
+        let fakeAttribute = "<m:oMath data-note=\"xmlns:m='https://example.invalid/fake'\"><m:r/></m:oMath>"
+        let normalizedFake = OMathExtractor.ensureXmlnsDeclared(in: fakeAttribute)
+        XCTAssertEqual(OMathNamespace.extractPrefix(from: normalizedFake), "m")
+        XCTAssertEqual(OMathNamespace.extractURI(from: normalizedFake), standardURI)
+        XCTAssertTrue(normalizedFake.contains("data-note=\"xmlns:m='https://example.invalid/fake'\""))
+
+        let dotted = "  <m.math:oMath><m.math:r/></m.math:oMath>"
+        let normalizedDotted = OMathExtractor.ensureXmlnsDeclared(in: dotted)
+        XCTAssertEqual(OMathNamespace.extractPrefix(from: normalizedDotted), "m.math")
+        XCTAssertEqual(OMathNamespace.extractURI(from: normalizedDotted), standardURI)
+        XCTAssertTrue(normalizedDotted.contains("xmlns:m.math=\"\(standardURI)\""))
+    }
+
+    func testMathScriptInsensitiveAnchorPreservesCrossRunCombiningAndNonBMPSuffix() throws {
+        let source = try parseParagraph(xml: Self.sourceInlineRunOMath)
+        let combining = "\u{0304}"
+        var target = makeDocument(with: Paragraph(runs: [
+            Run(text: "X"),
+            Run(text: combining),
+            Run(text: "😀tail"),
+        ]))
+
+        try target.spliceOMath(
+            from: source,
+            toBodyParagraphIndex: 0,
+            position: .afterText(
+                "X",
+                options: AnchorLookupOptions(mathScriptInsensitive: true)
+            )
+        )
+
+        guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+        let mathIndex = try XCTUnwrap(result.runs.firstIndex { $0.rawXML?.contains("oMath") == true })
+        XCTAssertEqual(result.runs[..<mathIndex].map(\.text).joined(), "X\(combining)")
+        XCTAssertEqual(result.runs[(mathIndex + 1)...].map(\.text).joined(), "😀tail")
+    }
+
+    func testAllParagraphCarrierMatrixRetainsOrderAtBothBoundaries() throws {
+        let allCarrierXML = """
+        <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+             xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+          <w:r><w:t>RUN_SENTINEL</w:t></w:r>
+          <w:hyperlink r:id="rId1"><w:r><w:t>HYPER_SENTINEL</w:t></w:r></w:hyperlink>
+          <w:fldSimple w:instr="FIELD_SENTINEL"><w:r><w:t>FIELD_TEXT</w:t></w:r></w:fldSimple>
+          <mc:AlternateContent><mc:Fallback><w:r><w:t>ALT_SENTINEL</w:t></w:r></mc:Fallback></mc:AlternateContent>
+          <w:bookmarkStart w:id="1" w:name="positionedBookmark"/>
+          <w:bookmarkEnd w:id="1"/>
+          <w:commentRangeStart w:id="2"/>
+          <w:commentRangeEnd w:id="2"/>
+          <w:permStart w:id="perm-sentinel" w:edGrp="everyone"/>
+          <w:permEnd w:id="perm-sentinel"/>
+          <w:proofErr w:type="spellStart"/>
+          <w:smartTag w:uri="urn:smart-sentinel" w:element="SMART_SENTINEL"><w:r><w:t>SMART_TEXT</w:t></w:r></w:smartTag>
+          <w:customXml w:element="CUSTOM_SENTINEL"><w:r><w:t>CUSTOM_TEXT</w:t></w:r></w:customXml>
+          <w:dir w:val="ltr"><w:r><w:t>BIDI_SENTINEL</w:t></w:r></w:dir>
+          <w:unknownCarrier w:sentinel="UNKNOWN_SENTINEL"/>
+          <w:sdt><w:sdtPr><w:id w:val="77"/><w:tag w:val="SDT_SENTINEL"/></w:sdtPr><w:sdtContent><w:r><w:t>SDT_TEXT</w:t></w:r></w:sdtContent></w:sdt>
+        </w:p>
+        """
+
+        func makeTarget() throws -> WordDocument {
+            var paragraph = try parseParagraph(xml: allCarrierXML)
+            paragraph.hasPageBreak = true
+            paragraph.bookmarks.append(Bookmark(id: 91, name: "legacyBookmark"))
+            paragraph.commentIds = [88]
+            paragraph.footnoteIds = [89]
+            paragraph.endnoteIds = [90]
+            var zeroRun = Run(text: "ZERO_SENTINEL")
+            zeroRun.position = 0
+            paragraph.runs.append(zeroRun)
+            return makeDocument(with: paragraph)
+        }
+
+        let existingTokens = [
+            "w:br w:type=\"page\"",
+            "w:bookmarkStart w:id=\"91\"",
+            "w:commentRangeStart w:id=\"88\"",
+            "RUN_SENTINEL", "HYPER_SENTINEL", "FIELD_SENTINEL", "ALT_SENTINEL",
+            "w:bookmarkStart w:id=\"1\"", "w:bookmarkEnd w:id=\"1\"",
+            "w:commentRangeStart w:id=\"2\"", "w:commentRangeEnd w:id=\"2\"",
+            "w:permStart", "w:permEnd", "w:proofErr",
+            "SMART_SENTINEL", "CUSTOM_SENTINEL", "BIDI_SENTINEL",
+            "UNKNOWN_SENTINEL", "SDT_SENTINEL", "ZERO_SENTINEL",
+            "w:commentRangeEnd w:id=\"88\"",
+            "w:footnoteReference w:id=\"89\"",
+            "w:endnoteReference w:id=\"90\"",
+            "w:bookmarkEnd w:id=\"91\"",
+        ]
+
+        let sources = [
+            try parseParagraph(xml: Self.sourceInlineRunOMath),
+            try parseParagraph(xml: Self.sourceDirectChildOMath),
+        ]
+        for source in sources {
+            for position in [OMathSplicePosition.atStart, .atEnd] {
+                var target = try makeTarget()
+                try target.spliceOMath(from: source, toBodyParagraphIndex: 0, position: position)
+                guard case .paragraph(let result) = target.body.children[0] else { XCTFail(); return }
+                let xml = result.toXML()
+                let tokenPositions = try existingTokens.map { token in
+                    try XCTUnwrap(xml.range(of: token)?.lowerBound, "Missing \(token): \(xml)")
+                }
+                for pair in zip(tokenPositions, tokenPositions.dropFirst()) {
+                    XCTAssertLessThan(pair.0, pair.1, "Existing carrier order changed: \(xml)")
+                }
+                let math = try XCTUnwrap(xml.range(of: "<m:oMath")?.lowerBound)
+                if position == .atStart {
+                    XCTAssertLessThan(math, tokenPositions[0], "atStart must precede full carrier matrix: \(xml)")
+                } else {
+                    XCTAssertLessThan(tokenPositions.last!, math, "atEnd must follow full carrier matrix: \(xml)")
+                }
+            }
+        }
+    }
+
+    func testOMathReloadContractUsesSemanticXMLFingerprint() throws {
+        let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        let lexicalA = "<m:oMath xmlns:m=\"\(uri)\" data-a=\"1\" data-b=\"2\"><m:r><m:ctrl m:val=\"on\"/><m:t>&#x3B1;</m:t></m:r></m:oMath>"
+        let lexicalB = "<math:oMath data-b='2' xmlns:math='\(uri)' data-a='1'><math:r><math:ctrl math:val='on'/><math:t>α</math:t></math:r></math:oMath>"
+        let different = "<math:oMath data-b='2' xmlns:math='\(uri)' data-a='1'><math:r><math:ctrl math:val='off'/><math:t>α</math:t></math:r></math:oMath>"
+
+        XCTAssertNotEqual(lexicalA, lexicalB, "Fixture must exercise lexical differences")
+        XCTAssertEqual(
+            try OMathSemanticXML.canonicalRepresentation(of: lexicalA),
+            try OMathSemanticXML.canonicalRepresentation(of: lexicalB),
+            "Entity spelling, attribute order/quotes, namespace placement, and element/attribute prefixes are semantically equivalent"
+        )
+        XCTAssertNotEqual(
+            try OMathSemanticXML.canonicalRepresentation(of: lexicalA),
+            try OMathSemanticXML.canonicalRepresentation(of: different),
+            "Different semantic attribute values must remain different"
+        )
+    }
+
     // MARK: - No regression (6.14)
 
     /// Pre-existing OMath in target paragraph must be preserved during splice.

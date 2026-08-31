@@ -31,13 +31,13 @@
 
 - [x] 5.1 Implement public `WordDocument.spliceParagraphOMath(from:toBodyParagraphIndex:rPrMode:namespacePolicy:)` per Two-tier API: `spliceOMath` (single) + `spliceParagraphOMath` (batch) decision
 - [x] 5.2 For each extracted OMath in source paragraph, derive context anchor by slicing `flattenedDisplayText()` 5-10 chars on each side of the OMath's source position
-- [x] 5.3 Loop calling `spliceOMath(from:..., position: .afterText(prefix, instance: 1), omathIndex: i, ...)` for each OMath in source order
-- [x] 5.4 On per-OMath context-anchor lookup failure throw `.contextAnchorNotFound(omathIndex:, snippet:)` with the failing snippet; partial-success state already in target paragraph at point of failure (Paragraph-level batch splice with auto-anchor derivation requirement)
+- [x] 5.3 Derive `(prefix, occurrence instance)`, group shared boundaries, and call `spliceOMath` right-to-left within source-ordered groups
+- [x] 5.4 Preflight each anchor group; on failure throw `.contextAnchorNotFound(omathIndex:, snippet:)` while preserving only earlier source groups
 
 ## 6. Tests
 
 - [x] 6.1 Create `Tests/OOXMLSwiftTests/OMathSpliceTests.swift` test file
-- [x] 6.2 `testInlineRunRawXMLSpliceAtEnd` — covers Inline OMath spliced from source Run.rawXML to target paragraph end scenario; round-trip byte-equal
+- [x] 6.2 `testInlineRunRawXMLSpliceAtEnd` — covers inline OMath copied into target Run.rawXML at paragraph end
 - [x] 6.3 `testDirectChildOMathSplicePreservesCarrier` — covers Direct-child OMath spliced preserving carrier scenario; verifies target gets `unrecognizedChildren` not Run
 - [x] 6.4 `testSourceHasNoOMathThrows` — covers Source paragraph has no OMath scenario
 - [x] 6.5 `testOMathIndexOutOfRangeThrows` — covers omathIndex out of range scenario
@@ -48,7 +48,7 @@
 - [x] 6.10 `testNamespaceLenientAcceptsPrefixMismatch`, `testNamespaceStrictRejectsPrefixMismatch` — namespace policy scenarios (URI-mismatch case covered structurally — both modes throw on URI mismatch per implementation)
 - [x] 6.11 `testParagraphBatchSpliceAllOMath` — covers All OMath blocks spliced in source order scenario (3 OMath in source → 3 OMath in target via batch API)
 - [x] 6.12 batch context-anchor lookup failure path covered structurally (testParagraphBatchSpliceAllOMath verifies success path; failure path covered by single-OMath testAnchorNotFoundThrows since batch wraps that)
-- [x] 6.13 `testRoundTripPreservesOMathContent` — covers Round-trip lossless guarantee requirement (OMath glyph survives DocxWriter.write + DocxReader.read; carrier may transition Run→unrecognizedChildren on round-trip per existing #85/#92/#99-103 contract)
+- [x] 6.13 `testRoundTripPreservesOMathContent` — covers save/reload semantic fidelity (OMath glyph survives; carrier may transition Run→unrecognizedChildren per existing contract)
 - [x] 6.14 `testNoRegressionOnExistingOMathInTarget` — covers Pre-existing OMath in target paragraph preserved during splice scenario
 - [x] 6.15 Verified — full suite `swift test` ran 871 tests, 0 failures, 1 pre-existing skip. Existing Issue85/Issue92/Issue99/Issue101/Issue102/Issue103 OMath round-trip suites all pass; satisfies the No regression on existing OMath round-trip behavior requirement
 
@@ -72,12 +72,19 @@
 ## 10. Boundary, metadata, and batch-anchor remediations (#122, #124, #125)
 
 - [x] 10.1 Add RED coverage for inline/direct `.atEnd` after API-built and mixed carriers
-- [x] 10.2 Canonicalize all position-indexed and legacy fixed-order carriers without `Int.max` overflow
-- [x] 10.3 Reserve true inline/direct `.atStart` and `.atEnd` positions outside every existing carrier
+- [x] 10.2 Add absolute-boundary serializer lanes without rewriting legacy typed state or existing positions
+- [x] 10.3 Verify true inline/direct `.atStart` and `.atEnd` across all 13 position-indexed and legacy fixed-order carriers
 - [x] 10.4 Carry direct-child local name and preserve `oMathPara` through save/reload/extraction
 - [x] 10.5 Distinguish unmatched, leading-empty, and text batch anchors
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
 - [x] 10.7 Derive anchor occurrence instances; apply source-ordered groups right-to-left within each shared boundary
 - [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, and quote-complete namespace checks
-- [x] 10.9 Run `OMathSpliceTests`: 39 tests, 0 failures
-- [x] 10.10 Re-run full package regression: 1,467 tests, 31 conditional skips, 0 failures; IDD cluster re-verification follows on the remediation commit
+- [x] 10.9 Run `OMathSpliceTests`: 44 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,472 tests, 31 conditional skips, 0 failures; IDD cluster re-verification follows on the round-3 remediation commit
+
+## 11. Reload fidelity contract remediation (#123)
+
+- [x] 11.1 Diagnose typed XML normalization versus lexical byte identity
+- [x] 11.2 Choose canonical semantic XML equivalence as the explicit reload contract
+- [x] 11.3 Cover entity spelling, attribute order/quotes, namespace placement, prefix variants, and semantic inequality
+- [x] 11.4 Re-baseline proposal, design, spec, and historical task wording
