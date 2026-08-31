@@ -676,6 +676,8 @@ final class OMathSpliceTests: XCTestCase {
         let vendorFragments = [
             #"<x:oMath xmlns:x="urn:vendor:not-omml"><x:data/></x:oMath>"#,
             #"<x:oMath xmlns:x='urn:vendor:not-omml'><x:data/></x:oMath>"#,
+            #"<oMath xmlns="urn:vendor:not-omml"><data/></oMath>"#,
+            #"<oMath xmlns='urn:vendor:not-omml'><data/></oMath>"#,
         ]
         for vendorXML in vendorFragments {
             var run = Run(text: "")
@@ -698,15 +700,21 @@ final class OMathSpliceTests: XCTestCase {
     }
 
     func testStandardOMathSingleQuotedNamespaceStillUsesRunCarrier() {
-        let omathXML = #"<m:oMath xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/math'><m:r><m:t>α</m:t></m:r></m:oMath>"#
-        var run = Run(text: "")
-        run.rawXML = omathXML
-        run.properties.bold = true
+        let standardFragments = [
+            #"<m:oMath xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/math'><m:r><m:t>α</m:t></m:r></m:oMath>"#,
+            #"<oMath xmlns="http://schemas.openxmlformats.org/officeDocument/2006/math"><r><t>α</t></r></oMath>"#,
+            #"<oMath xmlns='http://schemas.openxmlformats.org/officeDocument/2006/math'><r><t>α</t></r></oMath>"#,
+        ]
+        for omathXML in standardFragments {
+            var run = Run(text: "")
+            run.rawXML = omathXML
+            run.properties.bold = true
 
-        XCTAssertEqual(
-            run.toXML(),
-            "<w:r><w:rPr><w:b/></w:rPr>\(omathXML)</w:r>"
-        )
+            XCTAssertEqual(
+                run.toXML(),
+                "<w:r><w:rPr><w:b/></w:rPr>\(omathXML)</w:r>"
+            )
+        }
     }
 
     // MARK: - No regression (6.14)

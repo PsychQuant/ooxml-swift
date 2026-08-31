@@ -79,5 +79,6 @@
 - [x] 10.6 Stack on verified #115 tri-state RunProperties and cover explicit-off `.omathOnly` through first reload plus dirty resave
 - [x] 10.7 Reject explicitly non-OMML namespaces in the root classifier and preserve generic rawXML exact replacement semantics
 - [x] 10.8 Accept both XML-legal quote styles in namespace URI extraction and cover vendor plus standard single-quoted declarations
-- [x] 10.9 Run `OMathSpliceTests`: 20 tests, 0 failures
-- [ ] 10.10 Run the complete package regression suite and repeat IDD multi-agent verification on the final commit
+- [x] 10.9 Restrict prefix detection to the root QName and cover prefixed/default namespace matrices
+- [x] 10.10 Run `OMathSpliceTests`: 20 tests, 0 failures
+- [ ] 10.11 Run the complete package regression suite and repeat IDD multi-agent verification on the final commit
