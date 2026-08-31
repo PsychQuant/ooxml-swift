@@ -100,6 +100,13 @@ The system SHALL provide `OMathSpliceRpRMode` with three modes controlling how t
 - **THEN** the serializer SHALL treat an OMath-root raw fragment as a child of the Run rather than a complete Run replacement
 - **AND** the Run carrier and the selected rPr propagation semantics SHALL remain intact
 
+#### Scenario: Same local name in a non-OMML namespace remains a raw replacement
+
+- **GIVEN** `Run.rawXML` contains a root named `oMath` or `oMathPara` that explicitly declares a namespace URI other than the standard OMML URI
+- **WHEN** the Run is serialized directly or through `Paragraph.toXML()`
+- **THEN** the raw XML SHALL retain the generic exact-replacement behavior
+- **AND** the serializer SHALL NOT add a `<w:r>` carrier or copied rPr
+
 #### Scenario: Spliced inline OMath can be used as another splice source
 
 - **GIVEN** an inline OMath was programmatically spliced into a Run's OMath-root rawXML carrier

@@ -672,6 +672,26 @@ final class OMathSpliceTests: XCTestCase {
         )
     }
 
+    func testVendorOMathNamedRawXMLRemainsExactReplacement() {
+        let vendorXML = #"<x:oMath xmlns:x="urn:vendor:not-omml"><x:data/></x:oMath>"#
+        var run = Run(text: "")
+        run.rawXML = vendorXML
+        run.properties.bold = true
+
+        XCTAssertEqual(
+            run.toXML(),
+            vendorXML,
+            "same local name in a non-OMML namespace must keep generic rawXML replacement semantics"
+        )
+
+        let paragraphXML = Paragraph(runs: [run]).toXML()
+        XCTAssertEqual(
+            paragraphXML,
+            "<w:p>\(vendorXML)</w:p>",
+            "Paragraph.emitRun must use the same namespace-aware classification"
+        )
+    }
+
     // MARK: - No regression (6.14)
 
     /// Pre-existing OMath in target paragraph must be preserved during splice.
