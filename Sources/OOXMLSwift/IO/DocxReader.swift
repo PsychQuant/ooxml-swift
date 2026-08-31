@@ -2554,14 +2554,14 @@ public struct DocxReader {
             props.rStyle = val
         }
 
-        // 粗體
-        if element.elements(forName: "w:b").first != nil {
-            props.bold = true
+        // 粗體（OOXML ST_OnOff：presence 不是永遠等於 true）
+        if let bold = element.elements(forName: "w:b").first {
+            props.bold = parseOnOff(bold)
         }
 
         // 斜體
-        if element.elements(forName: "w:i").first != nil {
-            props.italic = true
+        if let italic = element.elements(forName: "w:i").first {
+            props.italic = parseOnOff(italic)
         }
 
         // 底線
@@ -2571,8 +2571,8 @@ public struct DocxReader {
         }
 
         // 刪除線
-        if element.elements(forName: "w:strike").first != nil {
-            props.strikethrough = true
+        if let strike = element.elements(forName: "w:strike").first {
+            props.strikethrough = parseOnOff(strike)
         }
 
         // 字型大小
@@ -2620,8 +2620,8 @@ public struct DocxReader {
         }
 
         // v0.20.0+ (#60): noProof — suppress spell/grammar check.
-        if element.elements(forName: "w:noProof").first != nil {
-            props.noProof = true
+        if let noProof = element.elements(forName: "w:noProof").first {
+            props.noProof = parseOnOff(noProof)
         }
 
         // v0.20.0+ (#60): kern — minimum kerning threshold (half-points).
@@ -2718,7 +2718,7 @@ public struct DocxReader {
     private static func parseOnOff(_ element: XMLElement) -> Bool {
         guard let raw = wordAttributeValue(element, localName: "val")?
             .lowercased() else { return true }
-        return !["0", "false", "off", "no"].contains(raw)
+        return !["0", "false", "off"].contains(raw)
     }
 
     private static func parseTable(
