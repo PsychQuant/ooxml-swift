@@ -24,6 +24,21 @@ final class TemplateFixtureGateTests: XCTestCase {
         XCTAssertEqual(resolved.path, fixture.path)
     }
 
+    func testThesisFixtureNameResolvesThroughSharedGate() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("thesis-gate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fixture = dir.appendingPathComponent(TemplateFixtureGate.thesisFixtureName)
+        XCTAssertTrue(FileManager.default.createFile(atPath: fixture.path, contents: Data()))
+
+        let resolved = try TemplateFixtureGate.requireTemplate(
+            TemplateFixtureGate.thesisFixtureName,
+            dirOverride: dir.path
+        )
+        XCTAssertEqual(resolved.path, fixture.path)
+    }
+
     /// Real baseline template (90_template_ja) coverage — runs only on a
     /// maintainer machine with `MACDOC_TEMPLATE_DIR` set; skips loudly on CI.
     func testRealTemplateBaselineCoverage() throws {

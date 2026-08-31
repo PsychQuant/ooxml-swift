@@ -24,6 +24,9 @@ enum TemplateFixtureGate {
         "REC-O-01-新案審查送件核對單-20250220公告.docx"
     }
 
+    /// Private thesis corpus fixture used by the content-equality matrix.
+    static var thesisFixtureName: String { "thesis-fixture.docx" }
+
     /// Resolves a real-template fixture `name` under the gate directory
     /// (`dirOverride` when given — for tests injecting a temp dir without
     /// mutating process env — otherwise `$MACDOC_TEMPLATE_DIR`). Throws
