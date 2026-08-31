@@ -411,7 +411,7 @@ extension WordDocument {
             newRuns.append(prefix)
         }
         newRuns.append(newOmath)
-        if !suffix.text.isEmpty || suffix.rawXML != nil {
+        if !suffix.text.isEmpty || suffix.rawXML != nil || !(suffix.rawElements?.isEmpty ?? true) {
             newRuns.append(suffix)
         }
 
@@ -419,9 +419,9 @@ extension WordDocument {
     }
 
     /// Splits a run's `text` at the given UTF-16 character offset, returning prefix and suffix.
-    /// `properties`, `position`, `rawXML`, etc. are deep-copied to both sides (rawXML stays
-    /// only on whichever segment carries the underlying content — but for plain-text runs,
-    /// rawXML is typically nil, so both sides get nil).
+    /// `properties` and `position` are copied to both sides. Opaque `rawElements`
+    /// serialize after typed text, so they move to the suffix only and remain
+    /// exactly once (including when the suffix text is empty).
     internal static func splitRun(_ original: Run, atCharOffset offset: Int) -> (prefix: Run, suffix: Run) {
         let text = original.text
         let utf16 = text.utf16
@@ -442,10 +442,7 @@ extension WordDocument {
 
         var prefixRun = original
         prefixRun.text = prefixStr
-        // Prefix keeps drawing/rawXML/etc. only if it's non-text content (rare). For
-        // plain text runs, drawing/rawXML are typically nil — they pass through.
-        // For OMath-bearing runs, we shouldn't be splitting them in the first place
-        // (anchor resolution skips them). So this is safe.
+        prefixRun.rawElements = nil
 
         var suffixRun = original
         suffixRun.text = suffixStr
@@ -686,7 +683,9 @@ extension WordDocument {
         let originalPosition = original.position ?? 1
         let (prefix, suffix) = splitRun(original, atCharOffset: offset)
         let hasPrefix = !prefix.text.isEmpty || prefix.rawXML != nil
-        let hasSuffix = !suffix.text.isEmpty || suffix.rawXML != nil
+        let hasSuffix = !suffix.text.isEmpty
+            || suffix.rawXML != nil
+            || !(suffix.rawElements?.isEmpty ?? true)
         let componentCount = (hasPrefix ? 1 : 0) + 1 + (hasSuffix ? 1 : 0)
         shiftCarrierPositions(
             after: originalPosition,

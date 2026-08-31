@@ -289,6 +289,69 @@ final class OMathSpliceTests: XCTestCase {
         )
     }
 
+    func testRawElementsRemainSingleAcrossInlineDirectAndBatchSplits() throws {
+        let raw = RawElement(name: "object", xml: "<w:object data-id='OPAQUE_CHILD'/>")
+        func makeTarget() -> WordDocument {
+            var run = Run(text: "ANCHORtail")
+            run.rawElements = [raw]
+            return makeDocument(with: Paragraph(runs: [run]))
+        }
+        func assertSingleOpaqueChild(_ document: WordDocument) throws {
+            guard case .paragraph(let result) = document.body.children[0] else { XCTFail(); return }
+            let xml = result.toXML()
+            XCTAssertEqual(xml.components(separatedBy: "OPAQUE_CHILD").count - 1, 1, xml)
+            XCTAssertLessThan(
+                try XCTUnwrap(xml.range(of: "ANCHOR")?.lowerBound),
+                try XCTUnwrap(xml.range(of: "oMath")?.lowerBound)
+            )
+            XCTAssertLessThan(
+                try XCTUnwrap(xml.range(of: "tail")?.lowerBound),
+                try XCTUnwrap(xml.range(of: "OPAQUE_CHILD")?.lowerBound),
+                "Opaque Run children must remain after the suffix text"
+            )
+        }
+
+        var inlineTarget = makeTarget()
+        try inlineTarget.spliceOMath(
+            from: try parseParagraph(xml: Self.sourceInlineRunOMath),
+            toBodyParagraphIndex: 0,
+            position: .afterText("ANCHOR")
+        )
+        try assertSingleOpaqueChild(inlineTarget)
+
+        var directTarget = makeTarget()
+        try directTarget.spliceOMath(
+            from: try parseParagraph(xml: Self.sourceDirectChildOMath),
+            toBodyParagraphIndex: 0,
+            position: .afterText("ANCHOR")
+        )
+        try assertSingleOpaqueChild(directTarget)
+
+        var batchMath = Run(text: "")
+        batchMath.rawXML = "<m:oMath><m:r><m:t>β</m:t></m:r></m:oMath>"
+        let batchSource = Paragraph(runs: [Run(text: "ANCHOR"), batchMath])
+        var batchTarget = makeTarget()
+        XCTAssertEqual(try batchTarget.spliceParagraphOMath(from: batchSource, toBodyParagraphIndex: 0), 1)
+        try assertSingleOpaqueChild(batchTarget)
+
+        var endRun = Run(text: "ANCHOR")
+        endRun.rawElements = [raw]
+        var endTarget = makeDocument(with: Paragraph(runs: [endRun]))
+        try endTarget.spliceOMath(
+            from: try parseParagraph(xml: Self.sourceInlineRunOMath),
+            toBodyParagraphIndex: 0,
+            position: .afterText("ANCHOR")
+        )
+        guard case .paragraph(let endResult) = endTarget.body.children[0] else { XCTFail(); return }
+        let endXML = endResult.toXML()
+        XCTAssertEqual(endXML.components(separatedBy: "OPAQUE_CHILD").count - 1, 1)
+        XCTAssertLessThan(
+            try XCTUnwrap(endXML.range(of: "oMath")?.lowerBound),
+            try XCTUnwrap(endXML.range(of: "OPAQUE_CHILD")?.lowerBound),
+            "An empty-text suffix must survive to carry post-text rawElements"
+        )
+    }
+
     /// Test 6.5: omathIndex out of range → throws .omathIndexOutOfRange.
     func testOMathIndexOutOfRangeThrows() throws {
         let sourcePara = try parseParagraph(xml: Self.sourceInlineRunOMath)

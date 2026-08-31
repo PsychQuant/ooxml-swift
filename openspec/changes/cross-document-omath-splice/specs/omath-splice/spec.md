@@ -97,6 +97,13 @@ The system SHALL support `OMathSplicePosition.afterText(_, instance:, options:)`
 - **THEN** the hidden typed text SHALL NOT resolve a single or batch anchor
 - **AND** the opaque content SHALL remain single and unchanged rather than being copied into split prefix/suffix Runs
 
+#### Scenario: Visible text with post-text raw elements preserves one opaque copy
+
+- **WHEN** an anchor splits a Run whose visible typed text is followed by `rawElements`
+- **THEN** the prefix SHALL contain no copied `rawElements`
+- **AND** the suffix SHALL retain the original `rawElements` exactly once, including when suffix text is empty
+- **AND** inline, direct-child, and batch splice SHALL preserve the same ordering
+
 #### Scenario: Anchor instance > 1 resolves to Nth occurrence
 
 - **WHEN** caller invokes `spliceOMath` with `position: .afterText("檢定", instance: 2)` and the target paragraph contains "檢定" three times at character offsets 10, 30, 50
