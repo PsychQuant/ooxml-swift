@@ -222,14 +222,22 @@ private func decodeXMLAttributeValue(_ raw: String) -> String {
         case "apos": decoded = "'"
         default:
             let scalarValue: UInt32?
-            if entity.hasPrefix("#x") || entity.hasPrefix("#X") {
-                scalarValue = UInt32(entity.dropFirst(2), radix: 16)
+            if entity.hasPrefix("#x") {
+                let digits = entity.dropFirst(2)
+                let isHex = !digits.isEmpty && digits.utf8.allSatisfy {
+                    ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 70) || ($0 >= 97 && $0 <= 102)
+                }
+                scalarValue = isHex ? UInt32(digits, radix: 16) : nil
             } else if entity.hasPrefix("#") {
-                scalarValue = UInt32(entity.dropFirst(), radix: 10)
+                let digits = entity.dropFirst()
+                let isDecimal = !digits.isEmpty && digits.utf8.allSatisfy { $0 >= 48 && $0 <= 57 }
+                scalarValue = isDecimal ? UInt32(digits, radix: 10) : nil
             } else {
                 scalarValue = nil
             }
-            if let scalarValue, let scalar = UnicodeScalar(scalarValue) {
+            if let scalarValue,
+               isValidXML10Scalar(scalarValue),
+               let scalar = UnicodeScalar(scalarValue) {
                 decoded = String(scalar)
             } else {
                 decoded = nil
@@ -244,6 +252,15 @@ private func decodeXMLAttributeValue(_ raw: String) -> String {
         index = raw.index(after: semicolon)
     }
     return output
+}
+
+private func isValidXML10Scalar(_ value: UInt32) -> Bool {
+    value == 0x9
+        || value == 0xA
+        || value == 0xD
+        || (value >= 0x20 && value <= 0xD7FF)
+        || (value >= 0xE000 && value <= 0xFFFD)
+        || (value >= 0x10000 && value <= 0x10FFFF)
 }
 
 // MARK: - Internal: rPr propagation modes

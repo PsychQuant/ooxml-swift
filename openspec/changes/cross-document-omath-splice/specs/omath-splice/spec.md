@@ -113,6 +113,7 @@ The system SHALL provide `OMathSpliceRpRMode` with three modes controlling how t
 - **AND** namespace-looking text inside ordinary root attribute values SHALL NOT be treated as a declaration
 - **AND** an explicit empty default namespace declaration SHALL remain distinct from an absent declaration
 - **AND** namespace URI comparison SHALL use XML-normalized attribute values, including predefined entities and numeric character references
+- **AND** malformed numeric references SHALL remain literal and SHALL NOT acquire standard-OMML meaning
 - **AND** a root that inherited the standard OMML namespace SHALL receive a self-contained root declaration when spliced into another document, even if a descendant shadows the same prefix or default namespace
 
 #### Scenario: Spliced inline OMath can be used as another splice source
