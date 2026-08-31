@@ -355,6 +355,14 @@ public struct RunProperties: Equatable {
     /// collapse an absent direct property into explicit false.
     var specifiedBold: Bool? { isBoldSpecified ? bold : nil }
     var specifiedItalic: Bool? { isItalicSpecified ? italic : nil }
+    var specifiedStrikethrough: Bool? {
+        isStrikethroughSpecified ? strikethrough : nil
+    }
+    var specifiedNoProof: Bool? { isNoProofSpecified ? noProof : nil }
+    var specifiedUnderlineRawValue: String? {
+        guard isUnderlineSpecified else { return nil }
+        return underline?.rawValue ?? "none"
+    }
 
     /// v0.20.0+ (#60): `<w:kern w:val="N"/>` — minimum font size threshold for kerning.
     /// OOXML uses half-points (e.g., kern=32 means kern only at 16pt+).
@@ -371,6 +379,9 @@ public struct RunProperties: Equatable {
     /// architectural pattern as `Run.rawElements` (v0.14.0+, #52).
     public init() {}
 
+    /// `nil` optional arguments mean "unspecified". To create an explicit
+    /// underline-removal patch, initialize first and then assign
+    /// `properties.underline = nil` so the assignment-presence bit is set.
     public init(bold: Bool? = nil,
          italic: Bool? = nil,
          underline: UnderlineType? = nil,
@@ -703,8 +714,8 @@ extension RunProperties {
         if let highlight = highlight {
             add(26, "<w:highlight w:val=\"\(highlight.rawValue)\"/>")
         }
-        if let underline = underline {
-            add(27, "<w:u w:val=\"\(underline.rawValue)\"/>")
+        if let underline = specifiedUnderlineRawValue {
+            add(27, "<w:u w:val=\"\(underline)\"/>")
         }
 
         // 28. effect (TextEffect — TextEffect.none returns empty so guard).

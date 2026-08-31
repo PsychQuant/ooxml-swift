@@ -288,9 +288,21 @@ extension RunProperties {
     func toChangeXML() -> String {
         var xml = "<w:rPr>"
 
-        if bold == true { xml += "<w:b/>" }
-        if italic == true { xml += "<w:i/>" }
-        if let underline = underline { xml += "<w:u w:val=\"\(underline.rawValue)\"/>" }
+        if let bold = specifiedBold {
+            xml += bold ? "<w:b/>" : "<w:b w:val=\"0\"/>"
+        }
+        if let italic = specifiedItalic {
+            xml += italic ? "<w:i/>" : "<w:i w:val=\"0\"/>"
+        }
+        if let strikethrough = specifiedStrikethrough {
+            xml += strikethrough ? "<w:strike/>" : "<w:strike w:val=\"0\"/>"
+        }
+        if let noProof = specifiedNoProof {
+            xml += noProof ? "<w:noProof/>" : "<w:noProof w:val=\"0\"/>"
+        }
+        if let underline = specifiedUnderlineRawValue {
+            xml += "<w:u w:val=\"\(underline)\"/>"
+        }
         // v0.19.4+ (#56 R3-NEW-6 codex P1): toChangeXML is a parallel emit path
         // (rPrChange's previousFormat) that pre-fix only escaped fontName.
         // color is a String? — same injection sink as RunProperties.toXML's

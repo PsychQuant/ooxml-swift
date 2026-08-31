@@ -18,6 +18,19 @@ The system SHALL distinguish absent, explicitly on, and explicitly off states fo
 - **WHEN** the element omits `w:val` or uses `1`, `true`, or `on`
 - **THEN** its Bool accessor is true and its state is explicitly specified
 
+#### Scenario: Parallel copy and revision paths preserve explicit off
+
+- **GIVEN** typed run properties contain explicit-off bold, italic, strikethrough, noProof, or underline
+- **WHEN** the run is copied through the tree-backed append/run-payload path or serialized as an `rPrChange` previous format
+- **THEN** each specified off value remains explicit in emitted OOXML
+- **AND** it SHALL NOT collapse to absence
+
+#### Scenario: WordprocessingML namespace aliases are accepted
+
+- **WHEN** a run uses a non-`w` prefix bound to the WordprocessingML namespace and carries explicit-off properties
+- **THEN** the typed reader recognizes the elements and values by namespace URI
+- **AND** the Bool accessors remain false and specified
+
 ### Requirement: Run-property merge distinguishes omission from explicit false
 
 A fresh `RunProperties()` patch SHALL leave existing boolean and underline properties unchanged. Explicit assignment of false SHALL disable the corresponding boolean. Explicit assignment of nil underline SHALL remove an existing underline.

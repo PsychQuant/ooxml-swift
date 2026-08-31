@@ -506,7 +506,7 @@ public enum ReverseExtractor {
     }
 
     /// rPr vocabulary and order must be exactly what setRuns stamps:
-    /// rFonts, b, i, color, sz, u, vertAlign.
+    /// rFonts, b, bCs, i, iCs, strike, noProof, color, sz, szCs, u, vertAlign.
     private static func extractRPr(_ rPr: XmlNode, into run: inout RunPayload, path: String) throws {
         guard rPr.attributes.isEmpty else { throw Unsupported("rPr-attrs", "\(path)/@attrs") }
         for child in try elementsOnly(rPr, path: path) {
@@ -528,17 +528,17 @@ public enum ReverseExtractor {
                 }
                 guard child.children.isEmpty else { throw Unsupported("rFonts-children", cpath) }
             case "b":
-                guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported("b-shape", cpath) }
-                run.bold = true
+                run.bold = try extractOnOff(child, path: cpath)
             case "bCs":
-                guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported("bCs-shape", cpath) }
-                run.boldCs = true
+                run.boldCs = try extractOnOff(child, path: cpath)
             case "i":
-                guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported("i-shape", cpath) }
-                run.italic = true
+                run.italic = try extractOnOff(child, path: cpath)
             case "iCs":
-                guard child.attributes.isEmpty, child.children.isEmpty else { throw Unsupported("iCs-shape", cpath) }
-                run.italicCs = true
+                run.italicCs = try extractOnOff(child, path: cpath)
+            case "strike":
+                run.strikethrough = try extractOnOff(child, path: cpath)
+            case "noProof":
+                run.noProof = try extractOnOff(child, path: cpath)
             case "color":
                 run.color = try singleVal(child, path: cpath)
             case "sz":
@@ -552,6 +552,19 @@ public enum ReverseExtractor {
             default:
                 throw Unsupported("rPr-element", cpath)
             }
+        }
+    }
+
+    private static func extractOnOff(_ node: XmlNode, path: String) throws -> Bool {
+        guard node.children.isEmpty else { throw Unsupported("on-off-children", path) }
+        guard node.attributes.count <= 1 else { throw Unsupported("on-off-attrs", path) }
+        guard let attribute = node.attributes.first else { return true }
+        guard attribute.prefix == "w", attribute.localName == "val" else {
+            throw Unsupported("on-off-attr", "\(path)/\(attrToken(attribute))")
+        }
+        switch attribute.value.lowercased() {
+        case "0", "false", "off": return false
+        default: return true
         }
     }
 
