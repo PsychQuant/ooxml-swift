@@ -523,6 +523,15 @@ extension Run {
               localName == "oMath" || localName == "oMathPara" else {
             return nil
         }
+        // A local-name match is insufficient because rawXML is a public
+        // generic replacement carrier. Preserve exact-replacement semantics
+        // when the root explicitly declares a non-OMML namespace. A missing
+        // declaration remains accepted because DocxReader fragments can
+        // inherit the standard `m` binding from an ancestor element.
+        if let declaredURI = OMathNamespace.extractURI(from: rawXML),
+           declaredURI != "http://schemas.openxmlformats.org/officeDocument/2006/math" {
+            return nil
+        }
         return rawXML
     }
 
