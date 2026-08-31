@@ -302,10 +302,18 @@ public struct LanguageProperties: Equatable {
 
 /// Run 格式屬性
 public struct RunProperties: Equatable {
-    public var bold: Bool = false
-    public var italic: Bool = false
-    public var underline: UnderlineType?
-    public var strikethrough: Bool = false
+    public var bold: Bool = false {
+        didSet { isBoldSpecified = true }
+    }
+    public var italic: Bool = false {
+        didSet { isItalicSpecified = true }
+    }
+    public var underline: UnderlineType? {
+        didSet { isUnderlineSpecified = true }
+    }
+    public var strikethrough: Bool = false {
+        didSet { isStrikethroughSpecified = true }
+    }
     public var fontSize: Int?              // 半點 (24 = 12pt)
     public var fontName: String?           // legacy single-axis; mirrors rFonts.ascii. Use rFonts for 4-axis preservation.
     public var color: String?              // RGB hex (e.g., "FF0000")
@@ -329,7 +337,19 @@ public struct RunProperties: Equatable {
     public var rFonts: RFontsProperties?
 
     /// v0.20.0+ (#60): `<w:noProof/>` — suppress spell/grammar check on this run.
-    public var noProof: Bool = false
+    public var noProof: Bool = false {
+        didSet { isNoProofSpecified = true }
+    }
+
+    /// OOXML on/off properties have three source states: absent, on, and
+    /// explicit off. Public Bool access remains source-compatible while these
+    /// presence bits let parsing, emission, and partial merge preserve the
+    /// distinction. They intentionally participate in synthesized Equatable.
+    private var isBoldSpecified = false
+    private var isItalicSpecified = false
+    private var isUnderlineSpecified = false
+    private var isStrikethroughSpecified = false
+    private var isNoProofSpecified = false
 
     /// v0.20.0+ (#60): `<w:kern w:val="N"/>` — minimum font size threshold for kerning.
     /// OOXML uses half-points (e.g., kern=32 means kern only at 16pt+).
@@ -346,20 +366,32 @@ public struct RunProperties: Equatable {
     /// architectural pattern as `Run.rawElements` (v0.14.0+, #52).
     public init() {}
 
-    public init(bold: Bool = false,
-         italic: Bool = false,
+    public init(bold: Bool? = nil,
+         italic: Bool? = nil,
          underline: UnderlineType? = nil,
-         strikethrough: Bool = false,
+         strikethrough: Bool? = nil,
          fontSize: Int? = nil,
          fontName: String? = nil,
          color: String? = nil,
          highlight: HighlightColor? = nil,
          verticalAlign: VerticalAlign? = nil,
          rStyle: String? = nil) {
-        self.bold = bold
-        self.italic = italic
-        self.underline = underline
-        self.strikethrough = strikethrough
+        if let bold {
+            self.bold = bold
+            self.isBoldSpecified = true
+        }
+        if let italic {
+            self.italic = italic
+            self.isItalicSpecified = true
+        }
+        if let underline {
+            self.underline = underline
+            self.isUnderlineSpecified = true
+        }
+        if let strikethrough {
+            self.strikethrough = strikethrough
+            self.isStrikethroughSpecified = true
+        }
         self.fontSize = fontSize
         self.fontName = fontName
         self.color = color
@@ -368,12 +400,12 @@ public struct RunProperties: Equatable {
         self.rStyle = rStyle
     }
 
-    /// 合併格式（覆蓋非 nil 值）
+    /// 合併格式。未指定的欄位維持原值；明確 false／nil 代表移除。
     mutating func merge(with other: RunProperties) {
-        if other.bold { self.bold = true }
-        if other.italic { self.italic = true }
-        if let underline = other.underline { self.underline = underline }
-        if other.strikethrough { self.strikethrough = true }
+        if other.isBoldSpecified { self.bold = other.bold }
+        if other.isItalicSpecified { self.italic = other.italic }
+        if other.isUnderlineSpecified { self.underline = other.underline }
+        if other.isStrikethroughSpecified { self.strikethrough = other.strikethrough }
         if let fontSize = other.fontSize { self.fontSize = fontSize }
         if let fontName = other.fontName { self.fontName = fontName }
         if let color = other.color { self.color = color }
@@ -387,7 +419,7 @@ public struct RunProperties: Equatable {
         // when set (per-axis merge would silently mask source values from the
         // base properties — safer to overwrite atomically).
         if let rFonts = other.rFonts { self.rFonts = rFonts }
-        if other.noProof { self.noProof = true }
+        if other.isNoProofSpecified { self.noProof = other.noProof }
         if let kern = other.kern { self.kern = kern }
         if let lang = other.lang { self.lang = lang }
     }
@@ -608,11 +640,20 @@ extension RunProperties {
             add(2, "<w:rFonts w:ascii=\"\(n)\" w:hAnsi=\"\(n)\" w:eastAsia=\"\(n)\" w:cs=\"\(n)\"/>")
         }
 
-        // 3. b · 5. i · 9. strike · 15. noProof
-        if bold { add(3, "<w:b/>") }
-        if italic { add(5, "<w:i/>") }
-        if strikethrough { add(9, "<w:strike/>") }
-        if noProof { add(15, "<w:noProof/>") }
+        // 3. b · 5. i · 9. strike · 15. noProof. A present element with
+        // w:val="0" is semantically different from an absent direct property.
+        if isBoldSpecified {
+            add(3, bold ? "<w:b/>" : "<w:b w:val=\"0\"/>")
+        }
+        if isItalicSpecified {
+            add(5, italic ? "<w:i/>" : "<w:i w:val=\"0\"/>")
+        }
+        if isStrikethroughSpecified {
+            add(9, strikethrough ? "<w:strike/>" : "<w:strike w:val=\"0\"/>")
+        }
+        if isNoProofSpecified {
+            add(15, noProof ? "<w:noProof/>" : "<w:noProof w:val=\"0\"/>")
+        }
 
         // 19. color
         if let color = color {
@@ -705,4 +746,3 @@ extension RunProperties {
         return slots.map { $0.xml }.joined()
     }
 }
-
