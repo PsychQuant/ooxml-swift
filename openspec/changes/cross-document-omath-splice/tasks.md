@@ -87,4 +87,4 @@
 - [x] 10.14 Normalize XML entities and decimal/hex character references before namespace URI comparison
 - [x] 10.15 Enforce XML CharRef grammar and XML 1.0 scalar ranges so malformed references remain literal
 - [x] 10.16 Run `OMathSpliceTests`: 23 tests, 0 failures
-- [ ] 10.17 Run the complete package regression suite and repeat IDD multi-agent verification on the final commit
+- [x] 10.17 Final verification on `fc84588`: `OMathSpliceTests` 23/23; full package 1,460 tests, 31 conditional skips, 0 failures; 5 independent reviewer passes plus Codex CLI PASS; Spectra analyze/validate clean; stacked PR base pinned to verified #115
