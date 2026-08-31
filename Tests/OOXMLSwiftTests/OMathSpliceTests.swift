@@ -345,6 +345,38 @@ final class OMathSpliceTests: XCTestCase {
         XCTAssertNil(omathRun?.properties.fontSize, ".discard should clear fontSize")
     }
 
+    func testRpRModeOMathOnlyPreservesLanguageAndDropsStyle() throws {
+        let sourceXML = """
+        <w:p \(Self.mNS)>
+          <w:r>
+            <w:rPr>
+              <w:rStyle w:val="SourceOnlyStyle"/>
+              <w:rFonts w:ascii="Cambria Math"/>
+              <w:sz w:val="24"/>
+              <w:lang w:val="en-US" w:eastAsia="zh-TW"/>
+            </w:rPr>
+            <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>
+          </w:r>
+        </w:p>
+        """
+        let source = try parseParagraph(xml: sourceXML)
+        var target = makeDocument(with: Paragraph(runs: [Run(text: "target")]))
+        try target.spliceOMath(
+            from: source,
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            rPrMode: .omathOnly
+        )
+
+        guard case .paragraph(let result) = target.body.children[0],
+              let run = result.runs.first(where: { $0.rawXML?.contains("oMath") == true }) else {
+            return XCTFail("Missing OMath Run")
+        }
+        XCTAssertEqual(run.properties.lang, LanguageProperties(val: "en-US", eastAsia: "zh-TW"))
+        XCTAssertNil(run.properties.rStyle)
+        XCTAssertEqual(run.properties.fontSize, 24)
+    }
+
     // MARK: - Namespace policy tests (6.10)
 
     /// .lenient (default) accepts prefix mismatch when URI is the same.
@@ -1124,6 +1156,129 @@ final class OMathSpliceTests: XCTestCase {
             try OMathSemanticXML.canonicalRepresentation(of: different),
             "Different semantic attribute values must remain different"
         )
+
+        let elementDifference = lexicalB.replacingOccurrences(of: "math:ctrl", with: "math:other")
+        let childOrderDifference = "<math:oMath data-b='2' xmlns:math='\(uri)' data-a='1'><math:r><math:t>α</math:t><math:ctrl math:val='on'/></math:r></math:oMath>"
+        let textDifference = lexicalB.replacingOccurrences(of: ">α<", with: ">β<")
+        for candidate in [elementDifference, childOrderDifference, textDifference] {
+            XCTAssertFalse(try OMathSemanticXML.isEquivalent(lexicalA, candidate))
+        }
+
+        let adjacentText = "<m:oMath xmlns:m='\(uri)'><m:r><m:t>α<![CDATA[β]]>γ</m:t></m:r></m:oMath>"
+        let mergedText = "<m:oMath xmlns:m='\(uri)'><m:r><m:t>αβγ</m:t></m:r></m:oMath>"
+        XCTAssertTrue(try OMathSemanticXML.isEquivalent(adjacentText, mergedText))
+
+        XCTAssertFalse(try OMathSemanticXML.isEquivalent("<xml:oMath/>", "<oMath/>"))
+        XCTAssertFalse(try OMathSemanticXML.isEquivalent(
+            "<m:oMath xmlns:m='\(uri)' xmlns:p='unbound:p' p:flag='1'/>",
+            "<m:oMath xmlns:m='\(uri)' p:flag='1'/>"
+        ))
+    }
+
+    func testOMathSemanticContractSurvivesActualSpliceWriteReload() throws {
+        let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        let sourceXML = "<m:oMath xmlns:m='\(uri)' data-b='2' data-a='1'><m:r><m:ctrl m:val='on'/><m:t>&#x3B1;</m:t></m:r></m:oMath>"
+        var sourceRun = Run(text: "")
+        sourceRun.rawXML = sourceXML
+        let source = Paragraph(runs: [sourceRun])
+        let expected = try XCTUnwrap(OMathExtractor.extract(from: source).first?.xml)
+        var target = makeDocument(with: Paragraph(runs: [Run(text: "target")]))
+        try target.spliceOMath(from: source, toBodyParagraphIndex: 0, position: .atEnd)
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OMathSpliceTests-semantic-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try DocxWriter.write(target, to: url)
+        let reloaded = try DocxReader.read(from: url)
+        guard case .paragraph(let paragraph) = reloaded.body.children[0] else { XCTFail(); return }
+        let actual = try XCTUnwrap(OMathExtractor.extract(from: paragraph).first?.xml)
+        XCTAssertTrue(try OMathSemanticXML.isEquivalent(expected, actual))
+    }
+
+    func testExtractorUsesAbsoluteBoundarySerializationOrder() throws {
+        let alphaSource = try parseParagraph(xml: Self.sourceDirectChildOMath)
+        let betaXML = "<w:p \(Self.mNS)><m:oMath><m:r><m:t>β</m:t></m:r></m:oMath></w:p>"
+        let betaSource = try parseParagraph(xml: betaXML)
+        var target = makeDocument(with: Paragraph(runs: [Run(text: "body")]))
+
+        try target.spliceOMath(from: alphaSource, toBodyParagraphIndex: 0, position: .atStart)
+        try target.spliceOMath(from: betaSource, toBodyParagraphIndex: 0, position: .atStart)
+        guard case .paragraph(let paragraph) = target.body.children[0] else { XCTFail(); return }
+
+        let extracted = OMathExtractor.extract(from: paragraph)
+        XCTAssertEqual(extracted.count, 2)
+        XCTAssertTrue(extracted[0].xml.contains("<m:t>β</m:t>"), "Extractor must follow boundary XML order")
+        XCTAssertTrue(extracted[1].xml.contains("<m:t>α</m:t>"), "Extractor must follow boundary XML order")
+
+        let xml = paragraph.toXML()
+        XCTAssertLessThan(
+            try XCTUnwrap(xml.range(of: "<m:t>β</m:t>")?.lowerBound),
+            try XCTUnwrap(xml.range(of: "<m:t>α</m:t>")?.lowerBound)
+        )
+    }
+
+    func testNamespacePolicyDecodesEntitiesFailsClosedAndHandlesDefaultStrict() throws {
+        let uri = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        let entityURI = "http://schemas.openxmlformats.org/officeDocument/2006/&#x6D;ath"
+        XCTAssertEqual(OMathNamespace.extractURI(from: "<m:oMath xmlns:m='\(entityURI)'/>"), uri)
+
+        var malformedRun = Run(text: "")
+        malformedRun.rawXML = "<m:oMath xmlns:m='\(uri)><m:r/></m:oMath>"
+        var malformedTarget = makeDocument(with: Paragraph(runs: [Run(text: "target")]))
+        XCTAssertThrowsError(
+            try malformedTarget.spliceOMath(
+                from: Paragraph(runs: [malformedRun]),
+                toBodyParagraphIndex: 0,
+                position: .atEnd
+            )
+        ) { error in
+            guard case .malformedOMathXML = error as? OMathSpliceError else {
+                return XCTFail("Expected malformedOMathXML, got \(error)")
+            }
+        }
+        guard case .paragraph(let unchanged) = malformedTarget.body.children[0] else { XCTFail(); return }
+        XCTAssertEqual(unchanged.text, "target")
+        XCTAssertFalse(unchanged.toXML().contains("oMath"))
+
+        var defaultSourceRun = Run(text: "")
+        defaultSourceRun.rawXML = "<oMath xmlns='\(uri)'><r><t>δ</t></r></oMath>"
+        var defaultTarget = Paragraph(runs: [Run(text: "target")])
+        defaultTarget.unrecognizedChildren = [
+            UnrecognizedChild(
+                name: "oMath",
+                rawXML: "<oMath xmlns='\(uri)'><r><t>existing</t></r></oMath>",
+                position: 2
+            )
+        ]
+        var defaultDocument = makeDocument(with: defaultTarget)
+        XCTAssertNoThrow(try defaultDocument.spliceOMath(
+            from: Paragraph(runs: [defaultSourceRun]),
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            namespacePolicy: .strict
+        ))
+
+        var mixedTarget = Paragraph()
+        var firstRun = Run(text: "")
+        firstRun.rawXML = "<m:oMath xmlns:m='\(uri)'><m:r/></m:oMath>"
+        firstRun.position = 1
+        mixedTarget.runs = [firstRun]
+        mixedTarget.unrecognizedChildren = [
+            UnrecognizedChild(
+                name: "oMath",
+                rawXML: "<mml:oMath xmlns:mml='\(uri)'><mml:r/></mml:oMath>",
+                position: 2
+            )
+        ]
+        var mixedDocument = makeDocument(with: mixedTarget)
+        var mSource = Run(text: "")
+        mSource.rawXML = "<m:oMath xmlns:m='\(uri)'><m:r/></m:oMath>"
+        XCTAssertNoThrow(try mixedDocument.spliceOMath(
+            from: Paragraph(runs: [mSource]),
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            namespacePolicy: .strict
+        ))
     }
 
     // MARK: - No regression (6.14)

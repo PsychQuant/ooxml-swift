@@ -17,7 +17,7 @@
 - [x] 3.3 Implement namespace policy check (lenient: throw only on URI mismatch; strict: throw on prefix or URI mismatch) per the Namespace policy controls prefix/URI mismatch handling requirement
 - [x] 3.4 Branch on extracted OMath kind: inRun → wrap in new `Run` with rawXML; directChild → append to target paragraph's `unrecognizedChildren` (Carrier preservation strategy)
 - [x] 3.5 Apply `OMathSpliceRpRMode` for source Run rPr propagation: `.full` deep-copy, `.omathOnly` whitelist (rFonts/sz/szCs/lang/bold/italic), `.discard` empty (rPr propagation modes requirement)
-- [x] 3.6 Resolve `OMathSplicePosition` to insertion site within target paragraph; for `.atStart` / `.atEnd` use position bounds; for `.afterText` / `.beforeText` use anchor lookup against `flattenedDisplayText()` with `AnchorLookupOptions`
+- [x] 3.6 Resolve `.atStart` / `.atEnd` through absolute-boundary serializer lanes; resolve `.afterText` / `.beforeText` with `AnchorLookupOptions`
 
 ## 4. Mid-paragraph anchor-Run split
 
@@ -30,7 +30,7 @@
 ## 5. Paragraph-level batch splice (high-level API)
 
 - [x] 5.1 Implement public `WordDocument.spliceParagraphOMath(from:toBodyParagraphIndex:rPrMode:namespacePolicy:)` per Two-tier API: `spliceOMath` (single) + `spliceParagraphOMath` (batch) decision
-- [x] 5.2 For each extracted OMath in source paragraph, derive context anchor by slicing `flattenedDisplayText()` 5-10 chars on each side of the OMath's source position
+- [x] 5.2 For each extracted OMath, derive up to 10 trailing prose characters plus the source occurrence instance
 - [x] 5.3 Derive `(prefix, occurrence instance)`, group shared boundaries, and call `spliceOMath` right-to-left within source-ordered groups
 - [x] 5.4 Preflight each anchor group; on failure throw `.contextAnchorNotFound(omathIndex:, snippet:)` while preserving only earlier source groups
 
@@ -44,7 +44,7 @@
 - [x] 6.6 `testTargetParagraphOutOfRangeThrows` — covers Target paragraph index out of range scenario
 - [x] 6.7 `testMidParagraphSpliceWithRunSplit` — covers Anchor falls in middle of a run scenario; verifies prefix/OMath/suffix three-run output with shared position and copied rPr (Mid-paragraph splice via anchor-Run split decision)
 - [x] 6.8 `testAnchorNotFoundThrows` — covers Anchor not found in target paragraph scenario
-- [x] 6.9 `testRpRModeFullCopiesVerbatim`, `testRpRModeDiscardResetsToDefault` — rPr propagation scenarios (Full + Discard. OMathOnly mode whitelist tested implicitly via Full+Discard contrast — adding explicit test if rPr drift surfaces)
+- [x] 6.9 Full, OMathOnly, and Discard rPr modes have explicit coverage, including language preservation and style stripping
 - [x] 6.10 `testNamespaceLenientAcceptsPrefixMismatch`, `testNamespaceStrictRejectsPrefixMismatch` — namespace policy scenarios (URI-mismatch case covered structurally — both modes throw on URI mismatch per implementation)
 - [x] 6.11 `testParagraphBatchSpliceAllOMath` — covers All OMath blocks spliced in source order scenario (3 OMath in source → 3 OMath in target via batch API)
 - [x] 6.12 batch context-anchor lookup failure path covered structurally (testParagraphBatchSpliceAllOMath verifies success path; failure path covered by single-OMath testAnchorNotFoundThrows since batch wraps that)
@@ -79,8 +79,8 @@
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
 - [x] 10.7 Derive anchor occurrence instances; apply source-ordered groups right-to-left within each shared boundary
 - [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, and quote-complete namespace checks
-- [x] 10.9 Run `OMathSpliceTests`: 44 tests, 0 failures
-- [x] 10.10 Re-run full package regression: 1,472 tests, 31 conditional skips, 0 failures; IDD cluster re-verification follows on the round-3 remediation commit
+- [x] 10.9 Run `OMathSpliceTests`: 48 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,476 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-4 remediation commit
 
 ## 11. Reload fidelity contract remediation (#123)
 
@@ -88,3 +88,4 @@
 - [x] 11.2 Choose canonical semantic XML equivalence as the explicit reload contract
 - [x] 11.3 Cover entity spelling, attribute order/quotes, namespace placement, prefix variants, and semantic inequality
 - [x] 11.4 Re-baseline proposal, design, spec, and historical task wording
+- [x] 11.5 Verify actual splice/write/reload canonical equivalence and collision-resistant namespace/text handling
