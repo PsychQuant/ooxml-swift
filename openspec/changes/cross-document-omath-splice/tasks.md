@@ -15,7 +15,7 @@
 - [x] 3.1 Implement public `WordDocument.spliceOMath(from:toBodyParagraphIndex:position:omathIndex:rPrMode:namespacePolicy:)` per the Single-OMath verbatim splice between documents requirement
 - [x] 3.2 Validate inputs: throw `.targetParagraphOutOfRange` if `toBodyParagraphIndex` invalid; throw `.sourceHasNoOMath` if extraction returns empty; throw `.omathIndexOutOfRange` if `omathIndex >= extracted.count`
 - [x] 3.3 Implement namespace policy check (lenient: throw only on URI mismatch; strict: throw on prefix or URI mismatch) per the Namespace policy controls prefix/URI mismatch handling requirement
-- [x] 3.4 Branch on extracted OMath kind: inRun → wrap in new `Run` with rawXML; directChild → append to target paragraph's `unrecognizedChildren` (Carrier preservation strategy)
+- [x] 3.4 Branch on extracted OMath kind: inRun → wrap the verbatim OMath as a `Run.rawElements` child so rPr remains serializable; directChild → append to target paragraph's `unrecognizedChildren` (Carrier preservation strategy; corrected by #117)
 - [x] 3.5 Apply `OMathSpliceRpRMode` for source Run rPr propagation: `.full` deep-copy, `.omathOnly` whitelist (rFonts/sz/szCs/lang/bold/italic), `.discard` empty (rPr propagation modes requirement)
 - [x] 3.6 Resolve `OMathSplicePosition` to insertion site within target paragraph; for `.atStart` / `.atEnd` use position bounds; for `.afterText` / `.beforeText` use anchor lookup against `flattenedDisplayText()` with `AnchorLookupOptions`
 
@@ -44,11 +44,11 @@
 - [x] 6.6 `testTargetParagraphOutOfRangeThrows` — covers Target paragraph index out of range scenario
 - [x] 6.7 `testMidParagraphSpliceWithRunSplit` — covers Anchor falls in middle of a run scenario; verifies prefix/OMath/suffix three-run output with shared position and copied rPr (Mid-paragraph splice via anchor-Run split decision)
 - [x] 6.8 `testAnchorNotFoundThrows` — covers Anchor not found in target paragraph scenario
-- [x] 6.9 `testRpRModeFullCopiesVerbatim`, `testRpRModeDiscardResetsToDefault` — rPr propagation scenarios (Full + Discard. OMathOnly mode whitelist tested implicitly via Full+Discard contrast — adding explicit test if rPr drift surfaces)
+- [x] 6.9 `testRpRModeFullCopiesVerbatim`, `testRpRModeOMathOnlyEmitsWhitelistInsideRunCarrier`, `testRpRModeDiscardResetsToDefault` — all three rPr propagation scenarios assert the serialized `<w:rPr>` / OMath child shape (#117)
 - [x] 6.10 `testNamespaceLenientAcceptsPrefixMismatch`, `testNamespaceStrictRejectsPrefixMismatch` — namespace policy scenarios (URI-mismatch case covered structurally — both modes throw on URI mismatch per implementation)
 - [x] 6.11 `testParagraphBatchSpliceAllOMath` — covers All OMath blocks spliced in source order scenario (3 OMath in source → 3 OMath in target via batch API)
 - [x] 6.12 batch context-anchor lookup failure path covered structurally (testParagraphBatchSpliceAllOMath verifies success path; failure path covered by single-OMath testAnchorNotFoundThrows since batch wraps that)
-- [x] 6.13 `testRoundTripPreservesOMathContent` — covers Round-trip lossless guarantee requirement (OMath glyph survives DocxWriter.write + DocxReader.read; carrier may transition Run→unrecognizedChildren on round-trip per existing #85/#92/#99-103 contract)
+- [x] 6.13 `testRoundTripPreservesOMathContent` — covers Round-trip lossless guarantee requirement; OMath glyph survives DocxWriter.write + DocxReader.read and an inline OMath remains inside a Run carrier (#117)
 - [x] 6.14 `testNoRegressionOnExistingOMathInTarget` — covers Pre-existing OMath in target paragraph preserved during splice scenario
 - [x] 6.15 Verified — full suite `swift test` ran 871 tests, 0 failures, 1 pre-existing skip. Existing Issue85/Issue92/Issue99/Issue101/Issue102/Issue103 OMath round-trip suites all pass; satisfies the No regression on existing OMath round-trip behavior requirement
 
@@ -68,3 +68,11 @@
 
 - [x] 9.1 Comment on `PsychQuant/che-word-mcp#160` noting v0.24.0 ships and unblocks MCP wrapper implementation
 - [x] 9.2 Comment on `kiki830621/collaboration_guo_analysis#17` noting the upstream API is available; rescue script Phase 7 can proceed
+
+## 10. Issue #117 remediation — serializable inline rPr carrier
+
+- [x] 10.1 Add RED assertions proving `.full`, `.omathOnly`, and round-trip carrier semantics fail when inline OMath is assigned to `Run.rawXML`
+- [x] 10.2 Store inline OMath as a verbatim `Run.rawElements` child so `Run.toXML()` emits the enclosing `<w:r>` and copied `<w:rPr>`
+- [x] 10.3 Update OMath tests to inspect both legacy source `rawXML` and target/reloaded `rawElements` carriers
+- [x] 10.4 Run `OMathSpliceTests`: 15 tests, 0 failures
+- [ ] 10.5 Run the complete package regression suite and IDD multi-agent verification

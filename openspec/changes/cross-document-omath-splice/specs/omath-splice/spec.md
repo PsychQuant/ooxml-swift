@@ -7,15 +7,16 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 #### Scenario: Inline OMath spliced from source Run.rawXML to target paragraph end
 
 - **WHEN** caller invokes `target.spliceOMath(from: sourceParagraph, toBodyParagraphIndex: 5, position: .atEnd, omathIndex: 0)` with `sourceParagraph` containing one OMath stored in `Run.rawXML`
-- **THEN** the system SHALL append a new `Run` with `rawXML` byte-equal to the source OMath block to `target.body.children[5].runs`
+- **THEN** the system SHALL append a new `Run` whose `rawElements` contains one OMath child byte-equal to the source OMath block to `target.body.children[5].runs`
 - **AND** the spliced Run's `properties` SHALL match the source Run's properties when `rPrMode == .full`
+- **AND** serialized output SHALL contain `<w:r><w:rPr>...source properties...</w:rPr><m:oMath>...</m:oMath></w:r>` rather than emitting the OMath as a direct child of `<w:p>`
 - **AND** the call SHALL return `1` indicating one OMath block was spliced
 
 ##### Example: Greek-letter inline math splice
 
 - **GIVEN** source paragraph with run containing `rawXML = "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:r><m:t>α</m:t></m:r></m:oMath>"` and rPr `{ rFonts: { ascii: "Cambria Math" }, sz: 24 }`
 - **WHEN** caller invokes `target.spliceOMath(from: source, toBodyParagraphIndex: 5, position: .atEnd, omathIndex: 0, rPrMode: .full)`
-- **THEN** target.body.children[5].runs gains one Run whose `rawXML` equals the source OMath XML byte-for-byte
+- **THEN** target.body.children[5].runs gains one Run whose OMath `rawElements` child equals the source OMath XML byte-for-byte
 - **AND** that Run's `properties` equals `{ rFonts: { ascii: "Cambria Math" }, sz: 24 }`
 
 #### Scenario: Direct-child OMath spliced preserving carrier
@@ -57,10 +58,10 @@ The system SHALL support `OMathSplicePosition.afterText(_, instance:, options:)`
 - **GIVEN** target paragraph with one run `text = "所得出的參數進行 檢定：", properties = { rFonts: { eastAsia: "DFKai-SB" } }, position = 3`
 - **WHEN** caller calls `spliceOMath(from: source, toBodyParagraphIndex: 5, position: .afterText("進行 "), omathIndex: 0)` with source providing inline OMath `<m:oMath>...t...</m:oMath>`
 - **THEN** target paragraph runs after splice:
-  | Index | text | rawXML | position |
-  |-------|------|--------|----------|
+  | Index | text | rawElements | position |
+  |-------|------|-------------|----------|
   | 0 | "所得出的參數進行 " | nil | 3 |
-  | 1 | "" | "<m:oMath>...t...</m:oMath>" | 3 |
+  | 1 | "" | `[RawElement(name: "oMath", xml: "<m:oMath>...t...</m:oMath>")]` | 3 |
   | 2 | "檢定：" | nil | 3 |
 - **AND** rPr `{ rFonts: { eastAsia: "DFKai-SB" } }` is copied to runs at indices 0 and 2
 
@@ -82,17 +83,20 @@ The system SHALL provide `OMathSpliceRpRMode` with three modes controlling how t
 
 - **WHEN** caller invokes `spliceOMath(..., rPrMode: .full)` (the default)
 - **THEN** the new OMath Run's `properties` SHALL equal the source Run's `properties` (deep copy)
+- **AND** `Paragraph.toXML()` SHALL emit those properties inside `<w:rPr>` before the OMath child
 
 #### Scenario: .omathOnly mode copies whitelisted fields
 
 - **WHEN** caller invokes `spliceOMath(..., rPrMode: .omathOnly)`
 - **THEN** the new OMath Run's `properties` SHALL contain ONLY `rFonts`, `sz`, `szCs`, `lang`, `bold`, `italic` from the source
 - **AND** all other fields (`rStyle`, `color`, `highlight`, `verticalAlign`, etc.) SHALL be `nil` / default
+- **AND** `Paragraph.toXML()` SHALL emit the whitelisted fields inside `<w:rPr>` before the OMath child
 
 #### Scenario: .discard mode resets to default rPr
 
 - **WHEN** caller invokes `spliceOMath(..., rPrMode: .discard)`
 - **THEN** the new OMath Run's `properties` SHALL equal `RunProperties()` (default-initialized)
+- **AND** serialized output SHALL contain a `<w:r>` carrier with the OMath child and no copied `<w:rPr>`
 
 ### Requirement: Namespace policy controls prefix/URI mismatch handling
 
@@ -145,7 +149,8 @@ The OMath XML written into the target paragraph by `spliceOMath` or `spliceParag
 #### Scenario: Saved target reloads with spliced OMath byte-equal to source
 
 - **WHEN** caller splices OMath block X from source, calls `DocxWriter.write(target, to: tempURL)`, and reads `let reloaded = try DocxReader.read(from: tempURL)`
-- **THEN** the corresponding `Run.rawXML` (or `unrecognizedChildren[].rawXML`) in `reloaded` SHALL equal source's OMath XML byte-for-byte
+- **THEN** the corresponding Run-carried OMath raw child (or `unrecognizedChildren[].rawXML`) in `reloaded` SHALL equal source's OMath XML byte-for-byte
+- **AND** an inline source OMath SHALL reload inside a `Run`, not as a direct child of `<w:p>`
 
 ### Requirement: No regression on existing OMath round-trip behavior
 

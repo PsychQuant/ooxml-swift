@@ -12,7 +12,7 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 - Add `OMathSpliceRpRMode` enum: `.full` (default) / `.omathOnly` / `.discard` — controls source-Run rPr (font/size/lang) propagation to target
 - Add `OMathSpliceNamespacePolicy` enum: `.lenient` (default) / `.strict` — controls behavior on namespace prefix vs URI mismatch
 - Add `OMathSpliceError` enum: 6 cases covering the failure taxonomy
-- Carrier preservation: source's `Run.rawXML` OMath splices into target as `Run.rawXML`; source's direct-child `unrecognizedChildren` OMath splices into target as `unrecognizedChildren` (visual semantics — inline stays inline, display stays display)
+- Carrier preservation: source's `Run.rawXML` OMath splices into target as a `Run` whose `rawElements` contains the verbatim OMath child; source's direct-child `unrecognizedChildren` OMath splices into target as `unrecognizedChildren` (visual semantics — inline stays inline, display stays display). The inline target MUST NOT use `Run.rawXML`, because that field replaces the complete serialized Run and bypasses rPr emission (#117).
 - Mid-paragraph splice via anchor-Run split (does not touch the other 12 position-indexed paragraph carriers — isolated blast radius; mirrors `replaceText` pattern)
 
 ## Non-Goals (optional)
@@ -24,6 +24,10 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 ### New Capabilities
 
 - `omath-splice`: Cross-document verbatim copy of `<m:oMath>` XML blocks between `WordDocument` paragraphs, preserving carrier shape (inline vs direct-child), source rPr, and namespace declarations. Includes single-OMath low-level API and paragraph-level batch API.
+
+### Correctness remediation
+
+- PsychQuant/ooxml-swift#117 corrects the inline target representation from a complete-Run raw-XML replacement to a Run-carried raw OMath child. This makes all three rPr propagation modes observable in serialized OOXML and preserves the inline carrier across save/reload.
 
 ### Modified Capabilities
 

@@ -4,7 +4,7 @@ OOXMLSwift currently has three OMath storage paths, each with distinct visual se
 
 | Carrier | XML shape | Word renders as | LaTeX equivalent |
 |---------|-----------|------------------|------------------|
-| `Run.rawXML` | `<w:r>...<m:oMath>...</m:oMath>...</w:r>` | inline (with surrounding text) | `$α$` |
+| Source `Run.rawXML`; target `Run.rawElements` OMath child | `<w:r><w:rPr>...</w:rPr><m:oMath>...</m:oMath></w:r>` | inline (with surrounding text and effective rPr) | `$α$` |
 | `Paragraph.unrecognizedChildren[name="oMath"]` | `<w:p>...<m:oMath>...</m:oMath>...</w:p>` (direct child of `<w:p>`) | display (own line) | `$$\alpha$$` or `\[\alpha\]` |
 | `MathEquation` (deprecated) | API-built; flat `<m:r><m:t>...</m:t></m:r>` from naive LaTeX simplifier | text-only fallback | n/a |
 
@@ -40,14 +40,14 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 ### Carrier preservation strategy
 
-**Decision**: Preserve source carrier shape — inspect source paragraph for OMath in `Run.rawXML` (inline) and `Paragraph.unrecognizedChildren[name="oMath" or "oMathPara"]` (direct-child), and splice into target using the same carrier kind.
+**Decision**: Preserve source carrier shape — inspect source paragraph for OMath in `Run.rawXML` (inline) and `Paragraph.unrecognizedChildren[name="oMath" or "oMathPara"]` (direct-child). An inline target uses a normal `Run` with the verbatim OMath stored as a `rawElements` child, so `Run.toXML()` can emit both `<w:rPr>` and the OMath child. A direct-child target remains an `UnrecognizedChild`.
 
 **Alternatives considered**:
 
-- *Always Run.rawXML on target*: simpler one-path implementation, mirrors existing `insertEquation(...displayMode: false)` convention. **Rejected** — turns display OMath into inline visually (lossy semantics), breaks Pandoc-style source documents
+- *Always Run.rawXML on target*: appears simple, but `Run.toXML()` treats `rawXML` as a complete replacement. **Rejected** — it suppresses the `<w:r>` carrier and copied `<w:rPr>`, so `.full` and `.omathOnly` have no serialized effect (#117); it also turns display OMath into inline visually when applied indiscriminately
 - *Always unrecognizedChildren on target*: simpler data model. **Rejected** — turns inline OMath into display visually (catastrophic for thesis use case where 522 OMath are all inline-in-Run)
 
-**Rationale**: Caller invokes a "verbatim copy" operation; turning inline into display (or vice versa) violates the contract. Implementation cost (two code paths) is acceptable; the alternative cost (broken visual semantics) is not.
+**Rationale**: Caller invokes a "verbatim copy" operation; turning inline into display (or vice versa) violates the contract. `rawElements` preserves the OMath bytes while retaining a serializable Run carrier around them. Implementation cost (two code paths) is acceptable; the alternative cost (broken visual semantics or missing rPr) is not.
 
 ### Joint document-order index for `omathIndex`
 
@@ -106,6 +106,8 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 ## Risks / Trade-offs
 
 [**Risk: round-trip lossy after splice**] → Mitigation: 8 round-trip test fixtures in `Tests/OOXMLSwiftTests/OMathSpliceTests.swift` enforce byte-equal `DocxReader.read()` of spliced output vs original `<m:oMath>` block. PR merge blocked on any byte mismatch.
+
+[**Risk: rPr silently omitted for inline splice**] → Mitigation: inline OMath is emitted through `Run.rawElements`, never `Run.rawXML`; focused tests assert `<w:rPr>` precedes `<m:oMath>` for `.full` and `.omathOnly`, assert `.discard` emits no `<w:rPr>`, and assert save/reload retains the Run carrier (#117).
 
 [**Risk: anchor-Run split with whitespace-sensitive `<w:t xml:space="preserve">`**] → Mitigation: copy `xml:space` attribute when splitting; existing `replaceText` code path tested with similar fixtures. Add explicit test case for whitespace-bearing anchor.
 
