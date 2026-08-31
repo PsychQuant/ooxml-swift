@@ -77,6 +77,12 @@ public struct Run {
     /// Default 0 keeps backward compat with API-built Runs.
     public var position: Int? = nil
 
+    /// Internal absolute-boundary serializer lane used by OMath splice.
+    /// Kept separate from `position` because legacy paragraph carriers live
+    /// outside the position-sorted window.
+    internal var paragraphBoundaryPlacement: ParagraphBoundaryPlacement? = nil
+    internal var paragraphBoundaryOrder: Int? = nil
+
     public init(text: String, properties: RunProperties = RunProperties()) {
         self._legacyText = text
         self._legacyProperties = properties
@@ -259,6 +265,8 @@ extension Run: Equatable {
             && lhs.revisionId == rhs.revisionId
             && lhs.formatChangeRevisionId == rhs.formatChangeRevisionId
             && lhs.position == rhs.position
+            && lhs.paragraphBoundaryPlacement == rhs.paragraphBoundaryPlacement
+            && lhs.paragraphBoundaryOrder == rhs.paragraphBoundaryOrder
     }
 }
 
@@ -705,4 +713,3 @@ extension RunProperties {
         return slots.map { $0.xml }.joined()
     }
 }
-

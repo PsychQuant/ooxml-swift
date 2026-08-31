@@ -34,6 +34,7 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 - #122 makes start/end boundaries honor all position-indexed and legacy fixed-order paragraph carriers without integer overflow.
 - #124 preserves direct-child OMath paragraph local-name metadata.
 - #125 distinguishes leading, matched, and unmatched batch anchors, derives repeated-text occurrence instances, honors direct-child anchors, and preserves partial-success/source order by anchor group.
+- #123 re-baselines save/reload fidelity from impossible lexical byte identity to canonical semantic XML equivalence.
 
 ## Impact
 

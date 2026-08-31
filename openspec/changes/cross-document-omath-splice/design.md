@@ -25,7 +25,7 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 - Preserve source Run's `rPr` (font/size/lang) by default, with escape hatches for cross-doc style/theme conflicts
 - Support mid-paragraph splice via `.afterText(...)` / `.beforeText(...)` anchors mirroring existing `InsertLocation` API
 - Provide both single-OMath low-level API (full caller control) and paragraph-level batch API (convenient for cross-doc rescue scenarios)
-- Maintain round-trip lossless guarantee — `DocxReader.read()` of the spliced doc returns OMath XML byte-equal to source
+- Maintain round-trip semantic fidelity — `DocxReader.read()` of the spliced doc returns an OMath subtree with the same namespace-expanded structure, attributes, and resolved text
 
 **Non-Goals:**
 
@@ -65,16 +65,16 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 **Alternatives considered**:
 
-- *Renumber whole paragraph's positioned entries*: re-sequence all 13 carrier types. **Rejected** — touches every carrier kind (each is a separate array; missing one causes silent ordering bug; this is the fragile area #56 series fixed). Renumber also loses correspondence between `position` and source byte offset, breaking byte-equal round-trip diagnostics
+- *Renumber whole paragraph's positioned entries*: re-sequence all 13 carrier types. **Rejected for inline anchors** — touches every carrier kind (each is a separate array; missing one causes silent ordering bug; this is the fragile area #56 series fixed) and discards useful source-offset diagnostics. Direct-child mid-text insertion is the narrow exception because cross-collection placement requires a unique slot.
 - *Append-only API (no mid-paragraph)*: only support `.atStart` / `.atEnd`. **Rejected** — thesis use case requires mid-paragraph (e.g., "進行 t 檢定" needs splicing the OMath `t` between "進行 " and " 檢定")
 
 **Rationale**: Run-split isolates blast radius to `runs[]` array; the other 12 carriers are untouched. This is the same anchor-split approach `WordDocument+ReplaceTextWithBoundaryDetection.swift` already implements — proven robust by the existing test suite.
 
 ### Boundary insertion across mixed carrier modes
 
-**Decision**: Before `.atStart` or `.atEnd`, project both position-indexed carriers and legacy fixed-order carriers (page break, legacy bookmark/comment boundaries, footnote/endnote references) into one ordered position space. Compact positive renumbering preserves the paragraph's current serialized order, neutralizes hostile `Int.max` values, and makes a true first/last position representable. `.atStart` reserves position 1; `.atEnd` uses the next compact position.
+**Decision**: `.atStart` and `.atEnd` use an internal absolute-boundary serializer lane on the newly inserted Run or UnrecognizedChild. The lane emits before legacy pre-content or after legacy post-content, respectively, and remains outside the ordinary position-sorted window.
 
-**Rationale**: Paragraph serializes legacy pre-content, positive positions, nil/zero type buckets, and legacy post-content through separate paths. Assigning only a new positive position cannot represent a boundary outside all four regions. Canonicalization preserves relative order (numeric source offsets are diagnostic metadata, not an ordering contract after mutation) while making true boundaries safe for both inline Run and direct-child OMath (#122).
+**Rationale**: Paragraph serializes legacy pre-content, positive positions, nil/zero type buckets, and legacy post-content through separate paths. A numeric position cannot represent a point outside all four regions, and projecting legacy typed state into raw carriers breaks later page-break/note/bookmark mutations. The dedicated lane preserves all public typed fields and existing numeric positions while making true boundaries safe, including hostile `Int.max` inputs (#122).
 
 ### Batch anchor state and mutation direction
 
@@ -107,7 +107,7 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 ### Two-tier API: `spliceOMath` (single) + `spliceParagraphOMath` (batch)
 
-**Decision**: Provide both single-OMath low-level entry point and paragraph-level batch entry point. The batch variant auto-derives anchor for each OMath from its source-text-context (~5-10 chars on each side via `flattenedDisplayText` slicing) and routes to `.afterText(prefix, instance: 1)`. Throws `OMathSpliceError.contextAnchorNotFound(omathIndex:, snippet:)` per OMath that fails to resolve.
+**Decision**: Provide both single-OMath low-level entry point and paragraph-level batch entry point. The batch variant derives a trailing source-text prefix plus its occurrence instance, groups OMath sharing one boundary, and routes each group to `.atStart` or `.afterText(prefix, instance:)`. Throws `OMathSpliceError.contextAnchorNotFound(omathIndex:, snippet:)` when a group cannot resolve.
 
 **Alternatives considered**:
 
@@ -131,13 +131,13 @@ Namespace inspection accepts both XML quote styles. Extracted prefix-less fragme
 
 ## Risks / Trade-offs
 
-[**Risk: round-trip lossy after splice**] → Mitigation: 8 round-trip test fixtures in `Tests/OOXMLSwiftTests/OMathSpliceTests.swift` enforce byte-equal `DocxReader.read()` of spliced output vs original `<m:oMath>` block. PR merge blocked on any byte mismatch.
+[**Risk: round-trip semantic loss after splice**] → Mitigation: save/reload tests verify preserved OMath carrier metadata and content, while `OMathSemanticXML` canonical coverage equates entity spelling, attribute order/quotes, namespace declaration placement, and element/attribute-prefix variants but rejects structural, resolved-text, or semantic-attribute changes (#123). Exact lexical bytes are not promised after XML parsing.
 
 [**Risk: anchor-Run split with whitespace-sensitive `<w:t xml:space="preserve">`**] → Mitigation: copy `xml:space` attribute when splitting; existing `replaceText` code path tested with similar fixtures. Add explicit test case for whitespace-bearing anchor.
 
 [**Risk: cross-doc rStyle reference broken in target (e.g., `<w:rStyle w:val="MathStyle">` where target lacks that style ID)**] → Mitigation: documented as `.full` mode caveat; provide `.omathOnly` (strips rStyle) as opt-out. Real risk is low — Cambria Math is typically applied via direct `rFonts`, not via style reference, in NTPU/Word output.
 
-[**Risk: position-renumber regression**] → Mitigation: mid-Run inline splice keeps the narrow shared-position approach; boundary and direct-child paths compact only when cross-collection placement requires it and pin relative order across legacy plus all 13 position-indexed carriers. Existing #56 / #99-103 round-trip suites run on every PR.
+[**Risk: position-renumber regression**] → Mitigation: ordinary boundary insertion does not renumber existing carriers; only direct-child mid-text insertion compacts the position-indexed window needed for a unique cross-collection slot. A sentinel matrix pins all 13 position-indexed collections plus legacy pre/post carriers for inline/direct `.atStart` and `.atEnd`.
 
 [**Risk: mixed-prefix output rejected by strict XML validators**] → Mitigation: default `.lenient` produces ECMA-376-compliant output (mixed prefixes are spec-legal); `.strict` mode available for callers needing single-prefix output for downstream tooling.
 

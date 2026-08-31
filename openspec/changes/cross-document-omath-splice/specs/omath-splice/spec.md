@@ -7,7 +7,7 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 #### Scenario: Inline OMath spliced from source Run.rawXML to target paragraph end
 
 - **WHEN** caller invokes `target.spliceOMath(from: sourceParagraph, toBodyParagraphIndex: 5, position: .atEnd, omathIndex: 0)` with `sourceParagraph` containing one OMath stored in `Run.rawXML`
-- **THEN** the system SHALL append a new `Run` with `rawXML` byte-equal to the source OMath block to `target.body.children[5].runs`
+- **THEN** the system SHALL append a new `Run` whose `rawXML` equals the extractor's self-contained OMath fragment to `target.body.children[5].runs`
 - **AND** the spliced Run's `properties` SHALL match the source Run's properties when `rPrMode == .full`
 - **AND** the call SHALL return `1` indicating one OMath block was spliced
 
@@ -15,7 +15,7 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 
 - **GIVEN** source paragraph with run containing `rawXML = "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:r><m:t>α</m:t></m:r></m:oMath>"` and rPr `{ rFonts: { ascii: "Cambria Math" }, sz: 24 }`
 - **WHEN** caller invokes `target.spliceOMath(from: source, toBodyParagraphIndex: 5, position: .atEnd, omathIndex: 0, rPrMode: .full)`
-- **THEN** target.body.children[5].runs gains one Run whose `rawXML` equals the source OMath XML byte-for-byte
+- **THEN** target.body.children[5].runs gains one Run whose `rawXML` equals the extractor's self-contained OMath XML
 - **AND** that Run's `properties` equals `{ rFonts: { ascii: "Cambria Math" }, sz: 24 }`
 
 #### Scenario: Direct-child OMath spliced preserving carrier
@@ -36,7 +36,7 @@ The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:pos
 - **WHEN** caller splices inline or direct-child OMath at `.atEnd`
 - **THEN** every existing carrier SHALL retain its relative serialized order
 - **AND** the new OMath SHALL serialize after all of them
-- **AND** hostile or API-built positions such as `Int.max` SHALL be compacted without overflow
+- **AND** hostile or API-built positions such as `Int.max` SHALL neither overflow nor be rewritten for ordinary boundary insertion
 
 #### Scenario: At-start precedes every paragraph carrier
 
@@ -196,14 +196,16 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 - **AND** any earlier source anchor groups that were already spliced before this failure SHALL remain in target
 - **AND** the failing shared-anchor group SHALL be preflighted as a unit so it does not partially mutate the target
 
-### Requirement: Round-trip lossless guarantee
+### Requirement: Round-trip semantic XML equivalence
 
-The OMath XML written into the target paragraph by `spliceOMath` or `spliceParagraphOMath` SHALL be byte-equal to the source OMath XML when the target document is subsequently saved with `DocxWriter.write` and reloaded with `DocxReader.read`.
+The OMath XML written into the target paragraph by `spliceOMath` or `spliceParagraphOMath` SHALL be semantically XML-equivalent to the extracted source OMath when the target document is subsequently saved with `DocxWriter.write` and reloaded with `DocxReader.read`. Equivalence SHALL compare namespace-expanded element identity, semantic attributes independent of order/quote style, ordered child structure, and resolved text values. Namespace prefix spelling/declaration placement and character/entity spelling SHALL NOT be treated as semantic differences.
 
-#### Scenario: Saved target reloads with spliced OMath byte-equal to source
+#### Scenario: Saved target reloads with semantically equivalent OMath
 
 - **WHEN** caller splices OMath block X from source, calls `DocxWriter.write(target, to: tempURL)`, and reads `let reloaded = try DocxReader.read(from: tempURL)`
-- **THEN** the corresponding `Run.rawXML` (or `unrecognizedChildren[].rawXML`) in `reloaded` SHALL equal source's OMath XML byte-for-byte
+- **THEN** the reloaded OMath subtree SHALL have the same `OMathSemanticXML` canonical representation as the extracted source subtree
+- **AND** entity versus literal spelling, attribute order/quotes, namespace declaration placement, and equivalent element-prefix variants SHALL compare equal
+- **AND** a changed element, semantic attribute value, child order, or resolved text value SHALL compare unequal
 
 ### Requirement: No regression on existing OMath round-trip behavior
 
@@ -213,7 +215,7 @@ The introduction of `spliceOMath` / `spliceParagraphOMath` APIs SHALL NOT alter 
 
 - **WHEN** target paragraph already contains 2 OMath blocks before splice
 - **AND** caller splices a 3rd OMath block via `spliceOMath(..., position: .atEnd, ...)`
-- **THEN** the original 2 OMath blocks SHALL remain in target with original `rawXML` and relative serialized order (numeric positions MAY be compacted to represent a true boundary safely)
+- **THEN** the original 2 OMath blocks SHALL remain in target with original `rawXML`, numeric positions, and relative serialized order
 - **AND** only the new 3rd OMath block SHALL be added at the end
 
 #### Scenario: Existing #85 / #92 / #99-103 fixture suites pass unchanged
