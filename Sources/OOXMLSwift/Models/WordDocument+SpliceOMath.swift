@@ -940,6 +940,28 @@ extension WordDocument {
         // Direct-child OMath in unrecognizedChildren — derive from its source position
         // by walking runs up to that position.
         for (i, ex) in extracted.enumerated() where ex.kind == .directChild && !matchedExtractedIndices.contains(i) {
+            if ex.boundaryPlacement == .start {
+                anchors[i] = DerivedContextAnchor(snippet: "", instance: 1)
+                continue
+            }
+
+            if ex.boundaryPlacement == .end {
+                let prose = sourceParagraph.runs
+                    .filter { run in
+                        guard let raw = run.rawXML else { return true }
+                        return !raw.contains(":oMath") && !raw.contains("<oMath")
+                    }
+                    .map(\.text)
+                    .joined()
+                let trailing = String(prose.suffix(charsBefore))
+                    .trimmingCharacters(in: .whitespaces)
+                anchors[i] = DerivedContextAnchor(
+                    snippet: trailing,
+                    instance: trailing.isEmpty ? 1 : occurrenceCount(of: trailing, in: prose)
+                )
+                continue
+            }
+
             // For direct-child OMath, use the prose accumulated up to the OMath's position.
             // (Best-effort — direct-child OMath typically doesn't have meaningful surrounding prose.)
             guard let omathPos = ex.sourcePosition else { continue }

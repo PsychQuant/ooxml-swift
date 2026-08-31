@@ -1,13 +1,13 @@
 ## 1. Setup — types and module scaffolding
 
 - [x] 1.1 Create `Sources/OOXMLSwift/Models/OMathSplice.swift` with `OMathSplicePosition`, `OMathSpliceRpRMode`, `OMathSpliceNamespacePolicy`, `OMathSpliceError` enums (Decision: Lenient namespace policy by default; Decision: Default `OMathSpliceRpRMode = .full`)
-- [x] 1.2 Add `ExtractedOMath` internal struct (xml: String, kind: .inRun | .directChild, sourcePosition: Int?) supporting Joint document-order index for `omathIndex`
+- [x] 1.2 Add `ExtractedOMath` carrier, boundary placement/order, source position, and stable sequence metadata supporting joint serializer-order `omathIndex`
 - [x] 1.3 Reuse existing `AnchorLookupOptions` from `InsertLocation.swift` for `.afterText` / `.beforeText` parameter types
 
 ## 2. Source extraction
 
 - [x] 2.1 Implement internal `extractOMath(from para: Paragraph) -> [ExtractedOMath]` that scans `para.runs[].rawXML` for `<m:oMath` and `para.unrecognizedChildren` for entries where `name == "oMath" || "oMathPara"` (Carrier preservation strategy)
-- [x] 2.2 Sort extracted OMath by `position ?? 0` to implement Joint document-order index for `omathIndex`
+- [x] 2.2 Sort extracted OMath by absolute-start / positive / non-positive post-content / absolute-end serializer regions with stable carrier tie-breaking
 - [x] 2.3 Implement namespace-URI extraction from extracted OMath XML for the lenient/strict policy comparison
 
 ## 3. Single-OMath splice (low-level API)
@@ -47,7 +47,7 @@
 - [x] 6.9 Full, OMathOnly, and Discard rPr modes have explicit coverage, including language preservation and style stripping
 - [x] 6.10 `testNamespaceLenientAcceptsPrefixMismatch`, `testNamespaceStrictRejectsPrefixMismatch` — namespace policy scenarios (URI-mismatch case covered structurally — both modes throw on URI mismatch per implementation)
 - [x] 6.11 `testParagraphBatchSpliceAllOMath` — covers All OMath blocks spliced in source order scenario (3 OMath in source → 3 OMath in target via batch API)
-- [x] 6.12 batch context-anchor lookup failure path covered structurally (testParagraphBatchSpliceAllOMath verifies success path; failure path covered by single-OMath testAnchorNotFoundThrows since batch wraps that)
+- [x] 6.12 Batch context-anchor failures, earlier-group partial success, unmatched direct children, and pre-reload boundary direct-child sources have explicit tests
 - [x] 6.13 `testRoundTripPreservesOMathContent` — covers save/reload semantic fidelity (OMath glyph survives; carrier may transition Run→unrecognizedChildren per existing contract)
 - [x] 6.14 `testNoRegressionOnExistingOMathInTarget` — covers Pre-existing OMath in target paragraph preserved during splice scenario
 - [x] 6.15 Verified — full suite `swift test` ran 871 tests, 0 failures, 1 pre-existing skip. Existing Issue85/Issue92/Issue99/Issue101/Issue102/Issue103 OMath round-trip suites all pass; satisfies the No regression on existing OMath round-trip behavior requirement
@@ -79,8 +79,8 @@
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
 - [x] 10.7 Derive anchor occurrence instances; apply source-ordered groups right-to-left within each shared boundary
 - [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, and quote-complete namespace checks
-- [x] 10.9 Run `OMathSpliceTests`: 48 tests, 0 failures
-- [x] 10.10 Re-run full package regression: 1,476 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-4 remediation commit
+- [x] 10.9 Run `OMathSpliceTests`: 51 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,479 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-5 remediation commit
 
 ## 11. Reload fidelity contract remediation (#123)
 

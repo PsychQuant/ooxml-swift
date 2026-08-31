@@ -50,13 +50,13 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 ### Joint document-order index for `omathIndex`
 
-**Decision**: When source paragraph contains OMath in both carriers, sort by `position: Int?` (filled by DocxReader for both `Run` and `UnrecognizedChild` from source byte offset) and treat `omathIndex` as "Nth OMath in source-document order, regardless of carrier."
+**Decision**: Treat `omathIndex` as "Nth OMath in actual paragraph serialization order, regardless of carrier." The extractor uses the same four regions as Paragraph: absolute start boundary, positive-position window, non-positive post-content buckets, and absolute end boundary; boundary order/position plus stable Run-before-direct collection sequence resolve ties.
 
 **Alternatives considered**:
 
 - *Per-carrier separate index*: caller specifies `sourceCarrier: .inRun(index: Int) | .directChild(index: Int)`. **Rejected** — exposes implementation detail; caller usually thinks in source-document order, not carrier order
 
-**Rationale**: Joint sort is robust because DocxReader fills `position` for both carriers (verified at `DocxReader.swift:1005` for runs, `DocxReader.swift:1399-1405` for default-case unrecognized children). API-built paragraphs have nil positions but never appear as splice sources in practice (sources are always source-loaded).
+**Rationale**: DocxReader fills positive positions for loaded carriers, while API-built and in-memory boundary paragraphs legitimately carry nil/non-positive positions or absolute-boundary metadata and can immediately become splice sources. Mirroring serializer regions keeps extraction, strict namespace target selection, batch anchors, and visible XML order consistent.
 
 ### Mid-paragraph splice via anchor-Run split
 
@@ -95,7 +95,7 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 ### Default `OMathSpliceRpRMode = .full`
 
-**Decision**: Default to verbatim `rPr` copy from source Run to the new target OMath Run. Provide `.omathOnly` (whitelist: rFonts/sz/lang only) and `.discard` (empty rPr) as escape hatches.
+**Decision**: Default to verbatim `rPr` copy from source Run to the new target OMath Run. Provide `.omathOnly` (whitelist: `rFonts`, legacy `fontName`, `fontSize`, `lang`, `bold`, `italic`) and `.discard` (empty rPr) as escape hatches.
 
 **Alternatives considered**:
 
@@ -126,7 +126,7 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 **Rationale**: ECMA-376 explicitly allows mixed prefixes within one document (each namespace declaration scopes locally). 99% of real docx files use the standard `m:` prefix anyway, making this almost a no-op safeguard. URI mismatch (rare; would mean the source uses a vendor-extended namespace not in the OMML schema) is a real semantic mismatch and warrants a throw.
 
-Namespace inspection accepts both XML quote styles and resolves character/entity references through `XmlTreeReader`. Extracted prefix-less fragments receive a local default OMML declaration so the copied raw subtree is self-contained; malformed fragments fail closed and an explicitly declared non-standard URI is never defaulted to the standard URI. Strict target comparison uses the first OMath in joint serializer order, including an explicit empty prefix for a default namespace.
+Namespace inspection accepts both XML quote styles and resolves character/entity references through `XmlTreeReader`. Foundation `XMLDocument` is the strict validity gate because the lossless tree parser intentionally does not enforce every namespace/QName/XML 1.0 rule. Extracted prefix-less fragments receive a local default OMML declaration so the copied raw subtree is self-contained; malformed fragments fail closed and an explicitly declared non-standard URI is never defaulted to the standard URI. Strict target comparison uses the first OMath in joint serializer order, including an explicit empty prefix for a default namespace.
 
 ## Risks / Trade-offs
 
