@@ -170,8 +170,10 @@ internal enum OMathNamespace {
         // `xmlns="urn:vendor"` for an element prefix.
         if let prefix = extractPrefix(from: rootStartTag) {
             return rootElementAttributeValue(named: "xmlns:\(prefix)", in: rootStartTag)
+                .map(decodeXMLAttributeValue)
         }
         return rootElementAttributeValue(named: "xmlns", in: rootStartTag)
+            .map(decodeXMLAttributeValue)
     }
 
     /// Extracts the OMath prefix (e.g. "m" or "mml") from the opening element.
@@ -191,6 +193,57 @@ internal enum OMathNamespace {
         return String(components[0])
     }
 
+}
+
+/// Applies the entity and character-reference portion of XML attribute-value
+/// normalization. Namespace comparison needs the semantic URI, not its lexical
+/// spelling. Unknown or malformed references remain literal so invalid input
+/// cannot accidentally acquire standard-OMML meaning.
+private func decodeXMLAttributeValue(_ raw: String) -> String {
+    var output = ""
+    var index = raw.startIndex
+
+    while index < raw.endIndex {
+        guard raw[index] == "&",
+              let semicolon = raw[index...].firstIndex(of: ";") else {
+            output.append(raw[index])
+            index = raw.index(after: index)
+            continue
+        }
+
+        let entityStart = raw.index(after: index)
+        let entity = String(raw[entityStart..<semicolon])
+        let decoded: String?
+        switch entity {
+        case "amp": decoded = "&"
+        case "lt": decoded = "<"
+        case "gt": decoded = ">"
+        case "quot": decoded = "\""
+        case "apos": decoded = "'"
+        default:
+            let scalarValue: UInt32?
+            if entity.hasPrefix("#x") || entity.hasPrefix("#X") {
+                scalarValue = UInt32(entity.dropFirst(2), radix: 16)
+            } else if entity.hasPrefix("#") {
+                scalarValue = UInt32(entity.dropFirst(), radix: 10)
+            } else {
+                scalarValue = nil
+            }
+            if let scalarValue, let scalar = UnicodeScalar(scalarValue) {
+                decoded = String(scalar)
+            } else {
+                decoded = nil
+            }
+        }
+
+        if let decoded {
+            output += decoded
+        } else {
+            output += String(raw[index...semicolon])
+        }
+        index = raw.index(after: semicolon)
+    }
+    return output
 }
 
 // MARK: - Internal: rPr propagation modes

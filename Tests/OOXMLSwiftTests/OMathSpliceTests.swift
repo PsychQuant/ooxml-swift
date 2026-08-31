@@ -706,6 +706,7 @@ final class OMathSpliceTests: XCTestCase {
     func testStandardOMathSingleQuotedNamespaceStillUsesRunCarrier() {
         let standardFragments = [
             #"<m:oMath xmlns:m='http://schemas.openxmlformats.org/officeDocument/2006/math'><m:r><m:t>α</m:t></m:r></m:oMath>"#,
+            #"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/&#x6D;ath"><m:r/></m:oMath>"#,
             #"<m.math:oMath xmlns:m.math="http://schemas.openxmlformats.org/officeDocument/2006/math"><m.math:r/></m.math:oMath>"#,
             #"<m:oMath note="xmlns:m='urn:vendor:fake'" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r/></m:oMath>"#,
             #"<oMath xmlns="http://schemas.openxmlformats.org/officeDocument/2006/math"><r><t>α</t></r></oMath>"#,
@@ -724,6 +725,27 @@ final class OMathSpliceTests: XCTestCase {
                 "<w:r><w:rPr><w:b/></w:rPr>\(omathXML)</w:r>"
             )
         }
+    }
+
+    func testCharacterReferencedNamespaceURIMatchesStandardPolicy() throws {
+        let encoded = #"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/&#109;ath"><m:r/></m:oMath>"#
+        XCTAssertEqual(
+            OMathNamespace.extractURI(from: encoded),
+            "http://schemas.openxmlformats.org/officeDocument/2006/math"
+        )
+
+        var sourceRun = Run(text: "")
+        sourceRun.rawXML = encoded
+        let source = Paragraph(runs: [sourceRun])
+        var target = makeDocument(with: try parseParagraph(xml: Self.targetEmpty))
+        XCTAssertNoThrow(
+            try target.spliceOMath(
+                from: source,
+                toBodyParagraphIndex: 0,
+                position: .atEnd,
+                namespacePolicy: .strict
+            )
+        )
     }
 
     func testInheritedNamespaceInjectionIgnoresNestedShadowing() throws {
