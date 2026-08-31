@@ -36,13 +36,17 @@ enum TemplateFixtureGate {
         "set MACDOC_TEMPLATE_DIR to a directory containing '\(name)' to run this test"
     }
 
+    static func missingFixtureMessage(for name: String) -> String {
+        "fixture '\(name)' not found under MACDOC_TEMPLATE_DIR"
+    }
+
     static func requireTemplate(_ name: String, dirOverride: String? = nil) throws -> URL {
         guard let dir = dirOverride ?? ProcessInfo.processInfo.environment["MACDOC_TEMPLATE_DIR"] else {
             throw XCTSkip(missingGateMessage(for: name))
         }
         let url = URL(fileURLWithPath: dir).appendingPathComponent(name)
         guard FileManager.default.fileExists(atPath: url.path) else {
-            throw XCTSkip("template '\(name)' not found under \(dir) — gate present but file absent")
+            throw XCTSkip(missingFixtureMessage(for: name))
         }
         return url
     }
