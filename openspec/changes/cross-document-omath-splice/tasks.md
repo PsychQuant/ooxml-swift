@@ -78,9 +78,9 @@
 - [x] 10.5 Distinguish unmatched, leading-empty, and text batch anchors
 - [x] 10.6 Normalize inline XML before matching extracted OMath back to its source Run
 - [x] 10.7 Derive anchor occurrence instances; preserve explicit start/end lane metadata; apply source-ordered start/text groups right-to-left and end groups left-to-right
-- [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, quote-complete namespace checks, and structural single-fragment admission
-- [x] 10.9 Run `OMathSpliceTests`: 53 tests, 0 failures
-- [x] 10.10 Re-run full package regression: 1,481 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-6 remediation commit
+- [x] 10.8 Implement direct-child text anchors, Unicode math-script lookup offsets, quote-complete namespace checks, and structural single-fragment admission limited to XML 1.0 `S` framing
+- [x] 10.9 Run `OMathSpliceTests`: 54 tests, 0 failures
+- [x] 10.10 Re-run full package regression: 1,482 tests, 31 conditional skips, 0 failures; IDD cluster verification follows on the round-7 remediation commit
 
 ## 11. Reload fidelity contract remediation (#123)
 
