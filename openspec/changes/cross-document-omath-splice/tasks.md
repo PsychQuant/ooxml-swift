@@ -15,7 +15,7 @@
 - [x] 3.1 Implement public `WordDocument.spliceOMath(from:toBodyParagraphIndex:position:omathIndex:rPrMode:namespacePolicy:)` per the Single-OMath verbatim splice between documents requirement
 - [x] 3.2 Validate inputs: throw `.targetParagraphOutOfRange` if `toBodyParagraphIndex` invalid; throw `.sourceHasNoOMath` if extraction returns empty; throw `.omathIndexOutOfRange` if `omathIndex >= extracted.count`
 - [x] 3.3 Implement namespace policy check (lenient: throw only on URI mismatch; strict: throw on prefix or URI mismatch) per the Namespace policy controls prefix/URI mismatch handling requirement
-- [x] 3.4 Branch on extracted OMath kind: inRun → wrap in new `Run` with rawXML; directChild → append to target paragraph's `unrecognizedChildren` (Carrier preservation strategy)
+- [x] 3.4 Branch on extracted OMath kind: inRun → preserve the established `Run.rawXML` representation and serialize an OMath-root fragment as a Run child; directChild → append to target paragraph's `unrecognizedChildren` (Carrier preservation strategy; corrected by #117)
 - [x] 3.5 Apply `OMathSpliceRpRMode` for source Run rPr propagation: `.full` deep-copy, `.omathOnly` whitelist (rFonts/sz/szCs/lang/bold/italic), `.discard` empty (rPr propagation modes requirement)
 - [x] 3.6 Resolve `OMathSplicePosition` to insertion site within target paragraph; for `.atStart` / `.atEnd` use position bounds; for `.afterText` / `.beforeText` use anchor lookup against `flattenedDisplayText()` with `AnchorLookupOptions`
 
@@ -44,11 +44,11 @@
 - [x] 6.6 `testTargetParagraphOutOfRangeThrows` — covers Target paragraph index out of range scenario
 - [x] 6.7 `testMidParagraphSpliceWithRunSplit` — covers Anchor falls in middle of a run scenario; verifies prefix/OMath/suffix three-run output with shared position and copied rPr (Mid-paragraph splice via anchor-Run split decision)
 - [x] 6.8 `testAnchorNotFoundThrows` — covers Anchor not found in target paragraph scenario
-- [x] 6.9 `testRpRModeFullCopiesVerbatim`, `testRpRModeDiscardResetsToDefault` — rPr propagation scenarios (Full + Discard. OMathOnly mode whitelist tested implicitly via Full+Discard contrast — adding explicit test if rPr drift surfaces)
+- [x] 6.9 `testRpRModeFullCopiesVerbatim`, `testRpRModeOMathOnlyEmitsWhitelistInsideRunCarrier`, `testRpRModeDiscardResetsToDefault` — all three rPr propagation scenarios assert the serialized `<w:rPr>` / OMath child shape (#117)
 - [x] 6.10 `testNamespaceLenientAcceptsPrefixMismatch`, `testNamespaceStrictRejectsPrefixMismatch` — namespace policy scenarios (URI-mismatch case covered structurally — both modes throw on URI mismatch per implementation)
 - [x] 6.11 `testParagraphBatchSpliceAllOMath` — covers All OMath blocks spliced in source order scenario (3 OMath in source → 3 OMath in target via batch API)
 - [x] 6.12 batch context-anchor lookup failure path covered structurally (testParagraphBatchSpliceAllOMath verifies success path; failure path covered by single-OMath testAnchorNotFoundThrows since batch wraps that)
-- [x] 6.13 `testRoundTripPreservesOMathContent` — covers Round-trip lossless guarantee requirement (OMath glyph survives DocxWriter.write + DocxReader.read; carrier may transition Run→unrecognizedChildren on round-trip per existing #85/#92/#99-103 contract)
+- [x] 6.13 `testRoundTripPreservesOMathContent` — covers Round-trip lossless guarantee requirement; OMath glyph survives DocxWriter.write + DocxReader.read and an inline OMath remains inside a Run carrier (#117)
 - [x] 6.14 `testNoRegressionOnExistingOMathInTarget` — covers Pre-existing OMath in target paragraph preserved during splice scenario
 - [x] 6.15 Verified — full suite `swift test` ran 871 tests, 0 failures, 1 pre-existing skip. Existing Issue85/Issue92/Issue99/Issue101/Issue102/Issue103 OMath round-trip suites all pass; satisfies the No regression on existing OMath round-trip behavior requirement
 
@@ -68,3 +68,23 @@
 
 - [x] 9.1 Comment on `PsychQuant/che-word-mcp#160` noting v0.24.0 ships and unblocks MCP wrapper implementation
 - [x] 9.2 Comment on `kiki830621/collaboration_guo_analysis#17` noting the upstream API is available; rescue script Phase 7 can proceed
+
+## 10. Issue #117 remediation — serializable inline rPr carrier
+
+- [x] 10.1 Add RED assertions proving `.full`, `.omathOnly`, and round-trip carrier semantics fail when OMath-root `Run.rawXML` is treated as a complete Run replacement
+- [x] 10.2 Preserve `Run.rawXML` read compatibility while making `Run.toXML()` and `Paragraph.emitRun()` serialize an OMath-root fragment inside the enclosing `<w:r>` after copied rPr
+- [x] 10.3 Add RED coverage for `.omathOnly` language, chained splice, strict namespace inspection, and a second dirty save after reload
+- [x] 10.4 Preserve `lang` and verify the existing rawXML representation remains visible to extraction and namespace inspection
+- [x] 10.5 Confirm flattened text / anchor lookup compatibility by retaining the established in-memory carrier
+- [x] 10.6 Stack on verified #115 tri-state RunProperties and cover explicit-off `.omathOnly` through first reload plus dirty resave
+- [x] 10.7 Reject explicitly non-OMML namespaces in the root classifier and preserve generic rawXML exact replacement semantics
+- [x] 10.8 Accept both XML-legal quote styles in namespace URI extraction and cover vendor plus standard single-quoted declarations
+- [x] 10.9 Restrict prefix detection to the root QName and cover prefixed/default namespace matrices
+- [x] 10.10 Restrict URI lookup to the root start tag and cover inherited-standard roots with nested namespace shadowing
+- [x] 10.11 Scope self-contained namespace injection to the root start tag and verify prefixed/default splice→write→reload under nested shadowing
+- [x] 10.12 Accept valid dotted namespace prefixes without a narrow custom character allowlist
+- [x] 10.13 Replace namespace regex matching with a quote-aware root attribute tokenizer; cover fake declaration text and empty undeclaration
+- [x] 10.14 Normalize XML entities and decimal/hex character references before namespace URI comparison
+- [x] 10.15 Enforce XML CharRef grammar and XML 1.0 scalar ranges so malformed references remain literal
+- [x] 10.16 Run `OMathSpliceTests`: 23 tests, 0 failures
+- [x] 10.17 Final verification on `fc84588`: `OMathSpliceTests` 23/23; full package 1,460 tests, 31 conditional skips, 0 failures; 5 independent reviewer passes plus Codex CLI PASS; Spectra analyze/validate clean; stacked PR base pinned to verified #115
