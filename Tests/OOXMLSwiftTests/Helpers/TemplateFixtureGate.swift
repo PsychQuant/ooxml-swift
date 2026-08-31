@@ -32,9 +32,13 @@ enum TemplateFixtureGate {
     /// mutating process env — otherwise `$MACDOC_TEMPLATE_DIR`). Throws
     /// `XCTSkip` when the gate is unset or the file is missing, so the calling
     /// test skips loudly rather than failing on CI.
+    static func missingGateMessage(for name: String) -> String {
+        "set MACDOC_TEMPLATE_DIR to a directory containing '\(name)' to run this test"
+    }
+
     static func requireTemplate(_ name: String, dirOverride: String? = nil) throws -> URL {
         guard let dir = dirOverride ?? ProcessInfo.processInfo.environment["MACDOC_TEMPLATE_DIR"] else {
-            throw XCTSkip("set MACDOC_TEMPLATE_DIR to a directory of real .docx templates to run this test")
+            throw XCTSkip(missingGateMessage(for: name))
         }
         let url = URL(fileURLWithPath: dir).appendingPathComponent(name)
         guard FileManager.default.fileExists(atPath: url.path) else {
