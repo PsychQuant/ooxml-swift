@@ -321,11 +321,7 @@ final class OMathSpliceTests: XCTestCase {
             "fontName should propagate via rFonts.ascii in .full mode")
         XCTAssertEqual(omathRun?.properties.fontSize, 24,
             "fontSize 24 (12pt) should propagate in .full mode")
-        XCTAssertNotNil(
-            omathRun?.rawElements?.first(where: { $0.name == "oMath" }),
-            "inline OMath must be a child of the emitted w:r carrier"
-        )
-        XCTAssertNil(omathRun?.rawXML, "rawXML would bypass the copied rPr")
+        XCTAssertNotNil(omathRun?.rawXML, "inline OMath remains visible through the compatibility rawXML model")
         let xml = resultPara.toXML()
         XCTAssertTrue(xml.contains("</w:rPr><m:oMath"), "Got: \(xml)")
         XCTAssertTrue(xml.contains(#"<w:rFonts w:ascii="Cambria Math""#), "Got: \(xml)")
@@ -367,7 +363,7 @@ final class OMathSpliceTests: XCTestCase {
         let sourceXML = """
         <w:p \(Self.mNS)>
           <w:r>
-            <w:rPr><w:rStyle w:val="MathStyle"/><w:rFonts w:ascii="Cambria Math"/><w:b/><w:i/><w:color w:val="FF0000"/><w:sz w:val="24"/></w:rPr>
+            <w:rPr><w:rStyle w:val="MathStyle"/><w:rFonts w:ascii="Cambria Math" w:eastAsia="PMingLiU"/><w:b/><w:i/><w:color w:val="FF0000"/><w:sz w:val="24"/><w:lang w:val="en-US" w:eastAsia="zh-TW"/></w:rPr>
             <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>
           </w:r>
         </w:p>
@@ -390,6 +386,8 @@ final class OMathSpliceTests: XCTestCase {
         XCTAssertTrue(xml.contains("<w:b/>"), "Got: \(xml)")
         XCTAssertTrue(xml.contains("<w:i/>"), "Got: \(xml)")
         XCTAssertTrue(xml.contains(#"<w:sz w:val="24"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:szCs w:val="24"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:lang w:val="en-US" w:eastAsia="zh-TW"/>"#), "Got: \(xml)")
         XCTAssertTrue(xml.contains("</w:rPr><m:oMath"), "Got: \(xml)")
         XCTAssertFalse(xml.contains("<w:rStyle"), "Got: \(xml)")
         XCTAssertFalse(xml.contains("<w:color"), "Got: \(xml)")
@@ -473,47 +471,148 @@ final class OMathSpliceTests: XCTestCase {
 
     // MARK: - Round-trip lossless guarantee (6.13)
 
-    /// After splice + DocxWriter.write + DocxReader.read, the OMath XML in target
-    /// preserves the source OMath content (substring match — ECMA-376 attribute
-    /// reordering may shift exact byte sequence, but visible content is preserved).
-    func testRoundTripPreservesOMathContent() throws {
+    /// Save/reload and a second dirty save must both preserve the inline Run
+    /// carrier, exact self-contained OMath bytes, and each rPr mode's semantics.
+    func testRoundTripPreservesOMathCarrierBytesAndRpRModesAcrossDirtyResave() throws {
+        let sourceXML = """
+        <w:p \(Self.mNS)>
+          <w:r>
+            <w:rPr><w:rStyle w:val="MathStyle"/><w:rFonts w:ascii="Cambria Math" w:eastAsia="PMingLiU"/><w:b/><w:i/><w:color w:val="FF0000"/><w:sz w:val="24"/><w:lang w:val="en-US" w:eastAsia="zh-TW"/></w:rPr>
+            <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>
+          </w:r>
+        </w:p>
+        """
+        let sourcePara = try parseParagraph(xml: sourceXML)
+        let expectedOMath = try XCTUnwrap(OMathExtractor.extract(from: sourcePara).first?.xml)
+
+        let cases: [(name: String, mode: OMathSpliceRpRMode)] = [
+            ("full", .full),
+            ("omathOnly", .omathOnly),
+            ("discard", .discard),
+        ]
+
+        for entry in cases {
+            let firstURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("OMathSpliceTests-\(entry.name)-first-\(UUID().uuidString).docx")
+            let secondURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("OMathSpliceTests-\(entry.name)-second-\(UUID().uuidString).docx")
+            defer {
+                try? FileManager.default.removeItem(at: firstURL)
+                try? FileManager.default.removeItem(at: secondURL)
+            }
+
+            var target = makeDocument(with: try parseParagraph(xml: Self.targetEmpty))
+            try target.spliceOMath(
+                from: sourcePara,
+                toBodyParagraphIndex: 0,
+                position: .atEnd,
+                omathIndex: 0,
+                rPrMode: entry.mode
+            )
+            try DocxWriter.write(target, to: firstURL)
+            var firstReload = try DocxReader.read(from: firstURL)
+
+            try assertReloadedOMath(
+                in: firstReload,
+                expectedXML: expectedOMath,
+                mode: entry.mode,
+                stage: "\(entry.name) first reload"
+            )
+
+            // Force typed document.xml serialization on the second save. A
+            // rawXML OMath short-circuit used to drop both rPr and <w:r> here.
+            firstReload.markPartDirty("word/document.xml")
+            try DocxWriter.write(firstReload, to: secondURL)
+            let secondReload = try DocxReader.read(from: secondURL)
+            try assertReloadedOMath(
+                in: secondReload,
+                expectedXML: expectedOMath,
+                mode: entry.mode,
+                stage: "\(entry.name) dirty resave"
+            )
+        }
+    }
+
+    private func assertReloadedOMath(
+        in document: WordDocument,
+        expectedXML: String,
+        mode: OMathSpliceRpRMode,
+        stage: String
+    ) throws {
+        guard case .paragraph(let paragraph) = document.body.children[0] else {
+            XCTFail("\(stage): expected paragraph")
+            return
+        }
+        let run = try XCTUnwrap(
+            paragraph.runs.first(where: { omathXML(in: $0) != nil }),
+            "\(stage): inline OMath must remain in a Run carrier"
+        )
+        XCTAssertTrue(
+            paragraph.unrecognizedChildren.filter { $0.name == "oMath" || $0.name == "oMathPara" }.isEmpty,
+            "\(stage): inline OMath must not become a direct paragraph child"
+        )
+        XCTAssertEqual(omathXML(in: run), expectedXML, "\(stage): OMath bytes changed")
+
+        switch mode {
+        case .full:
+            XCTAssertEqual(run.properties.rStyle, "MathStyle", "\(stage): full rStyle")
+            XCTAssertEqual(run.properties.color, "FF0000", "\(stage): full color")
+            XCTAssertEqual(run.properties.rFonts?.eastAsia, "PMingLiU", "\(stage): full rFonts")
+            XCTAssertEqual(run.properties.fontSize, 24, "\(stage): full sz/szCs")
+            XCTAssertEqual(run.properties.lang?.eastAsia, "zh-TW", "\(stage): full lang")
+            XCTAssertTrue(run.properties.bold, "\(stage): full bold")
+            XCTAssertTrue(run.properties.italic, "\(stage): full italic")
+        case .omathOnly:
+            XCTAssertNil(run.properties.rStyle, "\(stage): omathOnly strips rStyle")
+            XCTAssertNil(run.properties.color, "\(stage): omathOnly strips color")
+            XCTAssertEqual(run.properties.rFonts?.eastAsia, "PMingLiU", "\(stage): omathOnly rFonts")
+            XCTAssertEqual(run.properties.fontSize, 24, "\(stage): omathOnly sz/szCs")
+            XCTAssertEqual(run.properties.lang?.eastAsia, "zh-TW", "\(stage): omathOnly lang")
+            XCTAssertTrue(run.properties.bold, "\(stage): omathOnly bold")
+            XCTAssertTrue(run.properties.italic, "\(stage): omathOnly italic")
+        case .discard:
+            XCTAssertEqual(run.properties, RunProperties(), "\(stage): discard must keep default rPr")
+        }
+    }
+
+    func testSplicedInlineOMathCanBeUsedAsAnotherSpliceSource() throws {
         let sourcePara = try parseParagraph(xml: Self.sourceInlineRunOMath)
-        let targetPara = try parseParagraph(xml: Self.targetEmpty)
-        var target = makeDocument(with: targetPara)
+        var firstTarget = makeDocument(with: try parseParagraph(xml: Self.targetEmpty))
+        try firstTarget.spliceOMath(from: sourcePara, toBodyParagraphIndex: 0, position: .atEnd)
+        guard case .paragraph(let firstResult) = firstTarget.body.children[0] else { XCTFail(); return }
+        XCTAssertTrue(
+            firstResult.flattenedDisplayText().contains("t"),
+            "spliced inline OMath must remain visible to pre-save flattened text and anchor lookup"
+        )
+
+        var secondTarget = makeDocument(with: try parseParagraph(xml: Self.targetEmpty))
+        XCTAssertNoThrow(
+            try secondTarget.spliceOMath(from: firstResult, toBodyParagraphIndex: 0, position: .atEnd)
+        )
+        guard case .paragraph(let secondResult) = secondTarget.body.children[0] else { XCTFail(); return }
+        XCTAssertEqual(secondResult.runs.filter { omathXML(in: $0) != nil }.count, 1)
+    }
+
+    func testStrictNamespacePolicyRecognizesSplicedInlineOMathTarget() throws {
+        let sourcePara = try parseParagraph(xml: Self.sourceMMLPrefixOMath)
+        var target = makeDocument(with: try parseParagraph(xml: Self.targetEmpty))
 
         try target.spliceOMath(
             from: sourcePara,
             toBodyParagraphIndex: 0,
             position: .atEnd,
-            omathIndex: 0
+            namespacePolicy: .lenient
         )
+        guard case .paragraph(let rawElementTarget) = target.body.children[0] else { XCTFail(); return }
 
-        // Write to a temp file then reload.
-        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("OMathSpliceTests-\(UUID().uuidString).docx")
-        defer { try? FileManager.default.removeItem(at: tempURL) }
-
-        try DocxWriter.write(target, to: tempURL)
-        let reloaded = try DocxReader.read(from: tempURL)
-
-        // Inline OMath must remain inside a Run carrier after save/reload.
-        guard case .paragraph(let reloadedPara) = reloaded.body.children[0] else { XCTFail(); return }
-
-        let runOMathContent = reloadedPara.runs
-            .compactMap { $0.rawXML }
-            .filter { $0.contains("oMath") }
-            .joined()
-        let directChildOMathContent = reloadedPara.unrecognizedChildren
-            .filter { $0.name == "oMath" || $0.name == "oMathPara" }
-            .map { $0.rawXML }
-            .joined()
-        let allOMathContent = runOMathContent + directChildOMathContent
-
-        XCTAssertFalse(runOMathContent.isEmpty, "inline OMath must reload in a Run carrier")
-        XCTAssertTrue(directChildOMathContent.isEmpty, "inline OMath must not become direct-child")
-        XCTAssertTrue(
-            allOMathContent.contains("<m:t>t</m:t>") || allOMathContent.contains("<mml:t>t</mml:t>"),
-            "Round-tripped OMath should contain original glyph regardless of carrier; got: \(allOMathContent)"
+        XCTAssertNoThrow(
+            try target.spliceOMath(
+                from: sourcePara,
+                toBodyParagraphIndex: 0,
+                position: .atEnd,
+                namespacePolicy: .strict
+            ),
+            "strict policy should observe the existing mml prefix in the spliced Run carrier: \(rawElementTarget)"
         )
     }
 

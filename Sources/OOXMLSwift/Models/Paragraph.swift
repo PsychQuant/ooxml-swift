@@ -1053,7 +1053,8 @@ extension Paragraph {
     /// run has no rawXML override.
     fileprivate static func emitRun(_ run: Run, asDelText: Bool,
                                     paragraphRevisions: [Revision]) -> String {
-        if let rawXML = run.rawXML { return rawXML }
+        let rawOMathFragment = run.rawOMathFragment
+        if let rawXML = run.rawXML, rawOMathFragment == nil { return rawXML }
         if let rawXML = run.properties.rawXML { return rawXML }
 
         let formatRevision: Revision? = {
@@ -1080,6 +1081,8 @@ extension Paragraph {
 
         if let drawing = run.drawing {
             xml += drawing.toXML()
+        } else if let rawOMathFragment {
+            xml += rawOMathFragment
         } else if !run.text.isEmpty || (run.rawElements?.isEmpty ?? true) {
             if asDelText {
                 xml += "<w:delText xml:space=\"preserve\">\(escapeRunText(run.text))</w:delText>"

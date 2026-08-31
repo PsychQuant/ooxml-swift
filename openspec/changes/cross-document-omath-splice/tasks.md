@@ -15,7 +15,7 @@
 - [x] 3.1 Implement public `WordDocument.spliceOMath(from:toBodyParagraphIndex:position:omathIndex:rPrMode:namespacePolicy:)` per the Single-OMath verbatim splice between documents requirement
 - [x] 3.2 Validate inputs: throw `.targetParagraphOutOfRange` if `toBodyParagraphIndex` invalid; throw `.sourceHasNoOMath` if extraction returns empty; throw `.omathIndexOutOfRange` if `omathIndex >= extracted.count`
 - [x] 3.3 Implement namespace policy check (lenient: throw only on URI mismatch; strict: throw on prefix or URI mismatch) per the Namespace policy controls prefix/URI mismatch handling requirement
-- [x] 3.4 Branch on extracted OMath kind: inRun → wrap the verbatim OMath as a `Run.rawElements` child so rPr remains serializable; directChild → append to target paragraph's `unrecognizedChildren` (Carrier preservation strategy; corrected by #117)
+- [x] 3.4 Branch on extracted OMath kind: inRun → preserve the established `Run.rawXML` representation and serialize an OMath-root fragment as a Run child; directChild → append to target paragraph's `unrecognizedChildren` (Carrier preservation strategy; corrected by #117)
 - [x] 3.5 Apply `OMathSpliceRpRMode` for source Run rPr propagation: `.full` deep-copy, `.omathOnly` whitelist (rFonts/sz/szCs/lang/bold/italic), `.discard` empty (rPr propagation modes requirement)
 - [x] 3.6 Resolve `OMathSplicePosition` to insertion site within target paragraph; for `.atStart` / `.atEnd` use position bounds; for `.afterText` / `.beforeText` use anchor lookup against `flattenedDisplayText()` with `AnchorLookupOptions`
 
@@ -71,8 +71,10 @@
 
 ## 10. Issue #117 remediation — serializable inline rPr carrier
 
-- [x] 10.1 Add RED assertions proving `.full`, `.omathOnly`, and round-trip carrier semantics fail when inline OMath is assigned to `Run.rawXML`
-- [x] 10.2 Store inline OMath as a verbatim `Run.rawElements` child so `Run.toXML()` emits the enclosing `<w:r>` and copied `<w:rPr>`
-- [x] 10.3 Update OMath tests to inspect both legacy source `rawXML` and target/reloaded `rawElements` carriers
-- [x] 10.4 Run `OMathSpliceTests`: 15 tests, 0 failures
-- [ ] 10.5 Run the complete package regression suite and IDD multi-agent verification
+- [x] 10.1 Add RED assertions proving `.full`, `.omathOnly`, and round-trip carrier semantics fail when OMath-root `Run.rawXML` is treated as a complete Run replacement
+- [x] 10.2 Preserve `Run.rawXML` read compatibility while making `Run.toXML()` and `Paragraph.emitRun()` serialize an OMath-root fragment inside the enclosing `<w:r>` after copied rPr
+- [x] 10.3 Add RED coverage for `.omathOnly` language, chained splice, strict namespace inspection, and a second dirty save after reload
+- [x] 10.4 Preserve `lang` and verify the existing rawXML representation remains visible to extraction and namespace inspection
+- [x] 10.5 Confirm flattened text / anchor lookup compatibility by retaining the established in-memory carrier
+- [x] 10.6 Run `OMathSpliceTests`: 17 tests, 0 failures
+- [ ] 10.7 Run the complete package regression suite and repeat IDD multi-agent verification on the final commit
