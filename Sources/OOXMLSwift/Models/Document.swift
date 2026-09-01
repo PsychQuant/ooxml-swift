@@ -369,9 +369,79 @@ public struct WordDocument: Equatable {
         return stamped
     }
 
+    /// #175 (PsychQuant/macdoc#175) — the op-emission fast path in
+    /// `appendParagraph` projects the paragraph into `ParagraphPayload` +
+    /// `RunPayload`. Those payloads speak a deliberately small vocabulary;
+    /// any content outside it is SILENTLY DROPPED by the projection. The
+    /// reported case: a run whose content is a Drawing — rels + media were
+    /// written, but `<w:drawing>` never reached the XML tree, so the saved
+    /// body was missing the image while every status channel reported
+    /// success.
+    ///
+    /// This predicate is a POSITIVE whitelist: it returns true only when
+    /// everything the paragraph carries is representable in the payloads.
+    /// Anything else takes the typed-dirty slow path, which serializes the
+    /// full typed model and loses nothing (coarser op log, correct bytes).
+    /// When adding a field to `Paragraph` / `ParagraphProperties` / `Run` /
+    /// `RunProperties`, decide here whether the payloads carry it —
+    /// defaulting to "not representable" is always safe.
+    private func isOpPayloadRepresentable(_ paragraph: Paragraph) -> Bool {
+        // Paragraph-level content the payloads cannot carry.
+        guard !paragraph.hasPageBreak,
+              paragraph.bookmarks.isEmpty,
+              paragraph.hyperlinks.isEmpty,
+              paragraph.commentIds.isEmpty,
+              paragraph.footnoteIds.isEmpty,
+              paragraph.endnoteIds.isEmpty,
+              paragraph.revisions.isEmpty,
+              paragraph.contentControls.isEmpty,
+              paragraph.bookmarkMarkers.isEmpty,
+              paragraph.fieldSimples.isEmpty,
+              paragraph.alternateContents.isEmpty,
+              paragraph.previousProperties == nil,
+              paragraph.paragraphFormatChangeRevisionId == nil
+        else { return false }
+
+        // ParagraphProperties beyond the projected set
+        // (alignment / spacing / indentation / style / numbering ARE projected).
+        let p = paragraph.properties
+        guard !p.keepNext, !p.keepLines, !p.pageBreakBefore,
+              p.sectionBreak == nil,
+              p.border == nil,
+              p.shading == nil,
+              p.markRunProperties == nil
+        else { return false }
+
+        // Run-level content and properties beyond RunPayload's vocabulary
+        // (text / bold / italic / color / rFonts / size / underline /
+        //  vertAlign ARE projected).
+        for run in paragraph.runs {
+            guard run.drawing == nil,
+                  run.rawXML == nil,
+                  (run.rawElements ?? []).isEmpty,
+                  run.revisionId == nil,
+                  run.formatChangeRevisionId == nil,
+                  run.position == nil
+            else { return false }
+            let rp = run.properties
+            guard !rp.strikethrough,
+                  rp.highlight == nil,
+                  rp.characterSpacing == nil,
+                  rp.textEffect == nil,
+                  rp.rawXML == nil,
+                  rp.rStyle == nil,
+                  !rp.noProof,
+                  rp.kern == nil,
+                  rp.lang == nil
+            else { return false }
+        }
+        return true
+    }
+
     public mutating func appendParagraph(_ paragraph: Paragraph) {
         let stamped = withStampedParaId(paragraph)
-        if xmlTrees["word/document.xml"] != nil, let paraId = stamped.w14ParaId {
+        if xmlTrees["word/document.xml"] != nil, let paraId = stamped.w14ParaId,
+           isOpPayloadRepresentable(stamped) {
             let p = stamped.properties
             let payload = ParagraphPayload(
                 text: stamped.text,
