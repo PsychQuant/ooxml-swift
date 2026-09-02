@@ -576,6 +576,17 @@ public struct WordDocument: Equatable {
               let node = parsed.root.children.first(where: { $0.kind == .element && $0.localName == "p" })
         else { return false }
         Self.detachFromSource(node)
+        // Every prefix the grafted subtree uses must be declared on the document
+        // element, or the written XML is not well-formed (Word refuses it). The
+        // scratch wrapper's declarations do not travel with the node; add the
+        // missing ones to the root (its open tag is re-emitted, its children
+        // still blob-copy). A prefix with no known URI cannot be repaired here.
+        var declared = Set(tree.root.attributes.filter { $0.prefix == "xmlns" }.map(\.localName))
+        for prefix in Self.prefixesUsed(in: node) where !declared.contains(prefix) {
+            guard let uri = decls[prefix] else { return false }
+            tree.root.setAttribute(prefix: "xmlns", localName: prefix, value: uri)
+            declared.insert(prefix)
+        }
         if let sectIdx = body.children.firstIndex(where: { $0.kind == .element && $0.localName == "sectPr" }) {
             body.children.insert(node, at: sectIdx)
         } else {
@@ -591,6 +602,22 @@ public struct WordDocument: Equatable {
         carriedParts.removeValue(forKey: part)
         operationReplayBase = nil
         return true
+    }
+
+    /// Namespace prefixes an element subtree uses on element and attribute
+    /// names (`xmlns` declarations and the reserved `xml` prefix excluded).
+    private static func prefixesUsed(in node: XmlNode) -> Set<String> {
+        var out: Set<String> = []
+        func walk(_ n: XmlNode) {
+            guard n.kind == .element else { return }
+            if let p = n.prefix, !p.isEmpty, p != "xml" { out.insert(p) }
+            for a in n.attributes {
+                if let p = a.prefix, !p.isEmpty, p != "xmlns", p != "xml" { out.insert(p) }
+            }
+            for c in n.children { walk(c) }
+        }
+        walk(node)
+        return out
     }
 
     /// Clear scratch-buffer byte ranges on a parsed subtree so the writer

@@ -35,7 +35,7 @@ public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
 ///   images are therefore covered, and a `rId4` referenced by `header1.xml`
 ///   cannot mask an orphan `rId4` declared by `document.xml.rels`.
 /// - Nested parts (`word/charts/…`, `word/diagrams/…`) are included: any
-///   `word/_rels/<path>.rels` is compared against `word/<path>`.
+///   `<dir>/_rels/<name>.rels` under `word/` is compared against `<dir>/<name>`.
 /// - It is a comment-stripped attribute scan, not an OPC/XML parser: it
 ///   accepts both quote styles and any namespace prefix on `embed`/`link`/`id`,
 ///   but does not resolve entities or validate the XML.
@@ -88,10 +88,16 @@ public enum PackageInspector {
 
         for entry in archive {
             let path = entry.path
-            guard path.hasPrefix("word/_rels/"), path.hasSuffix(".rels") else { continue }
-            let partName = String(path.dropFirst("word/_rels/".count).dropLast(".rels".count))
-            guard partName.hasSuffix(".xml") else { continue }   // nested parts (charts/, diagrams/) included
-            let part = "word/" + partName
+            // OPC: the relationships of part `<dir>/<name>` live at
+            // `<dir>/_rels/<name>.rels` — so `word/charts/chart1.xml` is served by
+            // `word/charts/_rels/chart1.xml.rels`, NOT `word/_rels/charts/…`
+            // (R3 codex F5 corrected the earlier formula).
+            guard path.hasPrefix("word/"), path.hasSuffix(".rels"),
+                  let relsDirRange = path.range(of: "/_rels/", options: .backwards) else { continue }
+            let dir = String(path[..<relsDirRange.lowerBound])
+            let name = String(path[relsDirRange.upperBound...].dropLast(".rels".count))
+            guard name.hasSuffix(".xml"), !name.contains("/") else { continue }
+            let part = dir + "/" + name
 
             let relsXML = (try entryText(path)) ?? ""
             declared.append(contentsOf: imageRelationshipIds(inRels: relsXML).map {
