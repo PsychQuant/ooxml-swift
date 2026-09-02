@@ -386,11 +386,28 @@ public struct WordDocument: Equatable {
     /// `RunProperties`, decide here whether the payloads carry it —
     /// defaulting to "not representable" is always safe.
     private func isOpPayloadRepresentable(_ paragraph: Paragraph) -> Bool {
-        // Paragraph-level content the payloads cannot carry.
+        // Tree-backed paragraphs (`Paragraph(xmlNode:)`) expose text-only stub
+        // runs and empty stored collections through their getters, so nothing
+        // below can see what they actually carry — the whitelist is blind to
+        // them by construction. Never fast-path them. (macdoc#175 verify R1.)
+        guard paragraph.xmlNode == nil else { return false }
+
+        // Paragraph-level content the payloads cannot carry. Every
+        // source-positioned child collection that `toXMLSortedByPosition()`
+        // serializes is listed (mirror of `Paragraph.hasSourcePositionedChildren`);
+        // the macdoc#175 R1 verify proved each one that was missing here lost
+        // content silently — four of them carry visible run text.
         guard !paragraph.hasPageBreak,
               paragraph.bookmarks.isEmpty,
               paragraph.hyperlinks.isEmpty,
-              paragraph.commentIds.isEmpty,
+              paragraph.commentIds.isEmpty,            // deprecated field; harmless, kept for detached callers
+              paragraph.commentRangeMarkers.isEmpty,   // the live comment-range source of truth
+              paragraph.permissionRangeMarkers.isEmpty,
+              paragraph.proofErrorMarkers.isEmpty,
+              paragraph.smartTags.isEmpty,
+              paragraph.customXmlBlocks.isEmpty,
+              paragraph.bidiOverrides.isEmpty,
+              paragraph.unrecognizedChildren.isEmpty,
               paragraph.footnoteIds.isEmpty,
               paragraph.endnoteIds.isEmpty,
               paragraph.revisions.isEmpty,
@@ -432,7 +449,8 @@ public struct WordDocument: Equatable {
                   rp.rStyle == nil,
                   !rp.noProof,
                   rp.kern == nil,
-                  rp.lang == nil
+                  rp.lang == nil,
+                  rp.rFonts?.cs == nil          // RunPayload has no complex-script font slot
             else { return false }
         }
         return true
@@ -443,7 +461,7 @@ public struct WordDocument: Equatable {
         if xmlTrees["word/document.xml"] != nil, let paraId = stamped.w14ParaId,
            isOpPayloadRepresentable(stamped) {
             let p = stamped.properties
-            let payload = ParagraphPayload(
+            var payload = ParagraphPayload(
                 text: stamped.text,
                 styleId: p.style,
                 paraId: paraId,
@@ -458,10 +476,11 @@ public struct WordDocument: Equatable {
                 indentHanging: p.indentation?.hanging,
                 numId: p.numbering?.numId,
                 numLevel: p.numbering?.level)
+            payload.textId = stamped.w14TextId   // projected, not dropped (macdoc#175 R1)
             var ops: [Operation] = [.appendParagraph(in: nil, paragraph: payload)]
             let runPayloads = stamped.runs.map { run -> RunPayload in
                 let rp = run.properties
-                return RunPayload(
+                var runPayload = RunPayload(
                     text: run.text,
                     bold: rp.bold ? true : nil,
                     italic: rp.italic ? true : nil,
@@ -473,6 +492,10 @@ public struct WordDocument: Equatable {
                     vertAlign: rp.verticalAlign?.rawValue,
                     fontHAnsi: rp.rFonts?.hAnsi ?? rp.fontName,
                     fontHint: rp.rFonts?.hint)
+                // Same rule the typed serializer uses for xml:space="preserve";
+                // without it the reducer emitted <w:t> bare and Word ate the whitespace.
+                runPayload.preserveSpace = Run.needsXMLSpacePreserve(run.text) ? true : nil
+                return runPayload
             }
             if runPayloads.count != 1 || runPayloads.first != RunPayload(text: stamped.text) {
                 ops.append(.setRuns(
