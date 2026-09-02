@@ -9,6 +9,35 @@ import XCTest
 @testable import OOXMLSwift
 
 final class TemplateFixtureGateTests: XCTestCase {
+    func testRECFixtureNameResolvesThroughSharedGate() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rec-gate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fixture = dir.appendingPathComponent(TemplateFixtureGate.recFixtureName)
+        XCTAssertTrue(FileManager.default.createFile(atPath: fixture.path, contents: Data()))
+
+        let resolved = try TemplateFixtureGate.requireTemplate(
+            TemplateFixtureGate.recFixtureName,
+            dirOverride: dir.path
+        )
+        XCTAssertEqual(resolved.path, fixture.path)
+    }
+
+    func testThesisFixtureNameResolvesThroughSharedGate() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("thesis-gate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fixture = dir.appendingPathComponent(TemplateFixtureGate.thesisFixtureName)
+        XCTAssertTrue(FileManager.default.createFile(atPath: fixture.path, contents: Data()))
+
+        let resolved = try TemplateFixtureGate.requireTemplate(
+            TemplateFixtureGate.thesisFixtureName,
+            dirOverride: dir.path
+        )
+        XCTAssertEqual(resolved.path, fixture.path)
+    }
 
     /// Real baseline template (90_template_ja) coverage — runs only on a
     /// maintainer machine with `MACDOC_TEMPLATE_DIR` set; skips loudly on CI.
@@ -31,6 +60,9 @@ final class TemplateFixtureGateTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["MACDOC_TEMPLATE_DIR"] == nil else {
             throw XCTSkip("MACDOC_TEMPLATE_DIR is set in this environment; skip the unset-path check")
         }
+        let message = TemplateFixtureGate.missingGateMessage(for: "anything.docx")
+        XCTAssertTrue(message.contains("MACDOC_TEMPLATE_DIR"), "Got: \(message)")
+        XCTAssertTrue(message.contains("anything.docx"), "Got: \(message)")
         XCTAssertThrowsError(try TemplateFixtureGate.requireTemplate("anything.docx")) { error in
             XCTAssertTrue(error is XCTSkip, "missing gate must throw XCTSkip, not a hard failure")
         }
@@ -65,6 +97,10 @@ final class TemplateFixtureGateTests: XCTestCase {
             .appendingPathComponent("tmpl-empty-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
+        let message = TemplateFixtureGate.missingFixtureMessage(for: "absent.docx")
+        XCTAssertTrue(message.contains("MACDOC_TEMPLATE_DIR"), "Got: \(message)")
+        XCTAssertTrue(message.contains("absent.docx"), "Got: \(message)")
+        XCTAssertFalse(message.contains(dir.path), "Must not leak host path: \(message)")
         XCTAssertThrowsError(try TemplateFixtureGate.requireTemplate("absent.docx", dirOverride: dir.path)) { error in
             XCTAssertTrue(error is XCTSkip)
         }

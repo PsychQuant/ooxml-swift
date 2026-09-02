@@ -512,11 +512,9 @@ final class Issue58_60ContentPreservationTests: XCTestCase {
     /// version covering preservation-class 1 of 3
     /// (specs/ooxml-roundtrip-fidelity/spec.md).
     func testDocumentContentEqualityInvariant() throws {
-        let fixturePath = "/Users/che/Developer/macdoc/mcp/che-word-mcp/test-files/thesis-fixture.docx"
-        guard FileManager.default.fileExists(atPath: fixturePath) else {
-            throw XCTSkip("thesis fixture not present at \(fixturePath); skipping content-equality matrix-pin")
-        }
-        let srcURL = URL(fileURLWithPath: fixturePath)
+        let srcURL = try TemplateFixtureGate.requireTemplate(
+            TemplateFixtureGate.thesisFixtureName
+        )
 
         // Read source document.xml directly from the ZIP for ground-truth counts.
         let srcDocXML = try Self.readDocumentXMLString(from: srcURL)
