@@ -34,6 +34,8 @@ public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
 ///   found in **that part only** (`word/<part>`). Header/footer/footnote
 ///   images are therefore covered, and a `rId4` referenced by `header1.xml`
 ///   cannot mask an orphan `rId4` declared by `document.xml.rels`.
+/// - Nested parts (`word/charts/…`, `word/diagrams/…`) are included: any
+///   `word/_rels/<path>.rels` is compared against `word/<path>`.
 /// - It is a comment-stripped attribute scan, not an OPC/XML parser: it
 ///   accepts both quote styles and any namespace prefix on `embed`/`link`/`id`,
 ///   but does not resolve entities or validate the XML.
@@ -88,7 +90,7 @@ public enum PackageInspector {
             let path = entry.path
             guard path.hasPrefix("word/_rels/"), path.hasSuffix(".rels") else { continue }
             let partName = String(path.dropFirst("word/_rels/".count).dropLast(".rels".count))
-            guard partName.hasSuffix(".xml"), !partName.contains("/") else { continue }
+            guard partName.hasSuffix(".xml") else { continue }   // nested parts (charts/, diagrams/) included
             let part = "word/" + partName
 
             let relsXML = (try entryText(path)) ?? ""
@@ -115,7 +117,7 @@ public enum PackageInspector {
     // MARK: - Scanning helpers (attribute-level, not a parser)
 
     private static let relationshipElement = try! NSRegularExpression(
-        pattern: #"<Relationship\b[^>]*>"#, options: [])
+        pattern: #"<Relationship\b(?:[^>"']|"[^"]*"|'[^']*')*>"#, options: [])   // a '>' inside a quoted value does not end the element
     private static let idAttribute = try! NSRegularExpression(
         pattern: #"\bId\s*=\s*(["'])([^"']*)\1"#, options: [])
     private static let typeAttribute = try! NSRegularExpression(
@@ -127,6 +129,7 @@ public enum PackageInspector {
 
     /// Ids of `<Relationship>` elements whose `Type` ends with `/image`.
     static func imageRelationshipIds(inRels relsXML: String) -> [String] {
+        let relsXML = stripComments(relsXML)   // a commented-out declaration is not a declaration
         let ns = relsXML as NSString
         let whole = NSRange(location: 0, length: ns.length)
         return relationshipElement.matches(in: relsXML, range: whole).compactMap { m in
@@ -140,9 +143,12 @@ public enum PackageInspector {
     /// Every `*:embed` / `*:link` / `*:id` attribute value in a part, with XML
     /// comments removed first so a commented-out reference cannot satisfy a
     /// declaration.
+    static func stripComments(_ xml: String) -> String {
+        xmlComment.stringByReplacingMatches(in: xml, range: NSRange(location: 0, length: (xml as NSString).length), withTemplate: "")
+    }
+
     static func referencedRelationshipIds(inPart partXML: String) -> Set<String> {
-        let stripped = xmlComment.stringByReplacingMatches(
-            in: partXML, range: NSRange(location: 0, length: (partXML as NSString).length), withTemplate: "")
+        let stripped = stripComments(partXML)
         let ns = stripped as NSString
         let whole = NSRange(location: 0, length: ns.length)
         return Set(referenceAttribute.matches(in: stripped, range: whole).map { ns.substring(with: $0.range(at: 2)) })
