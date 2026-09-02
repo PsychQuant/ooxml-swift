@@ -1,6 +1,24 @@
 import Foundation
 import ZIPFoundation
 
+/// One image relationship, qualified by the part whose `.rels` declares it.
+/// Relationship ids are scoped per part in OPC (`word/_rels/header1.xml.rels`
+/// and `word/_rels/document.xml.rels` may both declare `rId4`), so a bare id
+/// is not an identity.
+public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
+    /// Package path of the part that owns the relationship, e.g. `word/document.xml`.
+    public let part: String
+    /// The relationship `Id` as declared in that part's `.rels`.
+    public let id: String
+    /// `"<part>:<id>"` — stable string form for messages and set diffs.
+    public var qualified: String { "\(part):\(id)" }
+
+    public init(part: String, id: String) {
+        self.part = part
+        self.id = id
+    }
+}
+
 /// Post-serialization consistency report for embedded images (#175,
 /// PsychQuant/macdoc#175).
 ///
@@ -10,26 +28,44 @@ import ZIPFoundation
 /// the file revealed the loss. This report gives save paths a cheap,
 /// package-level check to turn that silence into an error.
 ///
-/// The authoritative failure signal is `orphanImageRelationshipIds`: image
-/// relationships declared in `word/_rels/document.xml.rels` that no
-/// `r:embed`/`r:link` in any `word/**.xml` part references. Raw counts are
-/// informational — they can legitimately diverge (images in headers/footers
-/// are not body drawings; two relationships may share one media file).
+/// **Coverage (read this before relying on it):**
+/// - Declarations are taken from **every** `word/_rels/<part>.rels`, and each
+///   part's declared image relationships are compared against references
+///   found in **that part only** (`word/<part>`). Header/footer/footnote
+///   images are therefore covered, and a `rId4` referenced by `header1.xml`
+///   cannot mask an orphan `rId4` declared by `document.xml.rels`.
+/// - It is a comment-stripped attribute scan, not an OPC/XML parser: it
+///   accepts both quote styles and any namespace prefix on `embed`/`link`/`id`,
+///   but does not resolve entities or validate the XML.
+/// - When an archive carries two entries with the same name, the first is
+///   used (ZIPFoundation subscript semantics); the second is invisible.
+/// - No size limits are applied to the package (PsychQuant/ooxml-swift#130).
+///
+/// The authoritative failure signal is `orphanImageRelationshipRefs`. Raw
+/// counts are informational — they can legitimately diverge (two
+/// relationships may share one media file; a header image is not a body
+/// drawing).
 public struct ImageConsistencyReport: Equatable, Sendable {
     /// `<w:drawing>` occurrences in `word/document.xml` (body only).
     public let bodyDrawingCount: Int
-    /// Image relationships declared in `word/_rels/document.xml.rels`.
+    /// Image relationships declared across every `word/_rels/*.rels` part.
     public let imageRelationshipCount: Int
     /// Entries under `word/media/`.
     public let mediaEntryCount: Int
-    /// Image relationship Ids no XML part references — the #175 signature.
+    /// Orphan ids declared by `word/_rels/document.xml.rels` (bare ids —
+    /// kept for callers written against 3.6.0). Subset of the refs below.
     public let orphanImageRelationshipIds: [String]
+    /// Every image relationship no reference in its own part points at — the
+    /// #175 signature, across all parts.
+    public let orphanImageRelationshipRefs: [ImageRelationshipRef]
 
-    /// True when every declared image relationship is referenced somewhere.
-    public var isConsistent: Bool { orphanImageRelationshipIds.isEmpty }
+    /// True when every declared image relationship is referenced by its own part.
+    public var isConsistent: Bool { orphanImageRelationshipRefs.isEmpty }
 }
 
 public enum PackageInspector {
+
+    private static let documentPart = "word/document.xml"
 
     /// Inspect a serialized .docx package for image consistency.
     ///
@@ -38,56 +74,83 @@ public enum PackageInspector {
     public static func imageConsistencyReport(of packageData: Data) throws -> ImageConsistencyReport {
         let archive = try Archive(data: packageData, accessMode: .read)
 
-        func entryText(_ path: String) throws -> String {
-            guard let entry = archive[path] else { return "" }
+        func entryText(_ path: String) throws -> String? {
+            guard let entry = archive[path] else { return nil }
             var data = Data()
             _ = try archive.extract(entry) { data.append($0) }
             return String(decoding: data, as: UTF8.self)
         }
 
-        let documentXML = try entryText("word/document.xml")
-        let relsXML = try entryText("word/_rels/document.xml.rels")
+        var declared: [ImageRelationshipRef] = []
+        var referencedByPart: [String: Set<String>] = [:]
 
-        // Image relationship ids from the document part's rels. Attribute
-        // order within <Relationship> is not fixed, so capture Id and Type
-        // independently per element.
-        var imageRelIds: [String] = []
-        for element in relsXML.components(separatedBy: "<Relationship ").dropFirst() {
-            let tag = element.components(separatedBy: ">").first ?? element
-            guard tag.contains("relationships/image") else { continue }
-            guard let idRange = tag.range(of: #"Id="([^"]+)""#, options: .regularExpression) else { continue }
-            let idAttr = String(tag[idRange])
-            let id = idAttr
-                .replacingOccurrences(of: "Id=\"", with: "")
-                .replacingOccurrences(of: "\"", with: "")
-            imageRelIds.append(id)
-        }
+        for entry in archive {
+            let path = entry.path
+            guard path.hasPrefix("word/_rels/"), path.hasSuffix(".rels") else { continue }
+            let partName = String(path.dropFirst("word/_rels/".count).dropLast(".rels".count))
+            guard partName.hasSuffix(".xml"), !partName.contains("/") else { continue }
+            let part = "word/" + partName
 
-        // Every XML part under word/ may reference an image (body, headers,
-        // footers, footnotes...). Collect the referenced ids across all of
-        // them so header/footer images are not misreported as orphans.
-        var referencedIds: Set<String> = []
-        for entry in archive where entry.path.hasPrefix("word/") && entry.path.hasSuffix(".xml") {
-            let text = try entryText(entry.path)
-            for match in ["r:embed=\"", "r:link=\"", "r:id=\""] {
-                var search = text[text.startIndex...]
-                while let range = search.range(of: match) {
-                    let tail = search[range.upperBound...]
-                    if let quote = tail.firstIndex(of: "\"") {
-                        referencedIds.insert(String(tail[..<quote]))
-                        search = tail[quote...]
-                    } else { break }
-                }
+            let relsXML = (try entryText(path)) ?? ""
+            declared.append(contentsOf: imageRelationshipIds(inRels: relsXML).map {
+                ImageRelationshipRef(part: part, id: $0)
+            })
+            if referencedByPart[part] == nil {
+                referencedByPart[part] = referencedRelationshipIds(inPart: (try entryText(part)) ?? "")
             }
         }
 
+        let orphans = declared.filter { !(referencedByPart[$0.part] ?? []).contains($0.id) }
+        let documentXML = (try entryText(documentPart)) ?? ""
         let media = archive.filter { $0.path.hasPrefix("word/media/") }.count
-        let orphans = imageRelIds.filter { !referencedIds.contains($0) }
 
         return ImageConsistencyReport(
             bodyDrawingCount: documentXML.components(separatedBy: "<w:drawing").count - 1,
-            imageRelationshipCount: imageRelIds.count,
+            imageRelationshipCount: declared.count,
             mediaEntryCount: media,
-            orphanImageRelationshipIds: orphans)
+            orphanImageRelationshipIds: orphans.filter { $0.part == documentPart }.map(\.id),
+            orphanImageRelationshipRefs: orphans)
+    }
+
+    // MARK: - Scanning helpers (attribute-level, not a parser)
+
+    private static let relationshipElement = try! NSRegularExpression(
+        pattern: #"<Relationship\b[^>]*>"#, options: [])
+    private static let idAttribute = try! NSRegularExpression(
+        pattern: #"\bId\s*=\s*(["'])([^"']*)\1"#, options: [])
+    private static let typeAttribute = try! NSRegularExpression(
+        pattern: #"\bType\s*=\s*(["'])([^"']*)\1"#, options: [])
+    private static let referenceAttribute = try! NSRegularExpression(
+        pattern: #"(?:^|[\s<])[A-Za-z_][\w.-]*:(?:embed|link|id)\s*=\s*(["'])([^"']*)\1"#, options: [])
+    private static let xmlComment = try! NSRegularExpression(
+        pattern: #"<!--.*?-->"#, options: [.dotMatchesLineSeparators])
+
+    /// Ids of `<Relationship>` elements whose `Type` ends with `/image`.
+    static func imageRelationshipIds(inRels relsXML: String) -> [String] {
+        let ns = relsXML as NSString
+        let whole = NSRange(location: 0, length: ns.length)
+        return relationshipElement.matches(in: relsXML, range: whole).compactMap { m in
+            let element = ns.substring(with: m.range)
+            guard let type = firstCapture(typeAttribute, in: element), type.hasSuffix("/image"),
+                  let id = firstCapture(idAttribute, in: element) else { return nil }
+            return id
+        }
+    }
+
+    /// Every `*:embed` / `*:link` / `*:id` attribute value in a part, with XML
+    /// comments removed first so a commented-out reference cannot satisfy a
+    /// declaration.
+    static func referencedRelationshipIds(inPart partXML: String) -> Set<String> {
+        let stripped = xmlComment.stringByReplacingMatches(
+            in: partXML, range: NSRange(location: 0, length: (partXML as NSString).length), withTemplate: "")
+        let ns = stripped as NSString
+        let whole = NSRange(location: 0, length: ns.length)
+        return Set(referenceAttribute.matches(in: stripped, range: whole).map { ns.substring(with: $0.range(at: 2)) })
+    }
+
+    private static func firstCapture(_ regex: NSRegularExpression, in text: String) -> String? {
+        let ns = text as NSString
+        guard let m = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else { return nil }
+        return ns.substring(with: m.range(at: 2))
     }
 }

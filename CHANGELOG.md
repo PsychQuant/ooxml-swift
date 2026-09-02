@@ -8,6 +8,40 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.6.1] - 2026-09-03
+
+### Fixed
+
+- **`appendParagraph` whitelist completed at the `Paragraph` layer** (PsychQuant/macdoc#175 verify R1).
+  3.6.0's `isOpPayloadRepresentable` guarded `Run`/`RunProperties` completely but missed seven
+  source-positioned `Paragraph` collections — `commentRangeMarkers`, `permissionRangeMarkers`,
+  `proofErrorMarkers`, `smartTags`, `customXmlBlocks`, `bidiOverrides`, `unrecognizedChildren`
+  (four of them carry visible run text) — plus `rFonts.cs`; each was proved lost on append by
+  probe tests. All are guarded now (typed fallback), and tree-backed paragraphs
+  (`Paragraph(xmlNode:)`, whose getters return stubs the whitelist cannot see) never take the
+  fast path. `w14:textId` and `xml:space="preserve"` are now **projected** into the op payload
+  instead of being dropped — leading/trailing whitespace on an appended paragraph no longer
+  disappears in Word.
+- **`PackageInspector` scopes relationship ids per part.** 3.6.0 read declarations from
+  `document.xml.rels` only and matched references across every `word/**.xml`, so header/footer
+  image orphans were structurally invisible and a `rId` referenced by a header could mask the
+  same `rId` orphaned in the body. Every `word/_rels/*.rels` is now compared against its own
+  part; XML comments are stripped before scanning; both quote styles and any namespace prefix
+  are accepted; `Type` is matched by exact `/image` suffix. New `orphanImageRelationshipRefs`
+  (part-qualified) is the authoritative signal; `orphanImageRelationshipIds` keeps the
+  document-part bare-id view for 3.6.0 callers. Coverage limits are stated in the doc comment.
+
+### Noted
+
+- 3.6.0's fix also covered `insertPageBreak(at: nil)` and `insertSectionBreak(at: nil)`, which
+  were silently dropped by the same projection — unreported at the time.
+- **Known limitation** (PsychQuant/ooxml-swift#129): documents opened with
+  `wireTreeBackedViews: true` lose existing `<w:drawing>` on any typed re-serialization
+  (pre-existing; `insertParagraph(at:)` triggers it on 3.5.0 too). #128 re-routed append-image
+  onto that path, so on tree-backed documents the failure changed from "new image lost" to
+  "existing images lost". che-word-mcp never enables tree-backed views and is unaffected;
+  `Issue175R2WhitelistInspectorTests` documents it as an expected failure until #129 lands.
+
 ## [3.5.0] - 2026-08-27
 
 ### Added

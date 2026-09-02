@@ -498,7 +498,7 @@ extension Run {
     /// round-trip through Word's parser. Trigger when text starts/ends with
     /// whitespace OR contains two-or-more consecutive whitespace characters.
     /// Empty text returns false (nothing to protect).
-    fileprivate static func needsXMLSpacePreserve(_ text: String) -> Bool {
+    static func needsXMLSpacePreserve(_ text: String) -> Bool {
         if text.isEmpty { return false }
         if text.first?.isWhitespace == true { return true }
         if text.last?.isWhitespace == true { return true }
