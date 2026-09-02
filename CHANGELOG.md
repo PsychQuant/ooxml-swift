@@ -8,6 +8,23 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.6.3] - 2026-09-03
+
+### Fixed
+
+- **Grafted paragraphs declare their namespace prefixes** (PsychQuant/macdoc#175 verify R3, codex F1).
+  3.6.2's graft parsed the paragraph under a scratch wrapper's declarations, but those declarations
+  did not travel with the node: on a document whose root declares only `xmlns:w`, the written
+  `document.xml` used undeclared `w14:` / `wp:` / `a:` / `pic:` prefixes and was not well-formed
+  (Word refuses such a file). Every prefix the grafted subtree uses is now declared on the document
+  element when missing (its open tag is re-emitted; children still blob-copy); a prefix with no
+  known URI makes the graft fall back to the typed path. Real Word documents already declare these
+  prefixes and were unaffected.
+- **`PackageInspector` nested-part path formula** (codex F5): OPC places the relationships of
+  `<dir>/<name>` at `<dir>/_rels/<name>.rels`, so `word/charts/chart1.xml` is served by
+  `word/charts/_rels/chart1.xml.rels` — 3.6.2 looked under `word/_rels/charts/…` and never found it.
+
+
 ## [3.6.2] - 2026-09-03
 
 ### Fixed
