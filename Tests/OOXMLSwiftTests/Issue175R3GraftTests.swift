@@ -32,7 +32,7 @@ final class Issue175R3GraftTests: XCTestCase {
     /// what the graft path guarantees and the typed-dirty path cannot.
     private let oddBody = #"<w:customXml w:element="oddblock"><w:p w14:paraId="0A0A0A0A"><w:r w:rsidR="00AB12CD"><w:t>kept-verbatim</w:t></w:r></w:p></w:customXml><w:p w14:paraId="11111111" w14:textId="11111111"><w:r><w:t>One</w:t></w:r></w:p>"#
 
-    private func docx(body: String, docRels: String = "", withImage: Bool = false) throws -> URL {
+    private func docx(body: String, docRels: String = "", withImage: Bool = false, minimalRoot: Bool = false) throws -> URL {
         var parts: [String: Data] = [
             "[Content_Types].xml": Data("""
             <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -41,7 +41,7 @@ final class Issue175R3GraftTests: XCTestCase {
             "_rels/.rels": Data(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.utf8),
             "word/document.xml": Data("""
             <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-            <w:document xmlns:w="\(wNS)" xmlns:w14="\(w14NS)" xmlns:r="\(rNS)" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w14"><w:body>\(body)</w:body></w:document>
+            <w:document xmlns:w="\(wNS)"\(minimalRoot ? "" : " xmlns:w14=\"\(w14NS)\" xmlns:r=\"\(rNS)\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\"")><w:body>\(body)</w:body></w:document>
             """.utf8),
             "word/_rels/document.xml.rels": Data(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#.utf8 + Data(docRels.utf8) + Data("</Relationships>".utf8)),
         ]
@@ -102,6 +102,21 @@ final class Issue175R3GraftTests: XCTestCase {
         XCTAssertTrue(xml.contains("tree-run"))
     }
 
+    /// R3 codex F1: a document whose root declares only `xmlns:w` must still
+    /// produce well-formed XML after a grafted image paragraph (w14/wp/a/pic).
+    func testGraftDeclaresMissingNamespacePrefixesOnRoot() throws {
+        let url = try docx(body: #"<w:p><w:r><w:t>One</w:t></w:r></w:p>"#, minimalRoot: true); defer { try? FileManager.default.removeItem(at: url) }
+        let png = try pngPath(); defer { try? FileManager.default.removeItem(atPath: png) }
+        var doc = try DocxReader.read(from: url)
+        _ = try doc.insertImage(path: png, widthPx: 10, heightPx: 10, at: nil)
+        let data = try DocxWriter.writeData(doc)
+        let xmlData = Data(try part("word/document.xml", of: data).utf8)
+        XCTAssertNoThrow(try XMLDocument(data: xmlData, options: []), "grafted output must be namespace-well-formed")
+        let xml = String(decoding: xmlData, as: UTF8.self)
+        for p in ["w14", "wp", "a", "pic"] { XCTAssertTrue(xml.contains("xmlns:\(p)=\""), "root must declare \(p)") }
+        XCTAssertTrue(doc.treeFreshParts.contains("word/document.xml"), "still the graft path, not typed fallback")
+    }
+
     // MARK: - Inspector hardening
 
     private func pkg(_ parts: [String: String]) throws -> Data {
@@ -132,7 +147,7 @@ final class Issue175R3GraftTests: XCTestCase {
             "word/document.xml": "<w:document><w:body><w:p/></w:body></w:document>",
             "word/_rels/document.xml.rels": "<Relationships/>",
             "word/charts/chart1.xml": "<c:chartSpace/>",
-            "word/_rels/charts/chart1.xml.rels": #"<Relationships><Relationship Id="rId2" Type="\#(imageType)" Target="../media/image1.png"/></Relationships>"#,
+            "word/charts/_rels/chart1.xml.rels": #"<Relationships><Relationship Id="rId2" Type="\#(imageType)" Target="../media/image1.png"/></Relationships>"#,   // OPC: <dir>/_rels/<name>.rels
         ])
         let r = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(r.orphanImageRelationshipRefs, [ImageRelationshipRef(part: "word/charts/chart1.xml", id: "rId2")])
