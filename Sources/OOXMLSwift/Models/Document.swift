@@ -397,7 +397,8 @@ public struct WordDocument: Equatable {
         // serializes is listed (mirror of `Paragraph.hasSourcePositionedChildren`);
         // the macdoc#175 R1 verify proved each one that was missing here lost
         // content silently — four of them carry visible run text.
-        guard !paragraph.hasPageBreak,
+        guard !paragraph.hasSourcePositionedChildren,   // the serializer's own list — cannot drift from it (R2 regression)
+              !paragraph.hasPageBreak,
               paragraph.bookmarks.isEmpty,
               paragraph.hyperlinks.isEmpty,
               paragraph.commentIds.isEmpty,            // deprecated field; harmless, kept for detached callers
@@ -433,7 +434,10 @@ public struct WordDocument: Equatable {
         // (text / bold / italic / color / rFonts / size / underline /
         //  vertAlign ARE projected).
         for run in paragraph.runs {
-            guard run.drawing == nil,
+            // Same blindness one layer down: a tree-backed Run exposes stub
+            // properties/drawing through its getters (R2 logic N1).
+            guard run.xmlNode == nil,
+                  run.drawing == nil,
                   run.rawXML == nil,
                   (run.rawElements ?? []).isEmpty,
                   run.revisionId == nil,
@@ -532,9 +536,89 @@ public struct WordDocument: Equatable {
                 assertionFailure("tree-backed appendParagraph failed: \(error)")
             }
         }
+        // Not op-representable. Prefer grafting the serialized paragraph into
+        // the live tree over re-serializing all of document.xml from the typed
+        // model — the typed model is lossy for real Word documents (macdoc#175
+        // R2 regression: 4/27 real files lost body runs on the typed-dirty path).
+        if graftParagraphIntoDocumentTree(stamped) {
+            body.children.append(.paragraph(stamped))
+            return
+        }
         body.children.append(.paragraph(stamped))
         markTypedDirty("word/document.xml")
     }
+
+    /// Graft a typed paragraph into the live `word/document.xml` tree as an
+    /// XML subtree, leaving every other byte of the part untouched.
+    ///
+    /// The paragraph is serialized by the typed writer, parsed standalone
+    /// under the document's own namespace declarations, detached from the
+    /// scratch buffer (so the tree writer re-emits it instead of blob-copying
+    /// foreign byte ranges), and inserted before a trailing `<w:sectPr>`.
+    /// Returns false when there is no tree or the XML cannot be parsed; the
+    /// caller then falls back to the typed-dirty path.
+    private mutating func graftParagraphIntoDocumentTree(_ paragraph: Paragraph) -> Bool {
+        let part = "word/document.xml"
+        guard let tree = xmlTrees[part],
+              let body = tree.root.children.first(where: { $0.kind == .element && $0.localName == "body" })
+        else { return false }
+        // A typed mutation that has not been bridged back into the tree makes
+        // the tree stale; grafting into it would drop that mutation. Let the
+        // typed-dirty path handle that document instead.
+        guard !(modifiedParts.contains(part) && !treeFreshParts.contains(part)) else { return false }
+        var decls: [String: String] = Self.standardWordNamespaces
+        for attr in tree.root.attributes where attr.prefix == "xmlns" {
+            decls[attr.localName] = attr.value
+        }
+        let xmlns = decls.keys.sorted().map { "xmlns:\($0)=\"\(decls[$0]!)\"" }.joined(separator: " ")
+        let wrapped = "<w:graft \(xmlns)>" + paragraph.toXML() + "</w:graft>"
+        guard let parsed = try? XmlTreeReader.parse(Data(wrapped.utf8)),
+              let node = parsed.root.children.first(where: { $0.kind == .element && $0.localName == "p" })
+        else { return false }
+        Self.detachFromSource(node)
+        if let sectIdx = body.children.firstIndex(where: { $0.kind == .element && $0.localName == "sectPr" }) {
+            body.children.insert(node, at: sectIdx)
+        } else {
+            body.children.append(node)
+        }
+        // Same bookkeeping the op path performs after materializing: the tree
+        // is now the authority for this part (writer serializes it from the
+        // tree, blob-copying every untouched node), the carried source bytes
+        // are superseded, and a replay checkpoint older than this point can
+        // no longer reproduce the tree (this graft is not in the op log).
+        modifiedParts.insert(part)
+        treeFreshParts.insert(part)
+        carriedParts.removeValue(forKey: part)
+        operationReplayBase = nil
+        return true
+    }
+
+    /// Clear scratch-buffer byte ranges on a parsed subtree so the writer
+    /// emits it from node fields.
+    private static func detachFromSource(_ node: XmlNode) {
+        node.sourceRange = nil
+        node.markDirty()
+        for child in node.children { detachFromSource(child) }
+    }
+
+    private static let standardWordNamespaces: [String: String] = [
+        "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "w14": "http://schemas.microsoft.com/office/word/2010/wordml",
+        "w15": "http://schemas.microsoft.com/office/word/2012/wordml",
+        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+        "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+        "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
+        "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
+        "mc": "http://schemas.openxmlformats.org/markup-compatibility/2006",
+        "v": "urn:schemas-microsoft-com:vml",
+        "o": "urn:schemas-microsoft-com:office:office",
+        "w10": "urn:schemas-microsoft-com:office:word",
+        "wne": "http://schemas.microsoft.com/office/word/2006/wordml",
+        "wps": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+        "wpg": "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+        "xml": "http://www.w3.org/XML/1998/namespace",
+    ]
 
     public mutating func insertParagraph(_ paragraph: Paragraph, at index: Int) {
         let clampedIndex = min(max(0, index), body.children.count)

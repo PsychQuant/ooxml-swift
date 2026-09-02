@@ -160,7 +160,7 @@ final class Issue175R2WhitelistInspectorTests: XCTestCase {
         var doc = try DocxReader.read(from: url, wireTreeBackedViews: true)
         try doc.insertParagraph(Paragraph(runs: [Run(text: "typed-dirty edit")]), at: 0)
         let xml = try documentXML(of: try DocxWriter.writeData(doc))
-        XCTExpectFailure("PsychQuant/ooxml-swift#129 — tree-backed typed re-serialization drops existing drawings", strict: false) {
+        XCTExpectFailure("PsychQuant/ooxml-swift#129 — tree-backed typed re-serialization drops existing drawings", strict: true) {
             XCTAssertEqual(xml.components(separatedBy: "<w:drawing").count - 1, 1)
         }
     }

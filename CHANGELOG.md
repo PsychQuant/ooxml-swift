@@ -8,6 +8,29 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.6.2] - 2026-09-03
+
+### Fixed
+
+- **Non-representable appends are grafted into the live tree instead of re-serializing
+  `word/document.xml` from the typed model** (PsychQuant/macdoc#175 verify R2). The R2 regression
+  lens A/B-tested 27 real documents with che-word-mcp's settings: 3.6.0/3.6.1's typed-dirty
+  fallback rewrote body text in 4 of them (one thesis lost 73 paragraphs) because the typed model
+  is lossy for real Word files. `appendParagraph` now serializes only the new paragraph, parses it
+  under the document's namespace declarations, detaches it from the scratch buffer, and inserts it
+  before `<w:sectPr>` — every other byte of the part is blob-copied. The part becomes tree-fresh;
+  if a prior typed mutation left the tree stale, the typed-dirty path is used as before. This also
+  closes the append case of #129 (tree-backed documents keep their existing drawings).
+- **Run-layer tree-backed guard**: a `Run(xmlNode:)` inside a detached paragraph exposed stub
+  properties and slipped through the whitelist (R2 logic N1) — guarded like the paragraph layer.
+- Whitelist consults `Paragraph.hasSourcePositionedChildren` in addition to the explicit list, so
+  the two cannot drift (R2 regression M4).
+- `PackageInspector`: commented-out `<Relationship>` elements are not declarations; a `>` inside a
+  quoted attribute value no longer hides the element (fail-open); nested parts
+  (`word/charts/…`, `word/diagrams/…`) are included.
+- The tree-backed known-limitation test is now `strict` (the fixture reproduces #129).
+
+
 ## [3.6.1] - 2026-09-03
 
 ### Fixed
