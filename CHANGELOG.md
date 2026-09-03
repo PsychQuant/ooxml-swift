@@ -8,6 +8,31 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.6.4] - 2026-09-03
+
+### Fixed
+
+- **Graft no longer touches the document element** (PsychQuant/macdoc#175 verify R3, logic N1 —
+  a 3.6.3 regression). 3.6.3 repaired missing namespace declarations by setting attributes on the
+  root, which marked the root dirty and sent the writer down the synthesized-tree branch: a CRLF
+  prolog came out as LF and a trailing epilog was dropped on 70 of 80 real files (3.6.2 preserved
+  both). Declarations now go on the grafted `<w:p>` itself, only for prefixes the root lacks or
+  binds to a different URI (logic N2). The root, its prolog and its epilog are byte-identical after
+  a graft; the namespace-repair loop can no longer leave the tree half-modified (regression R3-4).
+
+### Corrected
+
+- The 3.6.3 entry said real Word documents "were unaffected" by the declaration repair. They were
+  not: 26 of 27 real files had `xmlns:a` / `xmlns:pic` added to their root (harmless for Word,
+  but a byte change — R3 requirements). With 3.6.4 nothing outside the grafted paragraph changes.
+- Scope of the graft, stated precisely: it applies to **`appendParagraph`** when the part is not
+  already typed-dirty — i.e. the appended image is the first typed change to `document.xml` in the
+  session. Anchored inserts (`insertParagraph(at:)`, `insertImage(at: index)` and the other
+  `InsertLocation` forms) and any earlier typed mutation still re-serialize the part from the typed
+  model, which is lossy for some real files (PsychQuant/ooxml-swift#133). The 3.6.2 entry's
+  "append-image no longer triggers that path" holds only under that condition.
+
+
 ## [3.6.3] - 2026-09-03
 
 ### Fixed

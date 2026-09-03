@@ -566,26 +566,35 @@ public struct WordDocument: Equatable {
         // the tree stale; grafting into it would drop that mutation. Let the
         // typed-dirty path handle that document instead.
         guard !(modifiedParts.contains(part) && !treeFreshParts.contains(part)) else { return false }
-        var decls: [String: String] = Self.standardWordNamespaces
-        for attr in tree.root.attributes where attr.prefix == "xmlns" {
-            decls[attr.localName] = attr.value
-        }
+        // Parse-time bindings: the document's own declarations fill gaps, the
+        // standard WordprocessingML set wins where they disagree (the typed
+        // serializer wrote standard prefixes, R3 logic N2).
+        var decls: [String: String] = [:]
+        for attr in tree.root.attributes where attr.prefix == "xmlns" { decls[attr.localName] = attr.value }
+        for (k, v) in Self.standardWordNamespaces { decls[k] = v }
         let xmlns = decls.keys.sorted().map { "xmlns:\($0)=\"\(decls[$0]!)\"" }.joined(separator: " ")
         let wrapped = "<w:graft \(xmlns)>" + paragraph.toXML() + "</w:graft>"
         guard let parsed = try? XmlTreeReader.parse(Data(wrapped.utf8)),
               let node = parsed.root.children.first(where: { $0.kind == .element && $0.localName == "p" })
         else { return false }
         Self.detachFromSource(node)
-        // Every prefix the grafted subtree uses must be declared on the document
-        // element, or the written XML is not well-formed (Word refuses it). The
-        // scratch wrapper's declarations do not travel with the node; add the
-        // missing ones to the root (its open tag is re-emitted, its children
-        // still blob-copy). A prefix with no known URI cannot be repaired here.
-        var declared = Set(tree.root.attributes.filter { $0.prefix == "xmlns" }.map(\.localName))
-        for prefix in Self.prefixesUsed(in: node) where !declared.contains(prefix) {
-            guard let uri = decls[prefix] else { return false }
-            tree.root.setAttribute(prefix: "xmlns", localName: prefix, value: uri)
-            declared.insert(prefix)
+        // Every prefix the grafted subtree uses must resolve to the URI the
+        // typed serializer meant, or the written XML is not well-formed (Word
+        // refuses it) or lands in the wrong namespace (Word ignores it — the
+        // #175 signature again). The scratch wrapper's declarations do not
+        // travel with the node, and touching the ROOT is not an option: a dirty
+        // root sends the writer down the synthesized-tree branch, which rewrote
+        // a CRLF prolog to LF and dropped the epilog on 70/80 real files
+        // (macdoc#175 R3 logic N1 — a 3.6.3 regression). So the declarations go
+        // on the grafted <w:p> itself: only when the root lacks the prefix or
+        // binds it to a different URI (R3 logic N2). Nothing outside the new
+        // subtree is mutated. A prefix with no known URI cannot be repaired.
+        let rootBindings = Dictionary(uniqueKeysWithValues:
+            tree.root.attributes.filter { $0.prefix == "xmlns" }.map { ($0.localName, $0.value) })
+        for prefix in Self.prefixesUsed(in: node).sorted() {
+            guard let wanted = Self.standardWordNamespaces[prefix] ?? rootBindings[prefix] else { return false }
+            if rootBindings[prefix] == wanted { continue }
+            node.setAttribute(prefix: "xmlns", localName: prefix, value: wanted)
         }
         if let sectIdx = body.children.firstIndex(where: { $0.kind == .element && $0.localName == "sectPr" }) {
             body.children.insert(node, at: sectIdx)

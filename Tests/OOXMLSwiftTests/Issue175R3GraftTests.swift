@@ -32,17 +32,14 @@ final class Issue175R3GraftTests: XCTestCase {
     /// what the graft path guarantees and the typed-dirty path cannot.
     private let oddBody = #"<w:customXml w:element="oddblock"><w:p w14:paraId="0A0A0A0A"><w:r w:rsidR="00AB12CD"><w:t>kept-verbatim</w:t></w:r></w:p></w:customXml><w:p w14:paraId="11111111" w14:textId="11111111"><w:r><w:t>One</w:t></w:r></w:p>"#
 
-    private func docx(body: String, docRels: String = "", withImage: Bool = false, minimalRoot: Bool = false) throws -> URL {
+    private func docx(body: String, docRels: String = "", withImage: Bool = false, minimalRoot: Bool = false, crlfProlog: Bool = false, foreignW: Bool = false) throws -> URL {
         var parts: [String: Data] = [
             "[Content_Types].xml": Data("""
             <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>
             """.utf8),
             "_rels/.rels": Data(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.utf8),
-            "word/document.xml": Data("""
-            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-            <w:document xmlns:w="\(wNS)"\(minimalRoot ? "" : " xmlns:w14=\"\(w14NS)\" xmlns:r=\"\(rNS)\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\"")><w:body>\(body)</w:body></w:document>
-            """.utf8),
+            "word/document.xml": Data(("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" + (crlfProlog ? "\r\n" : "\n") + "<w:document xmlns:w=\"\(foreignW ? "urn:vendor:not-wordprocessingml" : wNS)\"" + (minimalRoot ? "" : " xmlns:w14=\"\(w14NS)\" xmlns:r=\"\(rNS)\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\"") + "><w:body>\(body)</w:body></w:document>" + (crlfProlog ? "\r\n" : "")).utf8),
             "word/_rels/document.xml.rels": Data(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#.utf8 + Data(docRels.utf8) + Data("</Relationships>".utf8)),
         ]
         if withImage { parts["word/media/image1.png"] = onePixelPNG }
@@ -113,8 +110,24 @@ final class Issue175R3GraftTests: XCTestCase {
         let xmlData = Data(try part("word/document.xml", of: data).utf8)
         XCTAssertNoThrow(try XMLDocument(data: xmlData, options: []), "grafted output must be namespace-well-formed")
         let xml = String(decoding: xmlData, as: UTF8.self)
-        for p in ["w14", "wp", "a", "pic"] { XCTAssertTrue(xml.contains("xmlns:\(p)=\""), "root must declare \(p)") }
+        for p in ["w14", "wp", "a", "pic"] { XCTAssertTrue(xml.contains("xmlns:\(p)=\""), "grafted node must declare \(p)") }
         XCTAssertTrue(doc.treeFreshParts.contains("word/document.xml"), "still the graft path, not typed fallback")
+        // R3 logic N1: the ROOT must stay clean — a dirty root rewrites the prolog.
+        let root = try XCTUnwrap(doc.xmlTrees["word/document.xml"]?.root)
+        XCTAssertFalse(root.isDirty, "root must not be mutated by the graft")
+        XCTAssertTrue(xml.hasPrefix("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:document xmlns:w=\""), "root open tag byte-identical: \(xml.prefix(120))")
+    }
+
+    /// R3 logic N1 (regression in 3.6.3): a CRLF prolog must survive a graft byte-for-byte.
+    func testGraftPreservesCRLFPrologAndEpilog() throws {
+        let url = try docx(body: #"<w:p><w:r><w:t>One</w:t></w:r></w:p>"#, minimalRoot: true, crlfProlog: true); defer { try? FileManager.default.removeItem(at: url) }
+        let png = try pngPath(); defer { try? FileManager.default.removeItem(atPath: png) }
+        let original = Data(try part("word/document.xml", of: Data(contentsOf: url)).utf8)
+        var doc = try DocxReader.read(from: url)
+        _ = try doc.insertImage(path: png, widthPx: 10, heightPx: 10, at: nil)
+        let out = Data(try part("word/document.xml", of: try DocxWriter.writeData(doc)).utf8)
+        XCTAssertEqual(out.prefix(70), original.prefix(70), "prolog (CRLF) and root open tag must be untouched")
+        XCTAssertEqual(out.suffix(30), original.suffix(30), "epilog must be untouched")
     }
 
     // MARK: - Inspector hardening
