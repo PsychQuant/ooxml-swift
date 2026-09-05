@@ -8,6 +8,49 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-09-05
+
+### Fixed
+
+- **`PackageInspector` 改用 `XMLParser` 掃描，不再用屬性 regex**（#137 + #138 一次改寫）。舊版用四條
+  `NSRegularExpression` 抓 `Id` / `Type` / `*:embed|link|id` 的**字面值**，於是 (a) `Id="rId&#54;"` 在 inspector 是
+  `rId&#54;`、在 `DocxReader`（NSXML）是 `rId6`，任何把兩邊放一起比的 consumer 都會誤判（#137）；(b) 註解剝除的
+  `<!--.*?-->` 對未閉合 `<!--` 二次退化——實測 40/80/160 KB 的 rels part → 4.4/16.7/62.3 s，2 KB 的 .docx 就能讓呼叫端
+  卡 35–60 s（#138）。現在每個 part 由 `XMLParser`（`DocxReader` 用的同一個 libxml2）單次線性掃描：
+  - **屬性值由 parser 交付**——實體解析與屬性空白正規化（TAB/CR/LF → 空格、CRLF 先折成 LF）都是它的事，`ImageRelationshipRef.id`
+    因此定義上等於 reader 讀到的字串。**引用側（`*:embed`/`*:link`/`*:id`）同樣解碼**，`r:embed="rId&#x36;"` 對
+    `Id="rId6"` 的宣告不再誤報孤兒。
+  - **註解與 CDATA 是結構不是文字**：多行註解裡的 `<Relationship>` 不再被算成宣告，CDATA 裡的 `<Relationship>` 與字面
+    `<!--` 也不再影響判定。三種病態 payload（未閉合 ×20000、`(-->)×N (<!--)×N` 平衡錯排、nested + 換行）現在合計數十毫秒。
+  - **無法解析的 part 進 `unparsableParts` 且不產生孤兒**：未知不是遺失。舊版對非 well-formed 的 part 照樣給答案；新版把
+    「讀不到」與「宣告了卻沒人引用」分開，consumer 才不會對一份沒毛病的檔案拒絕存檔。
+- **`RelationshipsOverlay.merge` 不再 `fatalError`**（#139）。`Dictionary(uniqueKeysWithValues:)` 對重複 relationship id
+  直接 trap，而那些 id 來自磁碟上的檔案：一份 `word/_rels/document.xml.rels` 宣告兩次 `rId5`（或 `rId5` 與 `rId&#53;`，
+  reader 解碼後同號）就能讓整個 process 以 SIGTRAP 結束——下游實測是一個 MCP server 連同所有開啟中文件的未存編輯一起消失。
+  merge 改為 first-wins 且永不 trap；**真正的裁決移到 `DocxWriter.writeDocumentRels`**：序列化前偵測重複 id 並拋
+  `WordError.invalidDocx`，訊息具名重複的 id 與兩種成因（model 自身重複、或與 writer 固定槽 `rId1`–`rId4` 相撞，見 #140）。
+  觸發面比 issue 原文寬：`writeDocumentRels` 選 overlay 的條件是 `archiveTempDir != nil`，**與 `overlayMode` 旗標無關**，
+  所以 `writeData`（文件註解說 always scratch）對「從磁碟讀入的文件」也走這條路。
+
+### Added
+
+- `ImageConsistencyReport` 新增三個欄位（加法，既有 consumer 不受影響）：
+  - `declaredImageRelationshipRefs` — 每個 part 宣告的**全部** image relationship（宣告順序，id 已解碼）。media 檔缺失或
+    external target 的 relationship 永遠進不了 `WordDocument.images`，consumer 要把清單與封裝對帳就需要這個。
+  - `duplicateRelationshipRefs` — 同一 part 內宣告 ≥2 次的 id（任何 type）。OPC 禁止，且 writer 會拒絕序列化，讓 consumer
+    在動手前就能具名診斷。
+  - `unparsableParts` — XML 解析失敗的 package 路徑（已排序）。
+  - `ImageConsistencyReport` 另補 public memberwise init（下游測試可直接建構報告）。
+
+### 升級注意
+
+- 序列化的失敗集合擴大：**重複 relationship id 的文件從「trap 打死 process」變成拋 `WordError.invalidDocx`**。原本就會
+  crash 的輸入現在可被 `catch`；沒有輸入從「成功」變成「失敗」。
+- `bodyDrawingCount` 語意不變（`word/document.xml` 內的 `<w:drawing>` 元素數，含圖表／文字方塊／SmartArt），doc comment
+  補上「drawing ≠ image，不可用它判斷封裝有沒有圖片」。
+- inspector 現在對每個 part 做一次 SAX 解析，比 regex 掃描重；1487 個測試（含既有 #175 家族）全綠、無語意回歸。
+
+
 ## [3.6.4] - 2026-09-03
 
 ### Fixed
