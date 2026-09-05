@@ -677,6 +677,26 @@ public struct DocxWriter {
         EndnotesCollection.relationshipType,
     ]
 
+    /// Why the relationship merge's text scan (`RelationshipsOverlay.rawIds`,
+    /// #142) did not see a relationship the XML parser did: the one spelling
+    /// in the raw rels text that explains it, looked up by the parsed id.
+    static func relsSpellingCause(forParsedId id: String, inRaw raw: String) -> String {
+        let escaped = NSRegularExpression.escapedPattern(for: id)
+        func has(_ pattern: String) -> Bool { raw.range(of: pattern, options: .regularExpression) != nil }
+        if has(#"\bId\s*=\s*'"# + escaped + "'") { return "single-quoted attribute values" }
+        if has(#"\bId(\s+=|=\s+)\s*""# + escaped + "\"") { return "whitespace around `=`" }
+        if let idRange = raw.range(of: #"\bId=""# + escaped + "\"", options: .regularExpression) {
+            let before = raw[..<idRange.lowerBound]
+            let after = raw[idRange.upperBound...]
+            if let open = before.lastIndex(of: "<"), let close = after.firstIndex(of: ">") {
+                let tag = raw[open...close]
+                if !tag.hasSuffix("/>") { return "the <Relationship> element is not self-closing (`…></Relationship>`)" }
+            }
+        }
+        if id.contains("&") || id.rangeOfCharacter(from: .whitespacesAndNewlines) != nil { return "an id containing a character reference or whitespace" }
+        return "a spelling the text scan does not recognise"
+    }
+
     private static func writeDocumentRelationships(to baseURL: URL, document: WordDocument) throws {
         let originalRelsXML: String
         var originalRelsExists = false
@@ -729,8 +749,12 @@ public struct DocxWriter {
         // Which of the two it is decides whose fault the message names (verify
         // R3 B17): an id the model itself carries twice is the document's;
         // any other duplicate can only be a model id meeting a writer slot.
+        // The two causes are not exclusive: two images both using rId1 are a
+        // model duplicate AND a slot collision, and both are reported.
+        let modelIds = Array(typedReservedIds.dropFirst(fixedSlotCount))
         var seenModelIds = Set<String>(), modelDuplicateIds = Set<String>()
-        for id in typedReservedIds.dropFirst(fixedSlotCount) where !seenModelIds.insert(id).inserted { modelDuplicateIds.insert(id) }
+        for id in modelIds where !seenModelIds.insert(id).inserted { modelDuplicateIds.insert(id) }
+        let slotCollisionIds = Set(modelIds).intersection(typedReservedIds.prefix(fixedSlotCount))
         // The package's own rels can carry the duplicate too (a third-party
         // writer, or a file already damaged this way). Merging first-wins over
         // it would drop a relationship and report success.
@@ -755,47 +779,52 @@ public struct DocxWriter {
         // The overlay indexes the original rels with a regex over the raw text
         // (#142), while the model — and the checks above — hold parsed ids.
         // The two views must describe the same relationships or the merge
-        // cannot be trusted. Refuse when the regex cannot even see the
-        // structure (a comment, a CDATA section, a namespace-prefixed element
-        // name: it would read a commented-out declaration as live, or miss a
-        // live one), and refuse when the two id lists differ (a character
-        // reference, normalized whitespace, single quotes, whitespace around
-        // `=`, a non-self-closing element). 3.6.4 merged anyway and silently
-        // dropped, or invented, relationships on every one of those shapes.
+        // cannot be trusted. Refuse when the parser reported lexical structure
+        // the text scan cannot see the way the parser does (a comment, a CDATA
+        // section, a processing instruction, a namespace-prefixed element —
+        // it would read a commented-out declaration as live, or miss a live
+        // one), and refuse when the two id lists differ, naming the spelling
+        // that caused it per id. 3.6.4 merged anyway and silently dropped, or
+        // invented, relationships on every one of those shapes.
         if originalRelsExists {
             let raw = originalRelsXML
-            let structural: String? =
-                raw.contains("<!--") ? "an XML comment" :
-                raw.contains("<![CDATA[") ? "a CDATA section" :
-                raw.range(of: #"<[A-Za-z_][A-Za-z0-9_.-]*:Relationship\b"#, options: .regularExpression) != nil ? "a namespace-prefixed <Relationship> element" : nil
-            if let structural {
+            if !originalScan.structure.isEmpty {
                 throw WordError.invalidDocx(
-                    "the package's word/_rels/document.xml.rels contains \(structural), which the relationship merge (a text scan, PsychQuant/ooxml-swift#142) cannot read the way the XML parser does; refusing to merge into it. Re-save the file from Word first.")
+                    "the package's word/_rels/document.xml.rels contains \(originalScan.structure.joined(separator: ", ")), which the relationship merge (a text scan, PsychQuant/ooxml-swift#142) cannot read the way the XML parser does; refusing to merge into it. Re-save the file from Word first.")
             }
             let rawOriginalIds = RelationshipsOverlay.rawIds(inRelsXML: raw)
             if rawOriginalIds != originalScan.allIds {
+                func counts(_ ids: [String]) -> [String: Int] { ids.reduce(into: [:]) { $0[$1, default: 0] += 1 } }
+                let rawCounts = counts(rawOriginalIds), parsedCounts = counts(originalScan.allIds)
+                var causes: [String] = []
+                for id in originalScan.allIds where (rawCounts[id] ?? 0) < (parsedCounts[id] ?? 0) && !causes.contains(where: { $0.hasPrefix("\(id): ") }) {
+                    causes.append("\(id): \(Self.relsSpellingCause(forParsedId: id, inRaw: raw))")
+                }
+                for id in rawOriginalIds where (parsedCounts[id] ?? 0) < (rawCounts[id] ?? 0) && !causes.contains(where: { $0.hasPrefix("\(id): ") }) {
+                    causes.append("\(id): seen by the text scan but not by the XML parser")
+                }
                 let detail: String
-                if rawOriginalIds.count != originalScan.allIds.count {
-                    detail = "the text scan sees \(rawOriginalIds.count) relationship(s) [\(rawOriginalIds.joined(separator: ", "))] where the XML parser sees \(originalScan.allIds.count) [\(originalScan.allIds.joined(separator: ", "))]"
+                if !causes.isEmpty {
+                    detail = "the text scan sees \(rawOriginalIds.count) relationship(s), the XML parser \(originalScan.allIds.count) — " + causes.joined(separator: "; ")
                 } else {
                     detail = zip(rawOriginalIds, originalScan.allIds).filter { $0 != $1 }
                         .map { "the text scan reads \($0) where the XML parser reads \($1)" }.joined(separator: "; ")
                 }
                 throw WordError.invalidDocx(
                     "the relationship merge's text view of word/_rels/document.xml.rels does not match the XML parser's view — \(detail). "
-                    + "Spellings that cause this: an id written with a character reference or containing whitespace, single-quoted attributes, whitespace around `=`, a <Relationship> that is not self-closing. "
-                    + "This writer cannot merge such a package safely (PsychQuant/ooxml-swift#142); re-save it from Word first.")
+                    + "This writer cannot merge such a package safely (PsychQuant/ooxml-swift#142); re-save the file from Word first.")
             }
         }
         if !duplicateRelIds.isEmpty {
             let fromModel = duplicateRelIds.filter { modelDuplicateIds.contains($0) }
-            let fromSlots = duplicateRelIds.filter { !modelDuplicateIds.contains($0) }
+            let fromSlots = duplicateRelIds.filter { slotCollisionIds.contains($0) }
             var causes: [String] = []
             if !fromModel.isEmpty {
                 causes.append("the document model carries \(fromModel.joined(separator: ", ")) more than once; OPC scopes relationship ids per part, so the package cannot be written without losing a relationship")
             }
             if !fromSlots.isEmpty {
-                causes.append("\(fromSlots.joined(separator: ", ")) is used by the document and is also the id this writer assigns to one of its fixed parts (rId1 styles / rId2 settings / rId3 fontTable / rId4 numbering when present). The document is well-formed; it is the writer that cannot yet renumber its fixed parts (PsychQuant/ooxml-swift#140)")
+                let plural = fromSlots.count > 1
+                causes.append("\(fromSlots.joined(separator: ", ")) \(plural ? "are" : "is") used by the document and \(plural ? "are also the ids" : "is also the id") this writer assigns to its fixed parts (rId1 styles / rId2 settings / rId3 fontTable / rId4 numbering when present). The document is well-formed; it is the writer that cannot yet renumber its fixed parts (PsychQuant/ooxml-swift#140)")
             }
             throw WordError.invalidDocx(
                 "word/_rels/document.xml.rels would declare \(duplicateRelIds.count) relationship id(s) twice: "

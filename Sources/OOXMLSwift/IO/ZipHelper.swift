@@ -4,7 +4,30 @@ import ZIPFoundation
 /// ZIP 壓縮/解壓縮工具
 public struct ZipHelper {
     /// 解壓縮 ZIP 檔案到臨時目錄
+    ///
+    /// Refuses an archive that carries a symbolic-link entry, an entry whose
+    /// path has a `..` component, or an absolute entry path (v3.7.0). Either
+    /// half on its own is enough to write outside the destination: a link to
+    /// `.` inside the archive makes the kernel resolve later `..` components
+    /// in place while ZIPFoundation's containment check collapses them
+    /// lexically (verify R4 security: `word/a → .` then
+    /// `word/a/a/../../../x` lands in the temporary directory's parent, and
+    /// with enough components anywhere the process may write). A link is
+    /// also followed by every read after it, so `word/alias.xml →
+    /// document.xml` would be a second document. No Word output contains
+    /// any of these (0 / 740 in the real corpus); refusing them here keeps
+    /// one policy for the reader and the inspector.
     public static func unzip(_ url: URL) throws -> URL {
+        let archive = try Archive(url: url, accessMode: .read)
+        for entry in archive {
+            if entry.type == .symlink {
+                throw WordError.invalidDocx("the package contains a symbolic-link entry (\(entry.path)); refusing to extract it.")
+            }
+            let components = entry.path.split(separator: "/", omittingEmptySubsequences: false)
+            if entry.path.hasPrefix("/") || components.contains("..") {
+                throw WordError.invalidDocx("the package contains an entry whose path leaves its own directory (\(entry.path)); refusing to extract it.")
+            }
+        }
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("che-word-mcp")
             .appendingPathComponent(UUID().uuidString)

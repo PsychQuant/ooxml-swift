@@ -398,15 +398,20 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // what the parser delivered.
         let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
         let head = #"<w:document xmlns:w="\#(wNS)" xmlns:a="\#(aNS)" xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p>"#
-        // `refused` is what XMLParser + the undeclared-prefix rule happen to do
-        // today, pinned so a change is a conscious one: a trailing colon
-        // arrives with no namespace URI and falls under the prefix rule; the
-        // rest parse. None of this is reader parity.
+        // Every shape here is refused by the reader. `refused` says what the
+        // inspector does, and matches the class doc's two closed lists: a
+        // prefix bound to an EMPTY URI is refused — libxml2 reports no
+        // mapping for `xmlns:zz=""`, so to the undeclared-prefix rule `zz`
+        // is undeclared (not emulation: the parser's own report). Everything
+        // else parses (codex R4-B1: the earlier rule judged "no namespace
+        // URI" and so refused a trailing colon on a declared prefix; it now
+        // asks only whether the prefix is declared). Seven in the document,
+        // three in the rels — the DA's ten shapes.
         let shapes: [(String, String, Bool)] = [
             ("QName with two colons",            head + "<w:p:q/></w:body></w:document>", false),
-            ("QName with a trailing colon",      head + "<w:/></w:body></w:document>", true),
+            ("QName with a trailing colon",      head + "<w:/></w:body></w:document>", false),
             ("leading colon under a default ns", head + #"<w:p xmlns="urn:d"><:b/></w:p></w:body></w:document>"#, false),
-            ("prefix bound to an empty URI",     head + #"<w:p xmlns:zz=""/></w:body></w:document>"#, false),
+            ("prefix bound to an empty URI, used on an element and an attribute", head + #"<w:p xmlns:zz=""><zz:x zz:a="1"/></w:p></w:body></w:document>"#, true),
             ("prefix bound to an invalid URI",   head + #"<w:p xmlns:zz="urn: bad"/></w:body></w:document>"#, false),
             ("xml prefix rebound",               head + #"<w:p xmlns:xml="urn:wrong"/></w:body></w:document>"#, false),
             ("expanded duplicate attribute",     head + #"<w:p xmlns:p1="urn:u" xmlns:p2="urn:u" p1:k="1" p2:k="2"/></w:body></w:document>"#, false),
@@ -414,11 +419,25 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         for (label, document, refused) in shapes {
             XCTAssertThrowsError(try XMLDocument(data: Data(document.utf8)), "\(label): the reader's DOM refuses it")
             let report = try PackageInspector.imageConsistencyReport(of: try package(document: document, docRels: rel))
-            XCTAssertEqual(report.unparsableParts, refused ? ["word/document.xml"] : [], "\(label): documented leniency — not emulated")
-            // Whatever the verdict, the report never hides a relationship.
+            XCTAssertEqual(report.unparsableParts, refused ? ["word/document.xml"] : [], label)
+            // Leniency never hides a relationship: the report is exact.
             XCTAssertEqual(report.declaredImageRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId4")], label)
             XCTAssertEqual(report.orphanImageRelationshipRefs, [], label)
             if !refused { XCTAssertEqual(report.bodyDrawingCount, 1, label) }
+        }
+        let relsShapes: [(String, String, Bool)] = [
+            ("rels: QName with two colons",       #"<Relationships xmlns="\#(pkgNS)" xmlns:a="urn:a">"# + rel + "<a:b:c/></Relationships>", false),
+            ("rels: prefix bound to an empty URI", #"<Relationships xmlns="\#(pkgNS)" xmlns:zz="">"# + rel + "<zz:x/></Relationships>", true),
+            ("rels: trailing colon",              #"<Relationships xmlns="\#(pkgNS)" xmlns:x="urn:x">"# + rel + "<x:/></Relationships>", false),
+        ]
+        for (label, relsXML, refused) in relsShapes {
+            XCTAssertThrowsError(try XMLDocument(data: Data(relsXML.utf8)), "\(label): the reader's DOM refuses it")
+            let report = try PackageInspector.imageConsistencyReport(of: try zip(["word/document.xml": body(referencing: "rId4"), "word/_rels/document.xml.rels": relsXML, "word/media/image1.png": "png"]))
+            XCTAssertEqual(report.unparsableParts, refused ? ["word/_rels/document.xml.rels"] : [], label)
+            if !refused {
+                XCTAssertEqual(report.declaredImageRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId4")], label)
+                XCTAssertTrue(report.isConsistent, label)
+            }
         }
     }
 
@@ -543,6 +562,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         ]
         let report = try PackageInspector.imageConsistencyReport(of: try zip(parts))
         XCTAssertEqual(report.orphanImageRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId4")])
+        XCTAssertEqual(report.declaredImageRelationshipRefs.count, 1, "the listed `Word/document.xml` IS the document (same file), not a second part")
         XCTAssertEqual(report.mediaEntryCount, 1)
         XCTAssertFalse(report.isConsistent)
     }
@@ -773,19 +793,32 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         }
         let cases: [(String, (URL) throws -> Void, [String])] = [
             ("comment", appending(#"<!-- <Relationship Id="rId99" Type="\#(imageType)" Target="media/gone.png"/> -->"#), ["an XML comment", "#142"]),
+            ("plain comment", appending("<!-- note -->"), ["an XML comment", "#142"]),
             ("CDATA", appending("<![CDATA[x]]>"), ["a CDATA section", "#142"]),
+            ("processing instruction", appending(#"<?audit <p:Relationship ?>"#), ["a processing instruction", "#142"]),
+            ("prefixed root element, unprefixed children", { url in
+                let xml = try String(contentsOf: url, encoding: .utf8)
+                    .replacingOccurrences(of: "<Relationships xmlns=\"\(self.pkgNS)\">", with: "<pkg:Relationships xmlns:pkg=\"\(self.pkgNS)\" xmlns=\"\(self.pkgNS)\">")
+                    .replacingOccurrences(of: "</Relationships>", with: "</pkg:Relationships>")
+                try xml.write(to: url, atomically: true, encoding: .utf8)
+            }, ["namespace-prefixed", "pkg:Relationships", "#142"]),
             ("prefixed element", { url in
                 let xml = try String(contentsOf: url, encoding: .utf8)
                     .replacingOccurrences(of: "</Relationships>", with: #"<pkg:Relationship xmlns:pkg="\#(self.pkgNS)" Id="rId9" Type="\#(theme)" Target="theme/theme1.xml"/></Relationships>"#)
                 try xml.write(to: url, atomically: true, encoding: .utf8)
             }, ["namespace-prefixed", "#142"]),
-            ("not self-closing", appending(#"<Relationship Id="rId9" Type="\#(theme)" Target="theme/theme1.xml"></Relationship>"#), ["not self-closing", "rId9", "#142"]),
-            ("single quotes", appending("<Relationship Id='rId9' Type='\(theme)' Target='theme/theme1.xml'/>"), ["single-quoted", "rId9", "#142"]),
-            ("whitespace around =", appending(#"<Relationship Id = "rId9" Type="\#(theme)" Target="theme/theme1.xml"/>"#), ["whitespace around", "rId9", "#142"]),
+            ("not self-closing", appending(#"<Relationship Id="rId9" Type="\#(theme)" Target="theme/theme1.xml"></Relationship>"#), ["rId9: the <Relationship> element is not self-closing", "#142"]),
+            ("single quotes", appending("<Relationship Id='rId9' Type='\(theme)' Target='theme/theme1.xml'/>"), ["rId9: single-quoted", "#142"]),
+            ("whitespace around =", appending(#"<Relationship Id = "rId9" Type="\#(theme)" Target="theme/theme1.xml"/>"#), ["rId9: whitespace around", "#142"]),
         ]
+        // The cause named is THE cause (codex R4-B7): a message that lists
+        // every possible spelling names none.
+        let otherCauses = ["single-quoted", "whitespace around", "not self-closing"]
         for (label, mutate, expected) in cases {
             let message = try writerRefusal(mutatingRels: mutate)
             for phrase in expected { XCTAssertTrue(message.contains(phrase), "\(label): \(message)") }
+            let named = otherCauses.filter { message.contains($0) }
+            XCTAssertLessThanOrEqual(named.count, 1, "\(label): names one cause, not a list: \(message)")
             XCTAssertFalse(message.contains("(reads as"), "\(label): no mis-pairing of unequal lists: \(message)")
         }
     }
@@ -808,5 +841,101 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
             XCTAssertTrue(message.contains(phrase), "\(label): \(message)")
         }
+    }
+
+    // MARK: - verify R4 (codex B1–B8)
+
+    func testAPartWithoutARelsIsNotReadSoItCannotRefuseAPackageTheReaderOpens() throws {
+        // codex R4-B2: a part that declares nothing has nothing to reconcile.
+        // Reading it anyway would let `word/unused.xml` (any bytes; the
+        // reader never opens it) make a readable package "inconsistent".
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        let data = try package(document: body(referencing: "rId4"), docRels: rel, extra: ["word/unused.xml": "<not xml at all"])
+        XCTAssertEqual(try readerImageCount(data), 1, "the reader opens it")
+        let report = try PackageInspector.imageConsistencyReport(of: data)
+        XCTAssertEqual(report.unparsableParts, [])
+        XCTAssertTrue(report.isConsistent)
+    }
+
+    func testARelsForAnAbsentPartIsFoundByTheFileSystemsRulesNotOurs() throws {
+        // codex R4-B3: the absent-owner rels was still found by a suffix
+        // match (`lowercased().hasSuffix(".rels")`), which U+017F defeats
+        // where the file system does not. Now it is recognised by identity:
+        // the file IS `<name>.rels` inside a directory that IS `_rels` to the
+        // file system. The oracle is the file system itself: the orphan is
+        // reported exactly when a lookup of the folded name finds the file.
+        let rel = #"<Relationship Id="rId2" Type="\#(imageType)" Target="../media/image1.png"/>"#
+        for relsName in ["word/charts/_rels/missing.xml.rels", "word/charts/_REL\u{017F}/MISSING.XML.REL\u{017F}", "word/charts/_rel\u{017F}/missing.xml.rel\u{017F}"] {
+            let data = try zipEntries([("word/document.xml", body()), ("word/_rels/document.xml.rels", rels("")), (relsName, rels(rel)), ("word/media/image1.png", "png")])
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("i137-\(UUID().uuidString).docx")
+            try data.write(to: url); defer { try? FileManager.default.removeItem(at: url) }
+            let dir = try ZipHelper.unzip(url); defer { ZipHelper.cleanup(dir) }
+            let servedAtFoldedName = FileManager.default.fileExists(atPath: dir.appendingPathComponent("word/charts/_rels/missing.xml.rels").path)
+            let report = try PackageInspector.imageConsistencyReport(of: data)
+            // The owner is named as the listing spells it: `word/` + the rels file's stem.
+            let ownerStem = String(relsName.split(separator: "/").last!.dropLast(5))
+            let expected = servedAtFoldedName ? [ImageRelationshipRef(part: "word/charts/" + ownerStem, id: "rId2")] : []
+            XCTAssertEqual(report.orphanImageRelationshipRefs, expected, "\(relsName): served at the folded name = \(servedAtFoldedName)")
+        }
+    }
+
+    func testSymlinkAndTraversalEntriesAreRefusedByReaderAndInspectorAlike() throws {
+        // codex R4-B6: ZIPFoundation extracts a contained symlink, and every
+        // later read follows it — `word/alias.xml → document.xml` would be a
+        // second document. `ZipHelper.unzip` (the reader's own call) now
+        // refuses any archive with a symlink entry; a traversal entry is
+        // refused by ZIPFoundation itself. Both sides refuse both.
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        let target = Data("document.xml".utf8)
+        let archive = try Archive(accessMode: .create)
+        for (name, text) in [("word/document.xml", body(referencing: "rId4")), ("word/_rels/document.xml.rels", rels(rel)), ("word/media/image1.png", "png")] {
+            let d = Data(text.utf8)
+            try archive.addEntry(with: name, type: .file, uncompressedSize: Int64(d.count), compressionMethod: .deflate) { p, n in d.subdata(in: Int(p)..<Int(p) + n) }
+        }
+        try archive.addEntry(with: "word/alias.xml", type: .symlink, uncompressedSize: Int64(target.count)) { p, n in target.subdata(in: Int(p)..<Int(p) + n) }
+        let withLink = try XCTUnwrap(archive.data)
+        XCTAssertThrowsError(try readerImageCount(withLink), "the reader refuses a symlink entry")
+        XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(of: withLink)) { XCTAssertTrue(String(describing: $0).contains("symbolic-link"), "\($0)") }
+        let traversal = try zipEntries([("word/document.xml", body(referencing: "rId4")), ("word/_rels/document.xml.rels", rels(rel)), ("../evil.xml", "<x/>"), ("word/media/image1.png", "png")])
+        let readerRefuses = (try? readerImageCount(traversal)) == nil
+        let inspectorRefuses = (try? PackageInspector.imageConsistencyReport(of: traversal)) == nil
+        XCTAssertEqual(inspectorRefuses, readerRefuses, "traversal: same verdict as the reader")
+        XCTAssertTrue(readerRefuses, "an entry that escapes the destination is refused")
+        // verify R4 security S-R4-1: the conjunction ZIPFoundation 0.9.20 does
+        // not catch — a link to `.` makes later `..` components resolve in
+        // place while the containment check collapses them lexically, so
+        // `word/a/a/../../../x` lands OUTSIDE the temporary directory. Both
+        // halves are refused up front; nothing is written.
+        let dot = Data(".".utf8)
+        let chain = try Archive(accessMode: .create)
+        for (name, text) in [("word/document.xml", body(referencing: "rId4")), ("word/_rels/document.xml.rels", rels(rel)), ("word/media/image1.png", "png")] {
+            let d = Data(text.utf8)
+            try chain.addEntry(with: name, type: .file, uncompressedSize: Int64(d.count), compressionMethod: .deflate) { p, n in d.subdata(in: Int(p)..<Int(p) + n) }
+        }
+        try chain.addEntry(with: "word/a", type: .symlink, uncompressedSize: Int64(dot.count)) { p, n in dot.subdata(in: Int(p)..<Int(p) + n) }
+        let canaryName = "i137-canary-\(UUID().uuidString).txt"
+        let canary = Data("written outside".utf8)
+        try chain.addEntry(with: "word/a/a/a/../../../../\(canaryName)", type: .file, uncompressedSize: Int64(canary.count), compressionMethod: .deflate) { p, n in canary.subdata(in: Int(p)..<Int(p) + n) }
+        let escaping = try XCTUnwrap(chain.data)
+        XCTAssertThrowsError(try readerImageCount(escaping), "the reader refuses the chain")
+        XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(of: escaping), "the inspector refuses the chain")
+        let temp = FileManager.default.temporaryDirectory
+        for dir in [temp, temp.appendingPathComponent("che-word-mcp"), temp.deletingLastPathComponent()] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent(canaryName).path), "nothing written at \(dir.path)")
+        }
+    }
+
+    func testFixedSlotCollisionIsReportedEvenWhenTheSameIdIsAlsoAModelDuplicate() throws {
+        // codex R4-B8: the two causes are not a partition. Two images both on
+        // rId1 are a model duplicate AND a collision with the styles slot.
+        var doc = WordDocument()
+        doc.body.children.append(.paragraph(Paragraph(runs: [Run(text: "x")])))
+        doc.images = [ImageReference(id: "rId1", fileName: "a.png", contentType: "image/png", data: Data([0x89, 0x50])),
+                      ImageReference(id: "rId1", fileName: "b.png", contentType: "image/png", data: Data([0x89, 0x50]))]
+        var thrown: Error?
+        XCTAssertThrowsError(try DocxWriter.writeData(doc)) { thrown = $0 }
+        let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
+        XCTAssertTrue(message.contains("more than once"), message)
+        XCTAssertTrue(message.contains("#140"), message)
     }
 }
