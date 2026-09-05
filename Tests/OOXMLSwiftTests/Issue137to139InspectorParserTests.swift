@@ -171,6 +171,37 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         XCTAssertEqual(report.imageRelationshipCount, 0)
     }
 
+    func testPartsDeclaringADocumentTypeAreRefused() throws {
+        // OPC forbids DTDs in package parts. Switching to a parser made "what
+        // does an entity mean inside an attribute value" answerable in more
+        // than one way; refusing document types keeps the answer structural.
+        let dtd = #"<?xml version="1.0"?><!DOCTYPE Relationships [<!ENTITY x "rId9">]>"#
+        let data = try package(
+            document: body(referencing: "rId4"),
+            docRels: "",
+            extra: ["word/header1.xml": #"<w:hdr xmlns:r="\#(rNS)"><w:p/></w:hdr>"#,
+                    "word/_rels/header1.xml.rels": dtd + rels(#"<Relationship Id="&x;" Type="\#(imageType)" Target="media/image1.png"/>"#)])
+        let report = try PackageInspector.imageConsistencyReport(of: data)
+        XCTAssertEqual(report.unparsableParts, ["word/_rels/header1.xml.rels"])
+        XCTAssertEqual(report.declaredImageRelationshipRefs, [], "a refused part declares nothing")
+        XCTAssertTrue(report.isConsistent)
+    }
+
+    func testEntityExpansionBombIsRefusedImmediately() throws {
+        var dtd = #"<?xml version="1.0"?><!DOCTYPE Relationships [<!ENTITY a "aaaaaaaaaa">"#
+        for i in 1...9 {
+            let prev = i == 1 ? "a" : "e\(i - 1)"
+            dtd += "<!ENTITY e\(i) \"" + String(repeating: "&\(prev);", count: 10) + "\">"
+        }
+        dtd += "]>"
+        let data = try package(document: body(), docRels: "", extra: ["word/header1.xml": "<w:hdr/>",
+                                                                     "word/_rels/header1.xml.rels": dtd + rels("<!-- &e9; -->")])
+        let started = Date()
+        let report = try PackageInspector.imageConsistencyReport(of: data)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
+        XCTAssertEqual(report.unparsableParts, ["word/_rels/header1.xml.rels"])
+    }
+
     // MARK: - #139 · a duplicate relationship id is refused, never fatal
 
     private func documentWithImages(_ ids: [String]) -> WordDocument {

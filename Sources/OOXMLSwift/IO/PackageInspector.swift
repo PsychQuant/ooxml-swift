@@ -191,6 +191,7 @@ public enum PackageInspector {
     static func scanRels(_ relsXML: Data) -> (imageIds: [String], duplicateIds: [String], parsed: Bool) {
         let delegate = RelsScanner()
         let parser = XMLParser(data: relsXML)
+        parser.shouldResolveExternalEntities = false
         parser.delegate = delegate
         let parsed = parser.parse()
         var seen = Set<String>(), dupes: [String] = []
@@ -201,6 +202,7 @@ public enum PackageInspector {
     static func scanPart(_ partXML: Data, countDrawingsAsIn countDrawings: Bool = false) -> (referenced: Set<String>, drawingCount: Int, parsed: Bool) {
         let delegate = PartScanner(countsDrawings: countDrawings)
         let parser = XMLParser(data: partXML)
+        parser.shouldResolveExternalEntities = false
         parser.delegate = delegate
         let parsed = parser.parse()
         return (delegate.referenced, delegate.drawingCount, parsed)
@@ -221,10 +223,39 @@ public enum PackageInspector {
     }
 }
 
+/// Shared delegate behaviour: **a part that declares anything in a DTD is
+/// refused.** OPC forbids DTDs in package parts, no writer emits one, and a
+/// document type is where parser-differential tricks live — an entity that one
+/// XML API expands in an attribute value and another does not would put this
+/// scanner and `DocxReader` back into disagreement, which is the whole of
+/// #137. Refusing costs nothing on real packages and makes the agreement
+/// structural. (Entity-expansion bombs are separately refused by libxml2
+/// itself; external entities are never resolved.)
+private class PackageXMLScanner: NSObject, XMLParserDelegate {
+    func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) {
+        parser.abortParsing()
+    }
+    func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String, publicID: String?, systemID: String?) {
+        parser.abortParsing()
+    }
+    func parser(_ parser: XMLParser, foundUnparsedEntityDeclarationWithName name: String, publicID: String?, systemID: String?, notationName: String?) {
+        parser.abortParsing()
+    }
+    func parser(_ parser: XMLParser, foundAttributeDeclarationWithName attributeName: String, forElement elementName: String, type: String?, defaultValue: String?) {
+        parser.abortParsing()
+    }
+    func parser(_ parser: XMLParser, foundElementDeclarationWithName elementName: String, model: String) {
+        parser.abortParsing()
+    }
+    func parser(_ parser: XMLParser, foundNotationDeclarationWithName name: String, publicID: String?, systemID: String?) {
+        parser.abortParsing()
+    }
+}
+
 /// Collects `<Relationship>` declarations. Comments and CDATA are reported to
 /// the delegate as their own events and are therefore never mistaken for
 /// markup — the two blind spots of the pre-3.7.0 regex scan.
-private final class RelsScanner: NSObject, XMLParserDelegate {
+private final class RelsScanner: PackageXMLScanner {
     var imageIds: [String] = []
     var allIds: [String] = []
 
@@ -247,13 +278,14 @@ private final class RelsScanner: NSObject, XMLParserDelegate {
 
 /// Collects relationship references (`*:embed` / `*:link` / `*:id`) and, for
 /// `word/document.xml`, `<w:drawing>` elements.
-private final class PartScanner: NSObject, XMLParserDelegate {
+private final class PartScanner: PackageXMLScanner {
     let countsDrawings: Bool
     var referenced: Set<String> = []
     var drawingCount = 0
 
     init(countsDrawings: Bool) {
         self.countsDrawings = countsDrawings
+        super.init()
     }
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
