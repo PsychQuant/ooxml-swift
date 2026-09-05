@@ -89,6 +89,13 @@ internal struct RelationshipsOverlay {
         return Self.serialize(merged)
     }
 
+    /// The ids the merge will index by — the regex-parsed RAW attribute text,
+    /// in order. Exposed so `DocxWriter` can refuse a package whose raw ids
+    /// differ from what the reader decodes (#139 / #142).
+    static func rawIds(inRelsXML xml: String) -> [String] {
+        parseRels(xml).map(\.id)
+    }
+
     // MARK: - Parsing
 
     private static func parseRels(_ xml: String) -> [RelationshipDescriptor] {
