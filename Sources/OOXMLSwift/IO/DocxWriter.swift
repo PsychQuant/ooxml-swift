@@ -701,6 +701,27 @@ public struct DocxWriter {
 
         let typedRels = buildTypedRelationships(document: document, allocator: allocator)
 
+        // #139: OPC scopes relationship ids per part, so `word/_rels/document.xml.rels`
+        // may not declare one twice. Refuse loudly instead of emitting a package
+        // whose duplicate silently loses a relationship — and instead of the
+        // trap `RelationshipsOverlay.merge` used to hit. Two ways a document
+        // reaches here with duplicates: the model carries the same id twice
+        // (e.g. two images), or a model id collides with the fixed slots this
+        // writer assigns to styles / settings / fontTable / numbering
+        // (rId1–rId4 — see #140, a legitimate package can use rId1 for an image).
+        var seenRelIds = Set<String>(), duplicateRelIds: [String] = []
+        for rel in typedRels where !seenRelIds.insert(rel.id).inserted && !duplicateRelIds.contains(rel.id) {
+            duplicateRelIds.append(rel.id)
+        }
+        if !duplicateRelIds.isEmpty {
+            throw WordError.invalidDocx(
+                "word/_rels/document.xml.rels would declare \(duplicateRelIds.count) relationship id(s) twice: "
+                + duplicateRelIds.joined(separator: ", ")
+                + ". OPC scopes relationship ids per part, so this document cannot be serialized without losing a relationship. "
+                + "Either the model carries the same id twice, or one of its ids collides with the writer's fixed slots "
+                + "rId1 (styles) / rId2 (settings) / rId3 (fontTable) / rId4 (numbering, when present) — see PsychQuant/ooxml-swift#140.")
+        }
+
         let xml: String
         if document.archiveTempDir != nil && !originalRelsXML.isEmpty {
             // Overlay mode: merge typed rels into original to preserve unknown
