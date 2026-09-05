@@ -8,9 +8,13 @@ import ZIPFoundation
 public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
     /// Package path of the part that owns the relationship, e.g. `word/document.xml`.
     public let part: String
-    /// The relationship `Id` as declared in that part's `.rels`.
+    /// The relationship `Id` **as an XML parser delivers it**: entity
+    /// references resolved and attribute-value whitespace normalized, i.e. the
+    /// same string `DocxReader` sees (#137). `Id="rId&#54;"` is `rId6` here.
     public let id: String
-    /// `"<part>:<id>"` — stable string form for messages and set diffs.
+    /// `"<part>:<id>"` — display form for messages. Not an identity: a part
+    /// path and an id may both contain `:`, so compare `ImageRelationshipRef`
+    /// values (this type is `Hashable`), never their qualified strings.
     public var qualified: String { "\(part):\(id)" }
 
     public init(part: String, id: String) {
@@ -36,9 +40,13 @@ public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
 ///   cannot mask an orphan `rId4` declared by `document.xml.rels`.
 /// - Nested parts (`word/charts/…`, `word/diagrams/…`) are included: any
 ///   `<dir>/_rels/<name>.rels` under `word/` is compared against `<dir>/<name>`.
-/// - It is a comment-stripped attribute scan, not an OPC/XML parser: it
-///   accepts both quote styles and any namespace prefix on `embed`/`link`/`id`,
-///   but does not resolve entities or validate the XML.
+/// - Scanning is done by `XMLParser` — the same libxml2 `DocxReader` reads
+///   with (v3.7.0, #137/#138). Attribute values therefore arrive decoded and
+///   whitespace-normalized, comments and CDATA are structural rather than
+///   textual, and every part is scanned once (no regex, no backtracking).
+/// - A part XML rejects is listed in `unparsableParts` and produces **no
+///   orphans**: unknown is not the same as missing, and reporting an orphan
+///   there would refuse saves on files nothing is wrong with.
 /// - When an archive carries two entries with the same name, the first is
 ///   used (ZIPFoundation subscript semantics); the second is invisible.
 /// - No size limits are applied to the package (PsychQuant/ooxml-swift#130).
@@ -48,7 +56,9 @@ public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
 /// relationships may share one media file; a header image is not a body
 /// drawing).
 public struct ImageConsistencyReport: Equatable, Sendable {
-    /// `<w:drawing>` occurrences in `word/document.xml` (body only).
+    /// `<w:drawing>` elements in `word/document.xml` (body only). Counts every
+    /// drawing, including charts, shapes and text boxes — a drawing is not an
+    /// image, so this number does not decide whether a package has images.
     public let bodyDrawingCount: Int
     /// Image relationships declared across every `word/_rels/*.rels` part.
     public let imageRelationshipCount: Int
@@ -60,9 +70,40 @@ public struct ImageConsistencyReport: Equatable, Sendable {
     /// Every image relationship no reference in its own part points at — the
     /// #175 signature, across all parts.
     public let orphanImageRelationshipRefs: [ImageRelationshipRef]
+    /// Every image relationship each part declares, in declaration order
+    /// (v3.7.0). A consumer reconciling a listing against the package needs
+    /// this: a relationship whose media file is missing, or whose target is
+    /// external, never reaches `WordDocument.images` and would otherwise be
+    /// invisible.
+    public let declaredImageRelationshipRefs: [ImageRelationshipRef]
+    /// Relationship ids declared more than once within one part, any type
+    /// (v3.7.0). OPC forbids this; `DocxWriter` refuses to serialize such a
+    /// document (#139), so a consumer can name the defect before trying.
+    public let duplicateRelationshipRefs: [ImageRelationshipRef]
+    /// Package paths XML could not parse, sorted (v3.7.0). Their declarations
+    /// and references are unknown, so they contribute no orphans.
+    public let unparsableParts: [String]
 
     /// True when every declared image relationship is referenced by its own part.
     public var isConsistent: Bool { orphanImageRelationshipRefs.isEmpty }
+
+    public init(bodyDrawingCount: Int,
+                imageRelationshipCount: Int,
+                mediaEntryCount: Int,
+                orphanImageRelationshipIds: [String],
+                orphanImageRelationshipRefs: [ImageRelationshipRef],
+                declaredImageRelationshipRefs: [ImageRelationshipRef] = [],
+                duplicateRelationshipRefs: [ImageRelationshipRef] = [],
+                unparsableParts: [String] = []) {
+        self.bodyDrawingCount = bodyDrawingCount
+        self.imageRelationshipCount = imageRelationshipCount
+        self.mediaEntryCount = mediaEntryCount
+        self.orphanImageRelationshipIds = orphanImageRelationshipIds
+        self.orphanImageRelationshipRefs = orphanImageRelationshipRefs
+        self.declaredImageRelationshipRefs = declaredImageRelationshipRefs
+        self.duplicateRelationshipRefs = duplicateRelationshipRefs
+        self.unparsableParts = unparsableParts
+    }
 }
 
 public enum PackageInspector {
@@ -76,15 +117,20 @@ public enum PackageInspector {
     public static func imageConsistencyReport(of packageData: Data) throws -> ImageConsistencyReport {
         let archive = try Archive(data: packageData, accessMode: .read)
 
-        func entryText(_ path: String) throws -> String? {
+        func entryData(_ path: String) throws -> Data? {
             guard let entry = archive[path] else { return nil }
             var data = Data()
             _ = try archive.extract(entry) { data.append($0) }
-            return String(decoding: data, as: UTF8.self)
+            return data
         }
 
         var declared: [ImageRelationshipRef] = []
+        var duplicates: [ImageRelationshipRef] = []
         var referencedByPart: [String: Set<String>] = [:]
+        var unparsable: Set<String> = []
+        var unparsableContentParts: Set<String> = []
+        var documentDrawings = 0
+        var documentScanned = false
 
         for entry in archive {
             let path = entry.path
@@ -99,70 +145,125 @@ public enum PackageInspector {
             guard name.hasSuffix(".xml"), !name.contains("/") else { continue }
             let part = dir + "/" + name
 
-            let relsXML = (try entryText(path)) ?? ""
-            declared.append(contentsOf: imageRelationshipIds(inRels: relsXML).map {
-                ImageRelationshipRef(part: part, id: $0)
-            })
+            let rels = scanRels((try entryData(path)) ?? Data())
+            if !rels.parsed { unparsable.insert(path) }
+            declared.append(contentsOf: rels.imageIds.map { ImageRelationshipRef(part: part, id: $0) })
+            duplicates.append(contentsOf: rels.duplicateIds.map { ImageRelationshipRef(part: part, id: $0) })
+
             if referencedByPart[part] == nil {
-                referencedByPart[part] = referencedRelationshipIds(inPart: (try entryText(part)) ?? "")
+                let content = scanPart((try entryData(part)) ?? Data(), countDrawingsAsIn: part == documentPart)
+                if !content.parsed { unparsable.insert(part); unparsableContentParts.insert(part) }
+                referencedByPart[part] = content.referenced
+                if part == documentPart { documentDrawings = content.drawingCount; documentScanned = true }
             }
         }
 
-        let orphans = declared.filter { !(referencedByPart[$0.part] ?? []).contains($0.id) }
-        let documentXML = (try entryText(documentPart)) ?? ""
+        // `word/document.xml` is scanned above only when its rels part exists.
+        if !documentScanned, let data = try entryData(documentPart) {
+            let content = scanPart(data, countDrawingsAsIn: true)
+            if !content.parsed { unparsable.insert(documentPart) }
+            documentDrawings = content.drawingCount
+        }
+
+        let orphans = declared.filter {
+            !unparsableContentParts.contains($0.part) && !(referencedByPart[$0.part] ?? []).contains($0.id)
+        }
         let media = archive.filter { $0.path.hasPrefix("word/media/") }.count
 
         return ImageConsistencyReport(
-            bodyDrawingCount: documentXML.components(separatedBy: "<w:drawing").count - 1,
+            bodyDrawingCount: documentDrawings,
             imageRelationshipCount: declared.count,
             mediaEntryCount: media,
             orphanImageRelationshipIds: orphans.filter { $0.part == documentPart }.map(\.id),
-            orphanImageRelationshipRefs: orphans)
+            orphanImageRelationshipRefs: orphans,
+            declaredImageRelationshipRefs: declared,
+            duplicateRelationshipRefs: duplicates,
+            unparsableParts: unparsable.sorted())
     }
 
-    // MARK: - Scanning helpers (attribute-level, not a parser)
+    // MARK: - Scanning (XMLParser — the parser the reader uses, #137/#138)
 
-    private static let relationshipElement = try! NSRegularExpression(
-        pattern: #"<Relationship\b(?:[^>"']|"[^"]*"|'[^']*')*>"#, options: [])   // a '>' inside a quoted value does not end the element
-    private static let idAttribute = try! NSRegularExpression(
-        pattern: #"\bId\s*=\s*(["'])([^"']*)\1"#, options: [])
-    private static let typeAttribute = try! NSRegularExpression(
-        pattern: #"\bType\s*=\s*(["'])([^"']*)\1"#, options: [])
-    private static let referenceAttribute = try! NSRegularExpression(
-        pattern: #"(?:^|[\s<])[A-Za-z_][\w.-]*:(?:embed|link|id)\s*=\s*(["'])([^"']*)\1"#, options: [])
-    private static let xmlComment = try! NSRegularExpression(
-        pattern: #"<!--.*?-->"#, options: [.dotMatchesLineSeparators])
+    /// Image relationship ids, ids declared more than once (any type), and
+    /// whether the XML parsed. Namespace processing stays off, so element and
+    /// attribute names arrive exactly as written and an undeclared prefix is
+    /// not an error — the same tolerance the previous attribute scan had,
+    /// without its entity and comment blind spots.
+    static func scanRels(_ relsXML: Data) -> (imageIds: [String], duplicateIds: [String], parsed: Bool) {
+        let delegate = RelsScanner()
+        let parser = XMLParser(data: relsXML)
+        parser.delegate = delegate
+        let parsed = parser.parse()
+        var seen = Set<String>(), dupes: [String] = []
+        for id in delegate.allIds where !seen.insert(id).inserted && !dupes.contains(id) { dupes.append(id) }
+        return (delegate.imageIds, dupes, parsed)
+    }
 
-    /// Ids of `<Relationship>` elements whose `Type` ends with `/image`.
+    static func scanPart(_ partXML: Data, countDrawingsAsIn countDrawings: Bool = false) -> (referenced: Set<String>, drawingCount: Int, parsed: Bool) {
+        let delegate = PartScanner(countsDrawings: countDrawings)
+        let parser = XMLParser(data: partXML)
+        parser.delegate = delegate
+        let parsed = parser.parse()
+        return (delegate.referenced, delegate.drawingCount, parsed)
+    }
+
+    /// String conveniences (tests and callers holding text).
     static func imageRelationshipIds(inRels relsXML: String) -> [String] {
-        let relsXML = stripComments(relsXML)   // a commented-out declaration is not a declaration
-        let ns = relsXML as NSString
-        let whole = NSRange(location: 0, length: ns.length)
-        return relationshipElement.matches(in: relsXML, range: whole).compactMap { m in
-            let element = ns.substring(with: m.range)
-            guard let type = firstCapture(typeAttribute, in: element), type.hasSuffix("/image"),
-                  let id = firstCapture(idAttribute, in: element) else { return nil }
-            return id
-        }
-    }
-
-    /// Every `*:embed` / `*:link` / `*:id` attribute value in a part, with XML
-    /// comments removed first so a commented-out reference cannot satisfy a
-    /// declaration.
-    static func stripComments(_ xml: String) -> String {
-        xmlComment.stringByReplacingMatches(in: xml, range: NSRange(location: 0, length: (xml as NSString).length), withTemplate: "")
+        scanRels(Data(relsXML.utf8)).imageIds
     }
 
     static func referencedRelationshipIds(inPart partXML: String) -> Set<String> {
-        let stripped = stripComments(partXML)
-        let ns = stripped as NSString
-        let whole = NSRange(location: 0, length: ns.length)
-        return Set(referenceAttribute.matches(in: stripped, range: whole).map { ns.substring(with: $0.range(at: 2)) })
+        scanPart(Data(partXML.utf8)).referenced
     }
 
-    private static func firstCapture(_ regex: NSRegularExpression, in text: String) -> String? {
-        let ns = text as NSString
-        guard let m = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else { return nil }
-        return ns.substring(with: m.range(at: 2))
+    fileprivate static func localName(_ qualified: String) -> Substring {
+        guard let colon = qualified.lastIndex(of: ":") else { return Substring(qualified) }
+        return qualified[qualified.index(after: colon)...]
+    }
+}
+
+/// Collects `<Relationship>` declarations. Comments and CDATA are reported to
+/// the delegate as their own events and are therefore never mistaken for
+/// markup — the two blind spots of the pre-3.7.0 regex scan.
+private final class RelsScanner: NSObject, XMLParserDelegate {
+    var imageIds: [String] = []
+    var allIds: [String] = []
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
+                qualifiedName: String?, attributes: [String: String]) {
+        guard PackageInspector.localName(elementName) == "Relationship" else { return }
+        var id: String?, type: String?
+        for (key, value) in attributes {
+            switch PackageInspector.localName(key) {
+            case "Id": id = value
+            case "Type": type = value
+            default: break
+            }
+        }
+        guard let id else { return }
+        allIds.append(id)
+        if let type, type.hasSuffix("/image") { imageIds.append(id) }
+    }
+}
+
+/// Collects relationship references (`*:embed` / `*:link` / `*:id`) and, for
+/// `word/document.xml`, `<w:drawing>` elements.
+private final class PartScanner: NSObject, XMLParserDelegate {
+    let countsDrawings: Bool
+    var referenced: Set<String> = []
+    var drawingCount = 0
+
+    init(countsDrawings: Bool) {
+        self.countsDrawings = countsDrawings
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
+                qualifiedName: String?, attributes: [String: String]) {
+        if countsDrawings, elementName == "w:drawing" { drawingCount += 1 }
+        for (key, value) in attributes where key.contains(":") {
+            switch PackageInspector.localName(key) {
+            case "embed", "link", "id": referenced.insert(value)
+            default: break
+            }
+        }
     }
 }
