@@ -66,6 +66,49 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         return element.attribute(forName: name)?.stringValue
     }
 
+    /// A package with arbitrary entry names, in order — including names that
+    /// collide or repeat (ZIPFoundation writes what it is given).
+    private func zipEntries(_ entries: [(String, String)]) throws -> Data {
+        let archive = try Archive(accessMode: .create)
+        for (name, text) in entries {
+            let data = Data(text.utf8)
+            try archive.addEntry(with: name, type: name.hasSuffix("/") ? .directory : .file, uncompressedSize: Int64(data.count),
+                                 compressionMethod: .deflate) { position, size in
+                let start = data.startIndex.advanced(by: Int(position))
+                return data.subdata(in: start..<start.advanced(by: size))
+            }
+        }
+        return try XCTUnwrap(archive.data)
+    }
+
+    /// What `DocxReader` does with the same bytes: the number of images it
+    /// loads, or the error it throws. The by-construction oracle for every
+    /// "as the reader does" claim below.
+    private func readerImageCount(_ data: Data) throws -> Int {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i137-\(UUID().uuidString).docx")
+        try data.write(to: url); defer { try? FileManager.default.removeItem(at: url) }
+        var document = try DocxReader.read(from: url); defer { document.close() }
+        return document.images.count
+    }
+
+    /// Writer refusal for a package whose `word/_rels/document.xml.rels` was
+    /// rewritten by `mutate` — read back through `DocxReader` first, so the
+    /// shape is one the reader accepts.
+    private func writerRefusal(mutatingRels mutate: (URL) throws -> Void, file: StaticString = #filePath, line: UInt = #line) throws -> String {
+        var doc = WordDocument()
+        doc.body.children.append(.paragraph(Paragraph(runs: [Run(text: "x")])))
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i139-\(UUID().uuidString).docx")
+        try DocxWriter.write(doc, to: url); defer { try? FileManager.default.removeItem(at: url) }
+        let dir = try ZipHelper.unzip(url); defer { ZipHelper.cleanup(dir) }
+        try mutate(dir.appendingPathComponent("word/_rels/document.xml.rels"))
+        let damaged = FileManager.default.temporaryDirectory.appendingPathComponent("i139-shape-\(UUID().uuidString).docx")
+        try ZipHelper.zip(dir, to: damaged); defer { try? FileManager.default.removeItem(at: damaged) }
+        var read = try DocxReader.read(from: damaged); defer { read.close() }
+        var thrown: Error?
+        XCTAssertThrowsError(try DocxWriter.writeData(read), file: file, line: line) { thrown = $0 }
+        return (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
+    }
+
     // MARK: - #137 · ids are what the reader's parser delivers
 
     func testDeclaredIdsEqualWhatTheReadersParserDelivers() throws {
@@ -313,14 +356,167 @@ final class Issue137to139InspectorParserTests: XCTestCase {
 
     // MARK: - verify R2: the reader's other refusals, mirrored
 
-    func testUndeclaredPrefixIsAParseErrorHereAsInTheReader() throws {
-        // verify R2 DA: 7 bytes of `<zz:x/>` in a part the reader cannot open
-        // (namespace error) must not read as consistent here.
-        let data = try package(document: body(referencing: "rId4") + "<zz:x/>", docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#)
-        let report = try PackageInspector.imageConsistencyReport(of: data)
+    func testUndeclaredPrefixIsRefusedHereAsInTheReader() throws {
+        // verify R2 DA / R3 B7: 7 bytes of `<zz:x/>` in a part the reader
+        // cannot open (namespace error 201) must not read as consistent here.
+        // libxml2's SAX path only records the error, so the scanner refuses
+        // it itself. The R2 fixture put the bytes AFTER the root element and
+        // passed for an unrelated reason ("extra content"); these are inside.
+        // This is the ONE namespace class the inspector re-implements — see
+        // the leniency test below for the eleven it deliberately does not.
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        let head = #"<w:document xmlns:w="\#(wNS)" xmlns:a="\#(aNS)" xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p>"#
+        for (label, document) in [
+            ("undeclared element prefix", head + "<zz:x/></w:body></w:document>"),
+            ("undeclared attribute prefix", head + #"<w:p zz:a="1"/></w:body></w:document>"#),
+            ("prefix declared only in a sibling", head + #"<w:p xmlns:zz="urn:zz"/><zz:x/></w:body></w:document>"#),
+        ] {
+            let data = try package(document: document, docRels: rel)
+            let report = try PackageInspector.imageConsistencyReport(of: data)
+            XCTAssertEqual(report.unparsableParts, ["word/document.xml"], label)
+            XCTAssertFalse(report.isConsistent, label)
+            XCTAssertThrowsError(try XMLDocument(data: Data(document.utf8)), "\(label): the reader's DOM refuses the same bytes")
+            XCTAssertThrowsError(try readerImageCount(data), "\(label): the reader refuses the package")
+        }
+        // …and a declared prefix, or `xml:`, is not refused (no over-refusal).
+        let fine = head + #"<zz:x xmlns:zz="urn:zz"/><w:p xml:space="preserve"/></w:body></w:document>"#
+        let report = try PackageInspector.imageConsistencyReport(of: try package(document: fine, docRels: rel))
+        XCTAssertTrue(report.isConsistent, "\(report.unparsableParts) \(report.orphanImageRelationshipRefs)")
+        XCTAssertEqual(try readerImageCount(try package(document: fine, docRels: rel)), 1)
+    }
+
+    func testNamespaceIllFormednessBeyondUndeclaredPrefixesIsDocumentedLeniencyNotParity() throws {
+        // verify R3 DA D1: XMLDocument (the reader) refuses twelve classes of
+        // namespace ill-formedness; XMLParser refuses none of them, and the
+        // inspector re-implements exactly one (an undeclared prefix, the one
+        // shape a real writer produces). The rest are documented leniency —
+        // this test pins that boundary so nobody claims reader parity again,
+        // and so nobody starts emulating libxml2's namespace layer in a
+        // delegate either (the anti-pattern #137 removed from the consumer).
+        // The property that IS promised: the report never hides a
+        // relationship on these shapes — declarations and references are
+        // what the parser delivered.
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        let head = #"<w:document xmlns:w="\#(wNS)" xmlns:a="\#(aNS)" xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p>"#
+        // `refused` is what XMLParser + the undeclared-prefix rule happen to do
+        // today, pinned so a change is a conscious one: a trailing colon
+        // arrives with no namespace URI and falls under the prefix rule; the
+        // rest parse. None of this is reader parity.
+        let shapes: [(String, String, Bool)] = [
+            ("QName with two colons",            head + "<w:p:q/></w:body></w:document>", false),
+            ("QName with a trailing colon",      head + "<w:/></w:body></w:document>", true),
+            ("leading colon under a default ns", head + #"<w:p xmlns="urn:d"><:b/></w:p></w:body></w:document>"#, false),
+            ("prefix bound to an empty URI",     head + #"<w:p xmlns:zz=""/></w:body></w:document>"#, false),
+            ("prefix bound to an invalid URI",   head + #"<w:p xmlns:zz="urn: bad"/></w:body></w:document>"#, false),
+            ("xml prefix rebound",               head + #"<w:p xmlns:xml="urn:wrong"/></w:body></w:document>"#, false),
+            ("expanded duplicate attribute",     head + #"<w:p xmlns:p1="urn:u" xmlns:p2="urn:u" p1:k="1" p2:k="2"/></w:body></w:document>"#, false),
+        ]
+        for (label, document, refused) in shapes {
+            XCTAssertThrowsError(try XMLDocument(data: Data(document.utf8)), "\(label): the reader's DOM refuses it")
+            let report = try PackageInspector.imageConsistencyReport(of: try package(document: document, docRels: rel))
+            XCTAssertEqual(report.unparsableParts, refused ? ["word/document.xml"] : [], "\(label): documented leniency — not emulated")
+            // Whatever the verdict, the report never hides a relationship.
+            XCTAssertEqual(report.declaredImageRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId4")], label)
+            XCTAssertEqual(report.orphanImageRelationshipRefs, [], label)
+            if !refused { XCTAssertEqual(report.bodyDrawingCount, 1, label) }
+        }
+    }
+
+    func testMediaEntryCountCountsFilesNotTheDirectoryEntryAndCollidingMediaRefusesLikeTheReader() throws {
+        // verify R3 DA D3 / M9: media counting had no test at all. Files
+        // directly under word/media count; the `word/media/` directory entry
+        // some writers store does not (3.6.4 counted it — 6/740 real docs
+        // differ by exactly 1). A second entry that lands on the same media
+        // file makes extraction fail, so the report is refused exactly when
+        // the reader is (there is no count to "flatten" any more).
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        let withDirEntry = try zipEntries([("word/document.xml", body(referencing: "rId4")), ("word/_rels/document.xml.rels", rels(rel)),
+                                           ("word/media/", ""), ("word/media/image1.png", "png"), ("word/media/image2.png", "png")])
+        XCTAssertEqual(try PackageInspector.imageConsistencyReport(of: withDirEntry).mediaEntryCount, 2)
+        let colliding = try zipEntries([("word/document.xml", body(referencing: "rId4")), ("word/_rels/document.xml.rels", rels(rel)),
+                                        ("word/media/image1.png", "png"), ("Word/media/image1.png", "png"), ("word/media/image1.png", "png")])
+        let readerRefuses = (try? readerImageCount(colliding)) == nil
+        let inspectorRefuses = (try? PackageInspector.imageConsistencyReport(of: colliding)) == nil
+        XCTAssertEqual(inspectorRefuses, readerRefuses, "the inspector refuses colliding media exactly when the reader does")
+        XCTAssertTrue(readerRefuses, "an exact duplicate entry cannot be extracted on any file system")
+    }
+
+    func testCollidingEntryNamesRefuseTheReportExactlyWhenTheyRefuseTheReader() throws {
+        // verify R3 security S-R3-1/2: the reader extracts to a file system;
+        // a second entry that lands on an existing file makes extraction fail
+        // (NSCocoaError 516) and the reader never opens the package. A
+        // lowercased first-wins index chose by archive order instead and
+        // reported such packages consistent — the opposite of the reader.
+        // The inspector now extracts the same way, so it fails when the
+        // reader fails, whatever the file system decides about case.
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        let cases: [(String, [(String, String)], Bool)] = [
+            ("case-colliding document parts, the referencing one first",
+             [("WORD/DOCUMENT.XML", body(referencing: "rId4")), ("word/document.xml", body()),
+              ("word/_rels/document.xml.rels", rels(rel)), ("word/media/image1.png", "png")], false),
+            ("case-colliding rels, the empty one first",
+             [("WORD/_RELS/DOCUMENT.XML.RELS", rels("")), ("word/_rels/document.xml.rels", rels(rel)),
+              ("word/document.xml", body()), ("word/media/image1.png", "png")], false),
+            ("the same entry name twice",
+             [("word/document.xml", body(referencing: "rId4")), ("word/document.xml", body()),
+              ("word/_rels/document.xml.rels", rels(rel)), ("word/media/image1.png", "png")], true),
+        ]
+        for (label, entries, refusalIsFileSystemIndependent) in cases {
+            let data = try zipEntries(entries)
+            let readerRefuses = (try? readerImageCount(data)) == nil
+            var inspectorError: Error?
+            let report = try? { () throws -> ImageConsistencyReport in
+                do { return try PackageInspector.imageConsistencyReport(of: data) } catch { inspectorError = error; throw error }
+            }()
+            XCTAssertEqual(report == nil, readerRefuses, "\(label): the inspector must refuse exactly when the reader does")
+            if refusalIsFileSystemIndependent { XCTAssertTrue(readerRefuses, label) }
+            if let inspectorError {
+                XCTAssertTrue(String(describing: inspectorError).contains("no consistency verdict"), "\(label): \(inspectorError)")
+            }
+        }
+    }
+
+    func testRelsPathSpellingsMeanWhatTheyMeanToTheReader() throws {
+        // verify R3 security S-R3-3: `word/_rels/./document.xml.rels`,
+        // `./word/_rels/document.xml.rels` and a U+017F (long s) in the path
+        // were invisible to the archive index while the file system served
+        // them to the reader (APFS collapses `.` and folds U+017F to `s`;
+        // `lowercased()` does neither). Extracting like the reader makes the
+        // question disappear: whatever the file system does, both see it.
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        for relsName in ["word/_rels/./document.xml.rels", "./word/_rels/document.xml.rels", "word/_rel\u{017F}/document.xml.rel\u{017F}"] {
+            let data = try zipEntries([("word/document.xml", body()), (relsName, rels(rel)), ("word/media/image1.png", "png")])
+            let readerImages = try? readerImageCount(data)
+            let report = try? PackageInspector.imageConsistencyReport(of: data)
+            XCTAssertEqual(report == nil, readerImages == nil, relsName)
+            guard let report, let readerImages else { continue }
+            XCTAssertEqual(report.declaredImageRelationshipRefs.count, readerImages, "\(relsName): the inspector sees the rels iff the reader loads its image")
+            if readerImages == 1 {
+                XCTAssertEqual(report.orphanImageRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId4")], relsName)
+            }
+        }
+    }
+
+    func testInvalidUTF8IsRefusedBeforeParsing() throws {
+        // verify R3 requirements: a bad byte is not a character the reader and
+        // the inspector could agree on (the reader substitutes U+FFFD), so it
+        // is refused here — stricter than the reader, documented as such.
+        var bytes = Data(body().utf8)
+        let marker = Data("<w:p/>".utf8)
+        let range = try XCTUnwrap(bytes.range(of: marker))
+        bytes.replaceSubrange(range, with: Data("<w:p>".utf8) + Data([0xC3, 0x28]) + Data("</w:p>".utf8))
+        XCTAssertEqual(PackageInspector.linearPrecheckFailure(bytes), "not valid UTF-8")
+        XCTAssertFalse(PackageInspector.scanPart(bytes, part: "p").parsed)
+        let archive = try Archive(accessMode: .create)
+        for (name, data) in [("word/document.xml", bytes), ("word/_rels/document.xml.rels", Data(rels(#"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#).utf8))] {
+            try archive.addEntry(with: name, type: .file, uncompressedSize: Int64(data.count), compressionMethod: .deflate) { position, size in
+                let start = data.startIndex.advanced(by: Int(position))
+                return data.subdata(in: start..<start.advanced(by: size))
+            }
+        }
+        let report = try PackageInspector.imageConsistencyReport(of: try XCTUnwrap(archive.data))
         XCTAssertEqual(report.unparsableParts, ["word/document.xml"])
         XCTAssertFalse(report.isConsistent)
-        XCTAssertThrowsError(try XMLDocument(data: Data((body(referencing: "rId4") + "<zz:x/>").utf8)), "the reader's DOM refuses the same bytes")
     }
 
     func testReferenceMustBeInTheRelationshipsNamespace() throws {
@@ -336,8 +532,10 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     }
 
     func testPartNamesAreCaseInsensitive() throws {
-        // verify R2 DA: `Word/` is `word/` to OPC and to a case-insensitive file
-        // system the reader extracts onto; it must not be a mute switch here.
+        // verify R2 DA: `Word/` is `word/` to OPC and to the case-insensitive
+        // file system the reader extracts onto; it must not be a mute switch
+        // here. (Since R3 the inspector extracts the same way, so this holds
+        // by construction — and on a case-sensitive volume both would refuse.)
         let parts: [String: String] = [
             "Word/document.xml": body(),
             "Word/_rels/document.xml.rels": rels(#"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#),
@@ -376,6 +574,16 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let ok = "<r>" + String(repeating: "<a>", count: limit - 1) + String(repeating: "</a>", count: limit - 1) + "</r>"
         XCTAssertNil(PackageInspector.linearPrecheckFailure(Data(ok.utf8)))
         XCTAssertNil(PackageInspector.linearPrecheckFailure(Data("<r><a/><a/><a/></r>".utf8)), "self-closing tags do not nest")
+        // verify R3 logic G5: the reader enters a self-closing element too, so
+        // one AT the limit trips it; mirror that exactly, both ways.
+        let selfClosingOver = "<r>" + String(repeating: "<a>", count: limit - 1) + "<b/>" + String(repeating: "</a>", count: limit - 1) + "</r>"
+        XCTAssertNotNil(PackageInspector.linearPrecheckFailure(Data(selfClosingOver.utf8)))
+        XCTAssertThrowsError(try XmlTreeReader.parse(Data(selfClosingOver.utf8)), "the reader refuses the same depth")
+        let selfClosingAt = "<r>" + String(repeating: "<a>", count: limit - 2) + "<b/>" + String(repeating: "</a>", count: limit - 2) + "</r>"
+        XCTAssertNil(PackageInspector.linearPrecheckFailure(Data(selfClosingAt.utf8)))
+        XCTAssertNoThrow(try XmlTreeReader.parse(Data(selfClosingAt.utf8)), "the reader accepts the same depth")
+        XCTAssertThrowsError(try XmlTreeReader.parse(Data(deep.utf8)))
+        XCTAssertNoThrow(try XmlTreeReader.parse(Data(ok.utf8)))
     }
 
     func testDuplicateDeclarationsMakeThePackageInconsistent() throws {
@@ -546,5 +754,59 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         XCTAssertEqual(report.imageRelationshipCount, 0)
         XCTAssertEqual(report.mediaEntryCount, 0)
         XCTAssertTrue(report.isConsistent)
+    }
+
+    // MARK: - #139 · shapes the regex merge cannot index are refused, and named
+
+    func testRelsShapesTheMergeCannotIndexAreRefusedByShape() throws {
+        // verify R3 security S-R3-5 / logic G2-G3 / codex N4: five legal rels
+        // spellings that 3.6.4 merged anyway — silently dropping the
+        // relationship (W1/W2/W3/W5) or writing a commented-out one as live
+        // (W4). Each is refused, and the message names its own cause rather
+        // than "character references" for all of them.
+        let theme = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme"
+        func appending(_ fragment: String) -> (URL) throws -> Void {
+            { url in
+                let xml = try String(contentsOf: url, encoding: .utf8)
+                try xml.replacingOccurrences(of: "</Relationships>", with: fragment + "</Relationships>").write(to: url, atomically: true, encoding: .utf8)
+            }
+        }
+        let cases: [(String, (URL) throws -> Void, [String])] = [
+            ("comment", appending(#"<!-- <Relationship Id="rId99" Type="\#(imageType)" Target="media/gone.png"/> -->"#), ["an XML comment", "#142"]),
+            ("CDATA", appending("<![CDATA[x]]>"), ["a CDATA section", "#142"]),
+            ("prefixed element", { url in
+                let xml = try String(contentsOf: url, encoding: .utf8)
+                    .replacingOccurrences(of: "</Relationships>", with: #"<pkg:Relationship xmlns:pkg="\#(self.pkgNS)" Id="rId9" Type="\#(theme)" Target="theme/theme1.xml"/></Relationships>"#)
+                try xml.write(to: url, atomically: true, encoding: .utf8)
+            }, ["namespace-prefixed", "#142"]),
+            ("not self-closing", appending(#"<Relationship Id="rId9" Type="\#(theme)" Target="theme/theme1.xml"></Relationship>"#), ["not self-closing", "rId9", "#142"]),
+            ("single quotes", appending("<Relationship Id='rId9' Type='\(theme)' Target='theme/theme1.xml'/>"), ["single-quoted", "rId9", "#142"]),
+            ("whitespace around =", appending(#"<Relationship Id = "rId9" Type="\#(theme)" Target="theme/theme1.xml"/>"#), ["whitespace around", "rId9", "#142"]),
+        ]
+        for (label, mutate, expected) in cases {
+            let message = try writerRefusal(mutatingRels: mutate)
+            for phrase in expected { XCTAssertTrue(message.contains(phrase), "\(label): \(message)") }
+            XCTAssertFalse(message.contains("(reads as"), "\(label): no mis-pairing of unequal lists: \(message)")
+        }
+    }
+
+    func testRelsFileThatExistsButIsEmptyOrNotUTF8IsRefusedNotTreatedAsAbsent() throws {
+        // verify R3 codex N3 / logic G6: the gate keyed on "the string is not
+        // empty" — an empty rels file, or one that is not UTF-8, read as ""
+        // and took the scratch path, which drops every relationship the
+        // typed model does not manage. The gate is now keyed on existence.
+        var doc = WordDocument()
+        doc.body.children.append(.paragraph(Paragraph(runs: [Run(text: "x")])))
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i139-\(UUID().uuidString).docx")
+        try DocxWriter.write(doc, to: url); defer { try? FileManager.default.removeItem(at: url) }
+        for (label, bytes, phrase) in [("empty", Data(), "could not be scanned"), ("Latin-1", Data([0x3C, 0xE9, 0x3E]), "not readable as UTF-8")] {
+            var read = try DocxReader.read(from: url); defer { read.close() }
+            let relsURL = try XCTUnwrap(read.archiveTempDir).appendingPathComponent("word/_rels/document.xml.rels")
+            try bytes.write(to: relsURL)
+            var thrown: Error?
+            XCTAssertThrowsError(try DocxWriter.writeData(read), label) { thrown = $0 }
+            let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
+            XCTAssertTrue(message.contains(phrase), "\(label): \(message)")
+        }
     }
 }

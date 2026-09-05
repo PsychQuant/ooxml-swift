@@ -6,7 +6,10 @@ import ZIPFoundation
 /// and `word/_rels/document.xml.rels` may both declare `rId4`), so a bare id
 /// is not an identity.
 public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
-    /// Package path of the part that owns the relationship, e.g. `word/document.xml`.
+    /// Package path of the part that owns the relationship: always
+    /// `word/document.xml` for the document (the reader's name for it,
+    /// whatever spelling the archive stored); other parts as the file system
+    /// lists them after extraction.
     public let part: String
     /// The relationship `Id` **as an XML parser delivers it**: entity
     /// references resolved and attribute-value whitespace normalized, i.e. the
@@ -41,9 +44,31 @@ public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
 /// - Nested parts (`word/charts/…`, `word/diagrams/…`) are included: any
 ///   `<dir>/_rels/<name>.rels` under `word/` is compared against `<dir>/<name>`.
 /// - Scanning is done by `XMLParser` — the same libxml2 `DocxReader` reads
-///   with (v3.7.0, #137/#138) — **with namespace processing on**, so an
-///   undeclared prefix is a parse error here exactly as it is in the reader's
-///   `XMLDocument` (a 7-byte `<zz:x/>` in a part makes both refuse it).
+///   with (v3.7.0, #137/#138) — **with namespace processing on**, and the
+///   scanners refuse an undeclared prefix themselves (libxml2's SAX path
+///   only records one; the reader's `XMLDocument` refuses, so a 7-byte
+///   `<zz:x/>` in a part makes both refuse it).
+/// - **A part is refused for these reasons and no others** (closed list):
+///   a DTD (`DocxReader.rejectDTD`); bytes the linear pre-check rules out
+///   (not UTF-8, comment containing `--`, unterminated comment or CDATA,
+///   over-wide start tag, nesting past `maxElementDepth`); XML that
+///   `XMLParser` cannot parse; an element or attribute prefix that no
+///   `xmlns:` declares. `XMLParser` is otherwise **more lenient than the
+///   reader's `XMLDocument` on namespace well-formedness**, and that
+///   leniency is deliberate, not a gap to fill: a QName with two colons or a
+///   trailing colon, a leading colon under a default namespace, a prefix
+///   bound to an empty or invalid URI, the `xml` prefix bound to the wrong
+///   URI, and two prefixes for one URI carrying the same attribute all
+///   parse here and are refused by the reader (verify R3 DA, twelve
+///   classes). Re-implementing libxml2's namespace layer in a delegate is
+///   the anti-pattern this type exists to remove (#137); the reader's own
+///   verdict is not a single predicate either — it parses only the document,
+///   headers, footers, footnotes, endnotes, comments and their rels with
+///   `XMLDocument`, and charts, settings and the rest with a lenient tree
+///   reader. So: **`isConsistent` is a statement about relationships, never
+///   "the reader can open this package"**. On every one of those shapes the
+///   report's declarations and references are exactly what the parser
+///   delivered (the DA's ten packages all reported equal to the clean control).
 ///   Attribute values arrive decoded and whitespace-normalized, and comments
 ///   and CDATA are structural rather than textual. `Id` / `Type` are matched
 ///   by exact attribute name and `Relationship` by local name — the two
@@ -51,20 +76,37 @@ public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
 ///   resolves to the OOXML relationships namespace (transitional or strict)
 ///   with local name `embed` / `link` / `id`; a same-named attribute in any
 ///   other namespace is not a reference and cannot satisfy a declaration.
-/// - Part names are compared case-insensitively (OPC part names are), so a
-///   package spelled `Word/…` is scanned like `word/…` — the same way the
-///   reader finds it after extraction to a case-insensitive file system.
-/// - Parts that are not UTF-8 (a UTF-16 BOM, or NUL bytes in the first
-///   bytes) are refused, as the reader refuses them; a UTF-8 BOM is fine.
-/// - Nesting deeper than `maxElementDepth` (1024, the reader's `XmlTreeReader` limit) is refused,
-///   as the reader refuses it.
+/// - The package is extracted with the reader's own `ZipHelper.unzip` and
+///   parts are read back from the file system, so part names mean exactly
+///   what they mean to the reader: `Word/…` is `word/…` where the file
+///   system folds case, `word/_rels/./x.rels` is `word/_rels/x.rels`, and two
+///   entries that collide make extraction — and therefore the report —
+///   fail (`WordError.invalidDocx`), as they make the reader fail.
+/// - Parts that are not valid UTF-8 are refused (a UTF-8 BOM is fine). The
+///   reader substitutes U+FFFD for a bad byte and carries on; refusing is
+///   stricter, and it is the only way an id containing such a byte cannot
+///   mean two different strings in the two places.
+/// - Nesting deeper than `maxElementDepth` (1024, the reader's
+///   `XmlTreeReader` limit, counted as it counts — every element, self-closing
+///   ones included) is refused, as the reader refuses it.
 /// - Before a part reaches the parser it passes `DocxReader.rejectDTD` (the
 ///   package-wide DTD policy) and a linear byte pre-check that refuses the
 ///   inputs libxml2 itself handles super-linearly: a comment containing `--`
 ///   (illegal XML 1.0 anyway), an unterminated comment or CDATA section, and
-///   a start tag with more than `maxAttributesPerElement` attributes. Cost is
-///   therefore bounded by package size; the package size itself is not
-///   bounded here (PsychQuant/ooxml-swift#130).
+///   a start tag with more than `maxAttributesPerElement` attributes. What
+///   remains is libxml2's own cost on the same bytes the reader parses —
+///   including its namespace bookkeeping, which grows faster than linearly
+///   in the number of `xmlns` declarations per element (a 4 MB package with
+///   hundreds of thousands of them takes tens of seconds here and longer in
+///   the reader). Neither the package size nor that axis is bounded here
+///   (PsychQuant/ooxml-swift#130).
+/// - **The inspector is deliberately stricter than the reader in four
+///   places** (it refuses what the reader would open): a start tag wider than
+///   `maxAttributesPerElement`, a comment containing `--`, bytes that are
+///   not valid UTF-8 (the reader's rels path, `XMLDocument`, would even take
+///   UTF-16), and an undeclared prefix in a part the reader never parses
+///   (charts, settings, …) — the rule is applied to every scanned part, not
+///   routed per part. Cost caps and determinism rules, not reader parity.
 /// - A part that is present but refused or unreadable is listed in
 ///   `unparsableParts`. Its own declarations and references are discarded —
 ///   unknown is not the same as missing, so it yields no orphans — **and
@@ -73,8 +115,6 @@ public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
 ///   real orphan by corrupting an unrelated part. A part that is absent
 ///   (its `.rels` exists, the part does not) is knowable: its relationships
 ///   are unreferenced and are reported as orphans, as in 3.6.x.
-/// - When an archive carries two entries with the same name, the first is
-///   used; the second is invisible.
 /// - No size limits are applied to the package (PsychQuant/ooxml-swift#130).
 ///
 /// The authoritative failure signal is `orphanImageRelationshipRefs`. Raw
@@ -88,7 +128,8 @@ public struct ImageConsistencyReport: Equatable, Sendable {
     public let bodyDrawingCount: Int
     /// Image relationships declared across every `word/_rels/*.rels` part.
     public let imageRelationshipCount: Int
-    /// Entries under `word/media/`.
+    /// Files directly under `word/media/` (the directory entry itself, which
+    /// some writers store, is not counted — v3.7.0; 3.6.x counted it).
     public let mediaEntryCount: Int
     /// Orphan ids declared by `word/_rels/document.xml.rels` (bare ids —
     /// kept for callers written against 3.6.0). Subset of the refs below.
@@ -96,11 +137,12 @@ public struct ImageConsistencyReport: Equatable, Sendable {
     /// Every image relationship no reference in its own part points at — the
     /// #175 signature, across all parts.
     public let orphanImageRelationshipRefs: [ImageRelationshipRef]
-    /// Every image relationship each part declares, in declaration order
-    /// (v3.7.0). A consumer reconciling a listing against the package needs
-    /// this: a relationship whose media file is missing, or whose target is
-    /// external, never reaches `WordDocument.images` and would otherwise be
-    /// invisible.
+    /// Every image relationship each part declares (v3.7.0): the document
+    /// part first, then the other parts in path order; within a part, in
+    /// declaration order. A consumer reconciling a listing against the
+    /// package needs this: a relationship whose media file is missing, or
+    /// whose target is external, never reaches `WordDocument.images` and
+    /// would otherwise be invisible.
     public let declaredImageRelationshipRefs: [ImageRelationshipRef]
     /// Relationship ids declared more than once within one part, any type
     /// (v3.7.0). OPC forbids this; `DocxWriter` refuses to serialize such a
@@ -115,10 +157,12 @@ public struct ImageConsistencyReport: Equatable, Sendable {
     /// True when every declared image relationship is referenced by its own
     /// part, **every part could be scanned, and no part declares an id
     /// twice**. Never true for a package with an unreadable part ("no verdict"
-    /// is not "consistent") nor for one `DocxWriter` would refuse to
-    /// serialize. `orphanImageRelationshipIds` (the 3.6.0 bare-id view) is
-    /// empty for an unreadable document part — read this property, not that
-    /// list, to decide anything.
+    /// is not "consistent"). It says nothing about whether `DocxWriter` can
+    /// serialize the package: a consistent package whose image uses `rId1`
+    /// is still refused by the writer's fixed-slot collision (#140).
+    /// `orphanImageRelationshipIds` (the 3.6.0 bare-id view) is empty for an
+    /// unreadable document part — read this property, not that list, to
+    /// decide anything.
     public var isConsistent: Bool {
         orphanImageRelationshipRefs.isEmpty && unparsableParts.isEmpty && duplicateRelationshipRefs.isEmpty
     }
@@ -148,23 +192,65 @@ public enum PackageInspector {
 
     /// Inspect a serialized .docx package for image consistency.
     ///
+    /// The package is **extracted the way `DocxReader` extracts it** —
+    /// `ZipHelper.unzip`, the reader's own call, into the reader's own
+    /// temporary location — and every part is then read back from the file
+    /// system by the path the reader would use. Entry names are never
+    /// interpreted here: whatever the file system does to them (fold case,
+    /// collapse a `.` component, refuse a second entry that lands on an
+    /// existing file) it does identically for the reader, so the inspector
+    /// cannot see a part the reader does not, nor miss one it does. Verify R3
+    /// showed that a lowercased index of the archive re-created both: it chose
+    /// by archive order where the file system chooses by name, and
+    /// `lowercased()` is not the file system's case folding (APFS folds
+    /// U+017F to `s`; Swift does not).
+    ///
+    /// A package the reader cannot extract — two entries whose names collide
+    /// on the file system (`word/document.xml` twice, or once as
+    /// `WORD/DOCUMENT.XML`), a path that escapes the directory, a corrupt
+    /// member — throws `WordError.invalidDocx`, and so does one without
+    /// `word/document.xml`: a package the reader cannot open has no
+    /// consistency verdict, and returning one would be the "no verdict means
+    /// consistent" switch this type refuses to be.
+    ///
     /// - Parameter packageData: the bytes a writer produced (e.g.
     ///   `DocxWriter.writeData(_:)` output, or a file read back from disk).
     public static func imageConsistencyReport(of packageData: Data) throws -> ImageConsistencyReport {
-        let archive = try Archive(data: packageData, accessMode: .read)
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ooxml-swift-inspector")
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let packageURL = scratch.appendingPathComponent("package.docx")
+        try packageData.write(to: packageURL)
+        return try imageConsistencyReport(ofPackageAt: packageURL)
+    }
 
-        // OPC part names are case-insensitive; first entry per name wins.
-        var entryByLowerPath: [String: Entry] = [:]
-        var orderedLowerPaths: [String] = []
-        for entry in archive {
-            let lower = entry.path.lowercased()
-            if entryByLowerPath[lower] == nil { entryByLowerPath[lower] = entry; orderedLowerPaths.append(lower) }
+    /// The same report for a package already on disk; nothing is copied.
+    public static func imageConsistencyReport(ofPackageAt url: URL) throws -> ImageConsistencyReport {
+        let tempDir: URL
+        do {
+            tempDir = try ZipHelper.unzip(url)
+        } catch {
+            throw WordError.invalidDocx(
+                "the package could not be extracted the way DocxReader extracts it (\(error.localizedDescription)); "
+                + "a package the reader cannot open has no consistency verdict.")
         }
-        func entryData(_ lowerPath: String) throws -> Data? {
-            guard let entry = entryByLowerPath[lowerPath] else { return nil }
-            var data = Data()
-            _ = try archive.extract(entry) { data.append($0) }
-            return data
+        defer { ZipHelper.cleanup(tempDir) }
+        let fm = FileManager.default
+
+        /// A part as the file system serves it to the reader, or nil when
+        /// there is no such file (a directory is not a part).
+        func fileData(_ part: String) throws -> Data? {
+            let fileURL = tempDir.appendingPathComponent(part)
+            var isDirectory: ObjCBool = false
+            guard fm.fileExists(atPath: fileURL.path, isDirectory: &isDirectory), !isDirectory.boolValue else { return nil }
+            return try Data(contentsOf: fileURL)
+        }
+
+        // The reader's first act: `word/document.xml` by that path, or refuse.
+        guard let documentData = try fileData(documentPart) else {
+            throw WordError.invalidDocx("the package has no \(documentPart) (DocxReader refuses it too); no consistency verdict.")
         }
 
         var declared: [ImageRelationshipRef] = []
@@ -172,62 +258,76 @@ public enum PackageInspector {
         var referencedByPart: [String: Set<String>] = [:]
         var unparsable: Set<String> = []
         var unparsableContentParts: Set<String> = []
-        var documentDrawings = 0
-        var documentScanned = false
 
-        for path in orderedLowerPaths {
-            // OPC: the relationships of part `<dir>/<name>` live at
-            // `<dir>/_rels/<name>.rels` — so `word/charts/chart1.xml` is served by
-            // `word/charts/_rels/chart1.xml.rels`, NOT `word/_rels/charts/…`
-            // (R3 codex F5 corrected the earlier formula).
-            guard path.hasPrefix("word/"), path.hasSuffix(".rels"),
-                  let relsDirRange = path.range(of: "/_rels/", options: .backwards) else { continue }
-            let dir = String(path[..<relsDirRange.lowerBound])
-            let name = String(path[relsDirRange.upperBound...].dropLast(".rels".count))
-            guard name.hasSuffix(".xml"), !name.contains("/") else { continue }
-            let part = dir + "/" + name
+        let documentContent = scanPart(documentData, part: documentPart, countDrawingsAsIn: true)
+        if !documentContent.parsed { unparsable.insert(documentPart); unparsableContentParts.insert(documentPart) }
+        referencedByPart[documentPart] = documentContent.referenced
 
-            let rels = scanRels((try entryData(path)) ?? Data(), part: path)
+        /// Declarations of one part, from the `.rels` the file system serves
+        /// at the OPC address `<dir>/_rels/<name>.rels` — looked up by that
+        /// constructed path, which is how the reader reaches every rels it
+        /// reads (`word/_rels/\(target).rels`), never by listing a directory
+        /// and matching names: on APFS `word/_relſ/x.relſ` (U+017F) IS
+        /// `word/_rels/x.rels` to a lookup and is not to a suffix match.
+        /// (`word/charts/chart1.xml` ↔ `word/charts/_rels/chart1.xml.rels`,
+        /// not `word/_rels/charts/…` — R3 codex F5 corrected that formula.)
+        func declare(part: String) throws {
+            let slash = part.lastIndex(of: "/").map { part.index(after: $0) } ?? part.startIndex
+            let relsPath = part[..<slash] + "_rels/" + part[slash...] + ".rels"
+            guard let relsData = try fileData(String(relsPath)) else { return }
+            let rels = scanRels(relsData, part: String(relsPath))
             if rels.parsed {
                 declared.append(contentsOf: rels.imageIds.map { ImageRelationshipRef(part: part, id: $0) })
                 duplicates.append(contentsOf: rels.duplicateIds.map { ImageRelationshipRef(part: part, id: $0) })
             } else {
                 // Whatever the parser delivered before it failed is not a
                 // declaration list, it is a prefix of one. Discard it.
-                unparsable.insert(path)
-            }
-
-            if referencedByPart[part] == nil {
-                // A part that is *absent* is not a part that is *unreadable*:
-                // nothing was lost in translation, the content simply is not
-                // there, and its relationships are unreferenced in the #175
-                // sense. Keep the pre-3.7.0 verdict for that case and reserve
-                // "no verdict" for XML this scanner could not read.
-                if let data = try entryData(part) {
-                    let content = scanPart(data, part: part, countDrawingsAsIn: part == documentPart)
-                    if !content.parsed { unparsable.insert(part); unparsableContentParts.insert(part) }
-                    referencedByPart[part] = content.referenced
-                    if part == documentPart { documentDrawings = content.drawingCount; documentScanned = true }
-                } else {
-                    referencedByPart[part] = []
-                }
+                unparsable.insert(String(relsPath))
             }
         }
+        try declare(part: documentPart)
 
-        // `word/document.xml` is scanned above only when its rels part exists.
-        if !documentScanned, let data = try entryData(documentPart) {
-            let content = scanPart(data, part: documentPart, countDrawingsAsIn: true)
-            if !content.parsed { unparsable.insert(documentPart) }
-            documentDrawings = content.drawingCount
+        // Every other XML part under `word/`, as the file system lists it
+        // (`.xml` is matched case-insensitively; no other character folds to
+        // x, m or l, so a listing cannot hide a part the reader would open).
+        let wordDir = tempDir.appendingPathComponent("word")
+        let listed = ((try? fm.subpathsOfDirectory(atPath: wordDir.path)) ?? []).map { "word/" + $0 }.sorted()
+        for part in listed where part.lowercased().hasSuffix(".xml") && part.caseInsensitiveCompare(documentPart) != .orderedSame {
+            guard let data = try fileData(part) else { continue }          // a directory named like a part
+            let content = scanPart(data, part: part)
+            if !content.parsed { unparsable.insert(part); unparsableContentParts.insert(part) }
+            referencedByPart[part] = content.referenced
+            try declare(part: part)
+        }
+
+        // A `.rels` whose part is absent: knowable, and the pre-3.7.0 verdict
+        // (its relationships are unreferenced → orphans) is right — nothing
+        // was lost in translation, the content simply is not there. Found by
+        // listing, which is all there is to go on for a part that does not
+        // exist; a part the reader could open was handled above.
+        for path in listed where path.lowercased().hasSuffix(".rels") {
+            guard let relsDirRange = path.range(of: "/_rels/", options: [.backwards, .caseInsensitive]) else { continue }
+            let dir = String(path[..<relsDirRange.lowerBound])
+            let name = String(path[relsDirRange.upperBound...].dropLast(".rels".count))
+            guard name.lowercased().hasSuffix(".xml"), !name.contains("/") else { continue }
+            let part = dir + "/" + name
+            guard referencedByPart[part] == nil, part.caseInsensitiveCompare(documentPart) != .orderedSame,
+                  try fileData(part) == nil else { continue }
+            referencedByPart[part] = []
+            try declare(part: part)
         }
 
         let orphans = declared.filter {
             !unparsableContentParts.contains($0.part) && !(referencedByPart[$0.part] ?? []).contains($0.id)
         }
-        let media = orderedLowerPaths.filter { $0.hasPrefix("word/media/") }.count   // unique names, like every other count here
+        let mediaDir = tempDir.appendingPathComponent("word/media")
+        let media = ((try? fm.contentsOfDirectory(atPath: mediaDir.path)) ?? []).filter { name in
+            var isDirectory: ObjCBool = false
+            return fm.fileExists(atPath: mediaDir.appendingPathComponent(name).path, isDirectory: &isDirectory) && !isDirectory.boolValue
+        }.count
 
         return ImageConsistencyReport(
-            bodyDrawingCount: documentDrawings,
+            bodyDrawingCount: documentContent.drawingCount,
             imageRelationshipCount: declared.count,
             mediaEntryCount: media,
             orphanImageRelationshipIds: orphans.filter { $0.part == documentPart }.map(\.id),
@@ -266,6 +366,7 @@ public enum PackageInspector {
         // into a verdict it could never reach.
         if n >= 2, (b[0] == 0xFF && b[1] == 0xFE) || (b[0] == 0xFE && b[1] == 0xFF) { return "not UTF-8 (UTF-16 byte-order mark)" }
         if n >= 4, b[0] == 0 || b[1] == 0 || b[2] == 0 || b[3] == 0 { return "not UTF-8 (NUL bytes in the first four bytes)" }
+        if String(data: data, encoding: .utf8) == nil { return "not valid UTF-8" }
         var depth = 0
         @inline(__always) func at(_ k: Int, _ lit: StaticString) -> Bool {
             let u = lit.utf8Start; let c = lit.utf8CodeUnitCount
@@ -309,9 +410,11 @@ public enum PackageInspector {
                     j += 1
                 }
                 if isEnd { depth -= 1 }
-                else if last != 0x2F && !(i + 1 < n && b[i + 1] == 0x21) {   // start tag, not self-closing, not "<!…"
-                    depth += 1
-                    if depth > maxElementDepth { return "nesting deeper than \(maxElementDepth) elements (the reader's limit)" }
+                else if !(i + 1 < n && b[i + 1] == 0x21) {                      // a start tag (not "<!…")
+                    // The reader enters every element, self-closing ones too,
+                    // so a self-closing tag at the limit trips it (verify R3).
+                    if depth + 1 > maxElementDepth { return "nesting deeper than \(maxElementDepth) elements (the reader's limit)" }
+                    if last != 0x2F { depth += 1 }
                 }
                 i = j + 1
             }
@@ -326,7 +429,7 @@ public enum PackageInspector {
     static func scanRels(_ relsXML: Data, part: String = "") -> (imageIds: [String], duplicateIds: [String], parsed: Bool, allIds: [String]) {
         guard admissible(relsXML, part: part) else { return ([], [], false, []) }
         let delegate = RelsScanner()
-        let parsed = makeParser(relsXML, delegate: delegate).parse()
+        let parsed = makeParser(relsXML, delegate: delegate).parse() && !delegate.sawUndeclaredPrefix
         var seen = Set<String>(), flagged = Set<String>(), dupes: [String] = []
         for id in delegate.allIds where !seen.insert(id).inserted && flagged.insert(id).inserted { dupes.append(id) }
         return (delegate.imageIds, dupes, parsed, delegate.allIds)
@@ -335,13 +438,14 @@ public enum PackageInspector {
     static func scanPart(_ partXML: Data, part: String = "", countDrawingsAsIn countDrawings: Bool = false) -> (referenced: Set<String>, drawingCount: Int, parsed: Bool) {
         guard admissible(partXML, part: part) else { return ([], 0, false) }
         let delegate = PartScanner(countsDrawings: countDrawings)
-        let parsed = makeParser(partXML, delegate: delegate).parse()
+        let parsed = makeParser(partXML, delegate: delegate).parse() && !delegate.sawUndeclaredPrefix
         return (delegate.referenced, delegate.drawingCount, parsed)
     }
 
-    /// Namespace processing on: an undeclared prefix is a parse error, as it
-    /// is for the reader's `XMLDocument`; prefixes are reported so scanners
-    /// can resolve attribute namespaces; external entities never resolve.
+    /// Namespace processing on, prefixes reported: scanners resolve attribute
+    /// namespaces from the reported mappings and refuse an undeclared prefix
+    /// themselves (see `NamespaceTrackingScanner`); external entities never
+    /// resolve.
     private static func makeParser(_ data: Data, delegate: XMLParserDelegate) -> XMLParser {
         let parser = XMLParser(data: data)
         parser.shouldProcessNamespaces = true
@@ -383,6 +487,31 @@ public enum PackageInspector {
 /// parser reports every `xmlns:…` mapping as it opens and closes).
 private class NamespaceTrackingScanner: NSObject, XMLParserDelegate {
     private var scopes: [String: [String]] = [:]
+    /// Set when an element or attribute used a prefix no `xmlns:` declares.
+    /// libxml2 only *records* that (`nsWellFormed`) and `XMLParser.parse()`
+    /// never consults it, while the reader's `XMLDocument` treats it as fatal
+    /// (error 201) — so the scanner refuses it itself (verify R3, B7).
+    private(set) var sawUndeclaredPrefix = false
+
+    /// Call first in `didStartElement`. False (and the parse aborted) when the
+    /// element or any attribute carries a prefix that is not in scope; the
+    /// parser reports an element's own `xmlns:` mappings before the element,
+    /// so the scope table is complete at this point.
+    func namespacesWellFormed(_ parser: XMLParser, qualifiedName: String?, namespaceURI: String?, attributes: [String: String]) -> Bool {
+        if let q = qualifiedName, q.contains(":"), (namespaceURI ?? "").isEmpty { return refuse(parser) }
+        for key in attributes.keys {
+            guard let colon = key.firstIndex(of: ":") else { continue }
+            let prefix = String(key[..<colon])
+            if prefix == "xml" || prefix == "xmlns" { continue }
+            if scopes[prefix]?.last == nil { return refuse(parser) }
+        }
+        return true
+    }
+    private func refuse(_ parser: XMLParser) -> Bool {
+        sawUndeclaredPrefix = true
+        parser.abortParsing()
+        return false
+    }
 
     func parser(_ parser: XMLParser, didStartMappingPrefix prefix: String, toURI namespaceURI: String) {
         scopes[prefix, default: []].append(namespaceURI)
@@ -412,6 +541,7 @@ private final class RelsScanner: NamespaceTrackingScanner {
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
                 qualifiedName: String?, attributes: [String: String]) {
+        guard namespacesWellFormed(parser, qualifiedName: qualifiedName, namespaceURI: namespaceURI, attributes: attributes) else { return }
         guard elementName == "Relationship", let id = attributes["Id"] else { return }   // namespace processing on → local name
         allIds.append(id)
         if let type = attributes["Type"], type.hasSuffix("/image") { imageIds.append(id) }
@@ -432,6 +562,7 @@ private final class PartScanner: NamespaceTrackingScanner {
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
                 qualifiedName: String?, attributes: [String: String]) {
+        guard namespacesWellFormed(parser, qualifiedName: qualifiedName, namespaceURI: namespaceURI, attributes: attributes) else { return }
         if countsDrawings, elementName == "drawing", let ns = namespaceURI, PackageInspector.wordprocessingNamespaces.contains(ns) {
             drawingCount += 1
         }

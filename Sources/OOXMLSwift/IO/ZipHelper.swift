@@ -10,7 +10,12 @@ public struct ZipHelper {
             .appendingPathComponent(UUID().uuidString)
 
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        try FileManager.default.unzipItem(at: url, to: tempDir)
+        do {
+            try FileManager.default.unzipItem(at: url, to: tempDir)
+        } catch {
+            try? FileManager.default.removeItem(at: tempDir)   // nothing to keep from a failed extraction
+            throw error
+        }
 
         return tempDir
     }
