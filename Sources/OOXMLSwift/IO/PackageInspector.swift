@@ -151,10 +151,19 @@ public enum PackageInspector {
             duplicates.append(contentsOf: rels.duplicateIds.map { ImageRelationshipRef(part: part, id: $0) })
 
             if referencedByPart[part] == nil {
-                let content = scanPart((try entryData(part)) ?? Data(), countDrawingsAsIn: part == documentPart)
-                if !content.parsed { unparsable.insert(part); unparsableContentParts.insert(part) }
-                referencedByPart[part] = content.referenced
-                if part == documentPart { documentDrawings = content.drawingCount; documentScanned = true }
+                // A part that is *absent* is not a part that is *unreadable*:
+                // nothing was lost in translation, the content simply is not
+                // there, and its relationships are unreferenced in the #175
+                // sense. Keep the pre-3.7.0 verdict for that case and reserve
+                // "no verdict" for XML this scanner could not read.
+                if let data = try entryData(part) {
+                    let content = scanPart(data, countDrawingsAsIn: part == documentPart)
+                    if !content.parsed { unparsable.insert(part); unparsableContentParts.insert(part) }
+                    referencedByPart[part] = content.referenced
+                    if part == documentPart { documentDrawings = content.drawingCount; documentScanned = true }
+                } else {
+                    referencedByPart[part] = []
+                }
             }
         }
 

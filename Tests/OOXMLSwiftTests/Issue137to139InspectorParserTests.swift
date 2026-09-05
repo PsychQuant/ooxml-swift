@@ -164,6 +164,19 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         XCTAssertEqual(report.declaredImageRelationshipRefs.count, 2, "its declarations are still visible")
     }
 
+    func testMissingPartStillYieldsOrphansAndIsNotCalledUnparsable() throws {
+        // A part that is absent is not a part that could not be read: pre-3.7.0
+        // reported its relationships as orphans, and that verdict is right —
+        // the images are gone with the part. Only unreadable XML gets "no verdict".
+        let data = try package(
+            document: body(referencing: "rId4"),
+            docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
+            extra: ["word/_rels/header1.xml.rels": rels(#"<Relationship Id="rId9" Type="\#(imageType)" Target="media/image1.png"/>"#)])
+        let report = try PackageInspector.imageConsistencyReport(of: data)
+        XCTAssertEqual(report.unparsableParts, [], "absent is not unparsable")
+        XCTAssertEqual(report.orphanImageRelationshipRefs, [ImageRelationshipRef(part: "word/header1.xml", id: "rId9")])
+    }
+
     func testUnparsableRelsIsNamedAndDeclaresNothing() throws {
         let data = try package(document: body(), docRels: #"<Relationship Id="rId4" "#)   // truncated element
         let report = try PackageInspector.imageConsistencyReport(of: data)
