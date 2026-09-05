@@ -19,6 +19,8 @@ final class Issue137to139InspectorParserTests: XCTestCase {
 
     private let imageType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
     private let rNS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    private let wNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    private let aNS = "http://schemas.openxmlformats.org/drawingml/2006/main"
     private let pkgNS = "http://schemas.openxmlformats.org/package/2006/relationships"
 
     private func zip(_ parts: [String: String]) throws -> Data {
@@ -48,9 +50,12 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         return try zip(parts)
     }
 
+    /// Namespaces declared like real Word output: with namespace processing
+    /// on, an undeclared prefix is a parse error for the inspector exactly as
+    /// it is for the reader (verify R2 DA).
     private func body(referencing id: String? = nil) -> String {
         let run = id.map { #"<w:p><w:r><w:drawing><a:blip r:embed="\#($0)"/></w:drawing></w:r></w:p>"# } ?? "<w:p/>"
-        return #"<w:document xmlns:r="\#(rNS)"><w:body>"# + run + "</w:body></w:document>"
+        return #"<w:document xmlns:w="\#(wNS)" xmlns:a="\#(aNS)" xmlns:r="\#(rNS)"><w:body>"# + run + "</w:body></w:document>"
     }
 
     /// What `DocxReader` sees for the same attribute: NSXML, i.e. the same
@@ -111,7 +116,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     func testEntityEncodedReferenceSatisfiesAPlainDeclaration() throws {
         // The reference side must be decoded too: before #137 only declarations
         // were compared, so this document reported a phantom orphan.
-        let document = #"<w:document xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:drawing><a:blip r:embed="rId&#x36;"/></w:drawing></w:r></w:p></w:body></w:document>"#
+        let document = #"<w:document xmlns:w="\#(wNS)" xmlns:a="\#(aNS)" xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:drawing><a:blip r:embed="rId&#x36;"/></w:drawing></w:r></w:p></w:body></w:document>"#
         let data = try package(document: document, docRels: #"<Relationship Id="rId6" Type="\#(imageType)" Target="media/image1.png"/>"#)
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertTrue(report.isConsistent, "orphans: \(report.orphanImageRelationshipRefs)")
@@ -131,7 +136,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             let data = try package(
                 document: body(),
                 docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
-                extra: ["word/charts/chart1.xml": "<c:chartSpace/>",
+                extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#,
                         "word/charts/_rels/chart1.xml.rels": rels(payload)])
             let started = Date()
             let report = try PackageInspector.imageConsistencyReport(of: data)
@@ -159,7 +164,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             XCTAssertLessThan(Date().timeIntervalSince(started), 0.5, label)
             let data = try package(document: body(referencing: "rId4"),
                                    docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
-                                   extra: ["word/charts/chart1.xml": "<c:chartSpace/>", "word/charts/_rels/chart1.xml.rels": rels(payload)])
+                                   extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#, "word/charts/_rels/chart1.xml.rels": rels(payload)])
             let t0 = Date()
             let report = try PackageInspector.imageConsistencyReport(of: data)
             XCTAssertLessThan(Date().timeIntervalSince(t0), 1.0, label)
@@ -198,7 +203,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // `<!--` inside CDATA opens nothing. The pre-3.7.0 regex saw both as
         // markup: one invented a declaration, the other disabled the scan.
         let cdata = "<![CDATA[" + #"<Relationship Id="rId9" Type="\#(imageType)" Target="media/fake.png"/> <!-- "# + "]]>"
-        let document = #"<w:document xmlns:r="\#(rNS)"><w:body><w:p><w:t>\#(cdata)</w:t></w:p><w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p></w:body></w:document>"#
+        let document = #"<w:document xmlns:w="\#(wNS)" xmlns:a="\#(aNS)" xmlns:r="\#(rNS)"><w:body><w:p><w:t>\#(cdata)</w:t></w:p><w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p></w:body></w:document>"#
         let data = try package(document: document, docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#)
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(report.imageRelationshipCount, 1)
@@ -213,7 +218,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let data = try package(
             document: body(referencing: "rId4"),
             docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
-            extra: ["word/header1.xml": "<w:hdr><w:p>",   // never closed
+            extra: ["word/header1.xml": #"<w:hdr xmlns:w="\#(wNS)"><w:p>"#,   // never closed
                     "word/_rels/header1.xml.rels": rels(#"<Relationship Id="rId9" Type="\#(imageType)" Target="media/image1.png"/>"#)])
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(report.unparsableParts, ["word/header1.xml"])
@@ -229,7 +234,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let data = try package(
             document: body(),   // rId4 declared, never referenced → real orphan
             docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
-            extra: ["word/charts/chart1.xml": "<c:chartSpace/><",
+            extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/><"#,
                     "word/charts/_rels/chart1.xml.rels": rels("")])
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(report.orphanImageRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId4")], "the readable part's orphan is still reported")
@@ -278,7 +283,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let data = try package(
             document: body(referencing: "rId4"),
             docRels: "",
-            extra: ["word/header1.xml": #"<w:hdr xmlns:r="\#(rNS)"><w:p/></w:hdr>"#,
+            extra: ["word/header1.xml": #"<w:hdr xmlns:w="\#(wNS)" xmlns:r="\#(rNS)"><w:p/></w:hdr>"#,
                     "word/_rels/header1.xml.rels": dtd + rels(#"<Relationship Id="&x;" Type="\#(imageType)" Target="media/image1.png"/>"#)])
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(report.unparsableParts, ["word/_rels/header1.xml.rels"])
@@ -298,12 +303,88 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             dtd += "<!ENTITY e\(i) \"" + String(repeating: "&\(prev);", count: 10) + "\">"
         }
         dtd += "]>"
-        let data = try package(document: body(), docRels: "", extra: ["word/header1.xml": "<w:hdr/>",
+        let data = try package(document: body(), docRels: "", extra: ["word/header1.xml": #"<w:hdr xmlns:w="\#(wNS)"/>"#,
                                                                      "word/_rels/header1.xml.rels": dtd + rels("<!-- &e9; -->")])
         let started = Date()
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
         XCTAssertEqual(report.unparsableParts, ["word/_rels/header1.xml.rels"])
+    }
+
+    // MARK: - verify R2: the reader's other refusals, mirrored
+
+    func testUndeclaredPrefixIsAParseErrorHereAsInTheReader() throws {
+        // verify R2 DA: 7 bytes of `<zz:x/>` in a part the reader cannot open
+        // (namespace error) must not read as consistent here.
+        let data = try package(document: body(referencing: "rId4") + "<zz:x/>", docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#)
+        let report = try PackageInspector.imageConsistencyReport(of: data)
+        XCTAssertEqual(report.unparsableParts, ["word/document.xml"])
+        XCTAssertFalse(report.isConsistent)
+        XCTAssertThrowsError(try XMLDocument(data: Data((body(referencing: "rId4") + "<zz:x/>").utf8)), "the reader's DOM refuses the same bytes")
+    }
+
+    func testReferenceMustBeInTheRelationshipsNamespace() throws {
+        // verify R2 codex N3: `fake:embed` in another namespace is not a
+        // reference and cannot satisfy a declaration; a foreign PREFIX bound
+        // to the relationships namespace is (strict OOXML namespace too).
+        let fake = #"<w:document xmlns:w="\#(wNS)" xmlns:fake="urn:not-a-relationship"><w:body><w:p fake:embed="rId4"/></w:body></w:document>"#
+        let fakeReport = try PackageInspector.imageConsistencyReport(of: try package(document: fake, docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#))
+        XCTAssertEqual(fakeReport.orphanImageRelationshipRefs.map(\.id), ["rId4"], "a same-named attribute in another namespace hides nothing")
+        let strict = #"<w:document xmlns:w="\#(wNS)" xmlns:a="\#(aNS)" xmlns:rel="http://purl.oclc.org/ooxml/officeDocument/relationships"><w:body><w:p><w:r><w:drawing><a:blip rel:embed="rId4"/></w:drawing></w:r></w:p></w:body></w:document>"#
+        let strictReport = try PackageInspector.imageConsistencyReport(of: try package(document: strict, docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#))
+        XCTAssertTrue(strictReport.isConsistent, "orphans: \(strictReport.orphanImageRelationshipRefs)")
+    }
+
+    func testPartNamesAreCaseInsensitive() throws {
+        // verify R2 DA: `Word/` is `word/` to OPC and to a case-insensitive file
+        // system the reader extracts onto; it must not be a mute switch here.
+        let parts: [String: String] = [
+            "Word/document.xml": body(),
+            "Word/_rels/document.xml.rels": rels(#"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#),
+            "Word/media/image1.png": "png",
+        ]
+        let report = try PackageInspector.imageConsistencyReport(of: try zip(parts))
+        XCTAssertEqual(report.orphanImageRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId4")])
+        XCTAssertEqual(report.mediaEntryCount, 1)
+        XCTAssertFalse(report.isConsistent)
+    }
+
+    func testNonUTF8PartsAreRefusedLikeTheReaderAndUTF8BOMIsFine() throws {
+        let relsXML = rels(#"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#)
+        for (label, data) in [
+            ("UTF-16LE BOM", Data([0xFF, 0xFE]) + relsXML.data(using: .utf16LittleEndian)!),
+            ("UTF-16BE BOM", Data([0xFE, 0xFF]) + relsXML.data(using: .utf16BigEndian)!),
+            ("UTF-16LE no BOM", relsXML.data(using: .utf16LittleEndian)!),
+        ] {
+            XCTAssertNotNil(PackageInspector.linearPrecheckFailure(data), label)
+            XCTAssertFalse(PackageInspector.scanRels(data, part: "p").parsed, label)
+            XCTAssertThrowsError(try XmlTreeReader.parse(data), "\(label): the reader refuses it too")
+        }
+        let bom = Data([0xEF, 0xBB, 0xBF]) + Data(relsXML.utf8)
+        XCTAssertEqual(PackageInspector.scanRels(bom, part: "p").imageIds, ["rId4"])
+        XCTAssertNoThrow(try XmlTreeReader.parse(bom))
+    }
+
+    func testNestingDeeperThanTheReadersLimitIsRefusedBeforeParsing() throws {
+        // verify R2 security N1: depth × xmlns is quadratic in libxml2; the
+        // reader already stops at 1024 (XmlTreeReader.maxElementDepth).
+        let limit = PackageInspector.maxElementDepth
+        let deep = "<r>" + String(repeating: "<a xmlns:x=\"urn:x\">", count: limit + 1) + String(repeating: "</a>", count: limit + 1) + "</r>"
+        let started = Date()
+        XCTAssertNotNil(PackageInspector.linearPrecheckFailure(Data(deep.utf8)))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
+        let ok = "<r>" + String(repeating: "<a>", count: limit - 1) + String(repeating: "</a>", count: limit - 1) + "</r>"
+        XCTAssertNil(PackageInspector.linearPrecheckFailure(Data(ok.utf8)))
+        XCTAssertNil(PackageInspector.linearPrecheckFailure(Data("<r><a/><a/><a/></r>".utf8)), "self-closing tags do not nest")
+    }
+
+    func testDuplicateDeclarationsMakeThePackageInconsistent() throws {
+        // verify R2 security N3: a package the writer refuses must not read as consistent.
+        let twice = #"<Relationship Id="rId5" Type="\#(imageType)" Target="media/image1.png"/>"# + #"<Relationship Id="rId5" Type="\#(imageType)" Target="media/image2.png"/>"#
+        let report = try PackageInspector.imageConsistencyReport(of: try package(document: body(referencing: "rId5"), docRels: twice))
+        XCTAssertEqual(report.duplicateRelationshipRefs.map(\.id), ["rId5"])
+        XCTAssertEqual(report.orphanImageRelationshipRefs, [])
+        XCTAssertFalse(report.isConsistent)
     }
 
     // MARK: - #139 · a duplicate relationship id is refused, never fatal
@@ -385,6 +466,50 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         XCTAssertTrue(message.contains("#139"), message)
     }
 
+    func testUnreadableOriginalRelsIsRefusedNotMergedByRegex() throws {
+        // verify R2 codex N2 / security N2 / logic N1: a rels the strict scan
+        // cannot read must not fall through to the regex merge.
+        var doc = WordDocument()
+        doc.body.children.append(.paragraph(Paragraph(runs: [Run(text: "x")])))
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i139-\(UUID().uuidString).docx")
+        try DocxWriter.write(doc, to: url); defer { try? FileManager.default.removeItem(at: url) }
+        let dir = try ZipHelper.unzip(url); defer { ZipHelper.cleanup(dir) }
+        let relsURL = dir.appendingPathComponent("word/_rels/document.xml.rels")
+        var relsXML = try String(contentsOf: relsURL, encoding: .utf8)
+        let wide = (1...(PackageInspector.maxAttributesPerElement + 1)).map { "a\($0)=\"v\"" }.joined(separator: " ")
+        relsXML = relsXML.replacingOccurrences(of: "</Relationships>", with: "<Relationship \(wide) Id=\"rId9\" Type=\"\(imageType)\" Target=\"media/a.png\"/><Relationship Id=\"rId9\" Type=\"\(imageType)\" Target=\"media/b.png\"/></Relationships>")
+        try relsXML.write(to: relsURL, atomically: true, encoding: .utf8)
+        let damaged = FileManager.default.temporaryDirectory.appendingPathComponent("i139-wide-\(UUID().uuidString).docx")
+        try ZipHelper.zip(dir, to: damaged); defer { try? FileManager.default.removeItem(at: damaged) }
+        var read = try DocxReader.read(from: damaged); defer { read.close() }
+        var thrown: Error?
+        XCTAssertThrowsError(try DocxWriter.writeData(read)) { thrown = $0 }
+        let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
+        XCTAssertTrue(message.contains("could not be scanned"), message)
+    }
+
+    func testOriginalIdWrittenWithACharacterReferenceIsRefused() throws {
+        // verify R2 codex N4 / logic N1: the overlay indexes raw ids, the model
+        // holds decoded ones; refuse rather than emit two views of one id.
+        var doc = WordDocument()
+        doc.body.children.append(.paragraph(Paragraph(runs: [Run(text: "x")])))
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i139-\(UUID().uuidString).docx")
+        try DocxWriter.write(doc, to: url); defer { try? FileManager.default.removeItem(at: url) }
+        let dir = try ZipHelper.unzip(url); defer { ZipHelper.cleanup(dir) }
+        let relsURL = dir.appendingPathComponent("word/_rels/document.xml.rels")
+        var relsXML = try String(contentsOf: relsURL, encoding: .utf8)
+        relsXML = relsXML.replacingOccurrences(of: "</Relationships>", with: #"<Relationship Id="rId&#57;" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>"#)
+        try relsXML.write(to: relsURL, atomically: true, encoding: .utf8)
+        let damaged = FileManager.default.temporaryDirectory.appendingPathComponent("i139-ent-\(UUID().uuidString).docx")
+        try ZipHelper.zip(dir, to: damaged); defer { try? FileManager.default.removeItem(at: damaged) }
+        var read = try DocxReader.read(from: damaged); defer { read.close() }
+        var thrown: Error?
+        XCTAssertThrowsError(try DocxWriter.writeData(read)) { thrown = $0 }
+        let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
+        XCTAssertTrue(message.contains("rId&#57;"), message)
+        XCTAssertTrue(message.contains("#142"), message)
+    }
+
     func testDuplicateDeclarationsAreNamedInTheReport() throws {
         let twice = #"<Relationship Id="rId5" Type="\#(imageType)" Target="media/image1.png"/>"#
             + #"<Relationship Id="rId&#53;" Type="\#(imageType)" Target="media/image2.png"/>"#
@@ -392,7 +517,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(report.duplicateRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId5")],
                        "`rId5` and `rId&#53;` are one id once parsed")
-        XCTAssertTrue(report.isConsistent)
+        XCTAssertFalse(report.isConsistent, "a package the writer refuses is not consistent")
     }
 
     // MARK: - declaredImageRelationshipRefs
@@ -414,7 +539,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     func testDrawingCountIgnoresNonImageDrawings() throws {
         // A chart is a `<w:drawing>` and not an image: the count is
         // informational, and a consumer must not read it as "has images".
-        let document = #"<w:document xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:drawing><wp:inline><a:graphic/></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#
+        let document = #"<w:document xmlns:w="\#(wNS)" xmlns:a="\#(aNS)" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:drawing><wp:inline><a:graphic/></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#
         let data = try package(document: document, docRels: "", media: false)
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(report.bodyDrawingCount, 1)

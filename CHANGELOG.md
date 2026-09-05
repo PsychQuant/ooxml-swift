@@ -34,7 +34,15 @@ All notable changes to ooxml-swift will be documented in this file.
   - **DTD 政策單一來源**：沿用 `DocxReader.rejectDTD`（位元組級 `<!DOCTYPE` 即拒），與 reader 對同一份位元組的處置相同；不再
     自己維護一套 delegate 級的宣告攔截（那一版對空值實體、外部實體宣告與外部子集會放行）。實體展開炸彈因此根本進不了
     parser；外部實體另明寫 `shouldResolveExternalEntities = false`。
-  - **「讀不到」與「沒有」分開，且讀不到＝不一致**：present 但被預檢拒絕或 XML 解析失敗的 part 進 `unparsableParts`，它的
+  - **reader 拒絕的，inspector 也拒絕**（verify R2 差分測試 3095 筆 rels 抓到的一族）：namespace 處理**打開**，未宣告的前綴
+    是解析錯誤——與 reader 的 `XMLDocument` 一致，7 個位元組的 `<zz:x/>` 不再讓一份 reader 開不了的封裝被報成一致；非 UTF-8
+    的 part（UTF-16 BOM、前四位元組含 NUL）拒絕，UTF-8 BOM 接受——與 `XmlTreeReader` 一致；巢狀超過 1024 層拒絕——鏡射
+    `XmlTreeReader` 的上限（每層一個 `xmlns` 的深巢狀在 libxml2 是二次的：13.8 MB → 31 s，reader 15 ms 就拒）。
+  - **引用要在 relationships namespace 裡**：`fake:embed="rId4"`（`fake` 綁到別的 namespace）不是引用、不能滿足宣告；前綴任意
+    但綁到 transitional 或 strict 的 relationships namespace 才算。`bodyDrawingCount` 同樣改依 namespace 判 `w:drawing`。
+  - **part 名大小寫不敏感**（OPC 如此，reader 解壓到大小寫不敏感檔案系統後也如此）：`Word/…` 的封裝與 `word/…` 一樣被掃，
+    不再是靜音開關。
+  - **「讀不到」與「沒有」分開，且讀不到＝不一致；宣告兩次＝不一致**：present 但被預檢拒絕或 XML 解析失敗的 part 進 `unparsableParts`，它的
     宣告與引用整份丟棄（解析錯誤前收到的 prefix 不是清單）、不產生孤兒——但 **`isConsistent` 為假**。第一版 verify 證明
     「無定論 = 通過」是攻擊者可控的靜音開關：在 `word/charts/chart1.xml` 尾端加一個 `<` 就能把真孤兒藏掉。`.rels` 存在但
     part 缺席則維持 3.6.x 的判定（關係無人引用 → 孤兒），因為那是可知的。
@@ -43,7 +51,9 @@ All notable changes to ooxml-swift will be documented in this file.
   reader 解碼後同號）就能讓整個 process 以 SIGTRAP 結束——下游實測是一個 MCP server 連同所有開啟中文件的未存編輯一起消失。
   merge 兩個 pass 都改 first-wins、永不 trap；**裁決移到 `DocxWriter.writeDocumentRelationships`**：序列化前偵測重複 id
   並拋 `WordError.invalidDocx`——typed model 自身重複、與 writer 固定槽 `rId1`–`rId4` 相撞（#140）、或**原始 rels 本來就宣告
-  兩次**（first-wins 會靜默丟一條並「成功」存檔）三種都拒。觸發面比 issue 原文寬：`writeDocumentRelationships` 選 overlay
+  兩次**（first-wins 會靜默丟一條並「成功」存檔）三種都拒。原始 rels 的重複用 inspector 的解碼掃描判定（`rId9` 與
+  `rId&#57;` 是同一個），且**原始 rels 讀不到、或其 id 的原始寫法 ≠ 解碼後**（字元參照、空白正規化）也拒絕——merge 用的
+  regex 索引的是原始文字，與 model 持有的解碼 id 是兩套視角，硬合會寫出重複或錯接的關係（regex 本身另立 #142）。觸發面比 issue 原文寬：`writeDocumentRelationships` 選 overlay
   的條件是 `archiveTempDir != nil`，**與 `overlayMode` 旗標無關**，所以 `writeData` 對「從磁碟讀入的文件」也走這條路。
 
 ### Added
@@ -64,15 +74,20 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ### 升級注意
 
-- **序列化的失敗集合擴大**：重複 relationship id 的文件從「trap 打死 process」變成拋 `WordError.invalidDocx`。**scratch
-  路徑另有一種輸入從「成功」變「失敗」**：3.6.4 的 scratch writer 對同號 typed rel 不 trap、直接寫出一個 `rId1` 宣告兩次、
-  違反 OPC 的封裝；3.7.0 拒絕它。
+- **序列化的失敗集合擴大**：重複 relationship id 的文件從「trap 打死 process」變成拋 `WordError.invalidDocx`。**這個集合
+  不只是「rels 宣告兩次」**：writer 把 `rId1`–`rId4` 寫死給 styles/settings/fontTable/numbering，所以任何 header / footer /
+  image / hyperlink 佔用 `rId1`–`rId4` 的**合法** Word 文件也在裡面——verify 實測本 repo 自己的 golden fixture
+  `multi-section-thesis.docx`、`field-trip.docx`、`image_vml.docx` 三份，3.6.4 全部 SIGTRAP、3.7.0 具名拒絕。根治是 #140
+  （固定 part 的 id 走 allocator）。**scratch 路徑另有一種輸入從「成功」變「失敗」**：3.6.4 的 scratch writer 對同號 typed
+  rel 不 trap、直接寫出一個 `rId1` 宣告兩次、違反 OPC 的封裝；3.7.0 拒絕它。
 - **inspector 判定收緊兩處**：(1) 任何 part 讀不到 → `isConsistent == false`（3.6.4 對非 well-formed 的 part 照樣給答案）；
   (2) CDATA 內的引用不再算引用。消費 `isConsistent` 當 save gate 的 consumer（che-word-mcp）會對這兩種封裝拒絕存檔——這是
   刻意的：兩者都是「回報管道不該對讀不懂的東西說沒事」。
-- **效能是變快不是變慢**：verify 對 111 份真實 .docx 量測，報告逐位元組相同，且 17.5 MB／9 圖文件 52.5 → 42.8 ms；
-  #138 的 payload 快 434 倍。
-- 1490 個測試（含既有 #175 家族）全綠、28 個既有 env-gated skip。
+- **效能是變快不是變慢（用 release build 量）**：verify R2 對 740 份真實 .docx 量測，報告零差異、零 `unparsableParts`、
+  零新增不可存檔；整體 0.715×；601 份 corpus 218.9 → 157.1 ms、10.5 MB 文件 633 → 120 ms；#138 的 payload 6026 ms →
+  0.165 ms。**debug build 下結論會反轉**（預檢是 Swift、它省下的解析成本在 C），量測務必 `-c release`。
+- 上限離真實資料很遠：740 份中只有 2 份含 XML 註解、零份註解內含 `--`、最寬的 start tag 37 個屬性（上限 4096）。
+- 1500+ 個測試（含既有 #175 家族）全綠、28 個既有 env-gated skip（精確數字見 PR）。
 
 ## [3.6.4] - 2026-09-03
 
