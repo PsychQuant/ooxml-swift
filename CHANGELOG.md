@@ -8,6 +8,87 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-09-05
+
+### Fixed
+
+- **`PackageInspector` 改用 `XMLParser` 掃描，不再用屬性 regex**（#137 + #138 一次改寫；cluster PR #141）。舊版用四條
+  `NSRegularExpression` 抓 `Id` / `Type` / `*:embed|link|id` 的**字面值**，於是 (a) `Id="rId&#54;"` 在 inspector 是
+  `rId&#54;`、在 `DocxReader`（NSXML）是 `rId6`，任何把兩邊放一起比的 consumer 都會誤判（#137）；(b) 註解剝除的
+  `<!--.*?-->` 對未閉合 `<!--` 二次退化，2 KB 的 .docx 就能讓呼叫端卡 35–60 s（#138）。現在：
+  - **屬性值由 parser 交付**——實體解析與屬性空白正規化（字面 TAB/CR/LF → 空格、CRLF 先折成一個 LF 再變一個空格；`&#13;`
+    這類字元參照則保留原字元）都是 libxml2 的事，不是本 library 自己實作的。`ImageRelationshipRef.id` 因此定義上等於
+    reader 讀到的字串（verify 以 14 種寫法對真實 `DocxReader` 管線端到端比對，14/14 一致）。**引用側同樣解碼**，
+    `r:embed="rId&#x36;"` 對 `Id="rId6"` 的宣告不再誤報孤兒。
+  - **元素比 local name、屬性比精確名**——`local-name()='Relationship'` 與 `attribute(forName: "Id")`，就是 `DocxReader`
+    的兩個查找。`xmlns:Id` / `r:Id` / `p:Type` 不是那個屬性（第一版 verify 抓到 local-name 比對讓 `Id` 與 `r:Id` 並存時答案
+    由字典迭代順序決定）。
+  - **註解與 CDATA 是結構不是文字**：多行註解裡的 `<Relationship>` 不再被算成宣告，CDATA 裡的 `<Relationship>` 與字面
+    `<!--` 也不再影響判定。反方向同樣改變：CDATA 裡的**引用**（`<![CDATA[<a:blip r:embed="rId4"/>]]>`）3.6.4 會算、3.7.0
+    不算——那本來就是文字。
+  - **線性位元組預檢 + 上限**（#138 的 Expected 第二條）：換掉 regex 只是把二次退化搬進 libxml2——註解裡的 `--`（XML 1.0
+    本就禁止）會走它的錯誤回復路徑，仍是 O(N²)（verify 實測 4.6 KB 的 .docx → 82 s）；單一元素的屬性數也是二次（實測 32k
+    屬性 0.3 s、加倍 ×3.5）。所以每個 part 進 parser 前先過一次線性掃描：註解內含 `--`、未閉合的註解或 CDATA、單一 start tag
+    超過 `maxAttributesPerElement`（4096）個屬性 → 該 part 直接歸入 `unparsableParts`，不進 parser。成本從此由 package 大小
+    上界（package 大小本身的上限仍是 #130）。
+  - **DTD 政策單一來源**：沿用 `DocxReader.rejectDTD`（位元組級 `<!DOCTYPE` 即拒），與 reader 對同一份位元組的處置相同；不再
+    自己維護一套 delegate 級的宣告攔截（那一版對空值實體、外部實體宣告與外部子集會放行）。實體展開炸彈因此根本進不了
+    parser；外部實體另明寫 `shouldResolveExternalEntities = false`。
+  - **reader 拒絕的，inspector 也拒絕**（verify R2 差分測試 3095 筆 rels 抓到的一族）：namespace 處理**打開**，未宣告的前綴
+    是解析錯誤——與 reader 的 `XMLDocument` 一致，7 個位元組的 `<zz:x/>` 不再讓一份 reader 開不了的封裝被報成一致；非 UTF-8
+    的 part（UTF-16 BOM、前四位元組含 NUL）拒絕，UTF-8 BOM 接受——與 `XmlTreeReader` 一致；巢狀超過 1024 層拒絕——鏡射
+    `XmlTreeReader` 的上限（每層一個 `xmlns` 的深巢狀在 libxml2 是二次的：13.8 MB → 31 s，reader 15 ms 就拒）。
+  - **引用要在 relationships namespace 裡**：`fake:embed="rId4"`（`fake` 綁到別的 namespace）不是引用、不能滿足宣告；前綴任意
+    但綁到 transitional 或 strict 的 relationships namespace 才算。`bodyDrawingCount` 同樣改依 namespace 判 `w:drawing`。
+  - **part 名大小寫不敏感**（OPC 如此，reader 解壓到大小寫不敏感檔案系統後也如此）：`Word/…` 的封裝與 `word/…` 一樣被掃，
+    不再是靜音開關。
+  - **「讀不到」與「沒有」分開，且讀不到＝不一致；宣告兩次＝不一致**：present 但被預檢拒絕或 XML 解析失敗的 part 進 `unparsableParts`，它的
+    宣告與引用整份丟棄（解析錯誤前收到的 prefix 不是清單）、不產生孤兒——但 **`isConsistent` 為假**。第一版 verify 證明
+    「無定論 = 通過」是攻擊者可控的靜音開關：在 `word/charts/chart1.xml` 尾端加一個 `<` 就能把真孤兒藏掉。`.rels` 存在但
+    part 缺席則維持 3.6.x 的判定（關係無人引用 → 孤兒），因為那是可知的。
+- **`RelationshipsOverlay.merge` 不再 `fatalError`**（#139）。`Dictionary(uniqueKeysWithValues:)` 對重複 relationship id
+  直接 trap，而那些 id 來自磁碟上的檔案：一份 `word/_rels/document.xml.rels` 宣告兩次 `rId5`（或 `rId5` 與 `rId&#53;`，
+  reader 解碼後同號）就能讓整個 process 以 SIGTRAP 結束——下游實測是一個 MCP server 連同所有開啟中文件的未存編輯一起消失。
+  merge 兩個 pass 都改 first-wins、永不 trap；**裁決移到 `DocxWriter.writeDocumentRelationships`**：序列化前偵測重複 id
+  並拋 `WordError.invalidDocx`——typed model 自身重複、與 writer 固定槽 `rId1`–`rId4` 相撞（#140）、或**原始 rels 本來就宣告
+  兩次**（first-wins 會靜默丟一條並「成功」存檔）三種都拒。原始 rels 的重複用 inspector 的解碼掃描判定（`rId9` 與
+  `rId&#57;` 是同一個），且**原始 rels 讀不到、或其 id 的原始寫法 ≠ 解碼後**（字元參照、空白正規化）也拒絕——merge 用的
+  regex 索引的是原始文字，與 model 持有的解碼 id 是兩套視角，硬合會寫出重複或錯接的關係（regex 本身另立 #142）。觸發面比 issue 原文寬：`writeDocumentRelationships` 選 overlay
+  的條件是 `archiveTempDir != nil`，**與 `overlayMode` 旗標無關**，所以 `writeData` 對「從磁碟讀入的文件」也走這條路。
+
+### Added
+
+- `ImageConsistencyReport` 新增三個欄位（加法，既有 consumer 不受影響）：
+  - `declaredImageRelationshipRefs` — 每個 part 宣告的**全部** image relationship（宣告順序，id 已解碼；同一 id 宣告兩次就出現
+    兩次，與 `imageRelationshipCount` 同一母體）。media 檔缺失或 external target 的 relationship 永遠進不了
+    `WordDocument.images`，consumer 要把清單與封裝對帳就需要這個。
+  - `duplicateRelationshipRefs` — 同一 part 內宣告 ≥2 次的 id（任何 type，每個 id 一次）。OPC 禁止，且 writer 會拒絕序列化。
+  - `unparsableParts` — 被預檢拒絕或解析失敗的 package 路徑（`.rels` 或 part，各以自己的路徑具名；已排序）。
+  - `PackageInspector.maxAttributesPerElement`、`ImageConsistencyReport` 的 public memberwise init。
+
+### Changed
+
+- `bodyDrawingCount` 數的是真正名為 `w:drawing` 的**元素**，不再是字串 `<w:drawing` 的出現次數：註解或 CDATA 裡的
+  `<w:drawing/>`、`<w:drawingSuffix/>` 這類前綴誤命中，3.6.4 各算 1、3.7.0 算 0。語意變好，但是改變。它數的仍是**所有**
+  drawing（圖表／文字方塊／SmartArt 也是 `<w:drawing>`），不可用它判斷封裝有沒有圖片。
+
+### 升級注意
+
+- **序列化的失敗集合擴大**：重複 relationship id 的文件從「trap 打死 process」變成拋 `WordError.invalidDocx`。**這個集合
+  不只是「rels 宣告兩次」**：writer 把 `rId1`–`rId4` 寫死給 styles/settings/fontTable/numbering，所以任何 header / footer /
+  image / hyperlink 佔用 `rId1`–`rId4` 的**合法** Word 文件也在裡面——verify 實測本 repo 自己的 golden fixture
+  `multi-section-thesis.docx`、`field-trip.docx`、`image_vml.docx` 三份，3.6.4 全部 SIGTRAP、3.7.0 具名拒絕。根治是 #140
+  （固定 part 的 id 走 allocator）。**scratch 路徑另有一種輸入從「成功」變「失敗」**：3.6.4 的 scratch writer 對同號 typed
+  rel 不 trap、直接寫出一個 `rId1` 宣告兩次、違反 OPC 的封裝；3.7.0 拒絕它。
+- **inspector 判定收緊兩處**：(1) 任何 part 讀不到 → `isConsistent == false`（3.6.4 對非 well-formed 的 part 照樣給答案）；
+  (2) CDATA 內的引用不再算引用。消費 `isConsistent` 當 save gate 的 consumer（che-word-mcp）會對這兩種封裝拒絕存檔——這是
+  刻意的：兩者都是「回報管道不該對讀不懂的東西說沒事」。
+- **效能是變快不是變慢（用 release build 量）**：verify R2 對 740 份真實 .docx 量測，報告零差異、零 `unparsableParts`、
+  零新增不可存檔；整體 0.715×；601 份 corpus 218.9 → 157.1 ms、10.5 MB 文件 633 → 120 ms；#138 的 payload 6026 ms →
+  0.165 ms。**debug build 下結論會反轉**（預檢是 Swift、它省下的解析成本在 C），量測務必 `-c release`。
+- 上限離真實資料很遠：740 份中只有 2 份含 XML 註解、零份註解內含 `--`、最寬的 start tag 37 個屬性（上限 4096）。
+- 1500+ 個測試（含既有 #175 家族）全綠、28 個既有 env-gated skip（精確數字見 PR）。
+
 ## [3.6.4] - 2026-09-03
 
 ### Fixed

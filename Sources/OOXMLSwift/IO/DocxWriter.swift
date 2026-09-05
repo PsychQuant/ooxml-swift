@@ -701,6 +701,62 @@ public struct DocxWriter {
 
         let typedRels = buildTypedRelationships(document: document, allocator: allocator)
 
+        // #139: OPC scopes relationship ids per part, so `word/_rels/document.xml.rels`
+        // may not declare one twice. Refuse loudly instead of emitting a package
+        // whose duplicate silently loses a relationship — and instead of the
+        // trap `RelationshipsOverlay.merge` used to hit. Two ways a document
+        // reaches here with duplicates: the model carries the same id twice
+        // (e.g. two images), or a model id collides with the fixed slots this
+        // writer assigns to styles / settings / fontTable / numbering
+        // (rId1–rId4 — see #140, a legitimate package can use rId1 for an image).
+        var seenRelIds = Set<String>(), flaggedRelIds = Set<String>(), duplicateRelIds: [String] = []
+        for rel in typedRels where !seenRelIds.insert(rel.id).inserted && flaggedRelIds.insert(rel.id).inserted {
+            duplicateRelIds.append(rel.id)
+        }
+        // The package's own rels can carry the duplicate too (a third-party
+        // writer, or a file already damaged this way). Merging first-wins over
+        // it would drop a relationship and report success.
+        // Read the original rels with the inspector's parser, not the overlay's
+        // regex: `rId9` and `rId&#57;` are one id once decoded (#137), and the
+        // decoded form is what the reader — and therefore the model — holds.
+        let originalScan = PackageInspector.scanRels(Data(originalRelsXML.utf8), part: "word/_rels/document.xml.rels")
+        if !originalRelsXML.isEmpty && !originalScan.parsed {
+            // The merge below is a regex over these bytes; a package whose rels
+            // the strict scan cannot read is one the merge cannot be trusted on.
+            throw WordError.invalidDocx(
+                "the package's word/_rels/document.xml.rels could not be scanned (not well-formed, not UTF-8, or refused by the inspector's pre-check); "
+                + "refusing to merge relationships into it (PsychQuant/ooxml-swift#139).")
+        }
+        let originalDuplicates = originalScan.duplicateIds
+        if !originalDuplicates.isEmpty {
+            throw WordError.invalidDocx(
+                "the package's word/_rels/document.xml.rels declares \(originalDuplicates.count) relationship id(s) twice: "
+                + originalDuplicates.joined(separator: ", ")
+                + ". OPC scopes relationship ids per part; this document cannot be re-serialized without losing a relationship (PsychQuant/ooxml-swift#139).")
+        }
+        // The overlay indexes the original rels by their RAW ids (a regex over
+        // the text) while the model — and the check above — holds DECODED ids.
+        // An id written with a character reference or normalized whitespace
+        // is one id to the reader and another to the merge; refuse the
+        // package rather than let the two views produce a duplicate or a
+        // mis-linked relationship (#139; the regex itself is #142).
+        let rawOriginalIds = RelationshipsOverlay.rawIds(inRelsXML: originalRelsXML)
+        if !originalRelsXML.isEmpty, rawOriginalIds != originalScan.allIds {
+            let differing = zip(rawOriginalIds, originalScan.allIds).filter { $0 != $1 }.map { "\($0) (reads as \($1))" }
+            throw WordError.invalidDocx(
+                "word/_rels/document.xml.rels writes relationship id(s) with character references or whitespace: "
+                + (differing.isEmpty ? "\(rawOriginalIds.count) raw vs \(originalScan.allIds.count) parsed" : differing.joined(separator: ", "))
+                + ". This writer cannot merge such a package safely (PsychQuant/ooxml-swift#142); re-save it from Word first.")
+        }
+        if !duplicateRelIds.isEmpty {
+            throw WordError.invalidDocx(
+                "word/_rels/document.xml.rels would declare \(duplicateRelIds.count) relationship id(s) twice: "
+                + duplicateRelIds.joined(separator: ", ")
+                + ". OPC scopes relationship ids per part, so this document cannot be serialized without losing a relationship. "
+                + "Either the model carries the same id twice, or one of its ids collides with the writer's fixed slots "
+                + "rId1 (styles) / rId2 (settings) / rId3 (fontTable) / rId4 (numbering, when present) — see PsychQuant/ooxml-swift#140.")
+        }
+
         let xml: String
         if document.archiveTempDir != nil && !originalRelsXML.isEmpty {
             // Overlay mode: merge typed rels into original to preserve unknown

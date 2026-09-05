@@ -186,9 +186,9 @@ final class Issue175R2WhitelistInspectorTests: XCTestCase {
 
     func testHeaderOrphanIsDetected() throws {
         let data = try package(
-            document: #"<w:document xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p></w:body></w:document>"#,
+            document: #"<w:document xmlns:w="\#(wNS)" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p></w:body></w:document>"#,
             docRels: rel("rId4"),
-            header: #"<w:hdr xmlns:r="\#(rNS)"><w:p><w:r><w:t>no image here</w:t></w:r></w:p></w:hdr>"#,
+            header: #"<w:hdr xmlns:w="\#(wNS)" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="\#(rNS)"><w:p><w:r><w:t>no image here</w:t></w:r></w:p></w:hdr>"#,
             headerRels: rel("rId9"))
         let r = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertFalse(r.isConsistent)
@@ -200,9 +200,9 @@ final class Issue175R2WhitelistInspectorTests: XCTestCase {
     func testCrossPartAliasNoLongerMasksDocumentOrphan() throws {
         // R1 security PoC A: header references its OWN rId4; document's rId4 is an orphan.
         let data = try package(
-            document: #"<w:document xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:t>text only</w:t></w:r></w:p></w:body></w:document>"#,
+            document: #"<w:document xmlns:w="\#(wNS)" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:t>text only</w:t></w:r></w:p></w:body></w:document>"#,
             docRels: rel("rId4"),
-            header: #"<w:hdr xmlns:r="\#(rNS)"><w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p></w:hdr>"#,
+            header: #"<w:hdr xmlns:w="\#(wNS)" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="\#(rNS)"><w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p></w:hdr>"#,
             headerRels: rel("rId4"))
         let r = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(r.orphanImageRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId4")])
@@ -212,14 +212,14 @@ final class Issue175R2WhitelistInspectorTests: XCTestCase {
     func testCommentedOutReferenceDoesNotCount() throws {
         // R1 security PoC B.
         let data = try package(
-            document: #"<w:document xmlns:r="\#(rNS)"><w:body><!-- r:embed="rId4" --><w:p/></w:body></w:document>"#,
+            document: #"<w:document xmlns:w="\#(wNS)" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="\#(rNS)"><w:body><!-- r:embed="rId4" --><w:p/></w:body></w:document>"#,
             docRels: rel("rId4"))
         XCTAssertFalse(try PackageInspector.imageConsistencyReport(of: data).isConsistent)
     }
 
     func testSingleQuotesAndForeignPrefixAreAccepted() throws {
         let data = try package(
-            document: "<w:document xmlns:rel='\(rNS)'><w:body><w:p><w:r><w:drawing><a:blip rel:embed='rId4'/></w:drawing></w:r></w:p></w:body></w:document>",
+            document: "<w:document xmlns:w='\(wNS)' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:rel='\(rNS)'><w:body><w:p><w:r><w:drawing><a:blip rel:embed='rId4'/></w:drawing></w:r></w:p></w:body></w:document>",
             docRels: "<Relationship Id='rId4' Type='\(imageType)' Target='media/image1.png'/>")
         let r = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertTrue(r.isConsistent, "orphans: \(r.orphanImageRelationshipRefs)")
@@ -228,7 +228,7 @@ final class Issue175R2WhitelistInspectorTests: XCTestCase {
 
     func testTypeMatchIsSuffixNotSubstring() throws {
         let data = try package(
-            document: #"<w:document><w:body><w:p/></w:body></w:document>"#,
+            document: #"<w:document xmlns:w="\#(wNS)"><w:body><w:p/></w:body></w:document>"#,
             docRels: rel("rId4", type: imageType + "Extended"))
         let r = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(r.imageRelationshipCount, 0)
