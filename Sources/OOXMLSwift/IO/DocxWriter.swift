@@ -709,9 +709,22 @@ public struct DocxWriter {
         // (e.g. two images), or a model id collides with the fixed slots this
         // writer assigns to styles / settings / fontTable / numbering
         // (rId1–rId4 — see #140, a legitimate package can use rId1 for an image).
-        var seenRelIds = Set<String>(), duplicateRelIds: [String] = []
-        for rel in typedRels where !seenRelIds.insert(rel.id).inserted && !duplicateRelIds.contains(rel.id) {
+        var seenRelIds = Set<String>(), flaggedRelIds = Set<String>(), duplicateRelIds: [String] = []
+        for rel in typedRels where !seenRelIds.insert(rel.id).inserted && flaggedRelIds.insert(rel.id).inserted {
             duplicateRelIds.append(rel.id)
+        }
+        // The package's own rels can carry the duplicate too (a third-party
+        // writer, or a file already damaged this way). Merging first-wins over
+        // it would drop a relationship and report success.
+        // Read the original rels with the inspector's parser, not the overlay's
+        // regex: `rId9` and `rId&#57;` are one id once decoded (#137), and the
+        // decoded form is what the reader — and therefore the model — holds.
+        let originalDuplicates = PackageInspector.scanRels(Data(originalRelsXML.utf8), part: "word/_rels/document.xml.rels").duplicateIds
+        if !originalDuplicates.isEmpty {
+            throw WordError.invalidDocx(
+                "the package's word/_rels/document.xml.rels declares \(originalDuplicates.count) relationship id(s) twice: "
+                + originalDuplicates.joined(separator: ", ")
+                + ". OPC scopes relationship ids per part; this document cannot be re-serialized without losing a relationship (PsychQuant/ooxml-swift#139).")
         }
         if !duplicateRelIds.isEmpty {
             throw WordError.invalidDocx(

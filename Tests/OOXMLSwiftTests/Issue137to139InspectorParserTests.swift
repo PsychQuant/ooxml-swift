@@ -85,6 +85,22 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         }
     }
 
+    func testAttributeNamesAreMatchedExactlyLikeTheReader() throws {
+        // verify R1 logic F2 / codex 1: `xmlns:Id`, `r:Id`, `p:Type` are not the
+        // attributes DocxReader reads with attribute(forName:). With `Id` and
+        // `r:Id` both present the rc answered by dictionary order — run it
+        // several times so a flaky right answer cannot pass.
+        let fakeOnly = rels(#"<Relationship xmlns:Id="urn:x" r:Id="rIdFAKE" xmlns:r="\#(rNS)" Type="\#(imageType)" Target="media/image1.png"/>"#)
+        XCTAssertEqual(PackageInspector.imageRelationshipIds(inRels: fakeOnly), [])
+        XCTAssertEqual(try readerValue(ofAttribute: "Id", inRels: fakeOnly), nil)
+        let fakeType = rels(#"<Relationship Id="rId4" p:Type="\#(imageType)" xmlns:p="urn:p" Target="media/image1.png"/>"#)
+        XCTAssertEqual(PackageInspector.imageRelationshipIds(inRels: fakeType), [], "p:Type is not Type")
+        let both = rels(#"<Relationship Id="rIdREAL" r:Id="rIdFAKE" xmlns:r="\#(rNS)" Type="\#(imageType)" Target="media/image1.png"/>"#)
+        for _ in 0..<20 {
+            XCTAssertEqual(PackageInspector.imageRelationshipIds(inRels: both), ["rIdREAL"])
+        }
+    }
+
     func testEntityEncodedOrphanIsReportedWithTheDecodedId() throws {
         let data = try package(document: body(), docRels: #"<Relationship Id="rId&#54;" Type="\#(imageType)" Target="media/image1.png"/>"#)
         let report = try PackageInspector.imageConsistencyReport(of: data)
@@ -127,6 +143,48 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         }
     }
 
+    func testCommentShapesThatDegradeLibxml2AreRefusedBeforeParsing() throws {
+        // verify R1 requirements R1: replacing the regex moved the quadratic
+        // into libxml2's error recovery — `--` inside a comment. 4.6 KB of
+        // package, 82 s. These are refused by the linear pre-check instead.
+        let n = 800_000
+        let payloads: [String: String] = [
+            "nested openers, newline, one close": String(repeating: "<!--", count: n) + "\n-->",
+            "one comment full of --":             "<!--" + String(repeating: "--", count: n) + "\n-->",
+            "unterminated CDATA":                 "<![CDATA[" + String(repeating: "x", count: n),
+        ]
+        for (label, payload) in payloads {
+            let started = Date()
+            XCTAssertNotNil(PackageInspector.linearPrecheckFailure(Data(payload.utf8)), label)
+            XCTAssertLessThan(Date().timeIntervalSince(started), 0.5, label)
+            let data = try package(document: body(referencing: "rId4"),
+                                   docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
+                                   extra: ["word/charts/chart1.xml": "<c:chartSpace/>", "word/charts/_rels/chart1.xml.rels": rels(payload)])
+            let t0 = Date()
+            let report = try PackageInspector.imageConsistencyReport(of: data)
+            XCTAssertLessThan(Date().timeIntervalSince(t0), 1.0, label)
+            XCTAssertEqual(report.unparsableParts, ["word/charts/_rels/chart1.xml.rels"], label)
+            XCTAssertFalse(report.isConsistent, label)
+        }
+        // …and a benign comment of the same size is parsed normally.
+        let benign = "<!-- " + String(repeating: "x", count: n) + " -->"
+        XCTAssertNil(PackageInspector.linearPrecheckFailure(Data((benign + rels("")).utf8)))
+        XCTAssertEqual(PackageInspector.scanRels(Data((benign + rels(#"<Relationship Id="rId4" Type="\#(imageType)" Target="t"/>"#)).utf8)).imageIds, ["rId4"])
+    }
+
+    func testOverWideStartTagIsRefusedAndOrdinaryOnesAreNot() throws {
+        // verify R1 security S2: libxml2 is quadratic in per-element attribute count.
+        let wide = "<r " + (1...(PackageInspector.maxAttributesPerElement + 1)).map { "a\($0)=\"v\"" }.joined(separator: " ") + "/>"
+        XCTAssertNotNil(PackageInspector.linearPrecheckFailure(Data(wide.utf8)))
+        let ordinary = "<r " + (1...200).map { "a\($0)=\"v\"" }.joined(separator: " ") + "/>"
+        XCTAssertNil(PackageInspector.linearPrecheckFailure(Data(ordinary.utf8)))
+        // many elements, same total attribute count: linear, allowed
+        let many = "<r>" + String(repeating: "<c " + (1...10).map { "a\($0)=\"v\"" }.joined(separator: " ") + "/>", count: 2_000) + "</r>"
+        XCTAssertNil(PackageInspector.linearPrecheckFailure(Data(many.utf8)))
+        // an attribute VALUE may contain `=` and `>` freely
+        XCTAssertNil(PackageInspector.linearPrecheckFailure(Data(#"<r a="x=y>z" b='p=q'/>"#.utf8)))
+    }
+
     func testMultiLineCommentedOutRelationshipIsNotADeclaration() throws {
         let data = try package(document: body(), docRels: "<!--\n" + #"<Relationship Id="rId9" Type="\#(imageType)" Target="media/fake.png"/>"# + "\n-->")
         let report = try PackageInspector.imageConsistencyReport(of: data)
@@ -160,8 +218,23 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(report.unparsableParts, ["word/header1.xml"])
         XCTAssertEqual(report.orphanImageRelationshipRefs, [], "an unreadable part yields no verdict, not a guilty one")
-        XCTAssertTrue(report.isConsistent)
+        XCTAssertFalse(report.isConsistent, "…and no verdict is not a verdict of consistency (verify R1 security S1)")
         XCTAssertEqual(report.declaredImageRelationshipRefs.count, 2, "its declarations are still visible")
+    }
+
+    func testCorruptingAnUnrelatedPartCannotHideARealOrphan() throws {
+        // verify R1 security S1 / codex 3: one appended `<` in a chart part
+        // made 3.7.0-rc report isConsistent == true while 3.6.4 reported the
+        // document-part orphan. Unreadable must fail closed.
+        let data = try package(
+            document: body(),   // rId4 declared, never referenced → real orphan
+            docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
+            extra: ["word/charts/chart1.xml": "<c:chartSpace/><",
+                    "word/charts/_rels/chart1.xml.rels": rels("")])
+        let report = try PackageInspector.imageConsistencyReport(of: data)
+        XCTAssertEqual(report.orphanImageRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId4")], "the readable part's orphan is still reported")
+        XCTAssertEqual(report.unparsableParts, ["word/charts/chart1.xml"])
+        XCTAssertFalse(report.isConsistent)
     }
 
     func testMissingPartStillYieldsOrphansAndIsNotCalledUnparsable() throws {
@@ -182,6 +255,19 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(report.unparsableParts, ["word/_rels/document.xml.rels"])
         XCTAssertEqual(report.imageRelationshipCount, 0)
+        XCTAssertFalse(report.isConsistent)
+    }
+
+    func testRelsTruncatedAfterACompleteDeclarationDiscardsThePrefix() throws {
+        // verify R1 logic F1: the parser delivers rId4 before it fails on the
+        // second element; a prefix of a declaration list is not a declaration
+        // list and must not become an orphan.
+        let data = try package(document: body(), docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/><Relationship Id="rId5" "#)
+        let report = try PackageInspector.imageConsistencyReport(of: data)
+        XCTAssertEqual(report.unparsableParts, ["word/_rels/document.xml.rels"])
+        XCTAssertEqual(report.declaredImageRelationshipRefs, [])
+        XCTAssertEqual(report.orphanImageRelationshipRefs, [])
+        XCTAssertFalse(report.isConsistent)
     }
 
     func testPartsDeclaringADocumentTypeAreRefused() throws {
@@ -197,7 +283,12 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(report.unparsableParts, ["word/_rels/header1.xml.rels"])
         XCTAssertEqual(report.declaredImageRelationshipRefs, [], "a refused part declares nothing")
-        XCTAssertTrue(report.isConsistent)
+        XCTAssertFalse(report.isConsistent)
+        // The policy is DocxReader.rejectDTD — byte-level, so a document type
+        // with no declarations at all is refused too (verify R1 security).
+        for bare in [#"<!DOCTYPE Relationships>"#, #"<!DOCTYPE Relationships []>"#, #"<!DOCTYPE Relationships SYSTEM "x.dtd">"#] {
+            XCTAssertEqual(PackageInspector.scanRels(Data((bare + rels("")).utf8), part: "p").parsed, false, bare)
+        }
     }
 
     func testEntityExpansionBombIsRefusedImmediately() throws {
@@ -259,6 +350,39 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let xml = overlay.merge(typedRels: dupes, typedManagedTypes: [imageType])
         XCTAssertTrue(xml.contains("media/a.png"), "first declaration wins: \(xml)")
         XCTAssertFalse(xml.contains("media/b.png"), xml)
+    }
+
+    func testMergeEmitsATypedDuplicateOnceInPassTwo() throws {
+        // verify R1 codex 6 / logic: original has no rId5; typed carries it twice.
+        let overlay = RelationshipsOverlay(originalRelsXML: rels(""))
+        let dupes = [
+            RelationshipDescriptor(id: "rId5", type: imageType, target: "media/a.png", targetMode: nil),
+            RelationshipDescriptor(id: "rId5", type: imageType, target: "media/b.png", targetMode: nil),
+        ]
+        let xml = overlay.merge(typedRels: dupes, typedManagedTypes: [imageType])
+        XCTAssertEqual(xml.components(separatedBy: "Id=\"rId5\"").count - 1, 1, xml)
+    }
+
+    func testDuplicateInTheOriginalRelsIsRefusedOnSave() throws {
+        // verify R1 requirements R14: a clean model over a package whose own
+        // rels declare an id twice — first-wins would drop one and save.
+        var doc = WordDocument()
+        doc.body.children.append(.paragraph(Paragraph(runs: [Run(text: "x")])))
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i139-\(UUID().uuidString).docx")
+        try DocxWriter.write(doc, to: url); defer { try? FileManager.default.removeItem(at: url) }
+        let dir = try ZipHelper.unzip(url); defer { ZipHelper.cleanup(dir) }
+        let relsURL = dir.appendingPathComponent("word/_rels/document.xml.rels")
+        var relsXML = try String(contentsOf: relsURL, encoding: .utf8)
+        relsXML = relsXML.replacingOccurrences(of: "</Relationships>", with: #"<Relationship Id="rId9" Type="\#(imageType)" Target="media/a.png"/><Relationship Id="rId&#57;" Type="\#(imageType)" Target="media/b.png"/></Relationships>"#)
+        try relsXML.write(to: relsURL, atomically: true, encoding: .utf8)
+        let damaged = FileManager.default.temporaryDirectory.appendingPathComponent("i139-dup-\(UUID().uuidString).docx")
+        try ZipHelper.zip(dir, to: damaged); defer { try? FileManager.default.removeItem(at: damaged) }
+        var read = try DocxReader.read(from: damaged); defer { read.close() }
+        var thrown: Error?
+        XCTAssertThrowsError(try DocxWriter.writeData(read)) { thrown = $0 }
+        let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
+        XCTAssertTrue(message.contains("rId9"), message)
+        XCTAssertTrue(message.contains("#139"), message)
     }
 
     func testDuplicateDeclarationsAreNamedInTheReport() throws {
