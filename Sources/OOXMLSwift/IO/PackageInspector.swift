@@ -42,13 +42,26 @@ public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
 ///   `<dir>/_rels/<name>.rels` under `word/` is compared against `<dir>/<name>`.
 /// - Scanning is done by `XMLParser` — the same libxml2 `DocxReader` reads
 ///   with (v3.7.0, #137/#138). Attribute values therefore arrive decoded and
-///   whitespace-normalized, comments and CDATA are structural rather than
-///   textual, and every part is scanned once (no regex, no backtracking).
-/// - A part XML rejects is listed in `unparsableParts` and produces **no
-///   orphans**: unknown is not the same as missing, and reporting an orphan
-///   there would refuse saves on files nothing is wrong with.
+///   whitespace-normalized, and comments and CDATA are structural rather
+///   than textual. `Id` / `Type` are matched by exact attribute name and
+///   `Relationship` by local name — the two lookups `DocxReader` makes.
+/// - Before a part reaches the parser it passes `DocxReader.rejectDTD` (the
+///   package-wide DTD policy) and a linear byte pre-check that refuses the
+///   inputs libxml2 itself handles super-linearly: a comment containing `--`
+///   (illegal XML 1.0 anyway), an unterminated comment or CDATA section, and
+///   a start tag with more than `maxAttributesPerElement` attributes. Cost is
+///   therefore bounded by package size; the package size itself is not
+///   bounded here (PsychQuant/ooxml-swift#130).
+/// - A part that is present but refused or unreadable is listed in
+///   `unparsableParts`. Its own declarations and references are discarded —
+///   unknown is not the same as missing, so it yields no orphans — **and
+///   `isConsistent` is false**: an unreadable part is not a verdict of
+///   consistency, and treating it as one would let a crafted package hide a
+///   real orphan by corrupting an unrelated part. A part that is absent
+///   (its `.rels` exists, the part does not) is knowable: its relationships
+///   are unreferenced and are reported as orphans, as in 3.6.x.
 /// - When an archive carries two entries with the same name, the first is
-///   used (ZIPFoundation subscript semantics); the second is invisible.
+///   used; the second is invisible.
 /// - No size limits are applied to the package (PsychQuant/ooxml-swift#130).
 ///
 /// The authoritative failure signal is `orphanImageRelationshipRefs`. Raw
@@ -80,12 +93,16 @@ public struct ImageConsistencyReport: Equatable, Sendable {
     /// (v3.7.0). OPC forbids this; `DocxWriter` refuses to serialize such a
     /// document (#139), so a consumer can name the defect before trying.
     public let duplicateRelationshipRefs: [ImageRelationshipRef]
-    /// Package paths XML could not parse, sorted (v3.7.0). Their declarations
-    /// and references are unknown, so they contribute no orphans.
+    /// Package paths that were present but could not be scanned, sorted
+    /// (v3.7.0): a `.rels` part or a content part, each named by its own path.
+    /// Their declarations and references are unknown, so they contribute no
+    /// orphans — and they make `isConsistent` false.
     public let unparsableParts: [String]
 
-    /// True when every declared image relationship is referenced by its own part.
-    public var isConsistent: Bool { orphanImageRelationshipRefs.isEmpty }
+    /// True when every declared image relationship is referenced by its own
+    /// part **and every part could be scanned**. Never true for a package
+    /// with an unreadable part: "no verdict" is not "consistent".
+    public var isConsistent: Bool { orphanImageRelationshipRefs.isEmpty && unparsableParts.isEmpty }
 
     public init(bodyDrawingCount: Int,
                 imageRelationshipCount: Int,
@@ -129,11 +146,13 @@ public enum PackageInspector {
         var referencedByPart: [String: Set<String>] = [:]
         var unparsable: Set<String> = []
         var unparsableContentParts: Set<String> = []
+        var seenPaths: Set<String> = []          // a duplicate zip entry name is one part, not two
         var documentDrawings = 0
         var documentScanned = false
 
         for entry in archive {
             let path = entry.path
+            guard seenPaths.insert(path).inserted else { continue }
             // OPC: the relationships of part `<dir>/<name>` live at
             // `<dir>/_rels/<name>.rels` — so `word/charts/chart1.xml` is served by
             // `word/charts/_rels/chart1.xml.rels`, NOT `word/_rels/charts/…`
@@ -145,10 +164,15 @@ public enum PackageInspector {
             guard name.hasSuffix(".xml"), !name.contains("/") else { continue }
             let part = dir + "/" + name
 
-            let rels = scanRels((try entryData(path)) ?? Data())
-            if !rels.parsed { unparsable.insert(path) }
-            declared.append(contentsOf: rels.imageIds.map { ImageRelationshipRef(part: part, id: $0) })
-            duplicates.append(contentsOf: rels.duplicateIds.map { ImageRelationshipRef(part: part, id: $0) })
+            let rels = scanRels((try entryData(path)) ?? Data(), part: path)
+            if rels.parsed {
+                declared.append(contentsOf: rels.imageIds.map { ImageRelationshipRef(part: part, id: $0) })
+                duplicates.append(contentsOf: rels.duplicateIds.map { ImageRelationshipRef(part: part, id: $0) })
+            } else {
+                // Whatever the parser delivered before it failed is not a
+                // declaration list, it is a prefix of one. Discard it.
+                unparsable.insert(path)
+            }
 
             if referencedByPart[part] == nil {
                 // A part that is *absent* is not a part that is *unreadable*:
@@ -157,7 +181,7 @@ public enum PackageInspector {
                 // sense. Keep the pre-3.7.0 verdict for that case and reserve
                 // "no verdict" for XML this scanner could not read.
                 if let data = try entryData(part) {
-                    let content = scanPart(data, countDrawingsAsIn: part == documentPart)
+                    let content = scanPart(data, part: part, countDrawingsAsIn: part == documentPart)
                     if !content.parsed { unparsable.insert(part); unparsableContentParts.insert(part) }
                     referencedByPart[part] = content.referenced
                     if part == documentPart { documentDrawings = content.drawingCount; documentScanned = true }
@@ -169,7 +193,7 @@ public enum PackageInspector {
 
         // `word/document.xml` is scanned above only when its rels part exists.
         if !documentScanned, let data = try entryData(documentPart) {
-            let content = scanPart(data, countDrawingsAsIn: true)
+            let content = scanPart(data, part: documentPart, countDrawingsAsIn: true)
             if !content.parsed { unparsable.insert(documentPart) }
             documentDrawings = content.drawingCount
         }
@@ -192,29 +216,101 @@ public enum PackageInspector {
 
     // MARK: - Scanning (XMLParser — the parser the reader uses, #137/#138)
 
+    /// Start tags with more attributes than this are refused before parsing:
+    /// libxml2's attribute handling is quadratic in the per-element count
+    /// (measured: 32k attributes ≈ 0.3 s, doubling ≈ ×3.5), and no OOXML
+    /// element carries more than a few dozen. Total attributes across many
+    /// elements are linear and unbounded here.
+    public static let maxAttributesPerElement = 4096
+
+    /// Why a part was refused before the parser saw it, or `nil` when it may
+    /// be parsed. Linear in the part's bytes; visits each byte once.
+    ///
+    /// Refuses exactly the inputs on which libxml2 is not linear: a comment
+    /// that contains `--` (its error-recovery path is quadratic in the number
+    /// of `--` occurrences — the `<!--<!--<!--…` and `<!-- ---- … -->` shapes
+    /// are both this), an unterminated comment or CDATA section (recovery
+    /// again), and an over-wide start tag (see `maxAttributesPerElement`).
+    /// Everything else is handed to the parser as-is.
+    static func linearPrecheckFailure(_ data: Data) -> String? {
+        let b = [UInt8](data); let n = b.count; var i = 0
+        @inline(__always) func at(_ k: Int, _ lit: StaticString) -> Bool {
+            let u = lit.utf8Start; let c = lit.utf8CodeUnitCount
+            guard k + c <= n else { return false }
+            for o in 0..<c where b[k + o] != u[o] { return false }
+            return true
+        }
+        while i < n {
+            guard b[i] == 0x3C /* < */ else { i += 1; continue }
+            if at(i, "<!--") {
+                var j = i + 4
+                while true {
+                    guard j + 1 < n else { return "unterminated comment" }
+                    if b[j] == 0x2D && b[j + 1] == 0x2D {          // "--"
+                        if j + 2 < n && b[j + 2] == 0x3E { i = j + 3; break }   // "-->"
+                        return "comment contains \"--\" (illegal in XML 1.0; libxml2 recovers from it quadratically)"
+                    }
+                    j += 1
+                }
+            } else if at(i, "<![CDATA[") {
+                var j = i + 9
+                while true {
+                    guard j + 2 < n else { return "unterminated CDATA section" }
+                    if b[j] == 0x5D && b[j + 1] == 0x5D && b[j + 2] == 0x3E { i = j + 3; break }   // "]]>"
+                    j += 1
+                }
+            } else if at(i, "<?") {
+                var j = i + 2
+                while j + 1 < n && !(b[j] == 0x3F && b[j + 1] == 0x3E) { j += 1 }               // "?>"
+                i = j + 2
+            } else {
+                var j = i + 1; var quote: UInt8 = 0; var equals = 0
+                while j < n {
+                    let c = b[j]
+                    if quote != 0 { if c == quote { quote = 0 } }
+                    else if c == 0x22 || c == 0x27 { quote = c }
+                    else if c == 0x3D { equals += 1; if equals > maxAttributesPerElement { return "start tag with more than \(maxAttributesPerElement) attributes" } }
+                    else if c == 0x3E { break }
+                    j += 1
+                }
+                i = j + 1
+            }
+        }
+        return nil
+    }
+
     /// Image relationship ids, ids declared more than once (any type), and
-    /// whether the XML parsed. Namespace processing stays off, so element and
-    /// attribute names arrive exactly as written and an undeclared prefix is
-    /// not an error — the same tolerance the previous attribute scan had,
-    /// without its entity and comment blind spots.
-    static func scanRels(_ relsXML: Data) -> (imageIds: [String], duplicateIds: [String], parsed: Bool) {
+    /// whether the part could be scanned. `Id` and `Type` are looked up by
+    /// exact attribute name, as `DocxReader` does (`attribute(forName:)`);
+    /// `xmlns:Id`, `r:Id` or `p:Type` are not those attributes.
+    static func scanRels(_ relsXML: Data, part: String = "") -> (imageIds: [String], duplicateIds: [String], parsed: Bool) {
+        guard admissible(relsXML, part: part) else { return ([], [], false) }
         let delegate = RelsScanner()
         let parser = XMLParser(data: relsXML)
         parser.shouldResolveExternalEntities = false
         parser.delegate = delegate
         let parsed = parser.parse()
-        var seen = Set<String>(), dupes: [String] = []
-        for id in delegate.allIds where !seen.insert(id).inserted && !dupes.contains(id) { dupes.append(id) }
+        var seen = Set<String>(), flagged = Set<String>(), dupes: [String] = []
+        for id in delegate.allIds where !seen.insert(id).inserted && flagged.insert(id).inserted { dupes.append(id) }
         return (delegate.imageIds, dupes, parsed)
     }
 
-    static func scanPart(_ partXML: Data, countDrawingsAsIn countDrawings: Bool = false) -> (referenced: Set<String>, drawingCount: Int, parsed: Bool) {
+    static func scanPart(_ partXML: Data, part: String = "", countDrawingsAsIn countDrawings: Bool = false) -> (referenced: Set<String>, drawingCount: Int, parsed: Bool) {
+        guard admissible(partXML, part: part) else { return ([], 0, false) }
         let delegate = PartScanner(countsDrawings: countDrawings)
         let parser = XMLParser(data: partXML)
         parser.shouldResolveExternalEntities = false
         parser.delegate = delegate
         let parsed = parser.parse()
         return (delegate.referenced, delegate.drawingCount, parsed)
+    }
+
+    /// The two gates every part passes before the parser: the package-wide
+    /// DTD policy (`DocxReader.rejectDTD` — one policy, one place) and the
+    /// linear pre-check above.
+    private static func admissible(_ data: Data, part: String) -> Bool {
+        guard (try? DocxReader.rejectDTD(data, part: part)) != nil else { return false }
+        return linearPrecheckFailure(data) == nil
     }
 
     /// String conveniences (tests and callers holding text).
@@ -232,69 +328,33 @@ public enum PackageInspector {
     }
 }
 
-/// Shared delegate behaviour: **a part that declares anything in a DTD is
-/// refused.** OPC forbids DTDs in package parts, no writer emits one, and a
-/// document type is where parser-differential tricks live — an entity that one
-/// XML API expands in an attribute value and another does not would put this
-/// scanner and `DocxReader` back into disagreement, which is the whole of
-/// #137. Refusing costs nothing on real packages and makes the agreement
-/// structural. (Entity-expansion bombs are separately refused by libxml2
-/// itself; external entities are never resolved.)
-private class PackageXMLScanner: NSObject, XMLParserDelegate {
-    func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) {
-        parser.abortParsing()
-    }
-    func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String, publicID: String?, systemID: String?) {
-        parser.abortParsing()
-    }
-    func parser(_ parser: XMLParser, foundUnparsedEntityDeclarationWithName name: String, publicID: String?, systemID: String?, notationName: String?) {
-        parser.abortParsing()
-    }
-    func parser(_ parser: XMLParser, foundAttributeDeclarationWithName attributeName: String, forElement elementName: String, type: String?, defaultValue: String?) {
-        parser.abortParsing()
-    }
-    func parser(_ parser: XMLParser, foundElementDeclarationWithName elementName: String, model: String) {
-        parser.abortParsing()
-    }
-    func parser(_ parser: XMLParser, foundNotationDeclarationWithName name: String, publicID: String?, systemID: String?) {
-        parser.abortParsing()
-    }
-}
-
 /// Collects `<Relationship>` declarations. Comments and CDATA are reported to
 /// the delegate as their own events and are therefore never mistaken for
-/// markup — the two blind spots of the pre-3.7.0 regex scan.
-private final class RelsScanner: PackageXMLScanner {
+/// markup — the two blind spots of the pre-3.7.0 regex scan. Elements are
+/// matched by local name and attributes by exact name: the two lookups
+/// `DocxReader.parseRelationshipsFile` makes (`local-name()='Relationship'`,
+/// `attribute(forName: "Id")`).
+private final class RelsScanner: NSObject, XMLParserDelegate {
     var imageIds: [String] = []
     var allIds: [String] = []
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
                 qualifiedName: String?, attributes: [String: String]) {
-        guard PackageInspector.localName(elementName) == "Relationship" else { return }
-        var id: String?, type: String?
-        for (key, value) in attributes {
-            switch PackageInspector.localName(key) {
-            case "Id": id = value
-            case "Type": type = value
-            default: break
-            }
-        }
-        guard let id else { return }
+        guard PackageInspector.localName(elementName) == "Relationship", let id = attributes["Id"] else { return }
         allIds.append(id)
-        if let type, type.hasSuffix("/image") { imageIds.append(id) }
+        if let type = attributes["Type"], type.hasSuffix("/image") { imageIds.append(id) }
     }
 }
 
 /// Collects relationship references (`*:embed` / `*:link` / `*:id`) and, for
 /// `word/document.xml`, `<w:drawing>` elements.
-private final class PartScanner: PackageXMLScanner {
+private final class PartScanner: NSObject, XMLParserDelegate {
     let countsDrawings: Bool
     var referenced: Set<String> = []
     var drawingCount = 0
 
     init(countsDrawings: Bool) {
         self.countsDrawings = countsDrawings
-        super.init()
     }
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,

@@ -57,7 +57,7 @@ internal struct RelationshipsOverlay {
         // a file on disk — a package declaring `rId5` twice (or `rId5` and
         // `rId&#53;`, which the reader decodes to the same id) must not be able
         // to terminate the process. Duplicates are refused with a named error
-        // in `DocxWriter.writeDocumentRels` before this runs, so the merged
+        // in `DocxWriter.writeDocumentRelationships` before this runs, so the merged
         // output below is never actually written for such a document; this
         // loop only guarantees that the library itself cannot trap.
         var typedById: [String: RelationshipDescriptor] = [:]
@@ -80,7 +80,9 @@ internal struct RelationshipsOverlay {
         }
 
         // Pass 2: append typed rels not already emitted (newly added parts).
-        for rel in typedRels where !emittedIds.contains(rel.id) {
+        // `insert` rather than `contains` so a typed id that appears twice is
+        // emitted once here too — first-wins on both passes (#139).
+        for rel in typedRels where emittedIds.insert(rel.id).inserted {
             merged.append(rel)
         }
 
