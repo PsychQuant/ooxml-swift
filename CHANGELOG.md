@@ -22,6 +22,9 @@ All notable changes to ooxml-swift will be documented in this file.
     `Id="rId6"` 的宣告不再誤報孤兒。
   - **註解與 CDATA 是結構不是文字**：多行註解裡的 `<Relationship>` 不再被算成宣告，CDATA 裡的 `<Relationship>` 與字面
     `<!--` 也不再影響判定。三種病態 payload（未閉合 ×20000、`(-->)×N (<!--)×N` 平衡錯排、nested + 換行）現在合計數十毫秒。
+  - **帶 DTD 的 part 一律拒絕**：OPC 禁止 package part 出現 document type，而「屬性值裡的實體算什麼」正是 parser 之間會分歧的
+    地方——拒絕它讓 inspector 與 reader 的一致性是結構性的而非巧合。實體展開炸彈由 libxml2 自己擋掉（實測 0.000 s 直接
+    parse 失敗），外部實體從不解析（明寫 `shouldResolveExternalEntities = false`）。
   - **無法解析的 part 進 `unparsableParts` 且不產生孤兒**：未知不是遺失。舊版對非 well-formed 的 part 照樣給答案；新版把
     「讀不到」與「宣告了卻沒人引用」分開，consumer 才不會對一份沒毛病的檔案拒絕存檔。
 - **`RelationshipsOverlay.merge` 不再 `fatalError`**（#139）。`Dictionary(uniqueKeysWithValues:)` 對重複 relationship id
