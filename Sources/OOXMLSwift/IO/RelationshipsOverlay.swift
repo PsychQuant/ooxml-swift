@@ -52,9 +52,16 @@ internal struct RelationshipsOverlay {
         typedManagedTypes: Set<String>
     ) -> String {
         var merged: [RelationshipDescriptor] = []
-        let typedById: [String: RelationshipDescriptor] = Dictionary(
-            uniqueKeysWithValues: typedRels.map { ($0.id, $0) }
-        )
+        // First-wins, never `Dictionary(uniqueKeysWithValues:)` (#139): that
+        // initializer traps on a duplicate key, and relationship ids come from
+        // a file on disk — a package declaring `rId5` twice (or `rId5` and
+        // `rId&#53;`, which the reader decodes to the same id) must not be able
+        // to terminate the process. Duplicates are refused with a named error
+        // in `DocxWriter.writeDocumentRels` before this runs, so the merged
+        // output below is never actually written for such a document; this
+        // loop only guarantees that the library itself cannot trap.
+        var typedById: [String: RelationshipDescriptor] = [:]
+        for rel in typedRels where typedById[rel.id] == nil { typedById[rel.id] = rel }
         var emittedIds = Set<String>()
 
         // Pass 1: walk original rels in order. Preserve unknown types verbatim;
