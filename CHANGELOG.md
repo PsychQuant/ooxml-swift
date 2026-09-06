@@ -31,7 +31,7 @@ All notable changes to ooxml-swift will be documented in this file.
     屬性 0.3 s、加倍 ×3.5）。所以每個 part 進 parser 前先過一次線性掃描：註解內含 `--`、未閉合的註解或 CDATA、單一 start tag
     超過 `maxAttributesPerElement`（4096）個屬性 → 該 part 直接歸入 `unparsableParts`，不進 parser。剩下的是 libxml2 對同一份
     位元組本來的成本——包括它的 namespace 簿記，在**每個元素的 `xmlns` 宣告數**這一軸超線性（verify R3 實測 4 MB 的 .docx
-    200 元素 × 4000 xmlns → inspector 27 s、reader 78 s）；這一軸與 package 大小一樣沒有上限，兩者都是 #130。
+    200 元素 × 4000 xmlns → inspector 27 s、reader 63 s；R3 另一次量到 78 s，機器負載不同）；這一軸與 package 大小一樣沒有上限，兩者都是 #130。
   - **DTD 政策單一來源**：沿用 `DocxReader.rejectDTD`（位元組級 `<!DOCTYPE` 即拒），與 reader 對同一份位元組的處置相同；不再
     自己維護一套 delegate 級的宣告攔截（那一版對空值實體、外部實體宣告與外部子集會放行）。實體展開炸彈因此根本進不了
     parser；外部實體另明寫 `shouldResolveExternalEntities = false`。
@@ -48,12 +48,12 @@ All notable changes to ooxml-swift will be documented in this file.
     綁空 URI 的兩種拒、其餘八種收，報告的宣告與引用仍精確）。**`isConsistent` 是關於關係的陳述，不是「reader 開得起來」**——reader 自己也只對 document / header /
     footer / footnotes / endnotes / comments 及其 rels 走 `XMLDocument`，chart / settings 走寬鬆的 tree reader，根本沒有
     單一謂詞可對齊。**不是合法 UTF-8**
-    的 part 拒絕（UTF-16 BOM、NUL、任何壞位元組；UTF-8 BOM 接受）——這比 reader **嚴**：reader 對壞位元組以 U+FFFD 代換後
+    的 part 拒絕（UTF-16 BOM、任何壞位元組；含 NUL 的位元組串是合法 UTF-8 但不是合法 XML 1.0，同樣拒；UTF-8 BOM 接受）——這比 reader **嚴**：reader 對壞位元組以 U+FFFD 代換後
     繼續，但含壞位元組的 id 在兩邊不可能是同一個字串，拒絕是唯一誠實的答案；巢狀超過 1024 層拒絕——鏡射 `XmlTreeReader` 的
     上限，**且與它同法計數（自閉合元素也算一層）**（每層一個 `xmlns` 的深巢狀在 libxml2 是二次的：13.8 MB → 31 s，reader
     15 ms 就拒）。反方向（reader 開得起來、inspector 拒）在四處是**刻意**的：屬性數上限、註解含 `--`、非合法 UTF-8
-    （reader 的 rels 路徑是 `XMLDocument`，連 UTF-16 都收）、以及 reader 根本不解析的 part（chart / settings）裡的未宣告前綴
-    ——規則對每個掃到的 part 一律套用、不依 part 路由；那是成本上限與確定性規則，不是對齊。
+    （reader 的 rels 路徑是 `XMLDocument`，連 UTF-16 都收）、以及掃描範圍內 reader 不解析或不會到達的 part（未引用的 header、有 rels 的
+    chart）裡的未宣告前綴——規則對每個掃到的 part 一律套用、不依 part 路由；那是成本上限與確定性規則，不是對齊。
   - **引用要在 relationships namespace 裡**：`fake:embed="rId4"`（`fake` 綁到別的 namespace）不是引用、不能滿足宣告；前綴任意
     但綁到 transitional 或 strict 的 relationships namespace 才算。`bodyDrawingCount` 同樣改依 namespace 判 `w:drawing`。
   - **封裝用 reader 自己的路徑解壓，part 從檔案系統讀回**（verify R3）：R2 那版用 `lowercased()` 建大小寫不敏感索引、同名
@@ -66,9 +66,12 @@ All notable changes to ooxml-swift will be documented in this file.
     document、是不是 `<x>.xml`、上層是不是 `_rels`、是不是 `<x>.rels`）一律用**檔案 identity**（組出候選名、比 device+inode）
     回答，不再有任何 `lowercased()` / `caseInsensitiveCompare`（verify R4 抓到 rc3 殘留三處字串摺疊：缺 part 的 rels 用後綴比對、
     document 去重用 `caseInsensitiveCompare`、頂層拼法）。**掃描範圍回到 92befb9 的契約**：document 一定掃；其餘 `word/**/*.xml`
-    **只在它有 rels 時**才讀（rc3 把所有 `.xml` 都讀了，一個 reader 根本不開的壞 XML 就能讓可讀封裝報不一致——verify R4 B2）；
+    **只在它的 rels 至少宣告一條關係時**才讀（rc3 把所有 `.xml` 都讀了，rc4 只看「有沒有 rels」，一個 reader 根本不開的壞 XML
+  配一份空 rels 就能讓可讀封裝報不一致——verify R4 B2、R5 L4）；不讀的理由是「它不宣告任何關係、沒有東西要對帳」，不是
+  「reader 不讀它」——reader 讀的是被引用的 header/footer，與有沒有 rels 無關。`word/` 下的每一份 rels 仍全部對帳，reader
+  讀不讀它都一樣，讀不到就是無定論；
     rels 存在但 part 缺席 → 宣告視為孤兒（3.6.x 判定）。**解壓失敗的封裝（同名或僅大小寫不同的重複 entry、逃逸路徑、壞成員、
-    含 symbolic-link entry）、沒有 `word/document.xml` 的封裝、解壓後目錄列舉失敗，改為拋 `WordError.invalidDocx`**——reader 對
+    含 symbolic-link entry）、沒有 `word/document.xml` 的封裝、解壓後目錄列舉或 stat 失敗，改為拋 `WordError.invalidDocx`**——reader 對
     這些是 `NSCocoaError 516`／「找不到 word/document.xml」，開不了的封裝沒有一致性可言，回一份報告就是「無定論＝一致」的靜音
     開關。`ZipHelper.unzip`（reader 與 inspector 共用）**拒絕含 symbolic-link entry 的封裝**：解出來的連結會被之後的每次讀取跟隨，
     `word/alias.xml → document.xml` 會變成第二份 document（真實語料 0/740）。新增 `imageConsistencyReport(ofPackageAt:)` 給已在
@@ -121,46 +124,57 @@ All notable changes to ooxml-swift will be documented in this file.
   rel 不 trap、直接寫出一個 `rId1` 宣告兩次、違反 OPC 的封裝；3.7.0 拒絕它。
 - **原始 rels 有九種合法寫法從「可存」變「拒存」**（verify R3/R4 逐一對照 3.6.4；這是封閉列舉，下游拿自己的語料對這九種掃即可）：
   `<Relationship …></Relationship>`（非自閉合）、單引號屬性值、`Id = "…"`（`=` 兩側有空白）、任何帶前綴的元素
-  （`<pkg:Relationship>`、帶前綴的 root）、含 XML 註解、含 CDATA、含 processing instruction、**`Id="rId&#54;"`（id 用字元參照
-  ——#137 issue 本文舉的那個形狀）**、**`Id` 含字面換行或空白**。九種都是合法 XML / 合法 OPC，reader 開得起來；3.6.4 對前四種
+  （`<pkg:Relationship>`、帶前綴的 root）、含 XML 註解、含 CDATA、含 processing instruction、**`Id="rId&#54;"`（id 用字元參照或 `&amp;` 這類實體參照
+  ——#137 issue 本文舉的那個形狀）**、**`Id` 含會被屬性正規化改寫的空白（換行／tab）**。九種都是合法 XML / 合法 OPC，reader 開得起來；3.6.4 對前四種
   **靜默丟掉那條關係**後回報成功，對 regex 看得見的註解內假宣告**寫成真的**（指向不存在的 media）；後兩種 3.6.4 對 typed
-  model 不管的關係（如 webSettings）不會丟，只在 model 也持有同一個 id 時才會寫出兩套視角。3.7.0 具名拒絕：結構四類由 parser
-  事件判定、逐 id 說出實際成因（不是列一串可能），長度不等的兩份清單直接並列、不逐項錯配。這些文件要先用 Word 另存一次；
+  model 不管的關係（如 webSettings）不會丟，只在 model 也持有同一個 id 時才會寫出兩套視角。第九種精確地說是「會被 XML 屬性正規化改寫的空白」（換行、tab、CR）——普通的單一空格 parser 與 text scan 看到的一樣，
+  不會被拒；含空白的 `Id` 本來就不是合法的 `xsd:ID`，所以「九種都合法」只對 XML 成立、不全對 OPC 成立，reader 開得起來是
+  事實。3.7.0 具名拒絕：結構四類由 parser 事件判定、逐 id 說出實際成因（字元參照的拼法會被解碼比對後具名，不是列一串可能），長度不等的兩份清單直接並列、不逐項錯配。這些文件要先用 Word 另存一次；
   merge 用的 regex 本身是 #142。
 - **inspector 對開不了的封裝改為拋錯而非回報告**：解壓失敗（重複 entry、逃逸路徑、symbolic-link entry）、沒有
   `word/document.xml`、目錄列舉失敗 → `WordError.invalidDocx`。3.6.x 對前者回一份「一致」的報告。消費端把 throw 當拒絕即可
-  （che-word-mcp 已如此）。**reader 同步變嚴一處**：`DocxReader.read` 對含 symbolic-link entry 的封裝拒絕（共用 `ZipHelper.unzip`）。
-- **inspector 判定收緊四處**（與 Fixed 段「刻意比 reader 嚴的四處」是同一份清單）：(1) 任何 part 讀不到 → `isConsistent == false`
-  （3.6.4 對非 well-formed 的 part 照樣給答案；含屬性數上限與註解含 `--` 這兩種預檢拒絕）；(2) CDATA 內的引用不再算引用；
-  (3) 不是合法 UTF-8 的 part 視為讀不到（reader 會以 U+FFFD 代換後繼續）；(4) reader 不解析的 part（chart / settings）裡的
-  未宣告前綴也拒——規則對每個掃到的 part 一律套用。消費 `isConsistent` 當 save gate 的 consumer（che-word-mcp）會對這些封裝拒絕存檔——這是
+  （che-word-mcp 已如此）。**reader 同步變嚴三種 entry**：`DocxReader.read` 與 inspector 共用 `ZipHelper.unzip`，對「ZIPFoundation 會解壓成 symbolic link 的
+  entry」、路徑含 `..` 成分、絕對路徑、空路徑或含 NUL 的 entry 一律先拒；解壓出的檔案一律 0600／目錄 0700（封裝自帶的 setuid／
+  world-writable 位不再照搬）。
+- **inspector 判定收緊四處**（下列是消費端看得到的變更；Fixed 段「刻意比 reader 嚴的四處」是另一份、從 reader 對照的角度列的）：
+  (1) **掃描範圍內**的 part 讀不到 → `isConsistent == false`（3.6.4 對非 well-formed 的 part 照樣給答案；含屬性數上限與註解含
+  `--` 這兩種預檢拒絕；掃描範圍＝document ＋ 每個 rels 至少宣告一條關係的 `.xml` part ＋ `word/` 下每一份 rels）；(2) CDATA 內的
+  引用不再算引用；(3) 不是合法 UTF-8 的 part 視為讀不到（reader 會以 U+FFFD 代換後繼續）；(4) 掃描範圍內、reader 不解析或不會
+  到達的 part（未引用的 header、有 rels 的 chart）裡的未宣告前綴也拒——規則對每個掃到的 part 一律套用；`settings.xml` 幾乎從不
+  帶自己的 rels（1025 份真實文件中 3 份），所以通常不在範圍內。消費 `isConsistent` 當 save gate 的 consumer（che-word-mcp）會對這些封裝拒絕存檔——這是
   刻意的：全部都是「回報管道不該對讀不懂的東西說沒事」。
-- **效能：inspector 現在付的是 reader 的解壓成本，比 3.6.4 慢、不是快**（release build、740 份真實 .docx、每檔 3 次取平均，
-  在釋出的 head 上量；三代並列）：
+- **效能：inspector 現在付的是 reader 的解壓成本，比 3.6.4 慢、不是快**（release build、740 份真實 .docx；三代在**同一輪交錯**
+  跑三回合、每檔 3 次取平均、各取三回合最小值——不同時段量測的合計可差 ±20%，只有同輪並列的數字可以互比）：
 
-  | | 合計 740 份 | 中位數／份 | 平均／份 | 最慢單檔 | 24.6 MB 樣本 |
-  |---|---|---|---|---|---|
-  | 3.6.4 `17e9f38`（archive 直讀 + regex）| 2043 ms | 0.21 ms | 2.8 ms | 291 ms | 33 ms |
-  | rc2 `92befb9`（archive 直讀 + `lowercased()` 索引）| 1663 ms | 0.14 ms | 2.2 ms | 216 ms | 33 ms |
-  | **3.7.0**（`ZipHelper.unzip` 解壓 + 磁碟讀回）| **5798 ms** | **5.3 ms** | **7.8 ms** | **280 ms** | **88 ms** |
+  | | 合計 740 份 | 中位數／份 | 最慢單檔 | 24.6 MB 樣本 |
+  |---|---|---|---|---|
+  | 3.6.4 `17e9f38`（archive 直讀 + regex）| 2156 ms | 0.23 ms | 300 ms | 33 ms |
+  | rc2 `92befb9`（archive 直讀 + `lowercased()` 索引）| 1795 ms | 0.14 ms | 234 ms | 36 ms |
+  | **3.7.0**（`ZipHelper.unzip` 解壓 + 磁碟讀回）| **7247 ms** | **6.95 ms** | **300 ms** | **105 ms** |
 
-  每份多出的約 5 ms 是固定的解壓 IO（建暫存目錄、寫出所有 part、掃完刪除；含 symbolic-link 預掃）；rc2 那個 0.84× 是靠索引模擬檔案系統換來的，
+
+  每份多出的約 7 ms 是固定的解壓 IO（位元組進記憶體預掃、寫出私有副本、解出所有 part、重設權限位、掃完刪除）；rc2 那個 0.84× 是靠索引模擬檔案系統換來的，
   verify R3 證明那個模擬本身就是靜音開關（見 Fixed）。這是 save gate 的成本（每次存檔一次），與存檔本身寫 zip 同量級；
   已在磁碟上的檔請用 `imageConsistencyReport(ofPackageAt:)` 省掉一次寫出。#138 的 payload（2 KB、註解未閉合）6026 ms →
-  約 1.7 ms（含解壓；rc2 時代是 0.2 ms）。**debug build 下數字全變**（預檢是 Swift），量測務必 `-c release`。
+  約 2–3 ms（含解壓與私有副本；rc2 時代不解壓是 0.2 ms）。**debug build 下數字全變**（預檢是 Swift），量測務必 `-c release`。
 - **磁碟與對抗軸的成本也要一併知道**（verify R4 security）：3.6.4 的 inspector 純記憶體、零磁碟；3.7.0 每次檢查把整份封裝解壓到
-  `FileManager.default.temporaryDirectory`（`che-word-mcp/<UUID>/`，回傳前刪除；`of:` 版本多寫一份輸入位元組），**峰值磁碟 ≈ 解壓後
-  大小（＋輸入大小），沒有上限**——1 MB 的 zip bomb 解出 4 GB 就吃 4 GB（清理正常，殘留 0），且 `TMPDIR` 不能把它導到有配額
+  `FileManager.default.temporaryDirectory`（`ooxml-swift-inspector/<UUID>/`——與 reader 的 `che-word-mcp/` 命名空間分開，
+  reader 端「有沒有漏暫存目錄」的檢查不受並行 inspection 干擾（verify R5 regression：共用時兩個既有 hermetic 測試在有並行
+  inspector 工作時必然失敗）；回傳前刪除；`of:` 版本不再先寫 scratch 檔，但解壓前仍寫一份私有副本），**峰值磁碟 ≈ 解壓後
+  大小（＋輸入大小），沒有上限**——1 MB 的 zip bomb 解出 1 GB、4 MB 解出 4 GB 就吃那麼多（清理正常，殘留 0），且 `TMPDIR` 不能把它導到有配額
   的卷。對抗性的 xmlns 密集 part（200 元素 × 4000 xmlns、4 MB）inspector 26.7 s（3.6.4 是 1.0 s，reader 63 s）。兩者都歸 #130。
 - **inspector 從純函式變成會寫暫存檔的函式**，這是 3.6.x 消費者升級最該知道的一件事。解壓政策與 reader 共用（`ZipHelper.unzip`）：
-  含 symbolic-link entry、含 `..` 成分、或絕對路徑的 entry 一律先拒、不寫任何東西——verify R4 security 實測 ZIPFoundation 0.9.20 對
-  「指向 `.` 的 symlink ＋ `..` 成分」的合取擋不住（`isContained` 逐字收合、核心原地解析），能在解壓目錄外建立任意路徑的檔案；
-  3.6.4 的 **reader** 本來就有這個洞，3.7.0 一起關掉。真實語料 0/740 含這三種 entry。
+  會解壓成 symbolic link 的 entry、含 `..` 成分、絕對路徑、空或含 NUL 路徑的 entry 一律先拒、**不解出任何 entry**——verify R4
+  security 實測 ZIPFoundation 0.9.20 對「指向 `.` 的 symlink ＋ `..` 成分」的合取擋不住（`isContained` 逐字收合、核心原地解析），
+  能在解壓目錄外建立任意路徑的檔案；3.6.4 的 **reader** 本來就有這個洞，3.7.0 一起關掉。**預掃與解壓看的是同一份不可變位元組**
+  （verify R5：先掃一次 URL、再開一次 URL 解壓，兩次開啟之間換掉來源檔就把逃逸鏈換回來）：位元組先進記憶體、以 in-memory
+  archive 預掃，再寫成 UUID 命名的私有副本解壓；`imageConsistencyReport(of: Data)` 因此不再先寫 scratch 檔。真實語料 0/740
+  含這些 entry。
 - 已知的不對稱（follow-up）：strict-namespace 的 image relationship inspector 收、reader 的 `RelationshipType.image` 只認 transitional
   → #143。
 - **語意面 740 份真實 .docx 逐檔對照 3.6.4**：`isConsistent` / 孤兒 / 宣告 零差異、零 `unparsableParts`、零新增不可存檔
-  （9 次 SIGTRAP 變具名拒絕；738 份 rels 中零筆命中上述六種被拒形狀）。三個非語意差異：(1) `mediaEntryCount` 不再把
-  `word/media/` 這個**目錄 entry** 算進去（3.6.4 與 rc2 都算；740 份中 6 份因此少 1，那不是 media）；(2)
+  （9 次 SIGTRAP 變具名拒絕；738 份 rels 中零筆命中上述九種被拒形狀）。三個非語意差異：(1) `mediaEntryCount` 不再把
+  `word/media/` 這個**目錄 entry** 算進去（3.6.4 與 rc2 都算；740 份中 7 份因此少 1，那不是 media）；(2)
   `declaredImageRelationshipRefs` 的 part 順序改為 document 先、其餘依路徑排序（同一 part 內仍是宣告順序；rc2 是封裝順序）；
   (3) `ImageRelationshipRef.part` 對 document 一律是 `word/document.xml`（reader 的名字），其餘 part 是 `word/` 加上檔案系統列出的子路徑拼法。
   另有一份沒有 `word/document.xml` 的封裝（主文件在 `word/document2.xml`）從「一致」變拋錯——reader 對它本來就是

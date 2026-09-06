@@ -18,23 +18,63 @@ public struct ZipHelper {
     /// any of these (0 / 740 in the real corpus); refusing them here keeps
     /// one policy for the reader and the inspector.
     public static func unzip(_ url: URL) throws -> URL {
-        let archive = try Archive(url: url, accessMode: .read)
+        try unzip(data: try Data(contentsOf: url))     // one read; everything below works on these bytes
+    }
+
+    /// The reader's extraction namespace under the temporary directory.
+    public static let readerNamespace = "che-word-mcp"
+    /// The inspector's (v3.7.0): the same policy, a different directory, so
+    /// the reader's "did I leave an extraction directory behind" question
+    /// keeps its answer when an inspection runs alongside (verify R5).
+    public static let inspectorNamespace = "ooxml-swift-inspector"
+
+    /// Extract a package whose bytes are already in hand. Refused before
+    /// anything is written: an entry ZIPFoundation would extract as a
+    /// symbolic link (`Entry.type == .symlink`, which is what it consults
+    /// when extracting), an empty or NUL-containing path, an absolute path,
+    /// a path with a `..` component. The policy pre-scan
+    /// and the extraction see the **same immutable bytes**: the bytes are
+    /// scanned as an in-memory archive and then written to a private,
+    /// UUID-named copy inside the fresh temporary directory, which is what
+    /// gets extracted (verify R5: pre-scanning one open of a URL and then
+    /// extracting a second open let a source file swapped in between bring
+    /// the symlink + `..` chain back). Nothing is written before the policy
+    /// scan passes.
+    public static func unzip(data: Data, namespace: String = readerNamespace) throws -> URL {
+        let archive = try Archive(data: data, accessMode: .read)
         for entry in archive {
             if entry.type == .symlink {
                 throw WordError.invalidDocx("the package contains a symbolic-link entry (\(entry.path)); refusing to extract it.")
             }
-            let components = entry.path.split(separator: "/", omittingEmptySubsequences: false)
-            if entry.path.hasPrefix("/") || components.contains("..") {
-                throw WordError.invalidDocx("the package contains an entry whose path leaves its own directory (\(entry.path)); refusing to extract it.")
+            let path = entry.path
+            if path.isEmpty || path.contains("\0") {
+                throw WordError.invalidDocx("the package contains an entry with an empty or NUL-containing path; refusing to extract it.")
+            }
+            let components = path.split(separator: "/", omittingEmptySubsequences: false)
+            if path.hasPrefix("/") || components.contains("..") {
+                throw WordError.invalidDocx("the package contains an entry whose path leaves its own directory (\(path)); refusing to extract it.")
             }
         }
         let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("che-word-mcp")
+            .appendingPathComponent(namespace)
             .appendingPathComponent(UUID().uuidString)
 
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         do {
-            try FileManager.default.unzipItem(at: url, to: tempDir)
+            // A UUID name cannot collide with any entry the archive declares.
+            let privateCopy = tempDir.appendingPathComponent(UUID().uuidString + ".zip")
+            try data.write(to: privateCopy)
+            try FileManager.default.unzipItem(at: privateCopy, to: tempDir)
+            try FileManager.default.removeItem(at: privateCopy)
+            // ZIPFoundation applies the archive's own permission bits — setuid,
+            // setgid, sticky, world-writable included (verify R5). Nothing in a
+            // package needs any of that: owner-only, no special bits.
+            if let walker = FileManager.default.enumerator(at: tempDir, includingPropertiesForKeys: [.isDirectoryKey]) {
+                for case let item as URL in walker {
+                    let isDirectory = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                    try FileManager.default.setAttributes([.posixPermissions: isDirectory ? 0o700 : 0o600], ofItemAtPath: item.path)
+                }
+            }
         } catch {
             try? FileManager.default.removeItem(at: tempDir)   // nothing to keep from a failed extraction
             throw error

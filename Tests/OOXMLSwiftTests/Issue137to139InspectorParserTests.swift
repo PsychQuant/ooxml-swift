@@ -278,10 +278,13 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             document: body(),   // rId4 declared, never referenced → real orphan
             docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
             extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/><"#,
-                    "word/charts/_rels/chart1.xml.rels": rels("")])
+                    // The chart's rels declares something, so the chart IS in the
+                    // scan set (a part whose rels declares nothing is not read at all — R5 L4).
+                    "word/charts/_rels/chart1.xml.rels": rels(#"<Relationship Id="rId2" Type="\#(imageType)" Target="../media/image1.png"/>"#)])
         let report = try PackageInspector.imageConsistencyReport(of: data)
-        XCTAssertEqual(report.orphanImageRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId4")], "the readable part's orphan is still reported")
+        XCTAssertEqual(report.orphanImageRelationshipRefs, [ImageRelationshipRef(part: "word/document.xml", id: "rId4")], "the readable part's orphan is still reported; the unreadable part yields none")
         XCTAssertEqual(report.unparsableParts, ["word/charts/chart1.xml"])
+        XCTAssertEqual(report.declaredImageRelationshipRefs.count, 2, "the unreadable part's declarations stay listed")
         XCTAssertFalse(report.isConsistent)
     }
 
@@ -362,8 +365,10 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // libxml2's SAX path only records the error, so the scanner refuses
         // it itself. The R2 fixture put the bytes AFTER the root element and
         // passed for an unrelated reason ("extra content"); these are inside.
-        // This is the ONE namespace class the inspector re-implements — see
-        // the leniency test below for the eleven it deliberately does not.
+        // Of the reader's twelve namespace classes the inspector refuses two —
+        // this one and a prefix bound to an empty URI (libxml2 reports no
+        // mapping for it) — and deliberately judges none of the other ten; see
+        // the leniency test below.
         let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
         let head = #"<w:document xmlns:w="\#(wNS)" xmlns:a="\#(aNS)" xmlns:r="\#(rNS)"><w:body><w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p>"#
         for (label, document) in [
@@ -555,6 +560,10 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // file system the reader extracts onto; it must not be a mute switch
         // here. (Since R3 the inspector extracts the same way, so this holds
         // by construction — and on a case-sensitive volume both would refuse.)
+        // Not pinned here: that the document dedupe compares file identity
+        // rather than folding the name — on this (case-insensitive) volume the
+        // two are indistinguishable for an ASCII name (verify R5 DA-R5-3); a
+        // case-sensitive volume is the only oracle, see the R6 security prompt.
         let parts: [String: String] = [
             "Word/document.xml": body(),
             "Word/_rels/document.xml.rels": rels(#"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#),
@@ -736,6 +745,10 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
         XCTAssertTrue(message.contains("rId&#211;"), message)
         XCTAssertTrue(message.contains("#142"), message)
+        // verify R5 (codex W-R5-1 / req R5-7 / logic L3): the cause is named as
+        // what it is — the raw spelling that decodes to the parsed id.
+        XCTAssertTrue(message.contains("character reference"), message)
+        XCTAssertFalse(message.contains("does not recognise"), message)
     }
 
     func testDuplicateDeclarationsAreNamedInTheReport() throws {
@@ -857,6 +870,19 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         XCTAssertTrue(report.isConsistent)
     }
 
+    func testAPartWhoseRelsDeclaresNothingIsNotReadEither() throws {
+        // verify R5 logic L4: an EMPTY rels declares nothing to reconcile, so
+        // the part is not read — a rels the reader never reads must not make
+        // a readable package inconsistent through bytes nobody opens.
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        let data = try package(document: body(referencing: "rId4"), docRels: rel,
+                               extra: ["word/junk.xml": "<not xml at all", "word/_rels/junk.xml.rels": rels("")])
+        XCTAssertEqual(try readerImageCount(data), 1, "the reader opens it")
+        let report = try PackageInspector.imageConsistencyReport(of: data)
+        XCTAssertEqual(report.unparsableParts, [])
+        XCTAssertTrue(report.isConsistent)
+    }
+
     func testARelsForAnAbsentPartIsFoundByTheFileSystemsRulesNotOurs() throws {
         // codex R4-B3: the absent-owner rels was still found by a suffix
         // match (`lowercased().hasSuffix(".rels")`), which U+017F defeats
@@ -872,9 +898,10 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             let dir = try ZipHelper.unzip(url); defer { ZipHelper.cleanup(dir) }
             let servedAtFoldedName = FileManager.default.fileExists(atPath: dir.appendingPathComponent("word/charts/_rels/missing.xml.rels").path)
             let report = try PackageInspector.imageConsistencyReport(of: data)
-            // The owner is named as the listing spells it: `word/` + the rels file's stem.
-            let ownerStem = String(relsName.split(separator: "/").last!.dropLast(5))
-            let expected = servedAtFoldedName ? [ImageRelationshipRef(part: "word/charts/" + ownerStem, id: "rId2")] : []
+            // The owner does not exist, so it is named `<stem>.xml` from the rels
+            // file's stem (identity-checked against `<stem>.xml.rels`).
+            let ownerStem = String(relsName.split(separator: "/").last!.dropLast(9))
+            let expected = servedAtFoldedName ? [ImageRelationshipRef(part: "word/charts/" + ownerStem + ".xml", id: "rId2")] : []
             XCTAssertEqual(report.orphanImageRelationshipRefs, expected, "\(relsName): served at the folded name = \(servedAtFoldedName)")
         }
     }
@@ -918,7 +945,11 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         try chain.addEntry(with: "word/a/a/a/../../../../\(canaryName)", type: .file, uncompressedSize: Int64(canary.count), compressionMethod: .deflate) { p, n in canary.subdata(in: Int(p)..<Int(p) + n) }
         let escaping = try XCTUnwrap(chain.data)
         XCTAssertThrowsError(try readerImageCount(escaping), "the reader refuses the chain")
-        XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(of: escaping), "the inspector refuses the chain")
+        XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(of: escaping), "the inspector refuses the chain") {
+            // Ours, not ZIPFoundation's isContained (verify R5 DA-R5-2): the
+            // symlink clause fires first; delete it and the `..` clause must.
+            XCTAssertTrue(String(describing: $0).contains("symbolic-link") || String(describing: $0).contains("leaves its own directory"), "\($0)")
+        }
         let temp = FileManager.default.temporaryDirectory
         for dir in [temp, temp.appendingPathComponent("che-word-mcp"), temp.deletingLastPathComponent()] {
             XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent(canaryName).path), "nothing written at \(dir.path)")
@@ -937,5 +968,82 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
         XCTAssertTrue(message.contains("more than once"), message)
         XCTAssertTrue(message.contains("#140"), message)
+        XCTAssertFalse(message.contains("well-formed"), "a document that carries the id twice is not called well-formed: \(message)")
+    }
+
+    func testAbsoluteNulAndDirectoryTraversalEntriesAreRefusedBeforeAnythingIsWritten() throws {
+        // verify R5 (codex Z-R5-1): the absolute-path branch of the policy had
+        // no test; a `..` directory entry and an empty path are refused too.
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        let base: [(String, String)] = [("word/document.xml", body(referencing: "rId4")), ("word/_rels/document.xml.rels", rels(rel)), ("word/media/image1.png", "png")]
+        for (label, extra) in [("absolute file", ("/tmp/i137-abs-\(UUID().uuidString).xml", "<x/>")), ("absolute directory", ("/tmp/i137-absdir-\(UUID().uuidString)/", "")), ("dot-dot directory", ("word/../i137-dd-\(UUID().uuidString)/", ""))] {
+            let data = try zipEntries(base + [extra])
+            XCTAssertThrowsError(try readerImageCount(data), "\(label): the reader refuses")
+            XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(of: data), "\(label): the inspector refuses") {
+                XCTAssertTrue(String(describing: $0).contains("leaves its own directory"), "\(label): \($0)")
+            }
+            let name = extra.0.trimmingCharacters(in: CharacterSet(charactersIn: "/")).components(separatedBy: "/").last!
+            XCTAssertFalse(FileManager.default.fileExists(atPath: "/tmp/" + name), "\(label): nothing written at /tmp")
+        }
+    }
+
+    func testTheDataAndURLEntryPointsExtractTheSameBytesAndAgree() throws {
+        // verify R5 (codex S-R5-1 / security S-R5-1): the policy pre-scan and the
+        // extraction must see one immutable byte sequence. Both entry points now
+        // go through `ZipHelper.unzip(data:)`; their reports are identical, and
+        // the Data overload writes nothing before the policy scan passes.
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        let data = try package(document: body(), docRels: rel)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i137-\(UUID().uuidString).docx")
+        try data.write(to: url); defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertEqual(try PackageInspector.imageConsistencyReport(of: data), try PackageInspector.imageConsistencyReport(ofPackageAt: url))
+        let cheDir = FileManager.default.temporaryDirectory.appendingPathComponent(ZipHelper.inspectorNamespace)
+        let before = (try? FileManager.default.contentsOfDirectory(atPath: cheDir.path))?.count ?? 0
+        let link = Data("document.xml".utf8)
+        let bad = try Archive(accessMode: .create)
+        try bad.addEntry(with: "word/document.xml", type: .file, uncompressedSize: Int64(data.count), compressionMethod: .deflate) { p, n in data.subdata(in: Int(p)..<Int(p) + n) }
+        try bad.addEntry(with: "word/alias.xml", type: .symlink, uncompressedSize: Int64(link.count)) { p, n in link.subdata(in: Int(p)..<Int(p) + n) }
+        XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(of: try XCTUnwrap(bad.data)))
+        let after = (try? FileManager.default.contentsOfDirectory(atPath: cheDir.path))?.count ?? 0
+        XCTAssertEqual(after, before, "a refused package leaves no extraction directory behind")
+        // verify R5 regression N-R5-1: the inspector must not extract into the
+        // reader's namespace — two existing tests snapshot that directory.
+        let readerDir = FileManager.default.temporaryDirectory.appendingPathComponent(ZipHelper.readerNamespace)
+        let readerBefore = (try? FileManager.default.contentsOfDirectory(atPath: readerDir.path))?.count ?? 0
+        _ = try PackageInspector.imageConsistencyReport(of: data)
+        let readerAfter = (try? FileManager.default.contentsOfDirectory(atPath: readerDir.path))?.count ?? 0
+        XCTAssertEqual(readerAfter, readerBefore, "an inspection never touches the reader's extraction namespace")
+    }
+
+    func testStructureNotesStayBoundedOnManyDistinctPrefixedElements() throws {
+        // verify R5 logic L1: dedup by kind, not by an ever-growing list.
+        let many = (1...20000).map { #"<p:e\#($0) xmlns:p="urn:p"/>"# }.joined()
+        let relsXML = #"<Relationships xmlns="\#(pkgNS)">"# + many + "</Relationships>"
+        let started = Date()
+        let scan = PackageInspector.scanRels(Data(relsXML.utf8), part: "p")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2.0)
+        XCTAssertEqual(scan.structure.count, 1)
+        XCTAssertTrue(scan.structure[0].hasPrefix("a namespace-prefixed <p:e1>"), scan.structure[0])
+    }
+
+    func testAFailedDirectoryListingIsNoVerdictNotAnEmptyPackage() throws {
+        // verify R5 DA-R5-1: codex R4-B5's rule (a listing that fails throws
+        // instead of reading as an empty package) had no test; reverting it
+        // to `try? … ?? []` left the whole suite green. Inject the failure.
+        struct ListingFailed: Error {}
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        let data = try package(document: body(), docRels: rel, extra: ["word/header1.xml": body(), "word/_rels/header1.xml.rels": rels(rel)])
+        for (label, failSubpaths, failMedia) in [("word/ listing", true, false), ("word/media listing", false, true)] {
+            var thrown: Error?
+            XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(
+                extracting: { try ZipHelper.unzip(data: data, namespace: ZipHelper.inspectorNamespace) },
+                listSubpaths: { url in if failSubpaths { throw ListingFailed() }; return try FileManager.default.subpathsOfDirectory(atPath: url.path) },
+                listDirectory: { url in if failMedia { throw ListingFailed() }; return try FileManager.default.contentsOfDirectory(atPath: url.path) }
+            ), label) { thrown = $0 }
+            XCTAssertTrue(String(describing: thrown).contains("no consistency verdict"), "\(label): \(String(describing: thrown))")
+        }
+        // …and with working listings the same package reports its orphans.
+        let report = try PackageInspector.imageConsistencyReport(of: data)
+        XCTAssertEqual(report.orphanImageRelationshipRefs.count, 2)
     }
 }

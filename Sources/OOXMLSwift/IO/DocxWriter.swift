@@ -680,9 +680,40 @@ public struct DocxWriter {
     /// Why the relationship merge's text scan (`RelationshipsOverlay.rawIds`,
     /// #142) did not see a relationship the XML parser did: the one spelling
     /// in the raw rels text that explains it, looked up by the parsed id.
+    /// The raw `Id="…"` spellings in a rels text that the XML parser would
+    /// deliver as `id` (character references resolved, attribute whitespace
+    /// normalized) — i.e. the spellings a text scan cannot recognise.
+    static func rawSpellings(decodingTo id: String, inRaw raw: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: #"\bId="([^"]*)""#) else { return [] }
+        let ns = raw as NSString
+        return regex.matches(in: raw, range: NSRange(location: 0, length: ns.length)).compactMap { m -> String? in
+            let spelling = ns.substring(with: m.range(at: 1))
+            guard spelling != id, decodedAttributeValue(spelling) == id else { return nil }
+            return spelling
+        }
+    }
+
+    /// What an XML parser delivers for the attribute value `raw` (the value
+    /// between the quotes, verbatim) — the same libxml2 the reader uses.
+    static func decodedAttributeValue(_ raw: String) -> String? {
+        final class Grab: NSObject, XMLParserDelegate {
+            var value: String?
+            func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String]) { value = attributes["a"] }
+        }
+        let grab = Grab()
+        let parser = XMLParser(data: Data(("<x a=\"" + raw + "\"/>").utf8))
+        parser.delegate = grab
+        parser.shouldResolveExternalEntities = false
+        return parser.parse() ? grab.value : nil
+    }
+
     static func relsSpellingCause(forParsedId id: String, inRaw raw: String) -> String {
         let escaped = NSRegularExpression.escapedPattern(for: id)
         func has(_ pattern: String) -> Bool { raw.range(of: pattern, options: .regularExpression) != nil }
+        if let spelling = rawSpellings(decodingTo: id, inRaw: raw).first {
+            if spelling.contains("&") { return "written with a character reference (`\(spelling)` in the file)" }
+            return "written with whitespace the parser normalizes (`\(spelling.replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\t", with: "\\t").replacingOccurrences(of: "\r", with: "\\r"))` in the file)"
+        }
         if has(#"\bId\s*=\s*'"# + escaped + "'") { return "single-quoted attribute values" }
         if has(#"\bId(\s+=|=\s+)\s*""# + escaped + "\"") { return "whitespace around `=`" }
         if let idRange = raw.range(of: #"\bId=""# + escaped + "\"", options: .regularExpression) {
@@ -693,7 +724,6 @@ public struct DocxWriter {
                 if !tag.hasSuffix("/>") { return "the <Relationship> element is not self-closing (`…></Relationship>`)" }
             }
         }
-        if id.contains("&") || id.rangeOfCharacter(from: .whitespacesAndNewlines) != nil { return "an id containing a character reference or whitespace" }
         return "a spelling the text scan does not recognise"
     }
 
@@ -796,11 +826,12 @@ public struct DocxWriter {
             if rawOriginalIds != originalScan.allIds {
                 func counts(_ ids: [String]) -> [String: Int] { ids.reduce(into: [:]) { $0[$1, default: 0] += 1 } }
                 let rawCounts = counts(rawOriginalIds), parsedCounts = counts(originalScan.allIds)
-                var causes: [String] = []
-                for id in originalScan.allIds where (rawCounts[id] ?? 0) < (parsedCounts[id] ?? 0) && !causes.contains(where: { $0.hasPrefix("\(id): ") }) {
+                var causes: [String] = [], explained = Set<String>(), explainedRawSpellings = Set<String>()
+                for id in originalScan.allIds where (rawCounts[id] ?? 0) < (parsedCounts[id] ?? 0) && explained.insert(id).inserted {
                     causes.append("\(id): \(Self.relsSpellingCause(forParsedId: id, inRaw: raw))")
+                    explainedRawSpellings.formUnion(Self.rawSpellings(decodingTo: id, inRaw: raw))
                 }
-                for id in rawOriginalIds where (parsedCounts[id] ?? 0) < (rawCounts[id] ?? 0) && !causes.contains(where: { $0.hasPrefix("\(id): ") }) {
+                for id in rawOriginalIds where (parsedCounts[id] ?? 0) < (rawCounts[id] ?? 0) && !explainedRawSpellings.contains(id) && explained.insert(id).inserted {
                     causes.append("\(id): seen by the text scan but not by the XML parser")
                 }
                 let detail: String
@@ -824,11 +855,16 @@ public struct DocxWriter {
             }
             if !fromSlots.isEmpty {
                 let plural = fromSlots.count > 1
-                causes.append("\(fromSlots.joined(separator: ", ")) \(plural ? "are" : "is") used by the document and \(plural ? "are also the ids" : "is also the id") this writer assigns to its fixed parts (rId1 styles / rId2 settings / rId3 fontTable / rId4 numbering when present). The document is well-formed; it is the writer that cannot yet renumber its fixed parts (PsychQuant/ooxml-swift#140)")
+                let alsoModelDuplicate = fromSlots.contains { modelDuplicateIds.contains($0) }
+                causes.append("\(fromSlots.joined(separator: ", ")) \(plural ? "are" : "is") used by the document and \(plural ? "are also the ids" : "is also the id") this writer assigns to its fixed parts (rId1 styles / rId2 settings / rId3 fontTable / rId4 numbering when present). "
+                    + (alsoModelDuplicate ? "That collision on its own is the writer's limitation — it cannot yet renumber its fixed parts (PsychQuant/ooxml-swift#140)"
+                                          : "The document is well-formed; it is the writer that cannot yet renumber its fixed parts (PsychQuant/ooxml-swift#140)"))
             }
+            let count = duplicateRelIds.count
             throw WordError.invalidDocx(
-                "word/_rels/document.xml.rels would declare \(duplicateRelIds.count) relationship id(s) twice: "
-                + duplicateRelIds.joined(separator: ", ") + ". " + causes.joined(separator: " And: ") + ".")
+                "word/_rels/document.xml.rels would declare \(count) relationship \(count == 1 ? "id" : "ids") twice: "
+                + duplicateRelIds.joined(separator: ", ") + ". "
+                + causes.map { $0.prefix(1).uppercased() + $0.dropFirst() + "." }.joined(separator: " "))
         }
 
         let xml: String
