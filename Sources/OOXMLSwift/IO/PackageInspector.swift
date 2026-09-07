@@ -307,7 +307,7 @@ public enum PackageInspector {
             do { return try fm.attributesOfItem(atPath: url.path) }
             catch let error as NSError where error.domain == NSCocoaErrorDomain && (error.code == NSFileReadNoSuchFileError || error.code == NSFileNoSuchFileError) { return nil }
             catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT) { return nil }
-            catch { throw WordError.invalidDocx("could not read file attributes under the extracted package (\(error.localizedDescription)); no consistency verdict.") }
+            catch { throw WordError.invalidDocx("could not read file attributes under the extracted package (\(ZipHelper.describeWithoutPaths(error))); no consistency verdict.") }
         }
         func identity(_ fileURL: URL, ofType type: FileAttributeType = .typeRegular) throws -> FileIdentity? {
             guard let attrs = try attributes(fileURL), (attrs[.type] as? FileAttributeType) == type else { return nil }
@@ -321,7 +321,8 @@ public enum PackageInspector {
         func fileData(_ part: String) throws -> Data? {
             let fileURL = tempDir.appendingPathComponent(part)
             guard try identity(fileURL) != nil else { return nil }
-            return try Data(contentsOf: fileURL)
+            do { return try Data(contentsOf: fileURL) }
+            catch { throw WordError.invalidDocx("could not read a part of the extracted package (\(ZipHelper.describeWithoutPaths(error))); no consistency verdict.") }
         }
         /// Whether the file system serves `listed` under the name `<stem><suffix>`
         /// in the same directory — i.e. whether its name "ends with" `suffix`
@@ -386,7 +387,7 @@ public enum PackageInspector {
         let wordDir = tempDir.appendingPathComponent("word")
         let listed: [String]
         do { listed = try listSubpaths(wordDir).sorted() }
-        catch { throw WordError.invalidDocx("could not list the package's word/ directory after extraction (\(error.localizedDescription)); no consistency verdict.") }
+        catch { throw WordError.invalidDocx("could not list the package's word/ directory after extraction (\(ZipHelper.describeWithoutPaths(error))); no consistency verdict.") }
 
         // Pass 1 — XML parts whose rels declares at least one relationship:
         // take the declarations, then scan the part for references. A part
@@ -401,7 +402,10 @@ public enum PackageInspector {
             guard let own = try identity(fileURL), own != documentIdentity, try stem(of: fileURL, ifSuffixed: ".xml") != nil else { continue }
             let part = "word/" + sub
             guard let declaredCount = try declare(part: part), declaredCount > 0 else { continue }
-            let content = scanPart(try Data(contentsOf: fileURL), part: part)
+            let partBytes: Data
+            do { partBytes = try Data(contentsOf: fileURL) }
+            catch { throw WordError.invalidDocx("could not read a part of the extracted package (\(ZipHelper.describeWithoutPaths(error))); no consistency verdict.") }   // the raw NSError carries the temporary path in userInfo (verify R10 DA N-DA10-6)
+            let content = scanPart(partBytes, part: part)
             if !content.parsed { unparsable.insert(part); unparsableContentParts.insert(part) }
             referencedByPart[part] = content.referenced
         }
@@ -438,7 +442,7 @@ public enum PackageInspector {
         if fm.fileExists(atPath: mediaDir.path, isDirectory: &mediaIsDirectory), mediaIsDirectory.boolValue {
             let names: [String]
             do { names = try listDirectory(mediaDir) }
-            catch { throw WordError.invalidDocx("could not list the package's word/media directory after extraction (\(error.localizedDescription)); no consistency verdict.") }
+            catch { throw WordError.invalidDocx("could not list the package's word/media directory after extraction (\(ZipHelper.describeWithoutPaths(error))); no consistency verdict.") }
             for name in names where try identity(mediaDir.appendingPathComponent(name)) != nil { media += 1 }
         }
 

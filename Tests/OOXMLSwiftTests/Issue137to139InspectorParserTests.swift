@@ -1506,6 +1506,33 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         XCTAssertLessThanOrEqual(ZipHelper.displayName(String(repeating: "\u{01}", count: 9000)).count, 481)
     }
 
+    func testDisplayNameEscapesByUnicodePropertyNotByAHandWrittenList() {
+        // verify R10 requirements N-R10-2 / security N-S10-3: the R9 hand-written
+        // list missed U+00AD, U+061C, U+180E, U+FFF9 …; the criterion is now a
+        // Unicode property (Cc / Cf / Zl / Zp / Default_Ignorable_Code_Point).
+        for scalar in ["\u{00AD}", "\u{061C}", "\u{180E}", "\u{FFF9}", "\u{2060}", "\u{3164}", "\u{FE0F}", "\u{E0001}", "\u{2028}", "\u{200B}", "\u{202E}", "\u{FEFF}"] {
+            let shown = ZipHelper.displayName("a\(scalar)b")
+            XCTAssertFalse(shown.contains(scalar), "escaped: \(shown)")
+            XCTAssertTrue(shown.hasPrefix("a\\u{") && shown.hasSuffix("}b"), shown)
+        }
+        XCTAssertEqual(ZipHelper.displayName("標楷體 😀 café rId9"), "標楷體 😀 café rId9", "visible text passes through untouched")
+    }
+
+    func testAnUnreadableSiblingAttributeNameIsShownAsCappedText() throws {
+        // verify R10 security N-S10-1 (logic NEW-L10-3, requirements N-R10-1): the
+        // sibling attribute name was the last attacker-controlled string in a rels
+        // message that bypassed displaySpelling — a 9000-character name reached
+        // the message 1:1. The long single-quoted attribute comes before the
+        // single-quoted `Type`, so it is the first unreadable sibling named.
+        let base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+        let longName = String(repeating: "a", count: 9000)
+        let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId9\" \(longName)='v' Type='\(base)' Target=\"x\" TargetMode=\"External\"/></Relationships>"
+        let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
+        XCTAssertTrue(message.contains("attribute is single-quoted or spaced"), message.prefix(400).description)
+        XCTAssertTrue(message.contains("…(8880 more characters)"), message.suffix(300).description)
+        XCTAssertLessThan(message.count, 1200, "the sibling name is capped: \(message.count) characters")
+    }
+
     func testADecodedIdCannotInjectALineIntoTheMessage() throws {
         // verify R9 security N-S9-1: the parser decodes `&#10;` inside an Id to a
         // real newline; the message shows ids as escaped text.
@@ -1523,5 +1550,119 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: raw), [:], "the only real Id is spelled plainly")
         let raw2 = #"<Relationship r:Id="rId9" Id="rId&#57;" Type="t" Target="a"/>"#
         XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: raw2), ["rId9": ["rId&#57;"]])
+    }
+
+    // MARK: - verify R10 Devil's Advocate: four mutation probes stayed green (N-DA10-2..5) + N-DA10-1
+
+    func testADecoyElementNamedLikeRelationshipCannotSupplyTheCause() throws {
+        // N-DA10-4 (mutation M5): with `\b` as the tag boundary, a `<Relationship-2 …/>`
+        // decoy placed BEFORE the real tag became an occurrence — the cause named its
+        // `-2` "attribute" and a spelling that is not in any real tag was reported.
+        let raw = #"<Relationships xmlns="urn:p"><Relationship-2 Id="rId&#57;" Type="t" Target="a"/><Relationship Id = "rId9" Type="t" Target="b"/></Relationships>"#
+        let occurrences = DocxWriter.relationshipIdOccurrences(inRaw: raw)
+        XCTAssertEqual(occurrences["rId9"]?.count, 1, "\(occurrences)")
+        XCTAssertEqual(occurrences["rId9"]?.first?.whitespaceAroundEquals, true)
+        XCTAssertNil(occurrences["rId9"]?.first?.unreadableSiblingAttribute, "the decoy's `-2` is not a sibling of the real tag")
+        XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: raw), [:], "no spelling that only a decoy carries")
+        XCTAssertEqual(DocxWriter.relsSpellingCause(forParsedId: "rId9", occurrences: occurrences), "whitespace around `=`")
+    }
+
+    func testTheDecodeBudgetBoundsHowManyReferenceSpellingsAreDecoded() {
+        // N-DA10-5 (mutation M6): 4000 distinct reference spellings — only `decodeBudget`
+        // of them are handed to the parser; the rest are skipped, not decoded later.
+        var raw = #"<Relationships xmlns="urn:p">"#
+        for i in 0..<4000 { raw += "<Relationship Id=\"rId&#49;\(i)\" Type=\"t\" Target=\"a\"/>" }
+        raw += "</Relationships>"
+        let occurrences = DocxWriter.relationshipIdOccurrences(inRaw: raw)
+        XCTAssertEqual(occurrences.count, DocxWriter.decodeBudget, "decoded exactly `decodeBudget` spellings, not \(occurrences.count)")
+        XCTAssertLessThan(occurrences.count, 4000)
+    }
+
+    func testThePrivateCopyIsOwnerOnlyForAsLongAsItExists() throws {
+        // N-DA10-2 (mutation M2): the copy is created by openat(O_CREAT|O_EXCL|O_NOFOLLOW, 0o600);
+        // a `createFile(attributes: nil)` copy is 0644 for its whole lifetime. The copy lives
+        // for the length of the extraction, so a poller sees it: every sample must be 0600.
+        let ns = "i137-copy-\(UUID().uuidString)"
+        let nsDir = FileManager.default.temporaryDirectory.appendingPathComponent(ns)
+        defer { try? FileManager.default.removeItem(at: nsDir) }
+        let data = try zipEntries([("word/document.xml", body()), ("word/media/blob.bin", String(repeating: "0123456789abcdef", count: 3_000_000))])   // 48 MB to extract
+        final class Samples { var modes: [mode_t] = []; let lock = NSLock() }
+        let samples = Samples()
+        let poller = Thread {
+            while !Thread.current.isCancelled {
+                for uuid in (try? FileManager.default.contentsOfDirectory(atPath: nsDir.path)) ?? [] {
+                    let dir = nsDir.appendingPathComponent(uuid)
+                    for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".zip") {
+                        var st = stat()
+                        if lstat(dir.appendingPathComponent(name).path, &st) == 0 { samples.lock.lock(); samples.modes.append(st.st_mode & 0o777); samples.lock.unlock() }
+                    }
+                }
+                usleep(50)
+            }
+        }
+        poller.start()
+        let out = try ZipHelper.unzip(data: data, namespace: ns)
+        poller.cancel()
+        ZipHelper.cleanup(out)
+        samples.lock.lock(); let modes = samples.modes; samples.lock.unlock()
+        XCTAssertFalse(modes.isEmpty, "the poller observed the private copy at least once")
+        XCTAssertEqual(Set(modes), [0o600], "every sample of the private copy's mode is 0600: \(Set(modes).map { String($0, radix: 8) })")
+    }
+
+    func testTheExtractionWalkNeverFollowsALinkSwappedInDuringTheWalk() throws {
+        // N-DA10-3 (mutation M4): `chmod` follows a link swapped in between the walk's
+        // lstat and its mode change; fchmodat(AT_SYMLINK_NOFOLLOW) never does. Only a
+        // same-uid race can plant that link — this test IS that race, repeated: a
+        // swapper replaces extracted files with links to a file outside the tree while
+        // the walk runs. On the real code the outside file's mode cannot change.
+        let tmp = FileManager.default.temporaryDirectory
+        let outside = tmp.appendingPathComponent("i137-outside-\(UUID().uuidString).txt")
+        try Data("o".utf8).write(to: outside); defer { try? FileManager.default.removeItem(at: outside) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: outside.path)   // 0640: a followed chmod to 0600 or 0700 is visible
+        let ns = "i137-walk-\(UUID().uuidString)"
+        let nsDir = tmp.appendingPathComponent(ns)
+        defer { try? FileManager.default.removeItem(at: nsDir) }
+        var entries = [("word/document.xml", body())]
+        for i in 0..<300 { entries.append(("word/d/f\(i).txt", "x")) }
+        let data = try zipEntries(entries)
+        // The swapper starts only once the LAST entry exists, and never touches
+        // the last hundred: ZIPFoundation applies each entry's archive mode with
+        // a following `setAttributes` right after writing it, so a link swapped
+        // in DURING extraction is followed by ZIPFoundation, not by the walk —
+        // a same-uid race the library documents as outside its model. The race
+        // this test runs is confined to the walk that follows extraction.
+        let swapper = Thread {
+            while !Thread.current.isCancelled {
+                for uuid in (try? FileManager.default.contentsOfDirectory(atPath: nsDir.path)) ?? [] {
+                    let dir = nsDir.appendingPathComponent(uuid)
+                    guard FileManager.default.fileExists(atPath: dir.appendingPathComponent("word/d/f299.txt").path) else { continue }
+                    for i in 0..<200 {
+                        let p = dir.appendingPathComponent("word/d/f\(i).txt").path
+                        unlink(p); symlink(outside.path, p)
+                    }
+                }
+            }
+        }
+        swapper.start()
+        for _ in 0..<25 {
+            if let out = try? ZipHelper.unzip(data: data, namespace: ns) { ZipHelper.cleanup(out) }   // refusing (a link seen by lstat) is fine
+            var st = stat(); XCTAssertEqual(stat(outside.path, &st), 0)
+            XCTAssertEqual(st.st_mode & 0o777, 0o640, "the file behind a swapped-in link keeps its mode")
+        }
+        swapper.cancel()
+    }
+
+    func testAnUnreadableTargetModeIsRefusedNotReadAsAbsent() throws {
+        // N-DA10-1: `TargetMode` is optional, so an unreadable one used to be read as
+        // ABSENT — a legal edit silently turned an external link into an internal part
+        // path. It now refuses by name, exactly like Id / Type / Target.
+        let base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate"
+        for spelling in ["TargetMode='External'", "TargetMode = \"External\""] {
+            let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId9\" Type=\"\(base)\" Target=\"https://example.com/t.dotx\" \(spelling)/></Relationships>"
+            let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
+            XCTAssertTrue(message.contains("`TargetMode` attribute is single-quoted or spaced"), "\(spelling): \(message.prefix(400))")
+        }
+        XCTAssertFalse(RelationshipsOverlay.isPresentButUnreadable(#" Id="rId9" Type="t" Target="a""#, name: "TargetMode"), "absent is not unreadable")
+        XCTAssertTrue(RelationshipsOverlay.isPresentButUnreadable(#" Id="rId9" TargetMode='External'"#, name: "TargetMode"))
     }
 }

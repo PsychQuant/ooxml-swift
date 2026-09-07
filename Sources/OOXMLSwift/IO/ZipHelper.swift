@@ -140,8 +140,9 @@ public struct ZipHelper {
         guard let walker = fm.enumerator(at: tempDir, includingPropertiesForKeys: [.isDirectoryKey], options: [], errorHandler: { _, error in walkError = error; return false }) else {
             throw WordError.invalidDocx("could not enumerate the extracted package")
         }
+        let rootPrefixes = rootPrefixes(of: tempDir)                                // resolved once, not per item (verify R10 security N-S10-4)
         for case let item as URL in walker {
-            let relative = displayName(relativeName(of: item, under: tempDir))   // an entry name is attacker-controlled text
+            let relative = displayName(relativeName(of: item, rootPrefixes: rootPrefixes))   // an entry name is attacker-controlled text
             // `lstat` + `fchmodat(AT_SYMLINK_NOFOLLOW)`: nothing here follows a
             // link (verify R8: `chmod` through a link reached outside the tree).
             // The archive cannot contain a link entry (refused before anything
@@ -204,6 +205,21 @@ public struct ZipHelper {
     /// (Verify R8 security N-S8-1: a newline in an entry name forged a second
     /// line of output; ANSI sequences and 9 000-character names went straight
     /// into the message the consumer renders.)
+    /// Whether `scalar` is shown as `\u{…}` instead of itself: a Unicode
+    /// property, not a hand-written list — general category Cc (control), Cf
+    /// (format), Zl / Zp (line / paragraph separator), or any
+    /// Default_Ignorable_Code_Point. The R9 list (U+2028/2029, U+200B–200F,
+    /// U+202A–202E, U+2066–2069, U+FEFF) missed U+00AD, U+061C, U+180E, U+FFF9,
+    /// U+2060, U+3164, U+FE0F, U+E0001 … (verify R10 requirements N-R10-2,
+    /// security N-S10-3): a criterion the reader can check against the UCD
+    /// cannot drift from the list in someone's head.
+    static func isEscapedInDisplay(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .control, .format, .lineSeparator, .paragraphSeparator: return true
+        default: return scalar.properties.isDefaultIgnorableCodePoint
+        }
+    }
+
     static func displayName(_ raw: String) -> String {
         var out = ""
         for scalar in raw.unicodeScalars.prefix(120) {
@@ -211,11 +227,7 @@ public struct ZipHelper {
             case "\n": out += "\\n"
             case "\t": out += "\\t"
             case "\r": out += "\\r"
-            case _ where scalar.value < 0x20 || scalar.value == 0x7F || (0x80...0x9F).contains(scalar.value)
-                || scalar.value == 0x2028 || scalar.value == 0x2029                       // line / paragraph separator: a second line to a renderer (verify R9 security)
-                || (0x200B...0x200F).contains(scalar.value) || (0x202A...0x202E).contains(scalar.value)
-                || (0x2066...0x2069).contains(scalar.value) || scalar.value == 0xFEFF:     // zero-width, bidi overrides / isolates, BOM
-                out += String(format: "\\u{%02X}", scalar.value)
+            case _ where isEscapedInDisplay(scalar): out += String(format: "\\u{%02X}", scalar.value)
             default: out.unicodeScalars.append(scalar)
             }
         }
@@ -229,10 +241,21 @@ public struct ZipHelper {
     /// (verify R8 logic NEW-L1 named a non-existent item; R9 NEW-R9-2 found the
     /// fix comparing an unresolved item against resolved roots, never matching).
     static func relativeName(of item: URL, under root: URL) -> String {
-        let resolvedItem = item.resolvingSymlinksInPath().path
-        for prefix in [root.resolvingSymlinksInPath().path + "/", root.path + "/"] where resolvedItem.hasPrefix(prefix) {
-            return String(resolvedItem.dropFirst(prefix.count))
-        }
+        relativeName(of: item, rootPrefixes: rootPrefixes(of: root))
+    }
+
+    /// The two spellings of `root` an enumerated item can start with. Computed
+    /// once per walk: resolving the root for every item made a 32 000-entry
+    /// walk ~1.6× slower (verify R10 security N-S10-4).
+    static func rootPrefixes(of root: URL) -> [String] {
+        [root.resolvingSymlinksInPath().path + "/", root.path + "/"]
+    }
+
+    static func relativeName(of item: URL, rootPrefixes: [String]) -> String {
+        let unresolved = item.path                                  // the cheap comparison first; resolve the item only when it fails
+        for prefix in rootPrefixes where unresolved.hasPrefix(prefix) { return String(unresolved.dropFirst(prefix.count)) }
+        let resolved = item.resolvingSymlinksInPath().path
+        for prefix in rootPrefixes where resolved.hasPrefix(prefix) { return String(resolved.dropFirst(prefix.count)) }
         return item.lastPathComponent
     }
 

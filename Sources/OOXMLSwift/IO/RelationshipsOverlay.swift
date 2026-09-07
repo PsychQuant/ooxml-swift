@@ -115,7 +115,8 @@ internal struct RelationshipsOverlay {
             let attrs = nsString.substring(with: match.range(at: 1))
             guard let id = attribute(attrs, name: "Id"),
                   let type = attribute(attrs, name: "Type"),
-                  let target = attribute(attrs, name: "Target")
+                  let target = attribute(attrs, name: "Target"),
+                  !isPresentButUnreadable(attrs, name: "TargetMode")     // optional, so the id gate cannot see it (verify R10 DA N-DA10-1)
             else { continue }
             let targetMode = attribute(attrs, name: "TargetMode")
             result.append(RelationshipDescriptor(
@@ -132,14 +133,29 @@ internal struct RelationshipsOverlay {
     /// it contains — `Target='x Id="HIJACK"'` is a Target, not an Id (verify R8
     /// requirements N-R8-2; the diagnosis in `DocxWriter` skips values the
     /// same way, so the two scans define "the Id" identically). A `Name='v'`
-    /// or `Name = "v"` occurrence is present but unreadable: nil, and the
-    /// merge refuses the package instead of reading a neighbour (#142).
+    /// or `Name = "v"` occurrence is present but unreadable: nil. For `Id` /
+    /// `Type` / `Target` the tag is then skipped and the merge refuses the
+    /// package instead of reading a neighbour (#142); the optional
+    /// `TargetMode` is checked with `isPresentButUnreadable` so an unreadable
+    /// one is refused too, not read as absent (verify R10 DA N-DA10-1).
     /// `xmlns:Id` / `data-Id` are other names and never match.
     static func attribute(_ attrs: String, name: String) -> String? {
         guard let tokens = tokenize(attrs) else { return nil }              // an unterminated value: the tag text is cut, nothing in it is trusted
         guard let token = tokens.first(where: { $0.name == name }) else { return nil }
         return token.readable ? token.value : nil
     }
+
+    /// Whether `name` occurs in the tag text in a form the text scan cannot
+    /// read. `attribute(_:name:)` answers nil for both "absent" and
+    /// "unreadable"; for an optional attribute the difference is the whole
+    /// point — an unreadable `TargetMode` was read as absent, and one legal
+    /// edit silently turned an external link into an internal part path
+    /// (verify R10 DA N-DA10-1). A cut tag counts as unreadable.
+    static func isPresentButUnreadable(_ attrs: String, name: String) -> Bool {
+        guard let tokens = tokenize(attrs) else { return true }
+        return tokens.contains { $0.name == name && !$0.readable }
+    }
+
 
     /// One attribute of a start tag as the text scan sees it: `readable` only
     /// for the exact `Name="value"` form. Returns nil when a value has no
