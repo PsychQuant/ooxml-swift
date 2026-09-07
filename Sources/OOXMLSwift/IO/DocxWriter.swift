@@ -686,6 +686,16 @@ public struct DocxWriter {
         var whitespaceAroundEquals: Bool
         var selfClosing: Bool
         var greaterThanInsideAValue: Bool   // a `>` inside an attribute value ends the text scan's tag early
+        var unreadableSiblingAttribute: String?   // another attribute of the tag spelled in a form the text scan cannot read (single-quoted / spaced)
+    }
+
+    /// The first attribute in `tagText` whose spelling the text scan cannot
+    /// read (`Name='v'`, `Name = "v"`), or nil.
+    static func firstUnreadableAttribute(in tagText: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: #"(?<![\w:.\-])([A-Za-z_][\w:.\-]*)(?:\s*=\s*'|\s+=\s*"|=\s+")"#) else { return nil }
+        let ns = tagText as NSString
+        guard let m = regex.firstMatch(in: tagText, range: NSRange(location: 0, length: ns.length)) else { return nil }
+        return ns.substring(with: m.range(at: 1))
     }
 
     /// Why the relationship merge's text scan (`RelationshipsOverlay.rawIds`,
@@ -736,7 +746,8 @@ public struct DocxWriter {
                 spelling: spelling, quote: quote, decoded: decoded,
                 whitespaceAroundEquals: m.range(at: 2).length > 0 || m.range(at: 3).length > 0,
                 selfClosing: m.range(at: 7).length > 0,
-                greaterThanInsideAValue: before.contains(">") || after.contains(">"))
+                greaterThanInsideAValue: before.contains(">") || after.contains(">"),
+                unreadableSiblingAttribute: firstUnreadableAttribute(in: before) ?? firstUnreadableAttribute(in: after))
             if seen[decoded, default: []].insert(key).inserted { result[decoded, default: []].append(occurrence) }
             remaining?.remove(decoded)
         }
@@ -804,6 +815,7 @@ public struct DocxWriter {
         if occurrence.whitespaceAroundEquals { return "whitespace around `=`" }
         if !occurrence.selfClosing { return "the <Relationship> element is not self-closing (`…></Relationship>`)" }
         if occurrence.greaterThanInsideAValue { return "an attribute value containing `>`, which ends the text scan's tag early" }
+        if let sibling = occurrence.unreadableSiblingAttribute { return "the tag's `\(sibling)` attribute is single-quoted or spaced, which the text scan cannot read, so it skips the whole tag" }
         return "a spelling the text scan does not recognise"
     }
 
@@ -924,7 +936,10 @@ public struct DocxWriter {
                     explainedRawSpellings.formUnion((occurrences[id] ?? []).map(\.spelling))
                 }
                 for id in rawOriginalIds where (parsedCounts[id] ?? 0) < (rawCounts[id] ?? 0) && !explainedRawSpellings.contains(id) && explained.insert(id).inserted {
-                    addCause("\(Self.displaySpelling(id)): seen by the text scan but not by the XML parser")   // a raw "id" may be a 100 KB reference (codex R7-3)
+                    let seenByParser = parsedCounts[id] ?? 0
+                    addCause(seenByParser == 0
+                        ? "\(Self.displaySpelling(id)): seen by the text scan but not by the XML parser"          // a raw "id" may be a 100 KB reference (codex R7-3)
+                        : "\(Self.displaySpelling(id)): seen \(rawCounts[id] ?? 0) times by the text scan, \(seenByParser) by the XML parser")
                 }
                 if omitted > 0 { causes.append("…and \(omitted) more") }
                 let detail: String

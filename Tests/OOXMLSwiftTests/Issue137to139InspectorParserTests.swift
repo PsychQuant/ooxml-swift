@@ -1176,7 +1176,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             XCTAssertTrue(message.contains("does not match"), "\(label): \(message.prefix(200))")
                 XCTAssertTrue(message.range(of: #"…and [0-9]+ more"#, options: .regularExpression) != nil, "\(label): capped at 20 causes: \(message.suffix(160))")
                 XCTAssertLessThan(message.count, 6000, "\(label): capped message, got \(message.count) characters")
-            XCTAssertLessThan(elapsed, 2, "\(label): 3200 mismatched ids must be refused in linear time (took \(elapsed) s)")
+            XCTAssertLessThan(elapsed, 10, "\(label): 3200 mismatched ids must be refused in linear time (took \(elapsed) s; the bound is load-insensitive — the R6 snapshot took 60+ s here; linearity itself is the release probe in the CHANGELOG)")
         }
     }
 
@@ -1229,7 +1229,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(start)
         XCTAssertTrue(message.contains("rId9: single-quoted attribute values"), message.suffix(300).description)
         XCTAssertFalse(message.contains("reference"), "the data-Id spellings are not causes: \(message.suffix(300))")
-        XCTAssertLessThan(elapsed, 2, "took \(elapsed) s")
+        XCTAssertLessThan(elapsed, 10, "took \(elapsed) s (load-insensitive bound; quadratic would be minutes)")
         XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: #"<x foo.Id="rId&#57;" data-Id="rId&#57;"/><Relationship r:Id="rId&#57;" Id="rId&#57;"/>"#), ["rId9": ["rId&#57;"]])
     }
 
@@ -1410,6 +1410,50 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let wrapped = NSError(domain: NSCocoaErrorDomain, code: 4, userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: 2, userInfo: nil), NSFilePathErrorKey: "/var/x"])
         XCTAssertEqual(ZipHelper.describeWithoutPaths(wrapped), "No such file or directory")
         XCTAssertFalse(ZipHelper.describeWithoutPaths(NSError(domain: "Other", code: 7, userInfo: [NSLocalizedDescriptionKey: "at /tmp/z"])).contains("/"))
+    }
+
+    func testAnEntryNameCannotForgeOrFloodTheRefusalMessage() throws {
+        // verify R8 security N-S8-1: an entry name is attacker-controlled text.
+        let esc = "\u{1B}"
+        let names = ["word/../\nooxml-swift: everything is fine, extraction succeeded\n../x.xml",
+                     "word/../" + esc + "[31mred" + esc + "[0m\r../y.xml",
+                     "word/../" + String(repeating: "a", count: 9000) + "/z.xml"]
+        for name in names {
+            let data = try zipEntries([("word/document.xml", body()), (name, "<x/>")])
+            XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ZipHelper.inspectorNamespace)) { error in
+                let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                XCTAssertFalse(message.contains("\n") || message.contains("\r") || message.contains(esc), "escaped: \(message.prefix(200))")
+                XCTAssertLessThan(message.count, 400, "truncated: \(message.count) characters")
+                XCTAssertTrue(message.contains("leaves its own directory"), message.prefix(200).description)
+            }
+        }
+    }
+
+    func testTheTextScanNeverReadsInsideAnotherAttributesValue() throws {
+        // verify R8 requirements N-R8-2: `Target='x Id="HIJACK"' Id="rId4"` — the
+        // text scan used to read HIJACK; now it walks attribute by attribute and
+        // reads rId4, so both scans agree and the package saves.
+        let base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+        XCTAssertEqual(RelationshipsOverlay.attribute(#"Target='x Id="HIJACK"' Id="rId4" Type="t""#, name: "Id"), "rId4")
+        XCTAssertNil(RelationshipsOverlay.attribute(#"Id='rId4' Type="t""#, name: "Id"), "single-quoted: present but unreadable")
+        XCTAssertNil(RelationshipsOverlay.attribute(#"Id = "rId4" Type="t""#, name: "Id"), "spaced: present but unreadable")
+        XCTAssertNil(RelationshipsOverlay.attribute(#"xmlns:Id="urn:x" data-Id="d" Type="t""#, name: "Id"), "prefixed names are other attributes")
+        XCTAssertEqual(RelationshipsOverlay.attribute(#"Type="t" Target="a>b" Id="rId4""#, name: "Target"), "a>b")
+        // verify R8 logic NEW-L3: `<Relationship-2>` is another element to both scans.
+        XCTAssertEqual(RelationshipsOverlay.rawIds(inRelsXML: #"<Relationships><Relationship-2 Id="rIdH" Type="t" Target="x"/><Relationship Id="rId4" Type="t" Target="y"/></Relationships>"#), ["rId4"])
+        let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Target='media/image1.png?q= Id=\"HIJACK\"' Id=\"rId4\" Type=\"\(base)\"/></Relationships>"
+        let data = try package(document: body(referencing: "rId4"), docRels: relsXML)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i137-hijack-\(UUID().uuidString).docx")
+        try data.write(to: url); defer { try? FileManager.default.removeItem(at: url) }
+        var read = try DocxReader.read(from: url); defer { read.close() }
+        // The reader keeps the single-quoted Target, and the text scan refuses
+        // the tag as unreadable — the Id agrees, the Target does not: refused
+        // with a cause that names the sibling attribute, never HIJACK.
+        XCTAssertThrowsError(try DocxWriter.writeData(read)) { error in
+            let message = String(describing: error)
+            XCTAssertFalse(message.contains("HIJACK"), message.suffix(300).description)
+            XCTAssertTrue(message.contains("`Target` attribute is single-quoted"), message.suffix(300).description)
+        }
     }
 
     func testAPrefixedIdAttributeIsNotTheRelationshipId() throws {

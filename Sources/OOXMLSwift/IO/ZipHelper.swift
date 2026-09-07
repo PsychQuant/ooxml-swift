@@ -53,7 +53,7 @@ public struct ZipHelper {
         let archive = try Archive(data: data, accessMode: .read)
         for entry in archive {
             if entry.type == .symlink {
-                throw WordError.invalidDocx("the package contains a symbolic-link entry (\(entry.path)); refusing to extract it.")
+                throw WordError.invalidDocx("the package contains a symbolic-link entry (\(displayName(entry.path))); refusing to extract it.")
             }
             let path = entry.path
             if path.isEmpty || path.contains("\0") {
@@ -61,16 +61,18 @@ public struct ZipHelper {
             }
             let components = path.split(separator: "/", omittingEmptySubsequences: false)
             if path.hasPrefix("/") || components.contains("..") {
-                throw WordError.invalidDocx("the package contains an entry whose path leaves its own directory (\(path)); refusing to extract it.")
+                throw WordError.invalidDocx("the package contains an entry whose path leaves its own directory (\(displayName(path))); refusing to extract it.")
             }
         }
         let fm = FileManager.default
         // Threat model (verify R8 security, measured): the descriptor checks
         // below defeat anything planted at the namespace name before or while
-        // we create it, and anything a DIFFERENT user could do in a shared
-        // temporary directory (it cannot rename or replace our 0700 directory
-        // under a sticky or 0700 parent). They do not defeat a process running
-        // as the SAME user: extraction and every later read are path-based
+        // we create it, and anything a DIFFERENT non-root user could do —
+        // PROVIDED the parent temporary directory is per-user 0700 (macOS's
+        // `NSTemporaryDirectory()`, which ignores `TMPDIR` — measured) or
+        // sticky: such a user cannot rename or replace our 0700 directory
+        // there. Root is outside every model here. They do not defeat a
+        // process running as the SAME user: extraction and every later read are path-based
         // (ZIPFoundation and the reader take paths; macOS does not resolve
         // `/dev/fd/N/child`, so there is no descriptor-relative extraction),
         // and a same-uid process can rename our directory away at any time —
@@ -136,10 +138,15 @@ public struct ZipHelper {
         guard fchmod(tempFD, 0o700) == 0 else { throw WordError.invalidDocx("could not make the extraction directory owner-only (\(errnoText()))") }
         var walkError: Error?
         guard let walker = fm.enumerator(at: tempDir, includingPropertiesForKeys: [.isDirectoryKey], options: [], errorHandler: { _, error in walkError = error; return false }) else {
-            throw WordError.invalidDocx("could not enumerate the extracted package under \(tempDir.path)")
+            throw WordError.invalidDocx("could not enumerate the extracted package")
         }
+        // The enumerator hands back resolved paths (`/private/var/…`) while
+        // `temporaryDirectory` is `/var/…` (verify R8 logic NEW-L1: dropping
+        // the unresolved prefix cut eight characters too few and named a
+        // non-existent item, with the tail of the UUID directory in it).
+        let roots = Set([tempDir.path, tempDir.resolvingSymlinksInPath().path, tempDir.standardizedFileURL.path].map { $0 + "/" })
         for case let item as URL in walker {
-            let relative = String(item.path.dropFirst(tempDir.path.count + 1))
+            let relative = displayName(roots.first { item.path.hasPrefix($0) }.map { String(item.path.dropFirst($0.count)) } ?? item.lastPathComponent)   // an entry name is attacker-controlled text
             // `lstat` + `fchmodat(AT_SYMLINK_NOFOLLOW)`: nothing here follows a
             // link (verify R8: `chmod` through a link reached outside the tree).
             // The archive cannot contain a link entry (refused before anything
@@ -185,7 +192,35 @@ public struct ZipHelper {
             }
         }
         do { try fm.removeItem(at: root) }
-        catch { FileHandle.standardError.write(Data("ooxml-swift: could not remove the partial extraction at \(root.path) after a failure (\(describeWithoutPaths(error)))\n".utf8)) }
+        catch {
+            // Already gone (a same-uid process renamed it away between our lstat
+            // and this call — verify R8 security N-S8-3) is not a leftover.
+            let ns = error as NSError
+            let gone = (ns.domain == NSPOSIXErrorDomain && ns.code == Int(ENOENT)) || (ns.domain == NSCocoaErrorDomain && (ns.code == 4 || ns.code == 260))
+                || ((ns.userInfo[NSUnderlyingErrorKey] as? NSError).map { $0.domain == NSPOSIXErrorDomain && $0.code == Int(ENOENT) } ?? false)
+            if !gone { FileHandle.standardError.write(Data("ooxml-swift: could not remove the partial extraction at \(root.path) after a failure (\(describeWithoutPaths(error)))\n".utf8)) }
+        }
+    }
+
+    /// Attacker-controlled text (an archive entry name) as it may appear in an
+    /// error message: every control character escaped, at most 120 characters
+    /// (verify R8 security N-S8-1: a newline in an entry name forged a second
+    /// line of output; ANSI sequences and 9 000-character names went straight
+    /// into the message the consumer renders).
+    static func displayName(_ raw: String) -> String {
+        var out = ""
+        for scalar in raw.unicodeScalars.prefix(120) {
+            switch scalar {
+            case "\n": out += "\\n"
+            case "\t": out += "\\t"
+            case "\r": out += "\\r"
+            case _ where scalar.value < 0x20 || scalar.value == 0x7F || (0x80...0x9F).contains(scalar.value):
+                out += String(format: "\\u{%02X}", scalar.value)
+            default: out.unicodeScalars.append(scalar)
+            }
+        }
+        if raw.unicodeScalars.count > 120 { out += "…(\(raw.unicodeScalars.count - 120) more characters)" }
+        return out
     }
 
     /// `strerror(errno)` for the calling thread's last error.

@@ -104,7 +104,10 @@ internal struct RelationshipsOverlay {
         // for rels files. `[^>]*?` matches lazily so the trailing `/` is not
         // captured into the attrs group; we deliberately do NOT exclude `/`
         // because Type URLs like "http://schemas..." contain forward slashes.
-        let pattern = #"<Relationship\b([^>]*?)/>"#
+        // The element name ends at whitespace, `/` or `>` — `<Relationship-2` is
+        // another element, exactly as the diagnosis regex in DocxWriter and the
+        // XML parser see it (verify R8 logic NEW-L3: `\b` matched before `-`).
+        let pattern = #"<Relationship(?=[\s/>])([^>]*?)/>"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return result }
         let nsString = xml as NSString
         for match in regex.matches(in: xml, range: NSRange(location: 0, length: nsString.length))
@@ -122,19 +125,43 @@ internal struct RelationshipsOverlay {
         return result
     }
 
-    private static func attribute(_ attrs: String, name: String) -> String? {
-        let escaped = NSRegularExpression.escapedPattern(for: name)
-        // An attribute name follows whitespace — `xmlns:Id` / `data-Id` are
-        // other attributes (verify R7 logic N-L4-R7: a namespace URI was read as
-        // a relationship id).
-        let pattern = #"(?<![\w:.\-])\#(escaped)="([^"]*)""#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let nsString = attrs as NSString
-        guard let match = regex.firstMatch(
-            in: attrs,
-            range: NSRange(location: 0, length: nsString.length)
-        ), match.numberOfRanges >= 2 else { return nil }
-        return nsString.substring(with: match.range(at: 1))
+    /// The value of the attribute called `name` in a start tag's attribute
+    /// text, read the way the merge has always read it: only the exact
+    /// `Name="value"` form is readable. The text is walked attribute by
+    /// attribute, so every OTHER attribute's value is skipped whole, whatever
+    /// it contains — `Target='x Id="HIJACK"'` is a Target, not an Id (verify R8
+    /// requirements N-R8-2; the diagnosis in `DocxWriter` skips values the
+    /// same way, so the two scans define "the Id" identically). A `Name='v'`
+    /// or `Name = "v"` occurrence is present but unreadable: nil, and the
+    /// merge refuses the package instead of reading a neighbour (#142).
+    /// `xmlns:Id` / `data-Id` are other names and never match.
+    static func attribute(_ attrs: String, name: String) -> String? {
+        var i = attrs.startIndex
+        while i < attrs.endIndex {
+            while i < attrs.endIndex, attrs[i].isWhitespace { i = attrs.index(after: i) }
+            guard i < attrs.endIndex else { break }
+            let nameStart = i
+            while i < attrs.endIndex, !attrs[i].isWhitespace, attrs[i] != "=" { i = attrs.index(after: i) }
+            let attrName = String(attrs[nameStart..<i])
+            if attrName.isEmpty { i = attrs.index(after: i); continue }          // a stray character; keep walking
+            var readable = false
+            if i < attrs.endIndex, attrs[i] == "=" {
+                let afterEquals = attrs.index(after: i)
+                readable = afterEquals < attrs.endIndex && attrs[afterEquals] == "\""
+            }
+            while i < attrs.endIndex, attrs[i].isWhitespace { i = attrs.index(after: i) }
+            guard i < attrs.endIndex, attrs[i] == "=" else { if attrName == name { return nil }; continue }
+            i = attrs.index(after: i)
+            while i < attrs.endIndex, attrs[i].isWhitespace { i = attrs.index(after: i) }
+            guard i < attrs.endIndex, attrs[i] == "\"" || attrs[i] == "'" else { if attrName == name { return nil }; continue }
+            let quote = attrs[i]; i = attrs.index(after: i)
+            let valueStart = i
+            while i < attrs.endIndex, attrs[i] != quote { i = attrs.index(after: i) }
+            let value = String(attrs[valueStart..<i])
+            if i < attrs.endIndex { i = attrs.index(after: i) }
+            if attrName == name { return readable ? value : nil }
+        }
+        return nil
     }
 
     // MARK: - Serialization
