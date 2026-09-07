@@ -124,7 +124,10 @@ internal struct RelationshipsOverlay {
 
     private static func attribute(_ attrs: String, name: String) -> String? {
         let escaped = NSRegularExpression.escapedPattern(for: name)
-        let pattern = #"\b\#(escaped)="([^"]*)""#
+        // An attribute name follows whitespace — `xmlns:Id` / `data-Id` are
+        // other attributes (verify R7 logic N-L4-R7: a namespace URI was read as
+        // a relationship id).
+        let pattern = #"(?<![\w:.\-])\#(escaped)="([^"]*)""#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let nsString = attrs as NSString
         guard let match = regex.firstMatch(

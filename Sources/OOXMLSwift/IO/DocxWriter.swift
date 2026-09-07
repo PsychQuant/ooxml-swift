@@ -677,61 +677,133 @@ public struct DocxWriter {
         EndnotesCollection.relationshipType,
     ]
 
+    /// One `Id` attribute of one `<Relationship …>` start tag, with the facts
+    /// the text scan (`RelationshipsOverlay`, #142) trips over.
+    struct RelationshipIdOccurrence: Equatable {
+        var spelling: String            // the value between the quotes, verbatim
+        var quote: String               // `"` or `'`
+        var decoded: String             // what the XML parser delivers
+        var whitespaceAroundEquals: Bool
+        var selfClosing: Bool
+        var greaterThanInsideAValue: Bool   // a `>` inside an attribute value ends the text scan's tag early
+    }
+
     /// Why the relationship merge's text scan (`RelationshipsOverlay.rawIds`,
-    /// #142) did not see a relationship the XML parser did: the one spelling
-    /// in the raw rels text that explains it, looked up by the parsed id.
-    /// Every raw `Id` spelling in a rels text (double- or single-quoted,
-    /// whitespace around `=` allowed) grouped by what the XML parser delivers
-    /// for it — computed ONCE per rels, each distinct spelling decoded once
-    /// (verify R6: decoding per parsed id re-scanned the whole text and made
-    /// the refusal path quadratic). Only spellings that differ from their
-    /// decoded form are kept: those are the ones a text scan cannot recognise.
-    static func rawSpellingsByDecodedId(inRaw raw: String) -> [String: [String]] {
-        guard let regex = try? NSRegularExpression(pattern: #"(?<![:\w])Id\s*=\s*(["'])(.*?)\1"#, options: [.dotMatchesLineSeparators]) else { return [:] }
+    /// #142) did not see a relationship the XML parser did: the facts about the
+    /// tag that declares it, looked up by the parsed id.
+    ///
+    /// Only the `Id` attribute of a `<Relationship …>` start tag is read —
+    /// whitespace before `Id` (so `data-Id` / `foo.Id` / `r:Id` are other
+    /// attributes), and every attribute VALUE before and after it is skipped
+    /// as a quoted string, so an `Id='…'` written inside a `Target` value is
+    /// data, not an attribute (verify R7 codex R7-2/R7-7, logic N-L3-R7).
+    /// Nothing else in the text is ever consulted for a cause. Comments, CDATA
+    /// and processing instructions cannot be in the text this is asked about:
+    /// the structural gate refused them first; a DTD, the reader refused.
+    /// Computed ONCE per rels: each distinct spelling decoded once with the
+    /// quote it was written with; a spelling without a reference is decoded
+    /// without a parser (attribute whitespace normalization is the only change
+    /// possible); parser decodes stop at `decodeBudget` and a spelling past
+    /// 4 KB is not decoded (verify R7: "past the cap nothing is computed" must
+    /// hold for the map too); the scan stops as soon as every id in `wanted`
+    /// has an occurrence. Membership per id is a set: k spellings of one id
+    /// cost k, not k² (codex R7-2).
+    static let decodeBudget = 200
+    static let spellingDisplayLimit = 120
+    static let relationshipIdRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: #"<Relationship(?=[\s/>])((?:"[^"]*"|'[^']*'|[^>"'])*?)\sId(\s*)=(\s*)(["'])(.*?)\4((?:"[^"]*"|'[^']*'|[^>"'])*?)(/?)>"#,
+        options: [.dotMatchesLineSeparators])
+
+    static func relationshipIdOccurrences(inRaw raw: String, wanted: Set<String>? = nil) -> [String: [RelationshipIdOccurrence]] {
+        guard let regex = relationshipIdRegex else { return [:] }
         let ns = raw as NSString
         var decodedBySpelling: [String: String?] = [:]
-        var result: [String: [String]] = [:]
+        var result: [String: [RelationshipIdOccurrence]] = [:], seen: [String: Set<String>] = [:]
+        var decodesLeft = decodeBudget, remaining = wanted
         for m in regex.matches(in: raw, range: NSRange(location: 0, length: ns.length)) {
-            let spelling = ns.substring(with: m.range(at: 2))
+            if let remaining, remaining.isEmpty { break }
+            let quote = ns.substring(with: m.range(at: 4)), spelling = ns.substring(with: m.range(at: 5))
+            let key = quote + spelling
             let decoded: String?
-            if let cached = decodedBySpelling[spelling] { decoded = cached } else { decoded = decodedAttributeValue(spelling); decodedBySpelling[spelling] = decoded }
-            guard let decoded, decoded != spelling else { continue }
-            if !(result[decoded]?.contains(spelling) ?? false) { result[decoded, default: []].append(spelling) }
+            if let cached = decodedBySpelling[key] { decoded = cached }
+            else if !spelling.contains("&") { decoded = normalizedAttributeWhitespace(spelling); decodedBySpelling[key] = decoded }
+            else if spelling.utf8.count > 4096 || decodesLeft == 0 { decoded = nil; decodedBySpelling[key] = nil }
+            else { decodesLeft -= 1; decoded = decodedAttributeValue(spelling, quote: quote); decodedBySpelling[key] = decoded }
+            guard let decoded else { continue }
+            if let wanted, !wanted.contains(decoded) { continue }
+            let before = ns.substring(with: m.range(at: 1)), after = ns.substring(with: m.range(at: 6))
+            let occurrence = RelationshipIdOccurrence(
+                spelling: spelling, quote: quote, decoded: decoded,
+                whitespaceAroundEquals: m.range(at: 2).length > 0 || m.range(at: 3).length > 0,
+                selfClosing: m.range(at: 7).length > 0,
+                greaterThanInsideAValue: before.contains(">") || after.contains(">"))
+            if seen[decoded, default: []].insert(key).inserted { result[decoded, default: []].append(occurrence) }
+            remaining?.remove(decoded)
         }
         return result
     }
 
+    /// The spellings a text scan cannot read (they differ from what the parser
+    /// delivers), by decoded id — the view the tests pin.
+    static func rawSpellingsByDecodedId(inRaw raw: String, wanted: Set<String>? = nil) -> [String: [String]] {
+        relationshipIdOccurrences(inRaw: raw, wanted: wanted).compactMapValues { occurrences in
+            let differing = occurrences.filter { $0.spelling != $0.decoded }.map(\.spelling)
+            return differing.isEmpty ? nil : differing
+        }
+    }
+
+    /// Attribute-value normalization (XML 1.0 §3.3.3) for a value with no
+    /// reference: each TAB, LF, CR becomes a space.
+    static func normalizedAttributeWhitespace(_ raw: String) -> String {
+        String(raw.map { $0 == "\t" || $0 == "\n" || $0 == "\r" || $0 == "\r\n" ? " " : $0 })
+    }
+
     /// What an XML parser delivers for the attribute value `raw` (the value
-    /// between the quotes, verbatim) — the same libxml2 the reader uses.
-    static func decodedAttributeValue(_ raw: String) -> String? {
+    /// between the quotes, verbatim, written with `quote`) — the same libxml2
+    /// the reader uses. A DTD-declared entity cannot occur: the reader refuses
+    /// any part with a DTD before this is asked.
+    static func decodedAttributeValue(_ raw: String, quote: String = "\"") -> String? {
         final class Grab: NSObject, XMLParserDelegate {
             var value: String?
             func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String]) { value = attributes["a"] }
         }
         let grab = Grab()
-        let parser = XMLParser(data: Data(("<x a=\"" + raw + "\"/>").utf8))
+        let parser = XMLParser(data: Data(("<x a=" + quote + raw + quote + "/>").utf8))
         parser.delegate = grab
         parser.shouldResolveExternalEntities = false
         return parser.parse() ? grab.value : nil
     }
 
-    static func relsSpellingCause(forParsedId id: String, inRaw raw: String, spellings: [String: [String]]) -> String {
-        let escaped = NSRegularExpression.escapedPattern(for: id)
-        func has(_ pattern: String) -> Bool { raw.range(of: pattern, options: .regularExpression) != nil }
-        if let spelling = spellings[id]?.first {
-            if spelling.contains("&") { return "written with a character or entity reference (`\(spelling)` in the file)" }
-            return "written with whitespace the parser normalizes (`\(spelling.replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\t", with: "\\t").replacingOccurrences(of: "\r", with: "\\r"))` in the file)"
-        }
-        if has(#"(?<![:\w])Id\s*=\s*'"# + escaped + "'") { return "single-quoted attribute values" }
-        if has(#"(?<![:\w])Id(\s+=|=\s+)\s*""# + escaped + "\"") { return "whitespace around `=`" }
-        if let idRange = raw.range(of: #"(?<![:\w])Id=""# + escaped + "\"", options: .regularExpression) {
-            let before = raw[..<idRange.lowerBound]
-            let after = raw[idRange.upperBound...]
-            if let open = before.lastIndex(of: "<"), let close = after.firstIndex(of: ">") {
-                let tag = raw[open...close]
-                if !tag.hasSuffix("/>") { return "the <Relationship> element is not self-closing (`…></Relationship>`)" }
+    /// A raw spelling as it may appear in an error message: control characters
+    /// escaped, and no more than `spellingDisplayLimit` characters (a single
+    /// reference can carry any number of leading zeros — codex R7-3).
+    static func displaySpelling(_ spelling: String) -> String {
+        var out = ""
+        for ch in spelling.prefix(spellingDisplayLimit) {
+            switch ch {
+            case "\n": out += "\\n"
+            case "\t": out += "\\t"
+            case "\r": out += "\\r"
+            case "\r\n": out += "\\r\\n"
+            default: out.append(ch)
             }
         }
+        if spelling.count > spellingDisplayLimit { out += "…(\(spelling.count - spellingDisplayLimit) more characters)" }
+        return out
+    }
+
+    /// The cause, derived from the tag that declares `id` and from nothing
+    /// else in the file (verify R7 logic N-L3-R7: a per-id scan of the whole
+    /// text let an `Id='…'` inside another attribute's value stand in for the
+    /// real cause).
+    static func relsSpellingCause(forParsedId id: String, occurrences: [String: [RelationshipIdOccurrence]]) -> String {
+        guard let occurrence = occurrences[id]?.first else { return "a spelling the text scan does not recognise" }
+        if occurrence.spelling.contains("&") { return "written with a character or entity reference (`\(displaySpelling(occurrence.spelling))` in the file)" }
+        if occurrence.spelling != occurrence.decoded { return "written with whitespace the parser normalizes (`\(displaySpelling(occurrence.spelling))` in the file)" }
+        if occurrence.quote == "'" { return "single-quoted attribute values" }
+        if occurrence.whitespaceAroundEquals { return "whitespace around `=`" }
+        if !occurrence.selfClosing { return "the <Relationship> element is not self-closing (`…></Relationship>`)" }
+        if occurrence.greaterThanInsideAValue { return "an attribute value containing `>`, which ends the text scan's tag early" }
         return "a spelling the text scan does not recognise"
     }
 
@@ -834,30 +906,38 @@ public struct DocxWriter {
             if rawOriginalIds != originalScan.allIds {
                 func counts(_ ids: [String]) -> [String: Int] { ids.reduce(into: [:]) { $0[$1, default: 0] += 1 } }
                 let rawCounts = counts(rawOriginalIds), parsedCounts = counts(originalScan.allIds)
-                let spellings = Self.rawSpellingsByDecodedId(inRaw: raw)        // one pass over the text
                 var causes: [String] = [], explained = Set<String>(), explainedRawSpellings = Set<String>(), omitted = 0
                 let causeCap = 20
+                // The ids the parser sees more often than the text scan does — only
+                // the first `causeCap` of them get a spelling looked up, and the one
+                // pass over the text stops as soon as it has served them.
+                let deficit = originalScan.allIds.filter { (rawCounts[$0] ?? 0) < (parsedCounts[$0] ?? 0) }
+                var firstDeficit: [String] = [], seenDeficit = Set<String>()
+                for id in deficit where seenDeficit.insert(id).inserted && firstDeficit.count < causeCap { firstDeficit.append(id) }
+                let occurrences = Self.relationshipIdOccurrences(inRaw: raw, wanted: Set(firstDeficit))
                 // The cause is computed lazily: past the cap nothing is scanned
                 // (verify R6 DA: every cause after the twentieth cost a regex pass
                 // over the whole rels, so an N-id rels was O(N²) — 3.9 s at 800).
                 func addCause(_ text: @autoclosure () -> String) { if causes.count < causeCap { causes.append(text()) } else { omitted += 1 } }
                 for id in originalScan.allIds where (rawCounts[id] ?? 0) < (parsedCounts[id] ?? 0) && explained.insert(id).inserted {
-                    addCause("\(id): \(Self.relsSpellingCause(forParsedId: id, inRaw: raw, spellings: spellings))")
-                    explainedRawSpellings.formUnion(spellings[id] ?? [])
+                    addCause("\(id): \(Self.relsSpellingCause(forParsedId: id, occurrences: occurrences))")
+                    explainedRawSpellings.formUnion((occurrences[id] ?? []).map(\.spelling))
                 }
                 for id in rawOriginalIds where (parsedCounts[id] ?? 0) < (rawCounts[id] ?? 0) && !explainedRawSpellings.contains(id) && explained.insert(id).inserted {
-                    addCause("\(id): seen by the text scan but not by the XML parser")
+                    addCause("\(Self.displaySpelling(id)): seen by the text scan but not by the XML parser")   // a raw "id" may be a 100 KB reference (codex R7-3)
                 }
                 if omitted > 0 { causes.append("…and \(omitted) more") }
                 let detail: String
                 if !causes.isEmpty {
                     let counts = rawOriginalIds.count == originalScan.allIds.count
-                        ? "the text scan and the XML parser both see \(originalScan.allIds.count) relationship(s), but not the same ones"
-                        : "the text scan sees \(rawOriginalIds.count) relationship(s), the XML parser \(originalScan.allIds.count)"
+                        ? "the text scan and the XML parser both see \(originalScan.allIds.count) \(originalScan.allIds.count == 1 ? "relationship" : "relationships"), but not the same ones"
+                        : "the text scan sees \(rawOriginalIds.count) \(rawOriginalIds.count == 1 ? "relationship" : "relationships"), the XML parser \(originalScan.allIds.count)"
                     detail = counts + " — " + causes.joined(separator: "; ")
                 } else {
-                    detail = zip(rawOriginalIds, originalScan.allIds).filter { $0 != $1 }
-                        .map { "the text scan reads \($0) where the XML parser reads \($1)" }.joined(separator: "; ")
+                    // Same multiset, different order (codex R7-3): capped like the causes.
+                    let pairs = zip(rawOriginalIds, originalScan.allIds).filter { $0 != $1 }
+                    detail = pairs.prefix(causeCap).map { "the text scan reads \(Self.displaySpelling($0)) where the XML parser reads \(Self.displaySpelling($1))" }.joined(separator: "; ")
+                        + (pairs.count > causeCap ? "; …and \(pairs.count - causeCap) more" : "")
                 }
                 throw WordError.invalidDocx(
                     "the relationship merge's text view of word/_rels/document.xml.rels does not match the XML parser's view — \(detail). "
@@ -869,7 +949,7 @@ public struct DocxWriter {
             let fromSlots = duplicateRelIds.filter { slotCollisionIds.contains($0) }
             var causes: [String] = []
             if !fromModel.isEmpty {
-                causes.append("the document model carries \(fromModel.joined(separator: ", ")) more than once; OPC scopes relationship ids per part, so the package cannot be written without losing a relationship")
+                causes.append("The document model carries \(fromModel.joined(separator: ", ")) more than once; OPC scopes relationship ids per part, so the package cannot be written without losing a relationship")
             }
             if !fromSlots.isEmpty {
                 let plural = fromSlots.count > 1

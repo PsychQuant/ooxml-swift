@@ -68,7 +68,7 @@ All notable changes to ooxml-swift will be documented in this file.
     document 去重用 `caseInsensitiveCompare`、頂層拼法）。**掃描範圍回到 92befb9 的契約**：document 一定掃；其餘 `word/**/*.xml`
     **只在它的 rels 至少宣告一條關係時**才讀（rc3 把所有 `.xml` 都讀了，rc4 只看「有沒有 rels」，一個 reader 根本不開的壞 XML
   配一份空 rels 就能讓可讀封裝報不一致——verify R4 B2、R5 L4）；不讀的理由是「它不宣告任何關係、沒有東西要對帳」，不是
-  「reader 不讀它」——reader 讀的是被引用的 header/footer，與有沒有 rels 無關。`word/` 下每一份 owner 是 `.xml` 的 rels（`<name>.xml.rels`）仍全部對帳、reader 讀不讀它都一樣，讀不到就是無定論；
+  「reader 不讀它」——reader 讀的是被引用的 header/footer，與有沒有 rels 無關。`word/` 下每一份 owner 是 `.xml` 的 rels（`<name>.xml.rels`，`<name>` 非空——光禿的 `_rels/.xml.rels` 沒有 owner，不讀不報，#146）仍全部對帳、reader 讀不讀它都一樣，讀不到就是無定論；
   owner 不是 `.xml` 的 rels（`vmlDrawing1.vml.rels`）不對帳，見 #144；
     rels 存在但 part 缺席 → 宣告視為孤兒（3.6.x 判定）。**解壓失敗的封裝（同名或僅大小寫不同的重複 entry、逃逸路徑、壞成員、
     含 symbolic-link entry）、沒有 `word/document.xml` 的封裝、解壓後目錄列舉或 stat 失敗、或無法建立檔案 identity，改為拋 `WordError.invalidDocx`**——reader 對
@@ -124,26 +124,26 @@ All notable changes to ooxml-swift will be documented in this file.
   `multi-section-thesis.docx`、`field-trip.docx`、`image_vml.docx` 三份，3.6.4 全部 SIGTRAP、3.7.0 具名拒絕。根治是 #140
   （固定 part 的 id 走 allocator）。**scratch 路徑另有一種輸入從「成功」變「失敗」**：3.6.4 的 scratch writer 對同號 typed
   rel 不 trap、直接寫出一個 `rId1` 宣告兩次、違反 OPC 的封裝；3.7.0 拒絕它。
-- **原始 rels 有九種合法寫法從「可存」變「拒存」**（verify R3/R4 逐一對照 3.6.4；這是封閉列舉，下游拿自己的語料對這九種掃即可）：
+- **原始 rels 有九種合法寫法從「可存」變「拒存」**（verify R3/R4 逐一對照 3.6.4；這九種是逐一對照 3.6.4 確認的、不保證窮盡——verify R7 requirements 找到第十種：前綴屬性（`xmlns:Id`／`r:Id`／`data-Id`）排在真 `Id` 之前時，merge 的 text scan 曾把前者當成 `Id` 而拒存（真實語料 0／1092 份 rels 命中）；3.7.0 的 text scan（`RelationshipsOverlay`）與成因判定對「什麼是 `Id`」同一定義——屬性名位置、前面是空白——這種形狀現在照常存檔（fix round 7））：
   `<Relationship …></Relationship>`（非自閉合）、單引號屬性值、`Id = "…"`（`=` 兩側有空白）、任何帶前綴的元素
   （`<pkg:Relationship>`、帶前綴的 root）、含 XML 註解、含 CDATA、含 processing instruction、**`Id="rId&#54;"`（id 用字元參照或 `&amp;` 這類實體參照
-  ——#137 issue 本文舉的那個形狀）**、**`Id` 含會被屬性正規化改寫的空白（換行／tab）**。九種都是 well-formed XML、reader 開得起來，但**不全是合法 OPC**（第九種與含空白的第八種拼法不是合法的 `xsd:ID`）；3.6.4 對前四種
+  ——#137 issue 本文舉的那個形狀）**、**`Id` 含會被屬性正規化改寫的空白（換行／tab）**。九種都是 well-formed XML、reader 開得起來，但**不全是合法 OPC**（`Id` 是 `xsd:ID`，合法與否看**解碼後**的值：第九種解碼後帶空白、`&amp;` 解成 `&`，都不是合法的 NCName；`&#54;` 這種解成合法字元的參照則仍是合法 id——拒絕的理由是 text scan 讀不到它，不是它不合法）；3.6.4 對前四種
   **靜默丟掉那條關係**後回報成功（只有 typed model 不管的關係會消失；model 持有的會從 model 重建），對 regex 看得見的註解、CDATA、PI 內的假宣告：
   **非 typed-managed 型**（theme、webSettings……）的**寫成真的**進輸出（實測 `rId98→theme/ghost.xml` 進了輸出），image 這類 typed-managed 型的則被 overlay
   當成刪除靜默丟掉——所以 3.6.4 寫出的不是「指向不存在 media 的 image 關係」，是幽靈的非 image 關係；後兩種 3.6.4 對 typed
   model 不管的關係（如 webSettings）不會丟，只在 model 也持有同一個 id 時才會寫出兩套視角。第九種精確地說是「會被 XML 屬性正規化改寫的空白」（換行、tab、CR）——普通的單一空格 parser 與 text scan 看到的
   一樣，不會被拒。3.7.0 具名拒絕：結構四類由 parser 事件判定、逐 id 說出成因（raw 的 `Id` 拼法——雙引號、單引號、`=` 旁空白都算——先解碼比對一次，字元或實體參照與正規化空白
-  據此具名；單引號、`=` 旁空白、非自閉合另有各自的判定；`r:Id`／`xmlns:Id` 這類帶前綴的屬性不是 `Id`、不參與成因判定；訊息最多列 20 個 id；
-  兩份清單等長但成員不同時訊息明說「同數、不同組」，不並列兩個相同的數字；成因判定是**單次掃描＋上限 20 個、超過即不再計算**——verify R6 DA 抓到 R6 快照 `ba4ccbe` 對 N 個全字元參照 id 的 rels 是 O(N²)（400 個 1.0 s、800 個 3.9 s、1600 個 DA 量到 202 s），3.7.0 為線性：400／800／1600／3200 個 = 11／21／41／80 ms），長度不等的兩份清單直接並列、不逐項錯配。這些文件要先用 Word 另存一次；
+  據此具名；單引號、`=` 旁空白、非自閉合另有各自的判定；`r:Id`／`xmlns:Id`／`data-Id` 這類屬性不是 `Id`——text scan 與成因判定同一定義（fix round 7 前 text scan 仍會把排在前面的前綴屬性當成 `Id`，見上）；訊息最多列 20 個 id；
+  兩份清單等長但成員不同時訊息明說「同數、不同組」，不並列兩個相同的數字；成因判定的成本有明確上限（verify R7 codex R7-2／R7-3）：只讀 `<Relationship …>` 起始標籤裡、前面是空白的 `Id`（`data-Id`／`foo.Id`／`r:Id` 都不是），一次掃描；不含參照的拼法不動 parser（只做屬性空白正規化），含參照的拼法最多解碼 200 個、單一拼法超過 4 KB 不解碼，掃到前 20 個差異 id 都有拼法就停；成因最多 20 條、等多重集不同順序的 fallback 最多 20 對、訊息中的拼法最多顯示 120 字——verify R6 DA 抓到 R6 快照 `ba4ccbe` 對 N 個全字元參照 id 的 rels 是 O(N²)：lead 的 release probe 量到 400／800 個 = 1.0／3.9 s（DA 在自己的 APFS clone build 上量到 400／800／1600 個 = 12／50／202 s，環境不同、不可與前者串成一條曲線）；3.7.0 同一個 release probe 量到 400／800／1600／3200 個 = 13／21／39／70 ms（fix round 7 head；fix round 6 為 11／21／41／80），長度不等的兩份清單直接並列、不逐項錯配。這些文件要先用 Word 另存一次；
   merge 用的 regex 本身是 #142。
 - **inspector 對開不了的封裝改為拋錯而非回報告**：解壓失敗（重複 entry、逃逸路徑、symbolic-link entry）、沒有
   `word/document.xml`、目錄列舉失敗 → `WordError.invalidDocx`。3.6.x 對前者回一份「一致」的報告。消費端把 throw 當拒絕即可
   （che-word-mcp 已如此）。**reader 同步變嚴五種 entry**：`DocxReader.read` 與 inspector 共用 `ZipHelper.unzip`，對「ZIPFoundation 會解壓成 symbolic link 的
-  entry」、路徑含 `..` 成分、絕對路徑、空路徑或含 NUL 的 entry 一律先拒；解壓出的檔案一律 0600／目錄與解壓根目錄 0700（封裝自帶的 setuid／sticky／world-writable 位不再照搬；命名空間目錄若已存在，必須是同一 uid 的真目錄——symlink 或他人的目錄一律拒，verify R6 security N2；權限重設的
+  entry」、路徑含 `..` 成分、絕對路徑、空路徑或含 NUL 的 entry 一律先拒；解壓出的檔案一律 0600／目錄與解壓根目錄 0700（封裝自帶的 setuid／sticky／world-writable 位不再照搬；命名空間目錄以 `mkdir(0700)` 原子建立或得到 EEXIST，再以 `O_NOFOLLOW|O_DIRECTORY` 開成 fd、對 **fd** 做 `fstat` 驗 type／uid／mode（路徑不信任第二次：verify R7 codex R7-1 的「檢查後建立」race），UUID 子目錄用 `mkdirat` 建、cleanup 在建立前就 arm；私有副本用 `openat(O_CREAT|O_EXCL, 0600)` 原子建立、經 fd 寫入；symlink、檔案、他人的目錄一律拒（verify R6 security N2）；權限重設的
   walk 中任何列舉或 stat 失敗都是錯誤、不是部分結果）。
 - **inspector 判定收緊四處**（下列是消費端看得到的變更；Fixed 段「刻意比 reader 嚴的四處」是另一份、從 reader 對照的角度列的）：
   (1) **掃描範圍內**的 part 讀不到 → `isConsistent == false`（3.6.4 對非 well-formed 的 part 照樣給答案；含屬性數上限與註解含
-  `--` 這兩種預檢拒絕；掃描範圍＝document ＋ 每個 rels 至少宣告一條帶 `Id` 的 `Relationship` 的 `.xml` part ＋ `word/` 下每一份 `<name>.xml.rels`）；(2) CDATA 內的
+  `--` 這兩種預檢拒絕；掃描範圍＝document ＋ 每個 rels 至少宣告一條帶 `Id` 的 `Relationship` 的 `.xml` part ＋ `word/` 下每一份 `<name>.xml.rels`，`<name>` 非空）；(2) CDATA 內的
   引用不再算引用；(3) 不是合法 UTF-8 的 part 視為讀不到（reader 會以 U+FFFD 代換後繼續）；(4) 掃描範圍內、reader 不解析或不會
   到達的 part（未引用的 header、有 rels 的 chart）裡的未宣告前綴也拒——規則對每個掃到的 part 一律套用；`settings.xml` 幾乎從不
   帶自己的 rels（1025 份真實文件中 3 份），所以通常不在範圍內。消費 `isConsistent` 當 save gate 的 consumer（che-word-mcp）會對這些封裝拒絕存檔——這是
@@ -166,7 +166,7 @@ All notable changes to ooxml-swift will be documented in this file.
 - **磁碟與對抗軸的成本也要一併知道**（verify R4 security）：3.6.4 的 inspector 純記憶體、零磁碟；3.7.0 每次檢查把整份封裝解壓到
   `FileManager.default.temporaryDirectory`（`ooxml-swift-inspector/<UUID>/`——與 reader 的 `che-word-mcp/` 命名空間分開，
   reader 端「有沒有漏暫存目錄」的檢查不受並行 inspection 干擾（verify R5 regression：共用時兩個既有 hermetic 測試在有並行
-  inspector 工作時必然失敗）；命名空間目錄與 UUID 目錄建立時即 0700、私有副本建立時即 0600；回傳前刪除，屬 best-effort——刪除失敗不回報；
+  inspector 工作時必然失敗）；命名空間目錄與 UUID 目錄建立時即 0700（`mkdir`／`mkdirat` 帶 mode；**既有的命名空間目錄若不是 0700 會被改成 0700**——舊版建立的 `che-word-mcp/` 預設 0755，升級後第一次讀檔就會發生，verify R7 requirements N-R7-4）、私有副本 `openat(O_CREAT|O_EXCL, 0600)` 原子建立（inode 從未以其他 mode 存在）；回傳前刪除，屬 best-effort——失敗路徑先把整棵樹改回 owner-writable 再刪（封裝把目錄 entry 存成 0300／0400／0500 時 `removeItem` 原本刪不掉、整棵樹含私有副本留在共用命名空間，verify R7 logic N-L1-R7／security S-R7-3），仍刪不掉時印到 stderr、不回報給呼叫端；
   `of:` 版本不再先寫 scratch 檔，兩個入口都寫一份私有副本），**峰值磁碟 ≈ 解壓後大小 ＋ 一份私有副本，沒有上限**——1 MB 的 zip bomb 解出 1 GB、4 MB 解出 4 GB 就吃那麼多（清理正常，殘留 0），且 `TMPDIR` 不能把它導到有配額
   的卷。對抗性的 xmlns 密集 part（200 元素 × 4000 xmlns、4 MB）inspector 26.7 s（3.6.4 是 1.0 s，reader 63 s）。兩者都歸 #130。
 - **inspector 從純函式變成會寫暫存檔的函式**，這是 3.6.x 消費者升級最該知道的一件事。解壓政策與 reader 共用（`ZipHelper.unzip`）：

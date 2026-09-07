@@ -1094,6 +1094,8 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     func testEmptyAndNulEntryPathsAreRefusedBeforeExtraction() throws {
         // codex R6-10: the two policy members that had branches but no fixtures.
         let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        var executedCases = 0
+        defer { XCTAssertEqual(executedCases, 2, "codex R7-8: both fixtures must actually be built and refused; a fixture ZIPFoundation will not write is not coverage") }
         for (label, name) in [("NUL in the path", "word/a\u{0}.xml"), ("empty path", "")] {
             let archive = try Archive(accessMode: .create)
             for (n, text) in [("word/document.xml", body(referencing: "rId4")), ("word/_rels/document.xml.rels", rels(rel)), ("word/media/image1.png", "png")] {
@@ -1107,6 +1109,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
                 continue   // ZIPFoundation will not even write such an entry; nothing to refuse
             }
             let data = try XCTUnwrap(archive.data)
+            executedCases += 1
             XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ZipHelper.inspectorNamespace), label) {
                 XCTAssertTrue(String(describing: $0).contains("empty or NUL-containing"), "\(label): \($0)")
             }
@@ -1150,6 +1153,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         XCTAssertTrue(message.contains("rId5") && message.contains("rId1") && message.contains("#140"), message)
         XCTAssertFalse(message.contains("well-formed"), message)
         XCTAssertFalse(message.contains("RId"), "an id is never capitalized by sentence-casing (logic N-L2-R6): \(message)")
+        XCTAssertTrue(message.contains(". The document model carries"), "a cause sentence starts capitalized (logic N-L5-R7): \(message)")
     }
 
     func testThousandsOfMismatchedIdsAreRefusedInLinearTime() throws {
@@ -1170,9 +1174,189 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
             let elapsed = Date().timeIntervalSince(start)
             XCTAssertTrue(message.contains("does not match"), "\(label): \(message.prefix(200))")
-            XCTAssertTrue(message.contains("and 3180 more"), "\(label): capped at 20 causes: \(message.suffix(160))")
+                XCTAssertTrue(message.range(of: #"…and [0-9]+ more"#, options: .regularExpression) != nil, "\(label): capped at 20 causes: \(message.suffix(160))")
+                XCTAssertLessThan(message.count, 6000, "\(label): capped message, got \(message.count) characters")
             XCTAssertLessThan(elapsed, 2, "\(label): 3200 mismatched ids must be refused in linear time (took \(elapsed) s)")
         }
+    }
+
+    func testAPlantedFileOrLinkAtTheNamespaceIsRefusedAndOurOwnWrongModeIsRepaired() throws {
+        // codex R7-1: the namespace is created with mkdir(0700) or found, opened
+        // O_NOFOLLOW|O_DIRECTORY, and the DESCRIPTOR is verified — a file or a
+        // link planted at the name is refused; our own directory with another
+        // mode is reset to 0700.
+        let data = try zipEntries([("word/document.xml", body())])
+        let tmp = FileManager.default.temporaryDirectory
+        let plants: [(String, (URL) throws -> Void)] = [
+            ("regular file", { try Data("x".utf8).write(to: $0) }),
+            ("symbolic link", { try FileManager.default.createSymbolicLink(at: $0, withDestinationURL: tmp) }),
+        ]
+        for (label, plant) in plants {
+            let ns = "i137-ns-\(UUID().uuidString)"
+            let planted = tmp.appendingPathComponent(ns)
+            try plant(planted); defer { try? FileManager.default.removeItem(at: planted) }
+            XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns), label) {
+                XCTAssertTrue(String(describing: $0).contains("refused") || String(describing: $0).contains("not a directory"), "\(label): \($0)")
+            }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: planted.path), "\(label): the planted item is left alone")
+        }
+        let ns = "i137-ns-\(UUID().uuidString)"
+        let ours = tmp.appendingPathComponent(ns)
+        try FileManager.default.createDirectory(at: ours, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o755])
+        defer { try? FileManager.default.removeItem(at: ours) }
+        let out = try ZipHelper.unzip(data: data, namespace: ns); ZipHelper.cleanup(out)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: ours.path)[.posixPermissions] as? Int, 0o700, "our own namespace is reset to 0700")
+    }
+
+    func testOtherAttributesNamedLikeIdAreNotTheRelationshipIdAndTheCauseStaysRight() throws {
+        // codex R7-2 / R7-7: 3000 Relationship tags each carrying a `data-Id`
+        // attribute spelled as a distinct reference form of "rId9" (an XML Name
+        // may contain `-`; the old `(?<![:\w])Id` boundary read them all as Id and
+        // grew one bucket quadratically), plus one real single-quoted Id='rId9'.
+        // The real cause is the single quote, not the references; and it is linear.
+        // (`data-Id` sits after `Id` here because the text scan's own attribute
+        // regex — #142 — takes the first `\bId="` in a tag; that looseness is
+        // #142's, and the message must not compound it by naming a reference.)
+        var relationships = (0..<3000).map { i -> String in
+            let zeros = String(repeating: "0", count: i % 50)
+            let spell = "rId9".unicodeScalars.map { "&#\(zeros)\($0.value);" }.joined() + "&#\(String(repeating: "0", count: i / 50 + 1))59;"
+            return "<Relationship Id=\"rIdA\(i)\" data-Id=\"\(spell)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/\(i)\" TargetMode=\"External\"/>"
+        }
+        relationships.append("<Relationship Id='rId9' Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/9\" TargetMode=\"External\"/>")
+        let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" + relationships.joined() + "</Relationships>"
+        let start = Date()
+        let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertTrue(message.contains("rId9: single-quoted attribute values"), message.suffix(300).description)
+        XCTAssertFalse(message.contains("reference"), "the data-Id spellings are not causes: \(message.suffix(300))")
+        XCTAssertLessThan(elapsed, 2, "took \(elapsed) s")
+        XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: #"<x foo.Id="rId&#57;" data-Id="rId&#57;"/><Relationship r:Id="rId&#57;" Id="rId&#57;"/>"#), ["rId9": ["rId&#57;"]])
+    }
+
+    func testSameMultisetInAnotherOrderIsRefusedWithACappedMessage() throws {
+        // codex R7-3: when the text scan and the parser see the same ids the
+        // same number of times but in another order, the pairwise fallback is
+        // capped like the causes are.
+        let n = 60
+        let relationships = (0..<n).map { i -> String in
+            let mine = "rId\(i)", other = "rId\((i + 1) % n)"
+            return "<Relationship data-Id=\"\(other)\" Id='\(mine)' Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/\(i)\" TargetMode=\"External\"/>"
+        }
+        let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" + relationships.joined() + "</Relationships>"
+        let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
+        XCTAssertTrue(message.contains("does not match"), message.prefix(200).description)
+        XCTAssertTrue(message.contains("…and \(n - 20) more"), message.suffix(200).description)
+        XCTAssertLessThan(message.count, 3000, "capped: \(message.count) characters")
+    }
+
+    func testAHugeSpellingCannotInflateTheMessage() throws {
+        // codex R7-3: one reference may carry any number of leading zeros — the
+        // displayed spelling is truncated; a spelling past 4 KB is not even decoded.
+        for zeros in [3000, 100_000] {
+            let spell = "&#\(String(repeating: "0", count: zeros))114;Id9"
+            let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"\(spell)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/\" TargetMode=\"External\"/></Relationships>"
+            let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
+            XCTAssertLessThan(message.count, 1200, "\(zeros) zeros: \(message.count) characters")
+            if zeros == 3000 { XCTAssertTrue(message.contains("more characters)"), message.suffix(200).description) }
+        }
+    }
+
+    func testAnUnremovableDirectoryEntryLeavesNothingBehindAndTheErrorNamesNoPath() throws {
+        // verify R7 logic N-L1-R7 / N-L2-R7: a directory entry stored 0400 or 0500
+        // ahead of its file makes ZIPFoundation's extraction fail; the partial
+        // tree (with the private copy of the whole package) used to stay behind
+        // because `removeItem` cannot empty such a directory. Now the tree is
+        // made ours again before removal, the error is ours, and it names no path.
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        for mode: UInt16 in [0o400, 0o500] {
+            let archive = try Archive(accessMode: .create)
+            try archive.addEntry(with: "word/media/", type: .directory, uncompressedSize: 0, permissions: mode, provider: { (_: Int64, _: Int) -> Data in Data() })
+            for (name, text) in [("word/document.xml", body(referencing: "rId4")), ("word/_rels/document.xml.rels", rels(rel)), ("word/media/image1.png", "SECRET-BODY-BYTES")] {
+                let d = Data(text.utf8)
+                try archive.addEntry(with: name, type: .file, uncompressedSize: Int64(d.count), compressionMethod: .deflate, provider: { (p: Int64, n: Int) -> Data in d.subdata(in: Int(p)..<Int(p) + n) })
+            }
+            let data = try XCTUnwrap(archive.data)
+            let ns = "i137-ns-\(UUID().uuidString)"
+            let nsDir = FileManager.default.temporaryDirectory.appendingPathComponent(ns)
+            defer { try? FileManager.default.removeItem(at: nsDir) }
+            XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns), "mode \(String(mode, radix: 8))") { error in
+                let message = String(describing: error)
+                XCTAssertTrue(message.contains("could not be extracted"), "mode \(String(mode, radix: 8)): \(message)")
+                XCTAssertFalse(message.contains(nsDir.path) || message.contains("/var/") || message.contains("/private/"), "no path in the message: \(message)")
+            }
+            let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: nsDir.path)) ?? []
+            XCTAssertEqual(leftovers, [], "mode \(String(mode, radix: 8)): nothing stays behind (private copy included)")
+            XCTAssertThrowsError(try readerImageCount(data), "the reader refuses too") { XCTAssertTrue($0 is WordError, "the reader's error is ours: \($0)") }
+        }
+    }
+
+    func testADecoyInsideAnotherAttributeValueDoesNotChangeTheCause() throws {
+        // verify R7 logic N-L3-R7: only the tag's own Id attribute is a cause;
+        // an `Id='…'` inside a Target value is data.
+        let base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+        let cases: [(String, String, String)] = [
+            ("single quote, decoy reference in Target",
+             "<Relationship Id='rId9' Type=\"\(base)\" Target=\"https://example.com/?q= Id='rId&#57;'\" TargetMode=\"External\"/>",
+             "rId9: single-quoted attribute values"),
+            ("whitespace around =, decoy plain Id in Target",
+             "<Relationship Id = \"rId9\" Type=\"\(base)\" Target=\"https://example.com/? Id='rId9'\" TargetMode=\"External\"/>",
+             "rId9: whitespace around `=`"),
+            ("> inside a value ends the text scan's tag early",
+             "<Relationship Type=\"\(base)\" Target=\"https://example.com/a>b\" Id=\"rId9\" TargetMode=\"External\"/>",
+             "rId9: an attribute value containing `>`"),
+        ]
+        for (label, relationship, expected) in cases {
+            let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" + relationship + "</Relationships>"
+            let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
+            XCTAssertTrue(message.contains(expected), "\(label): \(message.suffix(300))")
+            if label.hasPrefix("single") { XCTAssertFalse(message.contains("reference"), "\(label): the decoy is not a cause: \(message.suffix(300))") }
+        }
+    }
+
+    func testANamespaceUriIsNotReportedAsARelationshipId() throws {
+        // verify R7 logic N-L4-R7: the overlay's own attribute regex reads names
+        // at attribute-name position only, so `xmlns:Id="urn:zz"` is not an Id.
+        let relsXML = #"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship xmlns:Id="urn:zz" Id="rId&#57;" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>"#
+        let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
+        XCTAssertFalse(message.contains("urn:zz"), message.suffix(300).description)
+        XCTAssertTrue(message.contains("both see 1 relationship,"), "singular (logic N-L6-R7): \(message.suffix(300))")
+        XCTAssertTrue(message.contains("rId9: written with a character or entity reference"), message.suffix(300).description)
+    }
+
+    func testAPrefixedAttributeBeforeTheRealIdSaves() throws {
+        // verify R7 requirements N-R7-1: `xmlns:Id="urn:x" Id="rId4"` and
+        // `r:Id="zzz" Id="rId4"` are well-formed, the reader opens them, and the
+        // Id is the plainest spelling there is — the text scan used to read the
+        // prefixed attribute as the Id and refuse. Now both scanners agree.
+        let base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+        for shape in ["<Relationship xmlns:Id=\"urn:x\" Id=\"rId4\" Type=\"\(base)\" Target=\"media/image1.png\"/>",
+                      "<Relationship xmlns:r=\"urn:r\" r:Id=\"zzz\" Id=\"rId4\" Type=\"\(base)\" Target=\"media/image1.png\"/>"] {
+            let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" + shape + "</Relationships>"
+            let data = try package(document: body(referencing: "rId4"), docRels: relsXML)
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("i137-tenth-\(UUID().uuidString).docx")
+            try data.write(to: url); defer { try? FileManager.default.removeItem(at: url) }
+            var read = try DocxReader.read(from: url); defer { read.close() }
+            XCTAssertNoThrow(try DocxWriter.writeData(read), shape)
+        }
+    }
+
+    func testAnUnlistableDirectoryWithContentIsRemovedAfterALaterFailure() throws {
+        // verify R7 security S-R7-3: `keep/` stored 0300 (writable, unlistable)
+        // and already holding a file, then `boom/` stored 0400 whose file cannot
+        // be written — the failure leaves a tree `removeItem` cannot empty
+        // unless every directory is made ours again first.
+        let archive = try Archive(accessMode: .create)
+        try archive.addEntry(with: "keep/", type: .directory, uncompressedSize: 0, permissions: 0o300, provider: { (_: Int64, _: Int) -> Data in Data() })
+        let payload = Data("payload".utf8)
+        try archive.addEntry(with: "keep/payload.bin", type: .file, uncompressedSize: Int64(payload.count), compressionMethod: .deflate, provider: { (p: Int64, n: Int) -> Data in payload.subdata(in: Int(p)..<Int(p) + n) })
+        try archive.addEntry(with: "boom/", type: .directory, uncompressedSize: 0, permissions: 0o400, provider: { (_: Int64, _: Int) -> Data in Data() })
+        try archive.addEntry(with: "boom/x.bin", type: .file, uncompressedSize: Int64(payload.count), compressionMethod: .deflate, provider: { (p: Int64, n: Int) -> Data in payload.subdata(in: Int(p)..<Int(p) + n) })
+        let data = try XCTUnwrap(archive.data)
+        let ns = "i137-ns-\(UUID().uuidString)"
+        let nsDir = FileManager.default.temporaryDirectory.appendingPathComponent(ns)
+        defer { try? FileManager.default.removeItem(at: nsDir) }
+        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns)) { XCTAssertTrue($0 is WordError, "\($0)") }
+        XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: nsDir.path)) ?? ["(missing)"], [], "nothing stays behind")
     }
 
     func testAPrefixedIdAttributeIsNotTheRelationshipId() throws {
