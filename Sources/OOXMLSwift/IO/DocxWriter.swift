@@ -719,7 +719,6 @@ public struct DocxWriter {
     /// has an occurrence. Membership per id is a set: k spellings of one id
     /// cost k, not k² (codex R7-2).
     static let decodeBudget = 200
-    static let spellingDisplayLimit = 120
     static let relationshipIdRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: #"<Relationship(?=[\s/>])((?:"[^"]*"|'[^']*'|[^>"'])*?)\sId(\s*)=(\s*)(["'])(.*?)\4((?:"[^"]*"|'[^']*'|[^>"'])*?)(/?)>"#,
         options: [.dotMatchesLineSeparators])
@@ -804,7 +803,7 @@ public struct DocxWriter {
         if occurrence.whitespaceAroundEquals { return "whitespace around `=`" }
         if !occurrence.selfClosing { return "the <Relationship> element is not self-closing (`…></Relationship>`)" }
         if occurrence.greaterThanInsideAValue { return "an attribute value containing `>`, which ends the text scan's tag early" }
-        if let sibling = occurrence.unreadableSiblingAttribute { return "the tag's `\(sibling)` attribute is single-quoted or spaced, which the text scan cannot read, so it skips the whole tag" }
+        if let sibling = occurrence.unreadableSiblingAttribute { return "the tag's `\(displaySpelling(sibling))` attribute is single-quoted or spaced, which the text scan cannot read, so it skips the whole tag" }   // the name is attacker text too (verify R10 security N-S10-1)
         return "a spelling the text scan does not recognise"
     }
 
