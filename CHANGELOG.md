@@ -139,7 +139,7 @@ All notable changes to ooxml-swift will be documented in this file.
 - **inspector 對開不了的封裝改為拋錯而非回報告**：解壓失敗（重複 entry、逃逸路徑、symbolic-link entry）、沒有
   `word/document.xml`、目錄列舉失敗 → `WordError.invalidDocx`。3.6.x 對前者回一份「一致」的報告。消費端把 throw 當拒絕即可
   （che-word-mcp 已如此）。**reader 同步變嚴五種 entry**：`DocxReader.read` 與 inspector 共用 `ZipHelper.unzip`，對「ZIPFoundation 會解壓成 symbolic link 的
-  entry」、路徑含 `..` 成分、絕對路徑、空路徑或含 NUL 的 entry 一律先拒；解壓出的檔案一律 0600／目錄與解壓根目錄 0700（封裝自帶的 setuid／sticky／world-writable 位不再照搬；命名空間目錄以 `mkdir(0700)` 原子建立或得到 EEXIST，再以 `O_NOFOLLOW|O_DIRECTORY` 開成 fd、對 **fd** 做 `fstat` 驗 type／uid／mode（路徑不信任第二次：verify R7 codex R7-1 的「檢查後建立」race），UUID 子目錄用 `mkdirat` 建、cleanup 在建立前就 arm；私有副本用 `openat(O_CREAT|O_EXCL, 0600)` 原子建立、經 fd 寫入；symlink、檔案、他人的目錄一律拒（verify R6 security N2）；權限重設的
+  entry」、路徑含 `..` 成分、絕對路徑、空路徑或含 NUL 的 entry 一律先拒；解壓出的檔案一律 0600／目錄與解壓根目錄 0700（封裝自帶的 setuid／sticky／world-writable 位不再照搬；命名空間目錄以 `mkdir(0700)` 原子建立或得到 EEXIST，再以 `O_NOFOLLOW|O_DIRECTORY` 開成 fd、對 **fd** 做 `fstat` 驗 type／uid／mode（路徑不信任第二次：verify R7 codex R7-1 的「檢查後建立」race），UUID 子目錄用 `mkdirat` 建、cleanup 在建立前就 arm；私有副本用 `openat(O_CREAT|O_EXCL, 0600)` 原子建立、經 fd 寫入；symlink、檔案、他人的目錄一律拒（verify R6 security N2）。**威脅模型邊界（verify R8 security 實測）**：這些檢查擋得住預植或並行建立的異物、以及共用暫存目錄裡**不同 uid** 的攻擊者（改不了、換不掉我們的 0700 目錄）；擋不住**同 uid** 的行程——解壓與之後的每次讀取都走路徑（ZIPFoundation 與 reader 只接受路徑，macOS 不解析 `/dev/fd/N/child`，實測），同 uid 隨時能把我們的目錄 rename 走再放 symlink（20 秒競態實測仍能導走少量解壓），但它本來就讀得到文件、也能換掉來源檔——這在模型之外，不是模型裡的洞；解壓出的項目在 walk 重設前帶封裝自己的 mode（0755／0644 取樣可見），全程位於我們的 0700 目錄內；權限重設的
   walk 中任何列舉或 stat 失敗都是錯誤、不是部分結果）。
 - **inspector 判定收緊四處**（下列是消費端看得到的變更；Fixed 段「刻意比 reader 嚴的四處」是另一份、從 reader 對照的角度列的）：
   (1) **掃描範圍內**的 part 讀不到 → `isConsistent == false`（3.6.4 對非 well-formed 的 part 照樣給答案；含屬性數上限與註解含
@@ -166,7 +166,7 @@ All notable changes to ooxml-swift will be documented in this file.
 - **磁碟與對抗軸的成本也要一併知道**（verify R4 security）：3.6.4 的 inspector 純記憶體、零磁碟；3.7.0 每次檢查把整份封裝解壓到
   `FileManager.default.temporaryDirectory`（`ooxml-swift-inspector/<UUID>/`——與 reader 的 `che-word-mcp/` 命名空間分開，
   reader 端「有沒有漏暫存目錄」的檢查不受並行 inspection 干擾（verify R5 regression：共用時兩個既有 hermetic 測試在有並行
-  inspector 工作時必然失敗）；命名空間目錄與 UUID 目錄建立時即 0700（`mkdir`／`mkdirat` 帶 mode；**既有的命名空間目錄若不是 0700 會被改成 0700**——舊版建立的 `che-word-mcp/` 預設 0755，升級後第一次讀檔就會發生，verify R7 requirements N-R7-4）、私有副本 `openat(O_CREAT|O_EXCL, 0600)` 原子建立（inode 從未以其他 mode 存在）；回傳前刪除，屬 best-effort——失敗路徑先把整棵樹改回 owner-writable 再刪（封裝把目錄 entry 存成 0300／0400／0500 時 `removeItem` 原本刪不掉、整棵樹含私有副本留在共用命名空間，verify R7 logic N-L1-R7／security S-R7-3），仍刪不掉時印到 stderr、不回報給呼叫端；
+  inspector 工作時必然失敗）；命名空間目錄與 UUID 目錄建立時即 0700（`mkdir`／`mkdirat` 帶 mode；**既有的命名空間目錄若不是 0700 會被改成 0700**——舊版建立的 `che-word-mcp/` 預設 0755，升級後第一次讀檔就會發生，verify R7 requirements N-R7-4）、私有副本 `openat(O_CREAT|O_EXCL, 0600)` 原子建立（inode 從未以其他 mode 存在）；回傳前刪除，屬 best-effort——失敗路徑先把整棵樹改回 owner-writable 再刪（封裝把目錄 entry 存成 0300／0400／0500 時 `removeItem` 原本刪不掉、整棵樹含私有副本留在共用命名空間，verify R7 logic N-L1-R7／security S-R7-3），仍刪不掉時印到 stderr、不回報給呼叫端；兩條 walk 都用 `lstat`＋`fchmodat(AT_SYMLINK_NOFOLLOW)`，永不跟隨 link（verify R8：`chmod` 曾跟著解壓樹裡被植入的 link 改到樹外檔案的 mode）——嚴格 walk 遇到 link 或特殊檔直接拒；建立目錄就失敗時不清理也不報（沒有東西可清）；所有錯誤訊息不含任何路徑、描述由 errno／error code 產生而非錯誤文字（verify R8：對文字做 token 過濾會留下帶引號的路徑、又砍掉只是以 `/` 開頭的字）；
   `of:` 版本不再先寫 scratch 檔，兩個入口都寫一份私有副本），**峰值磁碟 ≈ 解壓後大小 ＋ 一份私有副本，沒有上限**——1 MB 的 zip bomb 解出 1 GB、4 MB 解出 4 GB 就吃那麼多（清理正常，殘留 0），且 `TMPDIR` 不能把它導到有配額
   的卷。對抗性的 xmlns 密集 part（200 元素 × 4000 xmlns、4 MB）inspector 26.7 s（3.6.4 是 1.0 s，reader 63 s）。兩者都歸 #130。
 - **inspector 從純函式變成會寫暫存檔的函式**，這是 3.6.x 消費者升級最該知道的一件事。解壓政策與 reader 共用（`ZipHelper.unzip`）：

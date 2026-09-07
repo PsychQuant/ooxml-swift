@@ -65,6 +65,17 @@ public struct ZipHelper {
             }
         }
         let fm = FileManager.default
+        // Threat model (verify R8 security, measured): the descriptor checks
+        // below defeat anything planted at the namespace name before or while
+        // we create it, and anything a DIFFERENT user could do in a shared
+        // temporary directory (it cannot rename or replace our 0700 directory
+        // under a sticky or 0700 parent). They do not defeat a process running
+        // as the SAME user: extraction and every later read are path-based
+        // (ZIPFoundation and the reader take paths; macOS does not resolve
+        // `/dev/fd/N/child`, so there is no descriptor-relative extraction),
+        // and a same-uid process can rename our directory away at any time —
+        // it can also read the document directly, so that is outside the
+        // model, not a gap in it.
         // The namespace directory is owner-only from the moment it exists, and
         // it must be a real directory of ours. The path is never trusted twice
         // (verify R7 codex R7-1: "check, then create" let another uid plant a
@@ -89,9 +100,9 @@ public struct ZipHelper {
         // reported on stderr — it is the one thing this function cannot throw.
         defer { if !succeeded { removeTreeForcibly(tempDir) } }
         guard mkdirat(namespaceFD, uuid, 0o700) == 0 else {
-            throw WordError.invalidDocx("could not create the extraction directory \(tempDir.path) (errno \(errno))")
+            throw WordError.invalidDocx("could not create the extraction directory under the `\(namespace)` namespace (\(errnoText()))")
         }
-        let tempFD = try ownerOnlyDirectoryDescriptor(opening: uuid, relativeTo: namespaceFD, describedAs: tempDir.path)
+        let tempFD = try ownerOnlyDirectoryDescriptor(opening: uuid, relativeTo: namespaceFD)
         defer { close(tempFD) }
 
         // A UUID name cannot collide with any entry the archive declares; the
@@ -101,11 +112,11 @@ public struct ZipHelper {
         let copyName = UUID().uuidString + ".zip"
         let copyFD = openat(tempFD, copyName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard copyFD >= 0 else {
-            throw WordError.invalidDocx("could not create the package's private copy under \(tempDir.path) (errno \(errno))")
+            throw WordError.invalidDocx("could not create the package's private copy (\(errnoText()))")
         }
         let copyHandle = FileHandle(fileDescriptor: copyFD, closeOnDealloc: true)
         do { try copyHandle.write(contentsOf: data); try copyHandle.close() }
-        catch { throw WordError.invalidDocx("could not write the package's private copy under \(tempDir.path): \(error.localizedDescription)") }
+        catch { throw WordError.invalidDocx("could not write the package's private copy (\(describeWithoutPaths(error)))") }
         let privateCopy = tempDir.appendingPathComponent(copyName)
         // Every error from here on is ours to name (verify R7 logic N-L2-R7: a
         // raw POSIX error carried the temporary path to the caller).
@@ -122,21 +133,33 @@ public struct ZipHelper {
         // determined is an error too, not a file (codex R7-4). The root is set
         // before the walk (so a `./` entry cannot leave it unlistable) and
         // again after it.
-        guard fchmod(tempFD, 0o700) == 0 else { throw WordError.invalidDocx("could not make \(tempDir.path) owner-only (errno \(errno))") }
+        guard fchmod(tempFD, 0o700) == 0 else { throw WordError.invalidDocx("could not make the extraction directory owner-only (\(errnoText()))") }
         var walkError: Error?
         guard let walker = fm.enumerator(at: tempDir, includingPropertiesForKeys: [.isDirectoryKey], options: [], errorHandler: { _, error in walkError = error; return false }) else {
             throw WordError.invalidDocx("could not enumerate the extracted package under \(tempDir.path)")
         }
         for case let item as URL in walker {
             let relative = String(item.path.dropFirst(tempDir.path.count + 1))
-            guard let isDirectory = try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory else {
-                throw WordError.invalidDocx("could not determine whether \(relative) in the package is a directory; refusing a partial permission reset.")
+            // `lstat` + `fchmodat(AT_SYMLINK_NOFOLLOW)`: nothing here follows a
+            // link (verify R8: `chmod` through a link reached outside the tree).
+            // The archive cannot contain a link entry (refused before anything
+            // is written); one that appears anyway is refused, not chmod-ed.
+            var st = stat()
+            guard lstat(item.path, &st) == 0 else {
+                throw WordError.invalidDocx("could not stat \(relative) in the package (\(errnoText())); refusing a partial permission reset.")
             }
-            do { try fm.setAttributes([.posixPermissions: isDirectory ? 0o700 : 0o600], ofItemAtPath: item.path) }
-            catch { throw WordError.invalidDocx("could not make \(relative) in the package owner-only (\(describeWithoutPaths(error)))") }
+            let mode: mode_t
+            switch st.st_mode & S_IFMT {
+            case S_IFDIR: mode = 0o700
+            case S_IFREG: mode = 0o600
+            default: throw WordError.invalidDocx("\(relative) in the package is neither a file nor a directory (a link or special file appeared during extraction); refusing it.")
+            }
+            guard fchmodat(AT_FDCWD, item.path, mode, AT_SYMLINK_NOFOLLOW) == 0 else {
+                throw WordError.invalidDocx("could not make \(relative) in the package owner-only (\(errnoText()))")
+            }
         }
         if let walkError { throw WordError.invalidDocx("could not enumerate the extracted package (\(describeWithoutPaths(walkError)))") }
-        guard fchmod(tempFD, 0o700) == 0 else { throw WordError.invalidDocx("could not make \(tempDir.path) owner-only (errno \(errno))") }
+        guard fchmod(tempFD, 0o700) == 0 else { throw WordError.invalidDocx("could not make the extraction directory owner-only (\(errnoText()))") }
         succeeded = true
         return tempDir
     }
@@ -147,24 +170,47 @@ public struct ZipHelper {
     /// is reported on stderr with its path, the one place a path is useful.
     static func removeTreeForcibly(_ root: URL) {
         let fm = FileManager.default
-        chmod(root.path, 0o700)
+        var rootStat = stat()
+        guard lstat(root.path, &rootStat) == 0 else { return }       // never existed (creation failed) or already gone — nothing to report
+        fchmodat(AT_FDCWD, root.path, 0o700, AT_SYMLINK_NOFOLLOW)
         if let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [], errorHandler: { _, _ in true }) {
             for case let item as URL in walker {
                 var st = stat()
                 guard lstat(item.path, &st) == 0 else { continue }
-                chmod(item.path, (st.st_mode & S_IFMT) == S_IFDIR ? 0o700 : 0o600)
+                switch st.st_mode & S_IFMT {
+                case S_IFDIR: fchmodat(AT_FDCWD, item.path, 0o700, AT_SYMLINK_NOFOLLOW)
+                case S_IFREG: fchmodat(AT_FDCWD, item.path, 0o600, AT_SYMLINK_NOFOLLOW)
+                default: break                                        // a link is removed with the tree, never followed (verify R8)
+                }
             }
         }
         do { try fm.removeItem(at: root) }
-        catch { FileHandle.standardError.write(Data("ooxml-swift: could not remove the partial extraction at \(root.path) after a failure (\(error.localizedDescription))\n".utf8)) }
+        catch { FileHandle.standardError.write(Data("ooxml-swift: could not remove the partial extraction at \(root.path) after a failure (\(describeWithoutPaths(error)))\n".utf8)) }
     }
 
-    /// An error's description with no file-system path in it (the temporary
-    /// directory is not the caller's business — #146).
+    /// `strerror(errno)` for the calling thread's last error.
+    static func errnoText() -> String { String(cString: strerror(errno)) }
+
+    /// A description built from the error's code, never from its text: an
+    /// error's text can carry a file-system path, and the temporary
+    /// directory is not the caller's business (#146; verify R8: a token
+    /// filter kept quoted paths and dropped words that merely began with `/`).
     static func describeWithoutPaths(_ error: Error) -> String {
         let ns = error as NSError
-        let text = ns.localizedFailureReason ?? ns.localizedDescription
-        return text.split(separator: " ").filter { !$0.hasPrefix("/") && !$0.hasPrefix("“/") }.joined(separator: " ")
+        if ns.domain == NSPOSIXErrorDomain { return String(cString: strerror(Int32(ns.code))) }
+        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError, underlying.domain == NSPOSIXErrorDomain {
+            return String(cString: strerror(Int32(underlying.code)))
+        }
+        if ns.domain == NSCocoaErrorDomain {
+            switch ns.code {
+            case 4, 260: return "no such file"
+            case 513: return "permission denied"
+            case 516: return "file exists"
+            case 640: return "no space left"
+            default: return "file error \(ns.code)"
+            }
+        }
+        return "\(ns.domain) error \(ns.code)"
     }
 
     /// `mkdir(path, 0700)` — atomic create or `EEXIST` — then open the directory
@@ -172,31 +218,32 @@ public struct ZipHelper {
     /// by this uid, mode 0700 (any other mode of our own directory is reset;
     /// anyone else's, or a file or link planted at the name, is refused).
     private static func ownerOnlyDirectoryDescriptor(creatingIfAbsent path: String) throws -> Int32 {
+        let name = "the `" + (path as NSString).lastPathComponent + "` extraction namespace"
         if mkdir(path, 0o700) != 0, errno != EEXIST {
-            throw WordError.invalidDocx("could not create the extraction namespace \(path) (errno \(errno))")
+            throw WordError.invalidDocx("could not create \(name) (\(errnoText()))")
         }
         let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else {
-            throw WordError.invalidDocx("the extraction namespace \(path) cannot be opened as a real directory (errno \(errno)); a symbolic link or a file planted there is refused.")
+            throw WordError.invalidDocx("\(name) cannot be opened as a real directory (\(errnoText())); a symbolic link or a file planted there is refused.")
         }
-        do { try verifyOwnerOnlyDirectory(fd, describedAs: path) } catch { close(fd); throw error }
+        do { try verifyOwnerOnlyDirectory(fd, describedAs: name) } catch { close(fd); throw error }
         return fd
     }
 
-    private static func ownerOnlyDirectoryDescriptor(opening name: String, relativeTo parentFD: Int32, describedAs path: String) throws -> Int32 {
+    private static func ownerOnlyDirectoryDescriptor(opening name: String, relativeTo parentFD: Int32) throws -> Int32 {
         let fd = openat(parentFD, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard fd >= 0 else { throw WordError.invalidDocx("could not open the extraction directory \(path) just created (errno \(errno))") }
-        do { try verifyOwnerOnlyDirectory(fd, describedAs: path) } catch { close(fd); throw error }
+        guard fd >= 0 else { throw WordError.invalidDocx("could not open the extraction directory just created (\(errnoText()))") }
+        do { try verifyOwnerOnlyDirectory(fd, describedAs: "the extraction directory") } catch { close(fd); throw error }
         return fd
     }
 
-    private static func verifyOwnerOnlyDirectory(_ fd: Int32, describedAs path: String) throws {
+    private static func verifyOwnerOnlyDirectory(_ fd: Int32, describedAs name: String) throws {
         var st = stat()
-        guard fstat(fd, &st) == 0 else { throw WordError.invalidDocx("could not stat \(path) (errno \(errno))") }
-        guard (st.st_mode & S_IFMT) == S_IFDIR else { throw WordError.invalidDocx("\(path) exists but is not a directory; refusing to extract.") }
-        guard st.st_uid == getuid() else { throw WordError.invalidDocx("\(path) is owned by another user (uid \(st.st_uid)); refusing to extract.") }
+        guard fstat(fd, &st) == 0 else { throw WordError.invalidDocx("could not stat \(name) (\(errnoText()))") }
+        guard (st.st_mode & S_IFMT) == S_IFDIR else { throw WordError.invalidDocx("\(name) exists but is not a directory; refusing to extract.") }
+        guard st.st_uid == getuid() else { throw WordError.invalidDocx("\(name) is owned by another user (uid \(st.st_uid)); refusing to extract.") }
         if (st.st_mode & 0o7777) != 0o700 {                                  // created by an older version, or by hand
-            guard fchmod(fd, 0o700) == 0 else { throw WordError.invalidDocx("could not make \(path) owner-only (errno \(errno))") }
+            guard fchmod(fd, 0o700) == 0 else { throw WordError.invalidDocx("could not make \(name) owner-only (\(errnoText()))") }
         }
     }
 

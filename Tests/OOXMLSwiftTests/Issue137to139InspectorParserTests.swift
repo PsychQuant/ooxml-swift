@@ -1359,6 +1359,59 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: nsDir.path)) ?? ["(missing)"], [], "nothing stays behind")
     }
 
+    func testCleanupNeverFollowsASymbolicLink() throws {
+        // verify R8 security/logic: `removeTreeForcibly` used `chmod`, which
+        // follows a link — a link planted inside a failed extraction changed
+        // the mode of a file and a directory OUTSIDE the tree. Now lstat +
+        // fchmodat(AT_SYMLINK_NOFOLLOW): the link is removed with the tree,
+        // never followed.
+        let tmp = FileManager.default.temporaryDirectory
+        let outside = tmp.appendingPathComponent("i137-outside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o755])
+        defer { try? FileManager.default.removeItem(at: outside) }
+        let outsideFile = outside.appendingPathComponent("target.txt")
+        try Data("t".utf8).write(to: outsideFile); try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: outsideFile.path)
+        let root = tmp.appendingPathComponent("i137-tree-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("sub/link-file"), withDestinationURL: outsideFile)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("link-dir"), withDestinationURL: outside)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: root.appendingPathComponent("sub").path)   // unremovable until reset
+        ZipHelper.removeTreeForcibly(root)
+        func mode(_ url: URL) throws -> Int { try XCTUnwrap(FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path), "the tree (0500 directory included) is removed")
+        XCTAssertEqual(try mode(outside), 0o755, "the directory behind a link is untouched")
+        XCTAssertEqual(try mode(outsideFile), 0o644, "the file behind a link is untouched")
+    }
+
+    func testACreationFailureNamesNoPathAndLeavesNoReport() throws {
+        // verify R8 logic: with the namespace made immutable, `mkdirat` fails —
+        // the error must not carry the temporary path, and nothing is removed
+        // (nor reported) because nothing was created.
+        let data = try zipEntries([("word/document.xml", body())])
+        let ns = "i137-ns-\(UUID().uuidString)"
+        let nsDir = FileManager.default.temporaryDirectory.appendingPathComponent(ns)
+        try FileManager.default.createDirectory(at: nsDir, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        guard chflags(nsDir.path, UInt32(UF_IMMUTABLE)) == 0 else { throw XCTSkip("cannot set UF_IMMUTABLE here") }
+        defer { chflags(nsDir.path, 0); try? FileManager.default.removeItem(at: nsDir) }
+        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns)) { error in
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("could not create the extraction directory"), message)
+            XCTAssertFalse(message.contains("/"), "no path in the message: \(message)")
+        }
+    }
+
+    func testErrorDescriptionsAreBuiltFromCodesNotText() {
+        // verify R8: a token filter on the error text kept quoted paths and dropped
+        // words that merely began with `/`; descriptions now come from the code.
+        let posix = NSError(domain: NSPOSIXErrorDomain, code: 13, userInfo: [NSFilePathErrorKey: "/var/x/y.zip"])
+        XCTAssertEqual(ZipHelper.describeWithoutPaths(posix), "Permission denied")
+        let cocoa = NSError(domain: NSCocoaErrorDomain, code: 513, userInfo: [NSLocalizedDescriptionKey: "“/var/x/y.zip” couldn’t be removed.", NSFilePathErrorKey: "/var/x/y.zip"])
+        XCTAssertEqual(ZipHelper.describeWithoutPaths(cocoa), "permission denied")
+        let wrapped = NSError(domain: NSCocoaErrorDomain, code: 4, userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: 2, userInfo: nil), NSFilePathErrorKey: "/var/x"])
+        XCTAssertEqual(ZipHelper.describeWithoutPaths(wrapped), "No such file or directory")
+        XCTAssertFalse(ZipHelper.describeWithoutPaths(NSError(domain: "Other", code: 7, userInfo: [NSLocalizedDescriptionKey: "at /tmp/z"])).contains("/"))
+    }
+
     func testAPrefixedIdAttributeIsNotTheRelationshipId() throws {
         // logic N-L4-R6: `r:Id="…"` / `xmlns:Id="…"` are not the Id attribute; the
         // spelling map must not attribute a cause to them.
