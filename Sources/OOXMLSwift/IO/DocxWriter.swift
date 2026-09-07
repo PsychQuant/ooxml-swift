@@ -694,8 +694,15 @@ public struct DocxWriter {
     /// or nil — found by walking the fragment attribute by attribute, the same
     /// way the text scan does, so an `a='b'` inside another attribute's VALUE
     /// is never named (verify R9 logic: a regex over the raw text named it).
+    /// Only the four attributes the merge actually reads can make it skip a
+    /// tag, so only those may be named as the cause. Naming any unreadable
+    /// attribute named a bystander and attached a false "so it skips the whole
+    /// tag" to it: `xmlns:foo='urn:x'` on its own saves fine, and a user who
+    /// followed that message would fix it and get the same refusal again
+    /// (verify R11 DA N-DA11-3, logic N-L11C-1).
     static func firstUnreadableAttribute(in tagText: String) -> String? {
-        RelationshipsOverlay.tokenize(tagText)?.first { !$0.readable }?.name
+        guard let tokens = RelationshipsOverlay.tokenize(tagText) else { return nil }
+        return tokens.first { !$0.readable && RelationshipsOverlay.gatedAttributeNames.contains($0.name) }?.name
     }
 
     /// Why the relationship merge's text scan (`RelationshipsOverlay.rawIds`,

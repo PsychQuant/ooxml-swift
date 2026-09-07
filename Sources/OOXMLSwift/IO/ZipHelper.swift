@@ -227,6 +227,14 @@ public struct ZipHelper {
             case "\n": out += "\\n"
             case "\t": out += "\\t"
             case "\r": out += "\\r"
+            // The escape character and the delimiter the messages wrap this text
+            // in are themselves attacker-supplied when they appear in a name
+            // (verify R11 security N-S11-1: an entry literally named `a\u{202E}b`
+            // rendered identically to one containing a real U+202E, so the
+            // rendering could not be read back; N-S11-3: an id containing a
+            // backtick closed the code span and let prose escape it).
+            case "\\": out += "\\\\"
+            case "`": out += "\\u{60}"
             case _ where isEscapedInDisplay(scalar): out += String(format: "\\u{%02X}", scalar.value)
             default: out.unicodeScalars.append(scalar)
             }
@@ -244,15 +252,30 @@ public struct ZipHelper {
         relativeName(of: item, rootPrefixes: rootPrefixes(of: root))
     }
 
-    /// The two spellings of `root` an enumerated item can start with. Computed
-    /// once per walk: resolving the root for every item made a 32 000-entry
-    /// walk ~1.6× slower (verify R10 security N-S10-4).
+    /// The spellings of `root` an enumerated item can start with, deduplicated
+    /// — on the default macOS temporary directory the resolved and unresolved
+    /// forms are the SAME string, and comparing both meant every item paid the
+    /// identical failing comparison twice (verify R11 logic N-L11-2).
+    ///
+    /// Computed once per walk: resolving the root for every item made a
+    /// 32 000-entry walk ~1.6× slower (verify R10 security N-S10-4). That
+    /// hoisting is where the win came from — 183 → 15.6 ms per 20 000 items.
     static func rootPrefixes(of root: URL) -> [String] {
-        [root.resolvingSymlinksInPath().path + "/", root.path + "/"]
+        let resolved = root.resolvingSymlinksInPath().path + "/", raw = root.path + "/"
+        return resolved == raw ? [resolved] : [resolved, raw]
     }
 
+    /// `item`'s name under a root whose prefixes are already computed.
+    ///
+    /// The unresolved path is tried first, but do not read that as a fast path
+    /// that usually hits: on the default `TMPDIR` the enumerator hands back
+    /// `/private/var/…` while the root resolves to `/var/…`, so it hits ZERO
+    /// times in a real walk (verify R11 logic N-L11-2, measured over 55 items)
+    /// and every item falls through to the resolver. It is kept because it IS
+    /// the cheap answer wherever the two forms agree, and it costs one string
+    /// comparison where they do not.
     static func relativeName(of item: URL, rootPrefixes: [String]) -> String {
-        let unresolved = item.path                                  // the cheap comparison first; resolve the item only when it fails
+        let unresolved = item.path
         for prefix in rootPrefixes where unresolved.hasPrefix(prefix) { return String(unresolved.dropFirst(prefix.count)) }
         let resolved = item.resolvingSymlinksInPath().path
         for prefix in rootPrefixes where resolved.hasPrefix(prefix) { return String(resolved.dropFirst(prefix.count)) }
