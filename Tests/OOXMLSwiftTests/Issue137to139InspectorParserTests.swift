@@ -1456,6 +1456,66 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         }
     }
 
+    func testAValueContainingASelfClosingSequenceIsRefusedNotTruncated() throws {
+        // verify R9 logic / requirements N-R9-1 (a fix-round-9 regression): the tag
+        // regex is lazy up to `/>`, so `/>` inside the LAST attribute's value cuts
+        // the attribute text mid-value. The tokenizer once returned the prefix and
+        // the merge wrote a truncated Target (and dropped TargetMode) with exit 0.
+        // Now an unterminated value makes the whole tag untrusted → refused.
+        XCTAssertNil(RelationshipsOverlay.tokenize(#"Id="rId9" Type="t" Target="theme/a/"#), "unterminated value: no tokens at all")
+        XCTAssertNil(RelationshipsOverlay.attribute(#"Id="rId9" Type="t" Target="theme/a/"#, name: "Id"), "even an earlier, intact Id is not read from a cut tag")
+        let base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+        for relationship in ["<Relationship Id=\"rId9\" Type=\"\(base)\" Target=\"settings.xml?a=1/>2\"/>",
+                             "<Relationship Id=\"rId9\" Type=\"\(base)\" Target=\"https://example.com/q?a=1/>2\" TargetMode=\"External\"/>",
+                             "<Relationship Id=\"rId9\" Type=\"\(base)/>evil\" Target=\"x\"/>"] {
+            let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" + relationship + "</Relationships>"
+            let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
+            XCTAssertTrue(message.contains("does not match"), message.prefix(200).description)
+            XCTAssertTrue(message.contains("rId9: an attribute value containing `>`"), message.suffix(300).description)
+        }
+    }
+
+    func testTheRelativeNameIsComputedUnderTheResolvedRoot() throws {
+        // verify R8 logic NEW-L1 / R9 NEW-R9-2: `temporaryDirectory` is `/var/…`, an
+        // enumerator returns `/private/var/…`, and Foundation's resolver maps both
+        // to the `/var/…` form — the previous prefix set never matched.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("i137-rel-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("x".utf8).write(to: root.appendingPathComponent("word/_rels/document.xml.rels"))
+        let walker = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+        var names: [String] = []
+        for case let item as URL in walker { names.append(ZipHelper.relativeName(of: item, under: root)) }
+        XCTAssertEqual(names.sorted(), ["word", "word/_rels", "word/_rels/document.xml.rels"])
+    }
+
+    func testTheSiblingCauseIsFoundByTokenizingNotByRegex() throws {
+        // verify R9 logic: `Target="http://x/?a='b'"` must not name `a`; the real
+        // unreadable sibling is `Type`.
+        XCTAssertEqual(DocxWriter.firstUnreadableAttribute(in: #" Target="http://x/?a='b'" Type='t'"#), "Type")
+        XCTAssertNil(DocxWriter.firstUnreadableAttribute(in: #" Target="http://x/?a='b'" Type="t""#))
+        XCTAssertNil(DocxWriter.firstUnreadableAttribute(in: #" Target="cut/"#), "a cut fragment names nothing")
+    }
+
+    func testDisplayNameEscapesLineSeparatorsAndCapsTheRenderedText() {
+        // verify R9 security N-S9-2: U+2028 / U+2029 are line breaks to a renderer;
+        // R9 logic NEW-R9-4: escapes expand, so the rendered text has its own cap.
+        let shown = ZipHelper.displayName("a\u{2028}b\u{2029}c\u{200B}d\u{202E}e\u{FEFF}f")
+        XCTAssertFalse(shown.contains("\u{2028}") || shown.contains("\u{2029}") || shown.contains("\u{200B}") || shown.contains("\u{202E}") || shown.contains("\u{FEFF}"), shown)
+        XCTAssertTrue(shown.contains("\\u{2028}"), shown)
+        XCTAssertLessThanOrEqual(ZipHelper.displayName(String(repeating: "\u{01}", count: 9000)).count, 481)
+    }
+
+    func testADecodedIdCannotInjectALineIntoTheMessage() throws {
+        // verify R9 security N-S9-1: the parser decodes `&#10;` inside an Id to a
+        // real newline; the message shows ids as escaped text.
+        let base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+        let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId&#10;ooxml-swift: all good&#10;9\" Type=\"\(base)\" Target=\"x\" TargetMode=\"External\"/></Relationships>"
+        let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
+        XCTAssertFalse(message.contains("\n"), "no real newline in the message: \(message.prefix(300))")
+        XCTAssertTrue(message.contains("\\n"), message.suffix(300).description)
+    }
+
     func testAPrefixedIdAttributeIsNotTheRelationshipId() throws {
         // logic N-L4-R6: `r:Id="…"` / `xmlns:Id="…"` are not the Id attribute; the
         // spelling map must not attribute a cause to them.
