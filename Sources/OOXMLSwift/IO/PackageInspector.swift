@@ -37,7 +37,9 @@ public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
 ///
 /// **Coverage (read this before relying on it):**
 /// - Declarations are taken from every `<dir>/_rels/<name>.xml.rels` under
-///   `word/` whose owner is an `.xml` part — present or absent — and each
+///   `word/` whose owner `<name>.xml` is an `.xml` part with a **non-empty**
+///   `<name>` — present or absent. (A bare `_rels/.xml.rels` names no owner;
+///   it is neither read nor reported — #146.) Each
 ///   part's declared image relationships are compared against references
 ///   found in **that part only** (`<dir>/<name>.xml`). Header/footer/footnote
 ///   and nested (`word/charts/…`) images are therefore covered, and a `rId4`
@@ -59,7 +61,8 @@ public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
 ///   parser's report, not a rule of ours). `XMLParser` is otherwise **more
 ///   lenient than the reader's `XMLDocument` on namespace well-formedness**,
 ///   and that leniency is deliberate, not a gap to fill: a QName with two
-///   colons or a trailing colon, a leading colon under a default namespace,
+///   colons or a trailing colon (on a declared prefix — `<zz:/>` is refused
+///   by the no-mapping rule, not accepted by this one), a leading colon under a default namespace,
 ///   a prefix bound to an invalid URI, the `xml` prefix bound to the wrong
 ///   URI, and two prefixes for one URI carrying the same attribute all
 ///   parse here and are refused by the reader (verify R3 DA, twelve
@@ -116,6 +119,12 @@ public struct ImageRelationshipRef: Equatable, Hashable, Sendable {
 ///   scanned part, not routed per part. A part without a declaring rels is
 ///   not scanned at all, so `settings.xml` (which almost never has one) is
 ///   not in that set. Cost caps and determinism rules, not reader parity.
+/// - Whether a listed name *is* an `.xml` part is also asked of the file
+///   system: `<stem>.xml` must be the same file as the listed name. On a
+///   case-sensitive volume `word/DOCUMENT.XML` therefore is not one — it is
+///   neither scanned nor listed as unparsable (verify R6 security; the
+///   shipping temporary volume is case-insensitive, and non-`.xml` names are
+///   #144's class).
 /// - A part that is present but refused or unreadable is listed in
 ///   `unparsableParts`. An unreadable `.rels` contributes no declarations at
 ///   all; an unreadable content part keeps its rels' declarations in the
@@ -229,15 +238,18 @@ public enum PackageInspector {
     ///
     /// **This function has a side effect and a cost that 3.6.x did not**: it
     /// writes the package's contents into `FileManager.default.temporaryDirectory`
-    /// (a UUID-named directory under `ooxml-swift-inspector/` — the reader's
-    /// `che-word-mcp/` namespace is not shared, so its own leak checks keep
-    /// meaning; removed before returning, on every path) — peak disk use is the extracted size, plus
-    /// the package size once more for the `Data` overload, and nothing caps
-    /// either (PsychQuant/ooxml-swift#130). The extraction policy is
+    /// (a UUID-named, owner-only directory under `ooxml-swift-inspector/` —
+    /// the reader's `che-word-mcp/` namespace is not shared, so its own leak
+    /// checks keep meaning; removed before returning on every path, as a
+    /// best effort: a removal that fails is not reported) — peak disk use is the extracted size, plus
+    /// the package size once more (both overloads write one private copy
+    /// before extracting), and nothing caps either
+    /// (PsychQuant/ooxml-swift#130). The extraction policy is
     /// `ZipHelper.unzip`'s, shared with the reader: an archive with a
-    /// symbolic-link entry, a `..` path component or an absolute entry path
-    /// is refused before anything is written (a link to `.` plus `..`
-    /// components would otherwise write outside the directory — verify R4).
+    /// symbolic-link entry, a `..` path component, an absolute entry path,
+    /// or an empty or NUL-containing entry path is refused before anything
+    /// is written (a link to `.` plus `..` components would otherwise write
+    /// outside the directory — verify R4).
     ///
     /// A package the reader cannot extract — two entries whose names collide
     /// on the file system (`word/document.xml` twice, or once as
@@ -253,7 +265,9 @@ public enum PackageInspector {
         try imageConsistencyReport(extracting: { try ZipHelper.unzip(data: packageData, namespace: ZipHelper.inspectorNamespace) })
     }
 
-    /// The same report for a package already on disk; nothing is copied.
+    /// The same report for a package already on disk. Both entry points read
+    /// the bytes into memory, scan them, and extract from one owner-only
+    /// private copy; this one only saves the caller the read.
     public static func imageConsistencyReport(ofPackageAt url: URL) throws -> ImageConsistencyReport {
         try imageConsistencyReport(extracting: { try ZipHelper.unzip(data: try Data(contentsOf: url), namespace: ZipHelper.inspectorNamespace) })
     }
@@ -296,8 +310,10 @@ public enum PackageInspector {
             catch { throw WordError.invalidDocx("could not read file attributes under the extracted package (\(error.localizedDescription)); no consistency verdict.") }
         }
         func identity(_ fileURL: URL, ofType type: FileAttributeType = .typeRegular) throws -> FileIdentity? {
-            guard let attrs = try attributes(fileURL), (attrs[.type] as? FileAttributeType) == type,
-                  let device = (attrs[.systemNumber] as? NSNumber)?.intValue, let inode = (attrs[.systemFileNumber] as? NSNumber)?.intValue else { return nil }
+            guard let attrs = try attributes(fileURL), (attrs[.type] as? FileAttributeType) == type else { return nil }
+            guard let device = (attrs[.systemNumber] as? NSNumber)?.intValue, let inode = (attrs[.systemFileNumber] as? NSNumber)?.intValue else {
+                throw WordError.invalidDocx("could not establish the file identity of \(fileURL.lastPathComponent) under the extracted package; no consistency verdict.")
+            }
             return FileIdentity(device: device, inode: inode)
         }
         /// A part as the file system serves it to the reader, or nil when
@@ -341,9 +357,10 @@ public enum PackageInspector {
         /// reads (`word/_rels/\(target).rels`). Returns false when there is
         /// no such rels. (`word/charts/chart1.xml` ↔ `word/charts/_rels/chart1.xml.rels`,
         /// not `word/_rels/charts/…` — R3 codex F5 corrected that formula.)
-        /// Returns nil when there is no rels; otherwise how many relationships
-        /// it declares (0 for an empty one, 0 for one that could not be read —
-        /// which is recorded in `unparsableParts`).
+        /// Returns nil when there is no rels; otherwise how many `Relationship`
+        /// elements carrying an `Id` it declares (0 for an empty one — a
+        /// `Relationship` without an `Id` has nothing to reconcile — and 0 for
+        /// one that could not be read, which is recorded in `unparsableParts`).
         @discardableResult
         func declare(part: String) throws -> Int? {
             let slash = part.lastIndex(of: "/").map { part.index(after: $0) } ?? part.startIndex
@@ -419,8 +436,10 @@ public enum PackageInspector {
         var mediaIsDirectory: ObjCBool = false
         var media = 0
         if fm.fileExists(atPath: mediaDir.path, isDirectory: &mediaIsDirectory), mediaIsDirectory.boolValue {
-            do { media = try listDirectory(mediaDir).filter { (try? identity(mediaDir.appendingPathComponent($0))) != nil }.count }
+            let names: [String]
+            do { names = try listDirectory(mediaDir) }
             catch { throw WordError.invalidDocx("could not list the package's word/media directory after extraction (\(error.localizedDescription)); no consistency verdict.") }
+            for name in names where try identity(mediaDir.appendingPathComponent(name)) != nil { media += 1 }
         }
 
         return ImageConsistencyReport(
@@ -656,10 +675,11 @@ private final class RelsScanner: NamespaceTrackingScanner {
     /// per-element list that grew with every distinct prefixed name and made
     /// the dedup quadratic, the very shape #138 exists to prevent). Real Word
     /// output has none of these.
-    var structure: [String] { Kind.allCases.compactMap { noted[$0] } }
+    var structure: [String] { order.compactMap { noted[$0] } }
     private enum Kind: CaseIterable { case comment, cdata, processingInstruction, prefixedElement }
     private var noted: [Kind: String] = [:]
-    private func note(_ kind: Kind, _ what: @autoclosure () -> String) { if noted[kind] == nil { noted[kind] = what() } }
+    private var order: [Kind] = []                                 // first-seen order, at most four
+    private func note(_ kind: Kind, _ what: @autoclosure () -> String) { if noted[kind] == nil { noted[kind] = what(); order.append(kind) } }
 
     func parser(_ parser: XMLParser, foundComment comment: String) { note(.comment, "an XML comment") }
     func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) { note(.cdata, "a CDATA section") }

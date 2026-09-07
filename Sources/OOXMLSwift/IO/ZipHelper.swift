@@ -6,7 +6,9 @@ public struct ZipHelper {
     /// 解壓縮 ZIP 檔案到臨時目錄
     ///
     /// Refuses an archive that carries a symbolic-link entry, an entry whose
-    /// path has a `..` component, or an absolute entry path (v3.7.0). Either
+    /// path has a `..` component, an absolute entry path, or an empty or
+    /// NUL-containing entry path (v3.7.0; the five are listed once more on
+    /// `unzip(data:)`, which this calls). Either
     /// half on its own is enough to write outside the destination: a link to
     /// `.` inside the archive makes the kernel resolve later `..` components
     /// in place while ZIPFoundation's containment check collapses them
@@ -40,7 +42,11 @@ public struct ZipHelper {
     /// extracting a second open let a source file swapped in between bring
     /// the symlink + `..` chain back). Nothing is written before the policy
     /// scan passes.
-    public static func unzip(data: Data, namespace: String = readerNamespace) throws -> URL {
+    /// Public entry for bytes already in hand (the reader's namespace).
+    public static func unzip(data: Data) throws -> URL { try unzip(data: data, namespace: readerNamespace) }
+
+    static func unzip(data: Data, namespace: String) throws -> URL {
+        precondition(!namespace.isEmpty && !namespace.contains("/") && namespace != "." && namespace != "..", "namespace must be one path component")
         let archive = try Archive(data: data, accessMode: .read)
         for entry in archive {
             if entry.type == .symlink {
@@ -55,28 +61,52 @@ public struct ZipHelper {
                 throw WordError.invalidDocx("the package contains an entry whose path leaves its own directory (\(path)); refusing to extract it.")
             }
         }
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent(namespace)
-            .appendingPathComponent(UUID().uuidString)
-
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        // The namespace directory is owner-only from the moment it exists,
+        // and it must be a real directory of ours — a pre-planted symbolic
+        // link there would redirect every extraction (verify R6).
+        let namespaceDir = fm.temporaryDirectory.appendingPathComponent(namespace)
+        if let attrs = try? fm.attributesOfItem(atPath: namespaceDir.path) {
+            guard (attrs[.type] as? FileAttributeType) == .typeDirectory else {     // attributesOfItem does not follow links
+                throw WordError.invalidDocx("the extraction namespace \(namespaceDir.path) exists but is not a directory; refusing to extract.")
+            }
+            if let owner = (attrs[.ownerAccountID] as? NSNumber)?.uint32Value, owner != getuid() {
+                throw WordError.invalidDocx("the extraction namespace \(namespaceDir.path) is owned by another user (uid \(owner)); refusing to extract.")
+            }
+            if (attrs[.posixPermissions] as? Int) != 0o700 {                  // created by an older version, or by hand
+                try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: namespaceDir.path)
+            }
+        } else {
+            try fm.createDirectory(at: namespaceDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        }
+        let tempDir = namespaceDir.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         do {
-            // A UUID name cannot collide with any entry the archive declares.
+            // A UUID name cannot collide with any entry the archive declares;
+            // the copy is owner-only from creation.
             let privateCopy = tempDir.appendingPathComponent(UUID().uuidString + ".zip")
-            try data.write(to: privateCopy)
-            try FileManager.default.unzipItem(at: privateCopy, to: tempDir)
-            try FileManager.default.removeItem(at: privateCopy)
+            guard fm.createFile(atPath: privateCopy.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+                throw WordError.invalidDocx("could not write the package's private copy under \(tempDir.path)")
+            }
+            try fm.unzipItem(at: privateCopy, to: tempDir)
+            try fm.removeItem(at: privateCopy)
             // ZIPFoundation applies the archive's own permission bits — setuid,
             // setgid, sticky, world-writable included (verify R5). Nothing in a
-            // package needs any of that: owner-only, no special bits.
-            if let walker = FileManager.default.enumerator(at: tempDir, includingPropertiesForKeys: [.isDirectoryKey]) {
-                for case let item as URL in walker {
-                    let isDirectory = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-                    try FileManager.default.setAttributes([.posixPermissions: isDirectory ? 0o700 : 0o600], ofItemAtPath: item.path)
-                }
+            // package needs any of that: owner-only, no special bits, on every
+            // item including the root; a walk that cannot complete is an error,
+            // not a partial result (verify R6).
+            var walkError: Error?
+            guard let walker = fm.enumerator(at: tempDir, includingPropertiesForKeys: [.isDirectoryKey], options: [], errorHandler: { _, error in walkError = error; return false }) else {
+                throw WordError.invalidDocx("could not enumerate the extracted package under \(tempDir.path)")
             }
+            for case let item as URL in walker {
+                let isDirectory = try item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory ?? false
+                try fm.setAttributes([.posixPermissions: isDirectory ? 0o700 : 0o600], ofItemAtPath: item.path)
+            }
+            if let walkError { throw walkError }
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tempDir.path)
         } catch {
-            try? FileManager.default.removeItem(at: tempDir)   // nothing to keep from a failed extraction
+            try? fm.removeItem(at: tempDir)   // nothing to keep from a failed extraction
             throw error
         }
 

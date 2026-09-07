@@ -393,8 +393,10 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     func testNamespaceIllFormednessBeyondUndeclaredPrefixesIsDocumentedLeniencyNotParity() throws {
         // verify R3 DA D1: XMLDocument (the reader) refuses twelve classes of
         // namespace ill-formedness; XMLParser refuses none of them, and the
-        // inspector re-implements exactly one (an undeclared prefix, the one
-        // shape a real writer produces). The rest are documented leniency —
+        // inspector re-implements exactly two (an undeclared prefix — the one
+        // shape a real writer produces — and a prefix bound to an empty URI:
+        // one rule, "no reported mapping", two of the reader's classes). The
+        // other ten are documented leniency —
         // this test pins that boundary so nobody claims reader parity again,
         // and so nobody starts emulating libxml2's namespace layer in a
         // delegate either (the anti-pattern #137 removed from the consumer).
@@ -449,7 +451,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     func testMediaEntryCountCountsFilesNotTheDirectoryEntryAndCollidingMediaRefusesLikeTheReader() throws {
         // verify R3 DA D3 / M9: media counting had no test at all. Files
         // directly under word/media count; the `word/media/` directory entry
-        // some writers store does not (3.6.4 counted it — 6/740 real docs
+        // some writers store does not (3.6.4 counted it — 7/740 real docs
         // differ by exactly 1). A second entry that lands on the same media
         // file makes extraction fail, so the report is refused exactly when
         // the reader is (there is no count to "flatten" any more).
@@ -560,10 +562,12 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // file system the reader extracts onto; it must not be a mute switch
         // here. (Since R3 the inspector extracts the same way, so this holds
         // by construction — and on a case-sensitive volume both would refuse.)
-        // Not pinned here: that the document dedupe compares file identity
-        // rather than folding the name — on this (case-insensitive) volume the
-        // two are indistinguishable for an ASCII name (verify R5 DA-R5-3); a
-        // case-sensitive volume is the only oracle, see the R6 security prompt.
+        // Not pinned here, pinned elsewhere: that the document dedupe compares
+        // file identity rather than folding the name. On this (case-insensitive)
+        // volume the two are indistinguishable for an ASCII name (verify R5
+        // DA-R5-3); verify R6 security pinned it on a case-sensitive APFS volume
+        // (`word/Document.xml` beside `word/document.xml` is scanned as its own
+        // part and its orphan reported — a case-folding dedupe would hide it).
         let parts: [String: String] = [
             "Word/document.xml": body(),
             "Word/_rels/document.xml.rels": rels(#"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#),
@@ -747,7 +751,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         XCTAssertTrue(message.contains("#142"), message)
         // verify R5 (codex W-R5-1 / req R5-7 / logic L3): the cause is named as
         // what it is — the raw spelling that decodes to the parsed id.
-        XCTAssertTrue(message.contains("character reference"), message)
+        XCTAssertTrue(message.contains("character or entity reference"), message)
         XCTAssertFalse(message.contains("does not recognise"), message)
     }
 
@@ -973,7 +977,8 @@ final class Issue137to139InspectorParserTests: XCTestCase {
 
     func testAbsoluteNulAndDirectoryTraversalEntriesAreRefusedBeforeAnythingIsWritten() throws {
         // verify R5 (codex Z-R5-1): the absolute-path branch of the policy had
-        // no test; a `..` directory entry and an empty path are refused too.
+        // no test; a `..` directory entry is refused too. Empty and NUL paths
+        // have their own test (testEmptyAndNulEntryPathsAreRefusedBeforeExtraction).
         let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
         let base: [(String, String)] = [("word/document.xml", body(referencing: "rId4")), ("word/_rels/document.xml.rels", rels(rel)), ("word/media/image1.png", "png")]
         for (label, extra) in [("absolute file", ("/tmp/i137-abs-\(UUID().uuidString).xml", "<x/>")), ("absolute directory", ("/tmp/i137-absdir-\(UUID().uuidString)/", "")), ("dot-dot directory", ("word/../i137-dd-\(UUID().uuidString)/", ""))] {
@@ -997,22 +1002,27 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("i137-\(UUID().uuidString).docx")
         try data.write(to: url); defer { try? FileManager.default.removeItem(at: url) }
         XCTAssertEqual(try PackageInspector.imageConsistencyReport(of: data), try PackageInspector.imageConsistencyReport(ofPackageAt: url))
-        let cheDir = FileManager.default.temporaryDirectory.appendingPathComponent(ZipHelper.inspectorNamespace)
-        let before = (try? FileManager.default.contentsOfDirectory(atPath: cheDir.path))?.count ?? 0
+        // A refused package leaves no extraction directory behind. Observed in
+        // a namespace nobody else writes to (verify R6 logic N-L6-R6: counting
+        // entries of the SHARED inspector namespace re-created the very
+        // non-hermetic snapshot N-R5-1 was about); the internal entry point
+        // is the same code path with the namespace as its only difference.
+        let own = "i137-\(UUID().uuidString)"
+        let ownDir = FileManager.default.temporaryDirectory.appendingPathComponent(own)
+        defer { try? FileManager.default.removeItem(at: ownDir) }
         let link = Data("document.xml".utf8)
         let bad = try Archive(accessMode: .create)
         try bad.addEntry(with: "word/document.xml", type: .file, uncompressedSize: Int64(data.count), compressionMethod: .deflate) { p, n in data.subdata(in: Int(p)..<Int(p) + n) }
         try bad.addEntry(with: "word/alias.xml", type: .symlink, uncompressedSize: Int64(link.count)) { p, n in link.subdata(in: Int(p)..<Int(p) + n) }
-        XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(of: try XCTUnwrap(bad.data)))
-        let after = (try? FileManager.default.contentsOfDirectory(atPath: cheDir.path))?.count ?? 0
-        XCTAssertEqual(after, before, "a refused package leaves no extraction directory behind")
-        // verify R5 regression N-R5-1: the inspector must not extract into the
-        // reader's namespace — two existing tests snapshot that directory.
-        let readerDir = FileManager.default.temporaryDirectory.appendingPathComponent(ZipHelper.readerNamespace)
-        let readerBefore = (try? FileManager.default.contentsOfDirectory(atPath: readerDir.path))?.count ?? 0
-        _ = try PackageInspector.imageConsistencyReport(of: data)
-        let readerAfter = (try? FileManager.default.contentsOfDirectory(atPath: readerDir.path))?.count ?? 0
-        XCTAssertEqual(readerAfter, readerBefore, "an inspection never touches the reader's extraction namespace")
+        XCTAssertThrowsError(try ZipHelper.unzip(data: try XCTUnwrap(bad.data), namespace: own))
+        XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: ownDir.path))?.count ?? 0, 0, "a refused package leaves no extraction directory behind")
+        let good = try ZipHelper.unzip(data: data, namespace: own)
+        XCTAssertTrue(good.path.hasPrefix(ownDir.path + "/"), "extraction lands in the requested namespace")
+        ZipHelper.cleanup(good)
+        XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: ownDir.path))?.count ?? 0, 0, "cleanup removes it")
+        // The inspector's namespace is not the reader's (verify R5 regression
+        // N-R5-1) — a fact of the constants, not of a shared directory count.
+        XCTAssertNotEqual(ZipHelper.inspectorNamespace, ZipHelper.readerNamespace)
     }
 
     func testStructureNotesStayBoundedOnManyDistinctPrefixedElements() throws {
@@ -1045,5 +1055,132 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // …and with working listings the same package reports its orphans.
         let report = try PackageInspector.imageConsistencyReport(of: data)
         XCTAssertEqual(report.orphanImageRelationshipRefs.count, 2)
+    }
+
+    // MARK: - verify R6 (codex R6-1 … R6-10)
+
+    func testExtractionIsOwnerOnlyFromTheRootDownWhateverTheArchiveSays() throws {
+        // codex R6-2 / R6-3: the root, every directory and every file end up
+        // 0700 / 0600 even when the archive stores setuid or world-writable
+        // bits; the private copy is gone; the namespace directory is 0700.
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        let archive = try Archive(accessMode: .create)
+        // verify R6 security N4: a directory the archive stores as 0300 (writable,
+        // not listable) holding a setuid file — the walk must reach inside it,
+        // which it can only do by resetting the parent before descending.
+        try archive.addEntry(with: "word/locked/", type: .directory, uncompressedSize: 0, permissions: 0o300, provider: { (_: Int64, _: Int) -> Data in Data() })
+        let parts: [(String, String, UInt16)] = [("word/document.xml", body(referencing: "rId4"), 0o4755), ("word/_rels/document.xml.rels", rels(rel), 0o666), ("word/media/image1.png", "png", 0o777), ("word/locked/inner.bin", "x", 0o4755)]
+        for (name, text, perms) in parts {
+            let d = Data(text.utf8)
+            try archive.addEntry(with: name, type: .file, uncompressedSize: Int64(d.count), permissions: perms, compressionMethod: .deflate, provider: { (p: Int64, n: Int) -> Data in d.subdata(in: Int(p)..<Int(p) + n) })
+        }
+        try archive.addEntry(with: "word/media/", type: .directory, uncompressedSize: 0, permissions: 0o1777, provider: { (_: Int64, _: Int) -> Data in Data() })
+        let data = try XCTUnwrap(archive.data)
+        let dir = try ZipHelper.unzip(data: data, namespace: ZipHelper.inspectorNamespace); defer { ZipHelper.cleanup(dir) }
+        func mode(_ url: URL) throws -> Int { try XCTUnwrap(FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int) }
+        XCTAssertEqual(try mode(dir), 0o700, "root")
+        XCTAssertEqual(try mode(dir.deletingLastPathComponent()), 0o700, "namespace directory")
+        XCTAssertEqual(try mode(dir.appendingPathComponent("word")), 0o700, "directory")
+        XCTAssertEqual(try mode(dir.appendingPathComponent("word/media")), 0o700, "directory with sticky+world-writable in the archive")
+        XCTAssertEqual(try mode(dir.appendingPathComponent("word/document.xml")), 0o600, "setuid file")
+        XCTAssertEqual(try mode(dir.appendingPathComponent("word/media/image1.png")), 0o600, "world-writable file")
+        XCTAssertEqual(try mode(dir.appendingPathComponent("word/locked")), 0o700, "directory stored 0300 (unlistable)")
+        XCTAssertEqual(try mode(dir.appendingPathComponent("word/locked/inner.bin")), 0o600, "setuid file inside the unlistable directory")
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: dir.path).contains { $0.hasSuffix(".zip") }, "the private copy is removed")
+        // Real work on such a package is unaffected.
+        XCTAssertTrue(try PackageInspector.imageConsistencyReport(of: data).isConsistent)
+    }
+
+    func testEmptyAndNulEntryPathsAreRefusedBeforeExtraction() throws {
+        // codex R6-10: the two policy members that had branches but no fixtures.
+        let rel = #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#
+        for (label, name) in [("NUL in the path", "word/a\u{0}.xml"), ("empty path", "")] {
+            let archive = try Archive(accessMode: .create)
+            for (n, text) in [("word/document.xml", body(referencing: "rId4")), ("word/_rels/document.xml.rels", rels(rel)), ("word/media/image1.png", "png")] {
+                let d = Data(text.utf8)
+                try archive.addEntry(with: n, type: .file, uncompressedSize: Int64(d.count), compressionMethod: .deflate, provider: { (p: Int64, m: Int) -> Data in d.subdata(in: Int(p)..<Int(p) + m) })
+            }
+            let x = Data("<x/>".utf8)
+            do {
+                try archive.addEntry(with: name, type: .file, uncompressedSize: Int64(x.count), compressionMethod: .deflate, provider: { (p: Int64, m: Int) -> Data in x.subdata(in: Int(p)..<Int(p) + m) })
+            } catch {
+                continue   // ZIPFoundation will not even write such an entry; nothing to refuse
+            }
+            let data = try XCTUnwrap(archive.data)
+            XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ZipHelper.inspectorNamespace), label) {
+                XCTAssertTrue(String(describing: $0).contains("empty or NUL-containing"), "\(label): \($0)")
+            }
+            XCTAssertThrowsError(try readerImageCount(data), "\(label): the reader refuses too")
+        }
+    }
+
+    func testCharacterReferenceCauseIsNamedForQuotedAndSpacedSpellingsAndStaysLinear() throws {
+        // codex R6-7: `Id = 'rId&#211;'` decodes to rId57 like `Id="rId&#211;"` does;
+        // codex R6-1: the diagnosis is one pass over the text — 20 000 such ids
+        // must not make the refusal quadratic; the message is capped.
+        let theme = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme"
+        let message = try writerRefusal(mutatingRels: { url in
+            let xml = try String(contentsOf: url, encoding: .utf8)
+            try xml.replacingOccurrences(of: "</Relationships>", with: "<Relationship Id = 'rId&#211;' Type='\(theme)' Target='theme/theme1.xml'/></Relationships>").write(to: url, atomically: true, encoding: .utf8)
+        })
+        XCTAssertTrue(message.contains("rId9: written with a character or entity reference (`rId&#211;` in the file)"), message)
+        // `rId&#49;<n>` decodes to `rId1<n>`: 20 000 distinct ids, every one spelled with a reference.
+        let many = (1...20000).map { #"<Relationship Id="rId&#49;\#($0)" Type="\#(theme)" Target="theme/t\#($0).xml"/>"# }.joined()
+        let started = Date()
+        let big = try writerRefusal(mutatingRels: { url in
+            let xml = try String(contentsOf: url, encoding: .utf8)
+            try xml.replacingOccurrences(of: "</Relationships>", with: many + "</Relationships>").write(to: url, atomically: true, encoding: .utf8)
+        })
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5.0, "one pass, not one pass per id")
+        XCTAssertTrue(big.contains("…and"), "the message is capped: \(big.count) characters — \(big)")
+        XCTAssertLessThan(big.count, 8000, "the message is capped")
+    }
+
+    func testAnyModelDuplicateMeansTheDocumentIsNotCalledWellFormed() throws {
+        // codex R6-6: the model duplicate (rId5) and the slot collision (rId1)
+        // are different ids; the document is still not well-formed.
+        var doc = WordDocument()
+        doc.body.children.append(.paragraph(Paragraph(runs: [Run(text: "x")])))
+        doc.images = [ImageReference(id: "rId5", fileName: "a.png", contentType: "image/png", data: Data([0x89, 0x50])),
+                      ImageReference(id: "rId5", fileName: "b.png", contentType: "image/png", data: Data([0x89, 0x50])),
+                      ImageReference(id: "rId1", fileName: "c.png", contentType: "image/png", data: Data([0x89, 0x50]))]
+        var thrown: Error?
+        XCTAssertThrowsError(try DocxWriter.writeData(doc)) { thrown = $0 }
+        let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
+        XCTAssertTrue(message.contains("rId5") && message.contains("rId1") && message.contains("#140"), message)
+        XCTAssertFalse(message.contains("well-formed"), message)
+        XCTAssertFalse(message.contains("RId"), "an id is never capitalized by sentence-casing (logic N-L2-R6): \(message)")
+    }
+
+    func testThousandsOfMismatchedIdsAreRefusedInLinearTime() throws {
+        // verify R6 DA: an N-id rels whose every Id the text scan cannot read was
+        // O(N²) in the R6 snapshot (400 → 1.0 s, 800 → 3.9 s, 1600 → 202 s as the
+        // DA measured); the cause pass is one scan, capped at 20, and nothing is
+        // computed past the cap. Two spellings: all character references (the
+        // single-pass map answers) and single quotes (the per-id regex path).
+        let spellings: [(String, (Int) -> String)] = [
+            ("character references", { n in "\"" + "rId\(n)".unicodeScalars.map { "&#\($0.value);" }.joined() + "\"" }),
+            ("single quotes", { n in "'rId\(n)'" }),
+        ]
+        for (label, spell) in spellings {
+            let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                + (0..<3200).map { "<Relationship Id=\(spell($0)) Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/\($0)\" TargetMode=\"External\"/>" }.joined()
+                + "</Relationships>"
+            let start = Date()
+            let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertTrue(message.contains("does not match"), "\(label): \(message.prefix(200))")
+            XCTAssertTrue(message.contains("and 3180 more"), "\(label): capped at 20 causes: \(message.suffix(160))")
+            XCTAssertLessThan(elapsed, 2, "\(label): 3200 mismatched ids must be refused in linear time (took \(elapsed) s)")
+        }
+    }
+
+    func testAPrefixedIdAttributeIsNotTheRelationshipId() throws {
+        // logic N-L4-R6: `r:Id="…"` / `xmlns:Id="…"` are not the Id attribute; the
+        // spelling map must not attribute a cause to them.
+        let raw = #"<Relationships xmlns="urn:p"><Relationship xmlns:Id="urn:x" r:Id="rId&#211;" Id="rId9" Type="t" Target="a"/></Relationships>"#
+        XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: raw), [:], "the only real Id is spelled plainly")
+        let raw2 = #"<Relationship r:Id="rId9" Id="rId&#211;" Type="t" Target="a"/>"#
+        XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: raw2), ["rId9": ["rId&#211;"]])
     }
 }
