@@ -689,13 +689,13 @@ public struct DocxWriter {
         var unreadableSiblingAttribute: String?   // another attribute of the tag spelled in a form the text scan cannot read (single-quoted / spaced)
     }
 
-    /// The first attribute in `tagText` whose spelling the text scan cannot
-    /// read (`Name='v'`, `Name = "v"`), or nil.
+    /// The first attribute in `tagText` (an attribute-text fragment of the
+    /// tag) whose spelling the text scan cannot read (`Name='v'`, `Name = "v"`),
+    /// or nil — found by walking the fragment attribute by attribute, the same
+    /// way the text scan does, so an `a='b'` inside another attribute's VALUE
+    /// is never named (verify R9 logic: a regex over the raw text named it).
     static func firstUnreadableAttribute(in tagText: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: #"(?<![\w:.\-])([A-Za-z_][\w:.\-]*)(?:\s*=\s*'|\s+=\s*"|=\s+")"#) else { return nil }
-        let ns = tagText as NSString
-        guard let m = regex.firstMatch(in: tagText, range: NSRange(location: 0, length: ns.length)) else { return nil }
-        return ns.substring(with: m.range(at: 1))
+        RelationshipsOverlay.tokenize(tagText)?.first { !$0.readable }?.name
     }
 
     /// Why the relationship merge's text scan (`RelationshipsOverlay.rawIds`,
@@ -785,23 +785,12 @@ public struct DocxWriter {
         return parser.parse() ? grab.value : nil
     }
 
-    /// A raw spelling as it may appear in an error message: control characters
-    /// escaped, and no more than `spellingDisplayLimit` characters (a single
-    /// reference can carry any number of leading zeros — codex R7-3).
-    static func displaySpelling(_ spelling: String) -> String {
-        var out = ""
-        for ch in spelling.prefix(spellingDisplayLimit) {
-            switch ch {
-            case "\n": out += "\\n"
-            case "\t": out += "\\t"
-            case "\r": out += "\\r"
-            case "\r\n": out += "\\r\\n"
-            default: out.append(ch)
-            }
-        }
-        if spelling.count > spellingDisplayLimit { out += "…(\(spelling.count - spellingDisplayLimit) more characters)" }
-        return out
-    }
+    /// A raw spelling or a decoded id as it may appear in an error message —
+    /// `ZipHelper.displayName`'s discipline (control characters, U+2028/2029,
+    /// zero-width and bidi controls escaped; 120 scalars; 480 rendered chars).
+    /// A decoded id can carry a newline (`&#10;`), so ids are text too
+    /// (verify R9 security N-S9-1).
+    static func displaySpelling(_ spelling: String) -> String { ZipHelper.displayName(spelling) }
 
     /// The cause, derived from the tag that declares `id` and from nothing
     /// else in the file (verify R7 logic N-L3-R7: a per-id scan of the whole
@@ -895,7 +884,7 @@ public struct DocxWriter {
         if !originalDuplicates.isEmpty {
             throw WordError.invalidDocx(
                 "the package's word/_rels/document.xml.rels declares \(originalDuplicates.count) relationship \(originalDuplicates.count == 1 ? "id" : "ids") twice: "
-                + originalDuplicates.joined(separator: ", ")
+                + originalDuplicates.map(Self.displaySpelling).joined(separator: ", ")
                 + ". OPC scopes relationship ids per part; this document cannot be re-serialized without losing a relationship (PsychQuant/ooxml-swift#139).")
         }
         // The overlay indexes the original rels with a regex over the raw text
@@ -932,7 +921,7 @@ public struct DocxWriter {
                 // over the whole rels, so an N-id rels was O(N²) — 3.9 s at 800).
                 func addCause(_ text: @autoclosure () -> String) { if causes.count < causeCap { causes.append(text()) } else { omitted += 1 } }
                 for id in originalScan.allIds where (rawCounts[id] ?? 0) < (parsedCounts[id] ?? 0) && explained.insert(id).inserted {
-                    addCause("\(id): \(Self.relsSpellingCause(forParsedId: id, occurrences: occurrences))")
+                    addCause("\(Self.displaySpelling(id)): \(Self.relsSpellingCause(forParsedId: id, occurrences: occurrences))")
                     explainedRawSpellings.formUnion((occurrences[id] ?? []).map(\.spelling))
                 }
                 for id in rawOriginalIds where (parsedCounts[id] ?? 0) < (rawCounts[id] ?? 0) && !explainedRawSpellings.contains(id) && explained.insert(id).inserted {
@@ -964,19 +953,19 @@ public struct DocxWriter {
             let fromSlots = duplicateRelIds.filter { slotCollisionIds.contains($0) }
             var causes: [String] = []
             if !fromModel.isEmpty {
-                causes.append("The document model carries \(fromModel.joined(separator: ", ")) more than once; OPC scopes relationship ids per part, so the package cannot be written without losing a relationship")
+                causes.append("The document model carries \(fromModel.map(Self.displaySpelling).joined(separator: ", ")) more than once; OPC scopes relationship ids per part, so the package cannot be written without losing a relationship")
             }
             if !fromSlots.isEmpty {
                 let plural = fromSlots.count > 1
                 let alsoModelDuplicate = !modelDuplicateIds.isEmpty            // any model duplicate at all, not only on the colliding id (verify R6)
-                causes.append("\(fromSlots.joined(separator: ", ")) \(plural ? "are" : "is") used by the document and \(plural ? "are also the ids" : "is also the id") this writer assigns to its fixed parts (rId1 styles / rId2 settings / rId3 fontTable / rId4 numbering when present). "
+                causes.append("\(fromSlots.map(Self.displaySpelling).joined(separator: ", ")) \(plural ? "are" : "is") used by the document and \(plural ? "are also the ids" : "is also the id") this writer assigns to its fixed parts (rId1 styles / rId2 settings / rId3 fontTable / rId4 numbering when present). "
                     + (alsoModelDuplicate ? "That collision on its own is the writer's limitation — it cannot yet renumber its fixed parts (PsychQuant/ooxml-swift#140)"
                                           : "The document is well-formed; it is the writer that cannot yet renumber its fixed parts (PsychQuant/ooxml-swift#140)"))
             }
             let count = duplicateRelIds.count
             throw WordError.invalidDocx(
                 "word/_rels/document.xml.rels would declare \(count) relationship \(count == 1 ? "id" : "ids") twice: "
-                + duplicateRelIds.joined(separator: ", ") + ". "
+                + duplicateRelIds.map(Self.displaySpelling).joined(separator: ", ") + ". "
                 + causes.map { $0 + "." }.joined(separator: " "))
         }
 

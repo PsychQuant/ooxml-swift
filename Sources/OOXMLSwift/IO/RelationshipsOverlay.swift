@@ -136,6 +136,21 @@ internal struct RelationshipsOverlay {
     /// merge refuses the package instead of reading a neighbour (#142).
     /// `xmlns:Id` / `data-Id` are other names and never match.
     static func attribute(_ attrs: String, name: String) -> String? {
+        guard let tokens = tokenize(attrs) else { return nil }              // an unterminated value: the tag text is cut, nothing in it is trusted
+        guard let token = tokens.first(where: { $0.name == name }) else { return nil }
+        return token.readable ? token.value : nil
+    }
+
+    /// One attribute of a start tag as the text scan sees it: `readable` only
+    /// for the exact `Name="value"` form. Returns nil when a value has no
+    /// closing quote — the tag regex is lazy up to `/>`, so a `/>` inside a
+    /// value cuts the attribute text mid-value, and a tokenizer that returned
+    /// the prefix let the merge write a truncated Target and drop TargetMode
+    /// (verify R9 logic / requirements N-R9-1: three R8 refusals had become
+    /// silent corruption). Nil → the tag is skipped → the merge refuses.
+    struct AttributeToken: Equatable { var name: String; var value: String; var readable: Bool }
+    static func tokenize(_ attrs: String) -> [AttributeToken]? {
+        var tokens: [AttributeToken] = []
         var i = attrs.startIndex
         while i < attrs.endIndex {
             while i < attrs.endIndex, attrs[i].isWhitespace { i = attrs.index(after: i) }
@@ -150,18 +165,18 @@ internal struct RelationshipsOverlay {
                 readable = afterEquals < attrs.endIndex && attrs[afterEquals] == "\""
             }
             while i < attrs.endIndex, attrs[i].isWhitespace { i = attrs.index(after: i) }
-            guard i < attrs.endIndex, attrs[i] == "=" else { if attrName == name { return nil }; continue }
+            guard i < attrs.endIndex, attrs[i] == "=" else { tokens.append(AttributeToken(name: attrName, value: "", readable: false)); continue }
             i = attrs.index(after: i)
             while i < attrs.endIndex, attrs[i].isWhitespace { i = attrs.index(after: i) }
-            guard i < attrs.endIndex, attrs[i] == "\"" || attrs[i] == "'" else { if attrName == name { return nil }; continue }
+            guard i < attrs.endIndex, attrs[i] == "\"" || attrs[i] == "'" else { tokens.append(AttributeToken(name: attrName, value: "", readable: false)); continue }
             let quote = attrs[i]; i = attrs.index(after: i)
             let valueStart = i
             while i < attrs.endIndex, attrs[i] != quote { i = attrs.index(after: i) }
-            let value = String(attrs[valueStart..<i])
-            if i < attrs.endIndex { i = attrs.index(after: i) }
-            if attrName == name { return readable ? value : nil }
+            guard i < attrs.endIndex else { return nil }                        // no closing quote: cut mid-value
+            tokens.append(AttributeToken(name: attrName, value: String(attrs[valueStart..<i]), readable: readable))
+            i = attrs.index(after: i)
         }
-        return nil
+        return tokens
     }
 
     // MARK: - Serialization

@@ -140,13 +140,8 @@ public struct ZipHelper {
         guard let walker = fm.enumerator(at: tempDir, includingPropertiesForKeys: [.isDirectoryKey], options: [], errorHandler: { _, error in walkError = error; return false }) else {
             throw WordError.invalidDocx("could not enumerate the extracted package")
         }
-        // The enumerator hands back resolved paths (`/private/var/…`) while
-        // `temporaryDirectory` is `/var/…` (verify R8 logic NEW-L1: dropping
-        // the unresolved prefix cut eight characters too few and named a
-        // non-existent item, with the tail of the UUID directory in it).
-        let roots = Set([tempDir.path, tempDir.resolvingSymlinksInPath().path, tempDir.standardizedFileURL.path].map { $0 + "/" })
         for case let item as URL in walker {
-            let relative = displayName(roots.first { item.path.hasPrefix($0) }.map { String(item.path.dropFirst($0.count)) } ?? item.lastPathComponent)   // an entry name is attacker-controlled text
+            let relative = displayName(relativeName(of: item, under: tempDir))   // an entry name is attacker-controlled text
             // `lstat` + `fchmodat(AT_SYMLINK_NOFOLLOW)`: nothing here follows a
             // link (verify R8: `chmod` through a link reached outside the tree).
             // The archive cannot contain a link entry (refused before anything
@@ -203,10 +198,12 @@ public struct ZipHelper {
     }
 
     /// Attacker-controlled text (an archive entry name) as it may appear in an
-    /// error message: every control character escaped, at most 120 characters
-    /// (verify R8 security N-S8-1: a newline in an entry name forged a second
+    /// error message: every control character escaped, at most 120 scalars of
+    /// the name shown, and the rendered text capped at 480 characters (an
+    /// escape expands a scalar up to six-fold — verify R9 logic NEW-R9-4).
+    /// (Verify R8 security N-S8-1: a newline in an entry name forged a second
     /// line of output; ANSI sequences and 9 000-character names went straight
-    /// into the message the consumer renders).
+    /// into the message the consumer renders.)
     static func displayName(_ raw: String) -> String {
         var out = ""
         for scalar in raw.unicodeScalars.prefix(120) {
@@ -214,13 +211,29 @@ public struct ZipHelper {
             case "\n": out += "\\n"
             case "\t": out += "\\t"
             case "\r": out += "\\r"
-            case _ where scalar.value < 0x20 || scalar.value == 0x7F || (0x80...0x9F).contains(scalar.value):
+            case _ where scalar.value < 0x20 || scalar.value == 0x7F || (0x80...0x9F).contains(scalar.value)
+                || scalar.value == 0x2028 || scalar.value == 0x2029                       // line / paragraph separator: a second line to a renderer (verify R9 security)
+                || (0x200B...0x200F).contains(scalar.value) || (0x202A...0x202E).contains(scalar.value)
+                || (0x2066...0x2069).contains(scalar.value) || scalar.value == 0xFEFF:     // zero-width, bidi overrides / isolates, BOM
                 out += String(format: "\\u{%02X}", scalar.value)
             default: out.unicodeScalars.append(scalar)
             }
         }
         if raw.unicodeScalars.count > 120 { out += "…(\(raw.unicodeScalars.count - 120) more characters)" }
-        return out
+        return out.count > 480 ? String(out.prefix(480)) + "…" : out
+    }
+
+    /// `item`'s path under `root`, both taken through `resolvingSymlinksInPath()`
+    /// — the enumerator hands back `/private/var/…` while `temporaryDirectory`
+    /// is `/var/…`, and Foundation's resolver maps BOTH to the `/var/…` form
+    /// (verify R8 logic NEW-L1 named a non-existent item; R9 NEW-R9-2 found the
+    /// fix comparing an unresolved item against resolved roots, never matching).
+    static func relativeName(of item: URL, under root: URL) -> String {
+        let resolvedItem = item.resolvingSymlinksInPath().path
+        for prefix in [root.resolvingSymlinksInPath().path + "/", root.path + "/"] where resolvedItem.hasPrefix(prefix) {
+            return String(resolvedItem.dropFirst(prefix.count))
+        }
+        return item.lastPathComponent
     }
 
     /// `strerror(errno)` for the calling thread's last error.
