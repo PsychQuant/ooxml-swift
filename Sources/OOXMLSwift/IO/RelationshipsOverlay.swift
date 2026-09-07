@@ -165,6 +165,11 @@ internal struct RelationshipsOverlay {
     /// (verify R9 logic / requirements N-R9-1: three R8 refusals had become
     /// silent corruption). Nil → the tag is skipped → the merge refuses.
     struct AttributeToken: Equatable { var name: String; var value: String; var readable: Bool }
+
+    /// The attributes the merge reads. An unreadable one of THESE skips the tag
+    /// (and the id gate then refuses the package); any other attribute being
+    /// unreadable changes nothing (verify R11 DA N-DA11-3).
+    static let gatedAttributeNames: Set<String> = ["Id", "Type", "Target", "TargetMode"]
     static func tokenize(_ attrs: String) -> [AttributeToken]? {
         var tokens: [AttributeToken] = []
         var i = attrs.startIndex

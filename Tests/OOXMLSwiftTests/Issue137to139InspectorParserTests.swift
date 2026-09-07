@@ -1515,22 +1515,36 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             XCTAssertFalse(shown.contains(scalar), "escaped: \(shown)")
             XCTAssertTrue(shown.hasPrefix("a\\u{") && shown.hasSuffix("}b"), shown)
         }
-        XCTAssertEqual(ZipHelper.displayName("標楷體 😀 café rId9"), "標楷體 😀 café rId9", "visible text passes through untouched")
+        XCTAssertEqual(ZipHelper.displayName("標楷體 😀 café rId9"), "標楷體 😀 café rId9", "visible text with no invisible joiner passes through untouched")
+        // Not "all visible text": an emoji sequence's variation selector and ZWJ
+        // are Cf / Default_Ignorable, so they ARE escaped — deliberately, in an
+        // error message (verify R11 logic N-L11-4, regression N-REG11-4).
+        XCTAssertEqual(ZipHelper.displayName("\u{2764}\u{FE0F}"), "\u{2764}\\u{FE0F}")
+        // The escape character and the delimiter are escaped too, so a rendering
+        // maps back to one input (R11 security N-S11-1 / N-S11-3).
+        XCTAssertNotEqual(ZipHelper.displayName("a\\u{202E}b"), ZipHelper.displayName("a\u{202E}b"), "a literal backslash is not mistaken for an escape")
+        XCTAssertFalse(ZipHelper.displayName("rId`9; ignore the rest `x").contains("`"), "a backtick cannot close the message's code span")
     }
 
-    func testAnUnreadableSiblingAttributeNameIsShownAsCappedText() throws {
-        // verify R10 security N-S10-1 (logic NEW-L10-3, requirements N-R10-1): the
-        // sibling attribute name was the last attacker-controlled string in a rels
-        // message that bypassed displaySpelling — a 9000-character name reached
-        // the message 1:1. The long single-quoted attribute comes before the
-        // single-quoted `Type`, so it is the first unreadable sibling named.
+    func testAnAttackersOwnAttributeNameNeverReachesTheRefusalMessage() throws {
+        // verify R10 security NEW-S10-1 asked for the sibling attribute name to be
+        // capped; verify R11 DA N-DA11-3 removed the need for a cap at this site:
+        // only the four attributes the merge READS can make it skip a tag, so only
+        // those may be named. An attacker's own 9000-character attribute name is
+        // therefore not merely truncated — it never appears, and the tag it sits
+        // on is not refused for its sake either.
         let base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
         let longName = String(repeating: "a", count: 9000)
-        let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId9\" \(longName)='v' Type='\(base)' Target=\"x\" TargetMode=\"External\"/></Relationships>"
-        let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
-        XCTAssertTrue(message.contains("attribute is single-quoted or spaced"), message.prefix(400).description)
-        XCTAssertTrue(message.contains("…(8880 more characters)"), message.suffix(300).description)
-        XCTAssertLessThan(message.count, 1200, "the sibling name is capped: \(message.count) characters")
+        // (a) a long unreadable NON-gated attribute alongside an unreadable gated one:
+        //     the message names the gated one, and carries none of the attacker's name.
+        let mixed = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId9\" \(longName)='v' Type='\(base)' Target=\"x\" TargetMode=\"External\"/></Relationships>"
+        let message = try writerRefusal { try mixed.write(to: $0, atomically: true, encoding: .utf8) }
+        XCTAssertTrue(message.contains("`Type` attribute is single-quoted or spaced"), message.prefix(400).description)
+        XCTAssertFalse(message.contains("aaaaaaaaaa"), "the attacker's attribute name is absent, not truncated")
+        XCTAssertLessThan(message.count, 1200, "message length: \(message.count)")
+        // (b) the same long attribute with every gated attribute readable: saved, so
+        //     the tag was never skipped for it — which is why naming it was a lie.
+        XCTAssertNil(DocxWriter.firstUnreadableAttribute(in: " Id=\"rId9\" \(longName)='v' Type=\"t\" Target=\"x\""))
     }
 
     func testADecodedIdCannotInjectALineIntoTheMessage() throws {
@@ -1615,13 +1629,28 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // same-uid race can plant that link — this test IS that race, repeated: a
         // swapper replaces extracted files with links to a file outside the tree while
         // the walk runs. On the real code the outside file's mode cannot change.
+        //
+        // DETECTION POWER IS PROBABILISTIC — do not read a green run as proof.
+        // Measured against the M4 mutant: 3 catches in 17 runs (verify R11 logic
+        // N-L11-1) and 10 in 80 pooled across two reviewers (R11 DA N-DA11-2,
+        // ~12.5% — the lower, better-sampled figure is the one to quote);
+        // against the real code 8/8 green, no false alarm. So this
+        // narrows DA's M4 gap from "nothing guards it" to "something guards it
+        // about one time in six", and it must NOT be used as a CI gate on its own.
+        // A deterministic guard would need the link present before the walk starts,
+        // which the archive cannot deliver (a symlink ENTRY is refused in the
+        // pre-scan) — closing it properly means making the walk callable on a
+        // prepared tree, which is a refactor, not a test change.
         let tmp = FileManager.default.temporaryDirectory
         let outside = tmp.appendingPathComponent("i137-outside-\(UUID().uuidString).txt")
         try Data("o".utf8).write(to: outside); defer { try? FileManager.default.removeItem(at: outside) }
         try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: outside.path)   // 0640: a followed chmod to 0600 or 0700 is visible
         let ns = "i137-walk-\(UUID().uuidString)"
         let nsDir = tmp.appendingPathComponent(ns)
-        defer { try? FileManager.default.removeItem(at: nsDir) }
+        // The race can leave an extraction tree the archive made unremovable, so
+        // clean up the way the library does, not with removeItem (verify R11 DA
+        // N-DA11-5: this test intermittently left its own tree behind).
+        defer { ZipHelper.removeTreeForcibly(nsDir) }
         var entries = [("word/document.xml", body())]
         for i in 0..<300 { entries.append(("word/d/f\(i).txt", "x")) }
         let data = try zipEntries(entries)
@@ -1650,6 +1679,32 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             XCTAssertEqual(st.st_mode & 0o777, 0o640, "the file behind a swapped-in link keeps its mode")
         }
         swapper.cancel()
+    }
+
+    func testAPartThatCannotBeReadIsNamedWithoutAPathAndWithoutAVerdict() throws {
+        // verify R11 DA N-DA11-1: three mutations of PackageInspector's error
+        // hygiene (dropping either `Data(contentsOf:)` wrap, or reverting
+        // `describeWithoutPaths` to `localizedDescription`) passed all 1553
+        // tests — including the one that reopens the temporary-path leak #146
+        // and verify R8 spent two rounds closing. The injectable `extracting:`
+        // seam makes this deterministic: hand the inspector a tree whose
+        // document.xml exists (so `identity()` succeeds) but cannot be read.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("i137-unreadable-\(UUID().uuidString)")
+        defer { ZipHelper.removeTreeForcibly(root) }
+        let wordDir = root.appendingPathComponent("word")
+        try FileManager.default.createDirectory(at: wordDir, withIntermediateDirectories: true)
+        let part = wordDir.appendingPathComponent("document.xml")
+        try Data(body().utf8).write(to: part)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: part.path)
+        XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(extracting: { root })) { error in
+            guard case WordError.invalidDocx(let message) = error else {
+                return XCTFail("a part that cannot be read is refused as invalidDocx, not \(error)")
+            }
+            XCTAssertTrue(message.contains("could not read a part"), message)
+            XCTAssertTrue(message.contains("no consistency verdict"), message)
+            XCTAssertFalse(message.contains("/"), "no file-system path in the message: \(message)")
+            XCTAssertFalse(message.contains(root.lastPathComponent), message)
+        }
     }
 
     func testAnUnreadableTargetModeIsRefusedNotReadAsAbsent() throws {
