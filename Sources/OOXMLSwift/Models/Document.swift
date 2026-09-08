@@ -10,6 +10,8 @@ internal struct OperationReplayBase {
     let carriedParts: [String: Data]
     let modifiedParts: Set<String>
     let treeFreshParts: Set<String>
+    let formattingState: DocumentFormattingState?
+    let formattingStyles: [Style]?
     let logStartIndex: Int
 }
 
