@@ -241,7 +241,7 @@ extension WordDocument {
             else {
                 throw InsertLocationError.tableCellOutOfRange(tableIndex: tableIdx, row: row, col: col)
             }
-            table.rows[row].cells[col].paragraphs.append(paragraph)
+            table.rows[row].cells[col].appendParagraphKeepingOrder(paragraph)
             body.children[bodyIdx] = .table(table)
 
         case .afterText(let searchText, let instance, let options):

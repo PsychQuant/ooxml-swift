@@ -381,6 +381,32 @@ public struct TableCell: Equatable {
         return nil
     }
 
+    /// v3.8.0+ (#155): append a paragraph AND say so in the recorded shape, so a
+    /// cell that holds a nested table keeps its interleaving across the append.
+    ///
+    /// Plain `cell.paragraphs.append(_:)` changes how many blocks the cell holds,
+    /// which invalidates the record and drops the cell back to the historical
+    /// flatten — the paragraphs would jump to the near side of the table. Two
+    /// call sites need the ordered version: `InsertLocation.intoTableCell` and
+    /// `Document.updateCell`.
+    public mutating func appendParagraphKeepingOrder(_ paragraph: Paragraph) {
+        var updated = paragraphs
+        updated.append(paragraph)
+        paragraphs = updated
+        if _blockOrder != nil { _blockOrder?.append(.paragraph) }
+    }
+
+    /// Replace every paragraph with one, keeping the recorded shape usable when
+    /// the cell held exactly one to begin with.
+    public mutating func replaceParagraphsKeepingOrder(with single: Paragraph) {
+        if paragraphs.count == 1 {
+            paragraphs[0] = single          // count unchanged: the record still applies
+        } else {
+            paragraphs = [single]
+            _blockOrder = nil               // the shape genuinely changed; say so
+        }
+    }
+
     /// 取得儲存格純文字
     public func getText() -> String {
         return paragraphs.map { $0.getText() }.joined(separator: "\n")
@@ -405,7 +431,10 @@ extension TableCell {
         return lhs._legacyParagraphs == rhs._legacyParagraphs
             && lhs.properties == rhs.properties
             && lhs._legacyNestedTables == rhs._legacyNestedTables
-            && lhs._blockOrder == rhs._blockOrder
+            // `_blockOrder` is deliberately NOT compared: it records the shape
+            // the cell was READ with, not what the cell holds. Two cells with
+            // the same paragraphs and tables are equal whether or not one of
+            // them remembers how they were interleaved on disk.
     }
 }
 

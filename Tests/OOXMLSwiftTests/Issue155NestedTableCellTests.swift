@@ -279,10 +279,17 @@ final class Issue155NestedTableCellTests: XCTestCase {
 
     // MARK: - Real documents (gated)
 
-    /// The generation loop over real documents, comparing the EMITTED CELL XML
-    /// rather than a paragraph count — a count is stable under exactly the
-    /// corruption this issue is about. Point `OOXML_CORPUS_DIR` at a folder of
-    /// .docx files to run it.
+    /// The generation loop over real documents, comparing each generation
+    /// against **the order in the source file's own `word/document.xml`**.
+    ///
+    /// An earlier version compared generation N against generation 0 of its own
+    /// output. That detects INSTABILITY, not infidelity: an emit that moves
+    /// content once and then stays put is stable, so it passed. A mutation
+    /// recording the shape as "every table, then every paragraph" survived it.
+    /// This is the same failure the paragraph COUNT had, one level up, in the
+    /// test written to replace the count.
+    ///
+    /// Point `OOXML_CORPUS_DIR` at a folder of .docx files to run it.
     func testRealDocumentsReEmitIdentically() throws {
         guard let dir = ProcessInfo.processInfo.environment["OOXML_CORPUS_DIR"] else {
             throw XCTSkip("set OOXML_CORPUS_DIR to a folder of .docx files to run this")
@@ -292,16 +299,18 @@ final class Issue155NestedTableCellTests: XCTestCase {
             .filter { $0.pathExtension == "docx" && !$0.lastPathComponent.hasPrefix("~$") }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
 
-        var examined = 0
+        var examined = 0, cellsChecked = 0
         for f in files {
-            guard let doc = try? DocxReader.read(from: f), !nestedTableCellXML(doc).isEmpty else { continue }
+            guard let sourceOrders = try? nestedTableCellOrdersInSource(of: f), !sourceOrders.isEmpty else { continue }
             examined += 1
 
-            var snapshots: [[String]] = []
             var cur = f
             for gen in 0..<4 {
                 var d = try DocxReader.read(from: cur)
-                snapshots.append(nestedTableCellXML(d))
+                let emitted = nestedTableCellXML(d).map { blockOrder($0) }
+                XCTAssertEqual(emitted, sourceOrders,
+                               "\(f.lastPathComponent) gen \(gen): emitted cell order differs from the source file")
+                cellsChecked += emitted.count
                 if gen == 3 { break }
                 d.markTypedDirty("word/document.xml")       // the trigger: any typed-dirty op
                 let out = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -309,29 +318,72 @@ final class Issue155NestedTableCellTests: XCTestCase {
                 try DocxWriter.write(d, to: out)
                 cur = out
             }
-            for (i, snap) in snapshots.enumerated().dropFirst() {
-                XCTAssertEqual(snap, snapshots[0],
-                               "\(f.lastPathComponent): nested-table cells changed at generation \(i)")
-            }
         }
         XCTAssertGreaterThan(examined, 0,
                              "no document in \(root.path) holds a nested table — this test proved nothing")
-        print("issue155: examined \(examined) document(s) holding nested tables")
+        XCTAssertGreaterThan(cellsChecked, 0, "no cell was compared")
+        print("issue155: \(examined) document(s), \(cellsChecked) cell comparisons against the source")
     }
 
-    /// Emitted XML of every cell that holds a nested table.
+    /// The p/tbl order of every nested-table cell, read from the package's own
+    /// `word/document.xml` bytes — the ground truth this library is supposed to
+    /// preserve, independent of anything the typed model does.
+    private func nestedTableCellOrdersInSource(of url: URL) throws -> [[String]] {
+        let archive = try Archive(url: url, accessMode: .read)
+        guard let entry = archive["word/document.xml"] else { return [] }
+        var bytes = Data()
+        _ = try archive.extract(entry, skipCRC32: true) { bytes.append($0) }
+        let xml = try XMLDocument(data: bytes, options: [])
+        var out: [[String]] = []
+        func walk(_ el: XMLElement) {
+            if el.name == "w:tc" {
+                let kids = (el.children ?? []).compactMap { $0 as? XMLElement }
+                if kids.contains(where: { $0.name == "w:tbl" }) {
+                    out.append(kids.compactMap { k in
+                        switch k.name {
+                        case "w:p":   return "p:" + textOf(k)
+                        case "w:tbl": return "tbl"
+                        default:      return nil
+                        }
+                    })
+                }
+            }
+            for child in (el.children ?? []).compactMap({ $0 as? XMLElement }) { walk(child) }
+        }
+        if let rootEl = xml.rootElement() { walk(rootEl) }
+        return out
+    }
+
+    /// Concatenated `<w:t>` text of a paragraph, matching what `blockOrder` reads.
+    private func textOf(_ paragraph: XMLElement) -> String {
+        var text = ""
+        func walk(_ el: XMLElement) {
+            if el.name == "w:t" { text += el.stringValue ?? "" }
+            for child in (el.children ?? []).compactMap({ $0 as? XMLElement }) { walk(child) }
+        }
+        walk(paragraph)
+        return text
+    }
+
+    /// Emitted XML of every cell that holds a nested table, in DOCUMENT ORDER.
+    ///
+    /// The walk order matters: this list is compared element-wise against the
+    /// same cells read from the source XML, so a stack-order walk (`popLast()`)
+    /// silently compared cell 1 against cell 4.
     private func nestedTableCellXML(_ doc: WordDocument) -> [String] {
-        var pending: [Table] = doc.body.tables
-        for child in doc.body.children { if case .table(let t) = child { pending.append(t) } }
         var out: [String] = []
-        while let t = pending.popLast() {
+        func visit(_ t: Table) {
             for row in t.rows {
                 for cell in row.cells {
                     if !cell.nestedTables.isEmpty { out.append(cell.toXML()) }
-                    pending.append(contentsOf: cell.nestedTables)
+                    for nested in cell.nestedTables { visit(nested) }
                 }
             }
         }
+        for child in doc.body.children { if case .table(let t) = child { visit(t) } }
+        for t in doc.body.tables where !doc.body.children.contains(where: {
+            if case .table(let c) = $0 { return c == t } else { return false }
+        }) { visit(t) }
         return out
     }
 }
