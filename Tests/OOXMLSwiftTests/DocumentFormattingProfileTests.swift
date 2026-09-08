@@ -168,6 +168,72 @@ final class DocumentFormattingProfileTests: XCTestCase {
         return url
     }
 
+    func testEffectiveThemeMatchesProfileThenCallerEditsAcrossWritersAndReopen() throws {
+        let profile = try DocumentFormattingProfile.importOfficial(from: template())
+        let sourceTheme = try XCTUnwrap(profile.themeXML).replacingOccurrences(of: "Aptos", with: "Source Font")
+        let callerTheme = sourceTheme.replacingOccurrences(of: "Source Font", with: "Caller Font")
+            .replacingOccurrences(of: "</a:theme>", with: "<x:custom xmlns:x=\"urn:caller-theme\" value=\"keep\"/></a:theme>")
+        for sourceHasTheme in [false, true] {
+            let root = try directory(), source = root.appendingPathComponent("source.docx")
+            var initial = WordDocument.emptyAuthoringDocument()
+            if sourceHasTheme { try initial.apply(operations: [.carryPart(partPath: "word/theme/theme1.xml", xml: sourceTheme)]) }
+            try initial.writeAuthoringPackage(to: source)
+            var doc = try DocxReader.read(from: source)
+            defer { doc.close() }
+            try doc.applyFormattingProfile(profile, context: .existingDocument)
+            let effective = String(decoding: try XCTUnwrap(doc.effectiveThemeData()), as: UTF8.self)
+            XCTAssertTrue(effective.contains("Aptos"))
+            XCTAssertTrue(effective.contains("DFKai-SB"))
+            XCTAssertFalse(effective.contains("Source Font"))
+            for output in [try parts(doc), try parts(doc, authoring: true)] {
+                XCTAssertEqual(output["word/theme/theme1.xml"], effective)
+            }
+            try doc.apply(operations: [.carryPart(partPath: "word/theme/theme1.xml", xml: callerTheme)])
+            XCTAssertEqual(try doc.effectiveThemeData(), Data(callerTheme.utf8))
+            try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "After caller theme"))
+            for authoring in [false, true] {
+                let output = root.appendingPathComponent("edited-\(authoring).docx")
+                if authoring { try doc.writeAuthoringPackage(to: output) }
+                else { try DocxWriter.write(doc, to: output) }
+                XCTAssertEqual(try RawPartChannel.readAllParts(from: output)["word/theme/theme1.xml"], Data(callerTheme.utf8))
+                var reopened = try DocxReader.read(from: output)
+                defer { reopened.close() }
+                XCTAssertEqual(try reopened.effectiveThemeData(), Data(callerTheme.utf8))
+            }
+        }
+    }
+
+    func testCarriedThemeWithoutProfilePersistsInBothWritersAndRegistersMetadata() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        let xml = "<a:theme xmlns:a=\"\(a)\" name=\"Caller\"><x:custom xmlns:x=\"urn:caller-theme\"/></a:theme>"
+        XCTAssertNil(try doc.effectiveThemeData())
+        doc.markPartDirty("word/theme/theme1.xml")
+        try doc.apply(operations: [.carryPart(partPath: "word/theme/theme1.xml", xml: xml)])
+        XCTAssertEqual(try doc.effectiveThemeData(), Data(xml.utf8))
+        for output in [try parts(doc), try parts(doc, authoring: true)] {
+            XCTAssertEqual(output["word/theme/theme1.xml"], xml)
+            XCTAssertTrue(output["[Content_Types].xml"]!.contains("/word/theme/theme1.xml"))
+            XCTAssertTrue(output["word/_rels/document.xml.rels"]!.contains("theme/theme1.xml"))
+        }
+    }
+
+    func testUnmodifiedCarriedThemeKeepsReplayMetadataByteExact() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        let original = try parts(doc, authoring: true)
+        let types = original["[Content_Types].xml"]! + "\n<!-- caller content types -->"
+        let rels = original["word/_rels/document.xml.rels"]! + "\n<!-- caller relationships -->"
+        let theme = "<a:theme xmlns:a=\"\(a)\" name=\"Replay\"/>"
+        try doc.apply(operations: [
+            .carryPart(partPath: "word/theme/theme1.xml", xml: theme),
+            .carryPart(partPath: "[Content_Types].xml", xml: types),
+            .carryPart(partPath: "word/_rels/document.xml.rels", xml: rels)
+        ])
+        let replayed = try parts(doc, authoring: true)
+        XCTAssertEqual(replayed["word/theme/theme1.xml"], theme)
+        XCTAssertEqual(replayed["[Content_Types].xml"], types)
+        XCTAssertEqual(replayed["word/_rels/document.xml.rels"], rels)
+    }
+
     func testTypedLatentStylesSetAndClearSurviveProfileFinalizationInBothWriters() throws {
         for profile in [DocumentFormattingProfile.inherit, try DocumentFormattingProfile.importOfficial(from: template())] {
             var doc = WordDocument.emptyAuthoringDocument()
