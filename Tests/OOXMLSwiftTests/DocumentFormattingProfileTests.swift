@@ -82,6 +82,33 @@ final class DocumentFormattingProfileTests: XCTestCase {
         }
     }
 
+    func testMixedCarryAndReducerUsesCommittedFormattingAfterTypedEdit() throws {
+        for carryFirst in [true, false] {
+            var doc = WordDocument.emptyAuthoringDocument()
+            try doc.applyFormattingProfile(DocumentFormattingProfile.importOfficial(from: template()), context: .newDocument)
+            let size = try XCTUnwrap(ProfileXML.walk(doc.xmlTrees["word/styles.xml"]!.root).first { $0.localName == "sz" })
+            size.libraryUUID = UUID()
+            let carried = try ProfileXML.string(doc.xmlTrees["word/styles.xml"]!.root)
+                .replacingOccurrences(of: "w:val=\"24\"", with: "w:val=\"48\"")
+                .replacingOccurrences(of: "<w:name w:val=\"Normal\"/>", with: "<w:name w:val=\"Carried name\"/>")
+            let carry = Operation.carryPart(partPath: "word/styles.xml", xml: carried)
+            let reducer = Operation.updateAttribute(target: ElementID(node: size)!, prefix: "w", localName: "val", value: "64")
+            try doc.apply(operations: carryFirst ? [carry, reducer] : [reducer, carry])
+            XCTAssertNil(doc.carriedParts["word/styles.xml"])
+            XCTAssertEqual(doc.styles.first { $0.id == "Normal" }?.name, "Normal")
+            for output in [try parts(doc), try parts(doc, authoring: true)] {
+                let defaults = try XCTUnwrap(ProfileXML.child(ProfileXML.parse(output["word/styles.xml"]!), "docDefaults"))
+                XCTAssertEqual(ProfileXML.walk(defaults).first { $0.localName == "sz" }.flatMap { ProfileXML.value($0, "val") }, "64")
+            }
+            try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "After mixed"))
+            for output in [try parts(doc), try parts(doc, authoring: true)] {
+                let defaults = try XCTUnwrap(ProfileXML.child(ProfileXML.parse(output["word/styles.xml"]!), "docDefaults"))
+                XCTAssertEqual(ProfileXML.walk(defaults).first { $0.localName == "sz" }.flatMap { ProfileXML.value($0, "val") }, "64")
+                XCTAssertTrue(output["word/styles.xml"]!.contains("After mixed"))
+            }
+        }
+    }
+
     func testAliasedTargetStylesKeepReferencesAndUnknownMarkup() throws {
         var doc = WordDocument.emptyAuthoringDocument()
         let styles = "<x:styles xmlns:x=\"\(w)\" xmlns:custom=\"urn:target-owned\"><x:style x:type=\"paragraph\" x:default=\"1\" x:styleId=\"TargetDefault\"><x:name x:val=\"Default\"/></x:style><x:style x:type=\"paragraph\" x:styleId=\"AliasedTarget\"><x:name x:val=\"Keep target\"/><x:basedOn x:val=\"TargetDefault\"/><custom:preserve custom:setting=\"keep\"/><w:extension xmlns:w=\"urn:shadow\" x:flag=\"kept\"/></x:style></x:styles>"
