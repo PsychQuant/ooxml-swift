@@ -8,7 +8,7 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
-## [3.7.0] - 2026-09-05
+## [3.7.0] - 2026-09-08
 
 ### Fixed
 
