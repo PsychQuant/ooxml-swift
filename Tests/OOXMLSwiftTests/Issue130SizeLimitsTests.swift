@@ -184,7 +184,8 @@ final class Issue130SizeLimitsTests: XCTestCase {
         let l = limits(entry: 2 << 20, total: 2 << 20, ratio: .infinity) // the declaration passes these; the reality does not
         XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns, limits: l)) { error in
             let m = String(describing: error)
-            XCTAssertTrue(m.contains("over the") || m.contains("in total"), m)
+            XCTAssertTrue(m.contains("while being extracted") || m.contains("on disk"),
+                          "refused on what it actually wrote, not on its declaration: \(m)")
         }
         try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
     }
@@ -272,5 +273,59 @@ final class Issue130SizeLimitsTests: XCTestCase {
             XCTAssertTrue(String(describing: error).contains("in total"), String(describing: error))
         }
         try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
+    }
+
+    // MARK: - Bounded while extracting, not only afterwards (#157)
+
+    /// An archive that UNDERSTATES its entry is stopped DURING extraction, and
+    /// what reaches disk is bounded by the limit plus one chunk — not by the
+    /// entry's real size.
+    ///
+    /// The post-extraction walk alone could only refuse this after the whole
+    /// 8 MB had landed.
+    func testAnUnderstatingArchiveIsStoppedWhileItIsBeingWritten() throws {
+        let data = try packageDeclaring(1024, actualBytes: 8 << 20)   // declares 1 KB, writes 8 MB
+        let ns = "i130-\(UUID().uuidString)"
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(ns)
+        defer { ZipHelper.removeTreeForcibly(dir) }
+
+        let l = limits(entry: 64 << 20, total: 1 << 20, ratio: .infinity)   // 1 MB total
+        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns, limits: l)) { error in
+            let m = String(describing: error)
+            XCTAssertTrue(m.contains("while being extracted"), "the refusal names the real cause: \(m)")
+        }
+
+        // The message is the discriminator: the post-extraction walk says
+        // "expanded to more than … on disk" and only after everything landed.
+        // "while being extracted" can only come from the streaming budget, so
+        // this asserts the bound fired DURING the write. Measured with the
+        // counter traced: 65 chunks instead of 512, i.e. the limit plus one
+        // 16 KiB chunk rather than the entry's full 8 MB.
+    }
+
+    /// The interception rides on ZIPFoundation calling
+    /// `addChild(_:withPendingUnitCount:)` to attach its per-entry progress.
+    /// Foundation has another way to attach a child that does NOT call it; if a
+    /// future version switches, nothing is captured, the total stays zero, and
+    /// the bound vanishes with no error. This makes that an obvious test
+    /// failure rather than a silent loss of the limit.
+    func testTheExtractionBudgetActuallySeesTheEntries() throws {
+        let archive = try Archive(accessMode: .create)
+        let body = Data("<?xml version=\"1.0\"?><w:document xmlns:w=\"x\"><w:body/></w:document>".utf8)
+        let names = ["word/document.xml", "word/styles.xml", "word/settings.xml"]
+        for n in names {
+            try archive.addEntry(with: n, type: .file, uncompressedSize: Int64(body.count),
+                                 provider: { pos, size in body.subdata(in: Int(pos)..<Int(pos) + size) })
+        }
+        let budget = ExtractionBudget(limit: .max)
+        let src = FileManager.default.temporaryDirectory.appendingPathComponent("i130-\(UUID().uuidString).zip")
+        let dst = FileManager.default.temporaryDirectory.appendingPathComponent("i130-\(UUID().uuidString)")
+        try (archive.data ?? Data()).write(to: src)
+        try FileManager.default.createDirectory(at: dst, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: src); ZipHelper.removeTreeForcibly(dst) }
+
+        try FileManager.default.unzipItem(at: src, to: dst, progress: budget)
+        XCTAssertEqual(budget.capturedChildren, names.count,
+                       "every file entry must be observed, or the byte budget is not actually counting")
     }
 }
