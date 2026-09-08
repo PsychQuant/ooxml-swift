@@ -8,6 +8,17 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [Unreleased]
+
+### Added
+
+- **一個封裝能展開到多大有上限了**（#130）。上限分兩軸，issue 裡的兩個數字分屬不同軸：3000:1 的放大是**磁碟**，1.7 GB 的 RSS 是**記憶體**（把展開後的 part 整份讀進 `Data` 再解析）。兩軸各自有界，且各自以自己的證據拒絕。
+  - **磁碟**：解壓前的 policy 預掃（3.7.0 已逐一走訪每個 entry 的那個迴圈）多看三件事——單一 entry 的宣告大小、全部 entry 的宣告合計、單一 entry 的宣告壓縮比。**中央目錄會說謊**，所以解壓後的既有 walk 再累計一次實際位元組，宣告與實際各擋一次。宣告就超標時**在寫出任何位元組之前**拒絕，因此連要清的東西都沒有。
+  - **記憶體**：`ZipHelper.readPart(at:describedAs:)` 在讀之前先看檔案大小，超標即拒——行程從不持有它。inspector 的兩處 part 讀取與 reader 的 `word/document.xml` 都走它；其餘 part 因為都來自受上限約束的解壓，已被 transitively 界住。
+  - **預設值取自真實語料的上緣**（738 份文件，2026-09-08 實測）：最大單一 entry 17.5 MB、最大封裝合計 26.4 MB、最高壓縮比 117.8×（p99 17.9×、p99.9 32.2×）。預設訂在 **256 MB / 512 MB / 500×**，各約高出真實需求一個數量級。
+  - **代價，明說**：合法但超大的文件會被拒絕。`ZipHelper.limits` 可設定，正是為了讓有理由的呼叫端自己抬高，而不是把天花板當成無法解釋的拒絕來發現。本 repo 自己就用到了——三個刻意構造病態 fixture 的既有測試（#138 的註解 payload、解壓 48 MB 的私有副本輪詢測試）在自己的範圍內把上限拿掉。
+  - **仍不在範圍內**：`imageConsistencyReport` 在 che-word-mcp 的 save 路徑上仍是對來源檔的額外一次完整解壓＋讀取（同步、在 actor 上）。那是效能／併發，不是本 issue 的安全軸。
+
 ## [3.7.0] - 2026-09-08
 
 ### Fixed
