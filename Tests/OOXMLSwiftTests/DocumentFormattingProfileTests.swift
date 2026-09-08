@@ -168,6 +168,25 @@ final class DocumentFormattingProfileTests: XCTestCase {
         return url
     }
 
+    func testTypedLatentStylesSetAndClearSurviveProfileFinalizationInBothWriters() throws {
+        for profile in [DocumentFormattingProfile.inherit, try DocumentFormattingProfile.importOfficial(from: template())] {
+            var doc = WordDocument.emptyAuthoringDocument()
+            try doc.applyFormattingProfile(profile, context: .newDocument)
+            doc.setLatentStyles([LatentStyle(name: "Heading 9", uiPriority: 9, semiHidden: true, unhideWhenUsed: false, qFormat: false)])
+            for output in [try parts(doc), try parts(doc, authoring: true)] {
+                let styles = try ProfileXML.parse(output["word/styles.xml"]!)
+                let latent = try XCTUnwrap(ProfileXML.child(styles, "latentStyles"))
+                let entry = try XCTUnwrap(ProfileXML.child(latent, "lsdException"))
+                XCTAssertEqual(ProfileXML.value(entry, "name"), "Heading 9")
+                XCTAssertEqual(ProfileXML.value(entry, "semiHidden"), "1")
+            }
+            doc.setLatentStyles([])
+            for output in [try parts(doc), try parts(doc, authoring: true)] {
+                XCTAssertNil(ProfileXML.child(try ProfileXML.parse(output["word/styles.xml"]!), "latentStyles"))
+            }
+        }
+    }
+
     func template(styles: String? = nil, section: String? = nil, extras: [String: String] = [:]) throws -> URL {
         let dir = try directory()
         let source = dir.appendingPathComponent("source")
@@ -219,10 +238,13 @@ final class DocumentFormattingProfileTests: XCTestCase {
         XCTAssertEqual(doc.sectionProperties.pageMargins.left, 1800)
         let output = try parts(doc)
         XCTAssertTrue(output["word/styles.xml"]!.contains("w:val=\"24\""))
-        XCTAssertTrue(output["word/styles.xml"]!.contains("標楷體"))
+        XCTAssertTrue(output["word/styles.xml"]!.contains("w:eastAsia=\"DFKai-SB\""))
         XCTAssertFalse(output["word/styles.xml"]!.contains("eastAsiaTheme"))
         XCTAssertTrue(output["word/theme/theme1.xml"]!.contains("Aptos"))
         XCTAssertFalse(output["word/theme/theme1.xml"]!.contains("新細明體"))
+        XCTAssertTrue(output["word/theme/theme1.xml"]!.contains("typeface=\"DFKai-SB\""))
+        XCTAssertTrue(output["word/fontTable.xml"]!.contains("w:name=\"DFKai-SB\""))
+        XCTAssertFalse(output["word/styles.xml"]!.contains("w:eastAsia=\"標楷體\""))
     }
 
     func testBothWritersPersistDefaultsAfterTypedStyleMutationAndRetainReferencedStyles() throws {
@@ -421,7 +443,7 @@ final class DocumentFormattingProfileTests: XCTestCase {
         try doc.applyFormattingProfile(profile, context: .newDocument)
         XCTAssertEqual(doc.sectionProperties.pageSize, PageSize(width: 11906, height: 16838))
         XCTAssertEqual(doc.sectionProperties.pageMargins.left, 1800)
-        XCTAssertTrue(try parts(doc)["word/styles.xml"]!.contains("標楷體"))
+        XCTAssertTrue(try parts(doc)["word/styles.xml"]!.contains("w:eastAsia=\"DFKai-SB\""))
         XCTAssertEqual(try Data(contentsOf: url), before)
     }
 }

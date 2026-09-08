@@ -1272,6 +1272,14 @@ public struct DocxWriter {
     /// block injected after `<w:docDefaults>` and before `<w:style>` entries
     /// per ECMA-376 schema order.
     private static func writeStyles(_ styles: [Style], latentStyles: [LatentStyle], to baseURL: URL) throws {
+        let xml = stylesXML(styles, latentStyles: latentStyles)
+        let url = baseURL.appendingPathComponent("word/styles.xml")
+        try xml.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Shared with formatting-profile finalization so later typed latent-style
+    /// edits survive the same serialization path as ordinary style edits.
+    internal static func stylesXML(_ styles: [Style], latentStyles: [LatentStyle]) -> String {
         var xml = styles.toStylesXML()
         if !latentStyles.isEmpty {
             // Insert latentStyles block after </w:docDefaults> and before first <w:style>.
@@ -1287,8 +1295,7 @@ public struct DocxWriter {
                 }
             }
         }
-        let url = baseURL.appendingPathComponent("word/styles.xml")
-        try xml.write(to: url, atomically: true, encoding: .utf8)
+        return xml
     }
 
     private static func renderLatentStylesBlock(_ entries: [LatentStyle]) -> String {
