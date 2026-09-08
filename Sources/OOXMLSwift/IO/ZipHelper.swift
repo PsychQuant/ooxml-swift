@@ -19,8 +19,8 @@ public struct ZipHelper {
     /// document.xml` would be a second document. No Word output contains
     /// any of these (0 / 740 in the real corpus); refusing them here keeps
     /// one policy for the reader and the inspector.
-    public static func unzip(_ url: URL) throws -> URL {
-        try unzip(data: try Data(contentsOf: url))     // one read; everything below works on these bytes
+    public static func unzip(_ url: URL, limits: Limits = defaultLimits) throws -> URL {
+        try unzip(data: try Data(contentsOf: url), limits: limits)     // one read; everything below works on these bytes
     }
 
     /// The reader's extraction namespace under the temporary directory.
@@ -44,7 +44,9 @@ public struct ZipHelper {
     /// scan passes.
     /// Public entry for bytes already in hand (the reader's namespace); the
     /// five refused entry kinds are the ones listed just above.
-    public static func unzip(data: Data) throws -> URL { try unzip(data: data, namespace: readerNamespace) }
+    public static func unzip(data: Data, limits: Limits = defaultLimits) throws -> URL {
+        try unzip(data: data, namespace: readerNamespace, limits: limits)
+    }
 
     /// The same, into a named namespace (one path component) under the
     /// temporary directory. Refuses the same five entry kinds.
@@ -75,20 +77,28 @@ public struct ZipHelper {
         }
     }
 
-    /// The limits every extraction and part read uses. Settable so a caller
-    /// with a genuinely larger corpus can raise them deliberately, rather than
-    /// discovering the ceiling as an unexplained refusal.
-    public nonisolated(unsafe) static var limits = Limits()
+    /// The limits used when a caller does not name its own.
+    ///
+    /// This is a `let`. It was a settable process-global for one round, and
+    /// that is not a defensible shape for a library others embed: two requests
+    /// share it, so a scoped override installed by one is captured by an
+    /// unrelated concurrent extraction, and nested save/restore can leave the
+    /// process permanently unlimited. `unzip` also snapshotted it once while
+    /// later `readPart` calls re-read it, so a single document operation could
+    /// run under two different policies.
+    ///
+    /// A caller with a genuinely larger corpus passes its own `Limits` to the
+    /// operation instead; the value is immutable and travels with the call.
+    public static let defaultLimits = Limits()
 
     static func describeBytes(_ n: Int64) -> String {
         n >= 1_048_576 ? String(format: "%.1f MB", Double(n) / 1_048_576)
                        : String(format: "%.1f KB", Double(n) / 1024)
     }
 
-    static func unzip(data: Data, namespace: String) throws -> URL {
+    static func unzip(data: Data, namespace: String, limits: Limits = defaultLimits) throws -> URL {
         precondition(!namespace.isEmpty && !namespace.contains("/") && namespace != "." && namespace != "..", "namespace must be one path component")
         let archive = try Archive(data: data, accessMode: .read)
-        let limits = Self.limits
         var declaredTotal: Int64 = 0
         for entry in archive {
             if entry.type == .symlink {
@@ -105,7 +115,15 @@ public struct ZipHelper {
             // Size policy, from the archive's own declarations. The central
             // directory can lie, so the extracted tree is measured again below
             // (#130): declared and actual are each refused on their own.
-            let declared = Int64(entry.uncompressedSize)
+            // `clamping:`, not `Int64(_:)` — these are UInt64 values taken
+            // straight from the central directory, which the comment below
+            // says can lie. A ZIP64 header declaring 2^64-1 made the plain
+            // initializer TRAP ("Not enough bits to represent the passed
+            // value"): a 152-byte forged package killed the process here,
+            // before reaching the check meant to refuse it, and on a package
+            // that 3.7.0 extracted without incident. Saturating instead lands
+            // the value in the refusal below, which is where it belongs.
+            let declared = Int64(clamping: entry.uncompressedSize)
             if declared > limits.maximumEntryBytes {
                 throw WordError.invalidDocx("the package declares an entry of \(describeBytes(declared)) (\(displayName(path))), over the \(describeBytes(limits.maximumEntryBytes)) limit; refusing to extract it.")
             }
@@ -113,7 +131,7 @@ public struct ZipHelper {
             if declaredTotal > limits.maximumTotalBytes {
                 throw WordError.invalidDocx("the package declares more than \(describeBytes(limits.maximumTotalBytes)) of content in total; refusing to extract it.")
             }
-            let compressed = Int64(entry.compressedSize)
+            let compressed = Int64(clamping: entry.compressedSize)
             if compressed > 0, Double(declared) / Double(compressed) > limits.maximumCompressionRatio {
                 throw WordError.invalidDocx("the package declares an entry that expands \(Int(Double(declared) / Double(compressed)))x (\(displayName(path))), over the \(Int(limits.maximumCompressionRatio))x limit; refusing to extract it.")
             }
@@ -357,7 +375,7 @@ public struct ZipHelper {
     /// bound on the MEMORY axis of #130: the PoC's 1.7 GB RSS came from reading
     /// one expanded part into `Data` before parsing it, not from the extraction
     /// itself. Refusing before the read means the process never holds it.
-    static func readPart(at url: URL, describedAs name: String) throws -> Data {
+    static func readPart(at url: URL, describedAs name: String, limits: Limits = defaultLimits) throws -> Data {
         var st = stat()
         if lstat(url.path, &st) == 0, st.st_mode & S_IFMT == S_IFREG, Int64(st.st_size) > limits.maximumPartBytes {
             throw WordError.invalidDocx("\(displayName(name)) is \(describeBytes(Int64(st.st_size))), over the \(describeBytes(limits.maximumPartBytes)) limit for a single part; refusing to read it.")
