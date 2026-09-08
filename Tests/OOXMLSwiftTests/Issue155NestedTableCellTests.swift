@@ -1,4 +1,5 @@
 import XCTest
+import ZIPFoundation
 @testable import OOXMLSwift
 
 /// PsychQuant/ooxml-swift#155 — a cell holding a nested table must survive
@@ -143,11 +144,11 @@ final class Issue155NestedTableCellTests: XCTestCase {
         XCTAssertEqual(c.paragraphs.count, 0)
         XCTAssertEqual(c.nestedTables.count, 1)
 
-        // detached, as the reader builds it
+        // a caller-built cell records no order at all
         var detached = TableCell()
         detached.paragraphs = []
         detached.nestedTables = []
-        XCTAssertNil(detached._blocks, "a caller-built cell records no order")
+        XCTAssertNil(detached._blockOrder, "a caller-built cell records no order")
     }
 
     /// Detached cells have no recorded order, so they keep the pre-#155 shape:
@@ -162,6 +163,118 @@ final class Issue155NestedTableCellTests: XCTestCase {
         c.paragraphs = [Paragraph(text: "A")]
         c.nestedTables = [inner]
         XCTAssertEqual(blockOrder(c.toXML()), ["p:A", "tbl", "p:"])
+    }
+
+    // MARK: - Through the reader (not gated)
+
+    /// Every test above builds a tree-backed cell with `TableCell(xmlNode:)`.
+    /// `DocxReader.read` produces DETACHED cells — the other branch entirely —
+    /// so none of them covered the path real documents take. Making that branch
+    /// dead code left the whole 1567-test suite green.
+    private func readCell(bodyXML: String, inHeader: Bool = false) throws -> (WordDocument, TableCell) {
+        let body = inHeader ? "<w:p/>" : bodyXML
+        let doc = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+            + "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
+            + "<w:body>\(body)<w:sectPr>\(inHeader ? "<w:headerReference xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:id=\"rId9\" w:type=\"default\"/>" : "")</w:sectPr></w:body></w:document>"
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("i155-\(UUID().uuidString).docx")
+        try writeDocx(document: doc, header: inHeader ? headerPart(bodyXML) : nil, to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let read = try DocxReader.read(from: url)
+        let cell = try XCTUnwrap(firstNestedTableCell(read, inHeader: inHeader), "no nested-table cell found")
+        return (read, cell)
+    }
+
+    private func headerPart(_ inner: String) -> String {
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        + "<w:hdr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(inner)</w:hdr>"
+    }
+
+    private func firstNestedTableCell(_ doc: WordDocument, inHeader: Bool) -> TableCell? {
+        var tables: [Table] = []
+        let children: [BodyChild] = inHeader ? (doc.headers.first?.bodyChildren ?? []) : doc.body.children
+        if !inHeader { tables = doc.body.tables }
+        for ch in children { if case .table(let t) = ch { tables.append(t) } }
+        while let t = tables.popLast() {
+            for row in t.rows {
+                for cell in row.cells {
+                    if !cell.nestedTables.isEmpty { return cell }
+                    tables.append(contentsOf: cell.nestedTables)
+                }
+            }
+        }
+        return nil
+    }
+
+    private func writeDocx(document: String, header: String?, to url: URL) throws {
+        let arch = try Archive(accessMode: .create)
+        func add(_ path: String, _ text: String) throws {
+            let d = Data(text.utf8)
+            try arch.addEntry(with: path, type: .file, uncompressedSize: Int64(d.count),
+                              provider: { pos, size in d.subdata(in: Int(pos)..<Int(pos) + size) })
+        }
+        var overrides = "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>"
+        var rels = "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>"
+        if header != nil {
+            overrides += "<Override PartName=\"/word/header1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml\"/>"
+        }
+        try add("[Content_Types].xml", "<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/>\(overrides)</Types>")
+        try add("_rels/.rels", "<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\(rels)</Relationships>")
+        try add("word/document.xml", document)
+        if let header {
+            try add("word/header1.xml", header)
+            try add("word/_rels/document.xml.rels", "<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId9\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/header\" Target=\"header1.xml\"/></Relationships>")
+        }
+        try (arch.data ?? Data()).write(to: url)
+    }
+
+    private func outerTable(holding inner: String) -> String {
+        "<w:tbl><w:tr><w:tc>\(inner)</w:tc></w:tr></w:tbl>"
+    }
+
+    /// The reader's own path: order survives a real read.
+    func testAReadDocumentKeepsItsCellOrder() throws {
+        let (_, cell) = try readCell(bodyXML: outerTable(holding: para("A") + innerTable + para("B") + para("C")))
+        XCTAssertEqual(blockOrder(cell.toXML()), ["p:A", "tbl", "p:B", "p:C"])
+    }
+
+    /// The same cell inside a HEADER. `DocxReader` runs a hyperlink-id rewrite
+    /// over every header, footer, footnote and endnote, and that walk writes
+    /// each cell's paragraphs back through the setter. A record that the setter
+    /// destroyed therefore never reached any of them — the fix applied to the
+    /// body only, and no test could see it.
+    func testAHeaderCellKeepsItsOrderToo() throws {
+        let (_, cell) = try readCell(bodyXML: outerTable(holding: para("A") + innerTable + para("B")), inHeader: true)
+        XCTAssertEqual(blockOrder(cell.toXML()), ["p:A", "tbl", "p:B"])
+    }
+
+    /// Editing a paragraph IN PLACE must not lose the order. Swift routes
+    /// `transform(&cell.paragraphs[i])` through the setter, so a record the
+    /// setter discarded was lost to a no-op — and to `Document`'s accept/reject
+    /// revision walk, which writes every cell of a table back.
+    func testEditingAParagraphInPlaceKeepsTheOrder() throws {
+        let (_, original) = try readCell(bodyXML: outerTable(holding: para("A") + innerTable + para("B")))
+        var cell = original
+        XCTAssertEqual(blockOrder(cell.toXML()), ["p:A", "tbl", "p:B"], "precondition")
+
+        func noop(_ p: inout Paragraph) { _ = p }
+        noop(&cell.paragraphs[0])
+        XCTAssertEqual(blockOrder(cell.toXML()), ["p:A", "tbl", "p:B"], "a no-op in-place edit must change nothing")
+
+        cell.paragraphs[1] = Paragraph(text: "B edited")
+        XCTAssertEqual(blockOrder(cell.toXML()), ["p:A", "tbl", "p:B edited"],
+                       "replacing one paragraph keeps the interleaving")
+    }
+
+    /// A write that changes HOW MANY blocks the cell holds invalidates the
+    /// record, and the cell falls back to the historical shape rather than
+    /// emitting against a stale map.
+    func testAddingAParagraphFallsBackRatherThanMisplacing() throws {
+        let (_, original) = try readCell(bodyXML: outerTable(holding: para("A") + innerTable + para("B")))
+        var cell = original
+        cell.paragraphs.append(Paragraph(text: "C"))
+        let order = blockOrder(cell.toXML())
+        XCTAssertEqual(order.filter { $0.hasPrefix("p:") }.count, 4, "three paragraphs plus the required trailing one")
+        XCTAssertTrue(order.contains("tbl"))
     }
 
     // MARK: - Real documents (gated)

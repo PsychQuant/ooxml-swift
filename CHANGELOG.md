@@ -42,6 +42,23 @@ All notable changes to ooxml-swift will be documented in this file.
     把段落搬到表格另一側，數量完全不變。中間版本的「保留最後一個段落」修法正是這樣通過量測的，
     而它其實會把 `before, 表格` 反轉成 `表格, before`。現在的測試比對**輸出的儲存格 XML**，不是數量。
 
+  **記錄的是「形狀」不是「內容」，而這一點是被逼出來的。** 第一版存的是 block 本身，並讓
+  `paragraphs` / `nestedTables` 的 setter 在被賦值時把記錄清掉。**那行不通**——Swift 把
+  **就地修改**也繞進 setter：`transform(&cell.paragraphs[i])` 即使函式本體什麼都不做，
+  也足以清掉順序。而 `DocxReader` 自己的 hyperlink id 改寫正是這樣走訪 header / footer /
+  footnote / endnote 的**每一個** cell，所以第一版的修復**對這四類容器完全沒有生效**，
+  body 修好了、頁首照舊壞著。`Document` 的接受／拒絕修訂走訪也是同一個形狀：在一張表格裡
+  接受一個修訂，會讓那張表格**所有**巢狀表格 cell 的段落跨越表格搬家。
+
+  現在只記 kind 序列（`[.paragraph|.table]`），輸出前用兩個陣列的長度驗證它是否仍成立。
+  就地編輯、同長度整批取代都不影響交錯；改變 block 數量的寫入會讓記錄失效，退回舊形狀而
+  不是照著過期的地圖輸出。
+
+  **同時補上一整類先前零覆蓋的測試**：原本 7 個可跑測試全部用 `TableCell(xmlNode:)` 建
+  tree-backed cell，而 `DocxReader.read` 產出的是 **detached** cell——真實文件走的那條分支
+  把它整段改成死碼，1567 個測試依然全綠。現在有穿過真實 reader 的非 gated 測試，涵蓋 body、
+  **header**、就地編輯與數量改變四種情形；把 setter 的清空行為裝回去會殺掉其中 3 個斷言。
+
   **一個修復途中引進、由 R2 審查抓到的缺陷，記在這裡**：判斷「至少要有一個段落」時數的是**輸出的 block 數**
   而不是段落數，於是「唯一子元素就是一個巢狀表格」的儲存格輸出**零個段落**（3.7.0 會輸出兩個），Word 視為
   損壞；同時解析器的補段落動作帶著 `blocks.isEmpty` 的條件，讓 `paragraphs` 與 `_blocks` 對同一個儲存格

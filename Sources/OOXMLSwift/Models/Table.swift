@@ -277,8 +277,8 @@ public struct TableCell: Equatable {
     /// so the writer can emit `<w:tbl>` siblings of `<w:p>` correctly.
     internal var _legacyNestedTables: [Table] = []
 
-    /// v3.8.0+ (#155): the cell's block children in document order, when that
-    /// order is known.
+    /// v3.8.0+ (#155): which KINDS of block child this cell holds, in document
+    /// order — not the values, only the shape.
     ///
     /// `paragraphs` and `nestedTables` are two separate arrays, so between them
     /// they cannot say whether a paragraph came before or after a table. The
@@ -288,12 +288,22 @@ public struct TableCell: Equatable {
     /// trailing paragraph on every save. `A, table, B, C` came back as
     /// `A, B, C, table, <w:p/>`.
     ///
-    /// `nil` means no order was recorded: a cell built by a caller, or one
-    /// whose paragraphs or tables have since been replaced wholesale. The
-    /// writer then falls back to the historical shape. It is not `nil` for a
-    /// cell that was read and left alone, which is the case the defect was
-    /// reported for.
-    internal var _blocks: [CellBlock]?
+    /// It records KINDS rather than values deliberately. A first attempt stored
+    /// the blocks themselves and had the `paragraphs` / `nestedTables` setters
+    /// discard the record on assignment — which does not work, because Swift
+    /// routes IN-PLACE mutation through the setter too. `transform(&cell.paragraphs[i])`
+    /// with a no-op body was enough to lose the order, and `DocxReader`'s own
+    /// hyperlink-id rewrite does exactly that for every cell of every header,
+    /// footer, footnote and endnote — so the fix did not reach any of them.
+    ///
+    /// Storing only the shape makes those writes harmless: editing a paragraph
+    /// in place, or replacing the array with one of the same length, leaves the
+    /// interleaving valid. `toXML` checks the counts still match before using
+    /// it, so a write that adds or removes a block falls back to the historical
+    /// shape rather than emitting against a stale map.
+    ///
+    /// `nil` means no order was ever recorded — a cell built by a caller.
+    internal var _blockOrder: [CellBlockKind]?
 
     public init() {
         self._legacyParagraphs = [Paragraph()]
@@ -339,7 +349,7 @@ public struct TableCell: Equatable {
                 return Paragraph(xmlNode: child)
             }
         }
-        set { _legacyParagraphs = newValue; _blocks = nil }
+        set { _legacyParagraphs = newValue }
     }
 
     /// v0.31.1+ Mode-aware view of `<w:tbl>` nested tables.
@@ -359,7 +369,7 @@ public struct TableCell: Equatable {
                 return Table(xmlNode: child)
             }
         }
-        set { _legacyNestedTables = newValue; _blocks = nil }
+        set { _legacyNestedTables = newValue }
     }
 
     /// v0.31.1+ Stable identifier for this cell. Same fallback chain as
@@ -395,15 +405,16 @@ extension TableCell {
         return lhs._legacyParagraphs == rhs._legacyParagraphs
             && lhs.properties == rhs.properties
             && lhs._legacyNestedTables == rhs._legacyNestedTables
-            && lhs._blocks == rhs._blocks
+            && lhs._blockOrder == rhs._blockOrder
     }
 }
 
-/// v3.8.0+ (#155): one block-level child of a table cell, used to remember the
-/// order `paragraphs` and `nestedTables` cannot express between them.
-public enum CellBlock: Equatable {
-    case paragraph(Paragraph)
-    case table(Table)
+/// v3.8.0+ (#155): the kind of one block-level child of a table cell, used to
+/// remember the order that `paragraphs` and `nestedTables` cannot express
+/// between them. The kind, not the value — see `TableCell._blockOrder`.
+public enum CellBlockKind: Equatable {
+    case paragraph
+    case table
 }
 
 /// 表格儲存格屬性
@@ -1324,20 +1335,27 @@ extension TableCell {
                 }
             }
             if emitted == 0 || !lastWasParagraph { xml += Paragraph().toXML() }
-        } else if let blocks = _blocks {
-            // Detached but the reader recorded the order — emit it.
+        } else if let order = _blockOrder,
+                  order.filter({ $0 == .paragraph }).count == paragraphs.count,
+                  order.filter({ $0 == .table }).count == nestedTables.count {
+            // The recorded shape still describes this cell — emit against it.
+            var nextParagraph = 0, nextTable = 0
             var lastWasParagraph = false
-            for block in blocks {
-                switch block {
-                case .paragraph(let p): xml += p.toXML(); lastWasParagraph = true
-                case .table(let t):     xml += t.toXML(); lastWasParagraph = false
+            for kind in order {
+                switch kind {
+                case .paragraph:
+                    xml += paragraphs[nextParagraph].toXML(); nextParagraph += 1
+                    lastWasParagraph = true
+                case .table:
+                    xml += nestedTables[nextTable].toXML(); nextTable += 1
+                    lastWasParagraph = false
                 }
             }
-            if blocks.isEmpty || !lastWasParagraph { xml += Paragraph().toXML() }
+            if order.isEmpty || !lastWasParagraph { xml += Paragraph().toXML() }
         } else {
-            // No order was ever recorded: the cell was built by a caller, or its
-            // paragraphs/tables were replaced wholesale. There is nothing to
-            // preserve, so emit the historical shape.
+            // No order was recorded, or a write changed how many blocks the cell
+            // holds so the record no longer describes it. Emit the historical
+            // shape; there is nothing left to preserve.
             if paragraphs.isEmpty {
                 xml += Paragraph().toXML()
             } else {
@@ -1347,8 +1365,8 @@ extension TableCell {
             // v0.17.0+ (#49): nested tables emit as siblings of paragraphs
             for nested in nestedTables { xml += nested.toXML() }
 
-            // OOXML wants a paragraph after a nested table; with no recorded
-            // order there is no candidate to reuse, so one is added.
+            // OOXML wants a paragraph after a nested table; with no usable order
+            // there is no candidate to reuse, so one is added.
             if !nestedTables.isEmpty { xml += "<w:p/>" }
         }
 

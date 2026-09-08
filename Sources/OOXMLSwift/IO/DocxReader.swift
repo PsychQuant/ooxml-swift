@@ -3215,7 +3215,7 @@ public struct DocxReader {
         // table, and re-serialising it emitted `A, B, C, table, <w:p/>`: the
         // paragraphs moved across the table and the cell grew by one on every
         // save, without bound.
-        var blocks: [CellBlock] = []
+        var blocks: [CellBlockKind] = []
         for child in element.children ?? [] {
             guard let el = child as? XMLElement else { continue }
             switch el.name {
@@ -3226,7 +3226,7 @@ public struct DocxReader {
                     styles: styles,
                     numbering: numbering
                 )
-                blocks.append(.paragraph(para))
+                blocks.append(.paragraph)
                 cell.paragraphs.append(para)
             case "w:tbl":
                 // v0.17.0+ (#49): nested tables — recurse into <w:tbl> children
@@ -3237,7 +3237,7 @@ public struct DocxReader {
                     numbering: numbering,
                     depth: depth + 1
                 )
-                blocks.append(.table(nested))
+                blocks.append(.table)
                 cell.nestedTables.append(nested)
             default:
                 continue    // `w:tcPr` is read above; other children have no typed form (#133 / #129)
@@ -3254,12 +3254,12 @@ public struct DocxReader {
         if cell.paragraphs.isEmpty {
             let empty = Paragraph()
             cell.paragraphs.append(empty)
-            blocks.append(.paragraph(empty))
+            blocks.append(.paragraph)
         }
 
-        // Record the order LAST: the `paragraphs` / `nestedTables` setters above
-        // each clear it, since a wholesale replacement invalidates the mapping.
-        cell._blocks = blocks
+        // The recorded shape: which kinds, in which order. `toXML` checks it
+        // still matches the two arrays' counts before using it.
+        cell._blockOrder = blocks
 
         return cell
     }
