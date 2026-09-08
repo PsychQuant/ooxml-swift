@@ -160,8 +160,25 @@ public struct Paragraph: Equatable {
     ///   concatenating the `<w:t>` descendants. **Phase 1 stub:** the returned
     ///   `Run` values are NOT themselves tree-backed — task 2.2 of
     ///   `word-aligned-state-sync` adds `Run(xmlNode:)` and rewires this getter
-    ///   so further accessors propagate freshly. Existing tests only assert on
-    ///   `count`, so this stub is sufficient for Phase 1.
+    ///   so further accessors propagate freshly.
+    ///
+    ///   **This stub loses data on save** (PsychQuant/ooxml-swift#129). A run
+    ///   is reduced to its text, so a `<w:drawing>`, an `<w:rPr>`, a tab or a
+    ///   break does not survive the round trip — and any operation that marks
+    ///   `word/document.xml` typed-dirty re-serialises the body from this view.
+    ///   13 of 27 real documents lost images that way (171 -> 3, 36 -> 1,
+    ///   14 -> 1). Guards: `Issue129TreeBackedDrawingTests`.
+    ///
+    ///   The original justification here read "existing tests only assert on
+    ///   `count`, so this stub is sufficient for Phase 1" — reasoning from what
+    ///   the tests happened to check to what the code needed to do. It was true
+    ///   about the tests and wrong about the requirement.
+    ///
+    ///   Fixing it needs a primitive this library does not have: serialising a
+    ///   single `XmlNode` back to XML, so the getter can carry the run's own
+    ///   markup in `Run.rawXML` (which `Run.toXML()` already prefers).
+    ///   `XmlTreeWriter.serialize` works on a whole tree plus its source bytes.
+    ///   #106 is blocked on the same missing primitive.
     /// - Detached: returns the legacy stored buffer.
     ///
     /// Setter writes to `_legacyRuns` in both modes. In tree-backed mode the
