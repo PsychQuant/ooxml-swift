@@ -1692,9 +1692,78 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     /// The locale-independent difference M16 must be caught by: an NSError's
     /// `localizedDescription` names the FILE ("The file “header1.xml” couldn't
     /// be opened…"), while a description built from the error code cannot.
-    /// Asserting the file name is absent therefore fails under M16 in any
-    /// locale — asserting "no `/`" does not, which is why fix round 12's test
-    /// let it through.
+    /// Asserting the file name is absent therefore fails under M16 wherever the
+    /// system text names the file — measured in two locales (verify R12b
+    /// N-R12b-2 notes that is two samples, not a proof for every locale).
+    /// Asserting "no `/`" does not fail under M16 at all, which is why fix
+    /// round 12's test let it through.
+    /// The other three places an inspector error is described.
+    ///
+    /// verify R12b reverted `describeWithoutPaths` at each of the five call
+    /// sites one at a time and found only two of them guarded — the two the
+    /// part-read test covers. Listing `word/`, listing `word/media` and
+    /// stat-ing a path could all go back to `localizedDescription`, which names
+    /// the file, with all 1554 tests green. Two of the three have injectable
+    /// seams; the third is reached by putting the part inside a directory that
+    /// cannot be searched.
+    func testEveryInspectorErrorDescriptionComesFromTheCodeNotTheSystemText() throws {
+        func rootWithDocument() throws -> URL {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("i137-desc-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("word"), withIntermediateDirectories: true)
+            try Data(body().utf8).write(to: root.appendingPathComponent("word/document.xml"))
+            return root
+        }
+        func assertNoSystemText(_ label: String, _ expectedPhrase: String, _ operation: () throws -> Void) {
+            var captured = ""
+            XCTAssertThrowsError(try operation(), label) { error in
+                guard case WordError.invalidDocx(let message) = error else { return XCTFail("\(label): \(error)") }
+                captured = message
+            }
+            XCTAssertTrue(captured.contains(expectedPhrase), "\(label): \(captured)")
+            XCTAssertTrue(captured.contains("no consistency verdict"), "\(label): \(captured)")
+            // The fixed English of the message mentions `word/` on purpose; what
+            // must carry nothing from the system is the DESCRIPTION in
+            // parentheses. `localizedDescription` names the file or directory it
+            // failed on there; a description built from the error code cannot.
+            guard let open = captured.lastIndex(of: "("), let close = captured.lastIndex(of: ")"), open < close else {
+                return XCTFail("\(label): no parenthesised description in \(captured)")
+            }
+            let description = String(captured[captured.index(after: open)..<close])
+            XCTAssertFalse(description.isEmpty, "\(label): \(captured)")
+            XCTAssertFalse(description.contains("/"), "\(label) describes without a path: \(description)")
+            XCTAssertFalse(description.contains("word"), "\(label) describes without naming a file or directory: \(description)")
+            XCTAssertFalse(description.contains("absent"), "\(label): \(description)")
+            XCTAssertFalse(description.contains("part.xml"), "\(label): \(description)")
+        }
+        struct Boom: Error {}
+        // (a) listing word/ fails — injectable.
+        let r1 = try rootWithDocument(); defer { ZipHelper.removeTreeForcibly(r1) }
+        assertNoSystemText("listing word/", "could not list the package's word/ directory") {
+            _ = try PackageInspector.imageConsistencyReport(
+                extracting: { r1 },
+                listSubpaths: { _ in try FileManager.default.attributesOfItem(atPath: r1.appendingPathComponent("word/absent.xml").path); return [] })
+        }
+        // (b) listing word/media fails — injectable, and only reached when the
+        //     directory exists, so create it.
+        let r2 = try rootWithDocument(); defer { ZipHelper.removeTreeForcibly(r2) }
+        try FileManager.default.createDirectory(at: r2.appendingPathComponent("word/media"), withIntermediateDirectories: true)
+        assertNoSystemText("listing word/media", "could not list the package's word/media directory") {
+            _ = try PackageInspector.imageConsistencyReport(
+                extracting: { r2 },
+                listDirectory: { _ in try FileManager.default.attributesOfItem(atPath: r2.appendingPathComponent("word/media/absent.png").path); return [] })
+        }
+        // (c) stat-ing a path fails — no seam, so make the directory holding it
+        //     unsearchable and hand the scan that path.
+        let r3 = try rootWithDocument(); defer { ZipHelper.removeTreeForcibly(r3) }
+        let closed = r3.appendingPathComponent("word/closed")
+        try FileManager.default.createDirectory(at: closed, withIntermediateDirectories: true)
+        try Data(body().utf8).write(to: closed.appendingPathComponent("part.xml"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: closed.path)
+        assertNoSystemText("stat under the package", "could not read file attributes under the extracted package") {
+            _ = try PackageInspector.imageConsistencyReport(extracting: { r3 }, listSubpaths: { _ in ["closed/part.xml", "document.xml"] })
+        }
+    }
+
     func testNeitherReadOfAPartCanCarryTheFileNameOrAPathIntoTheMessage() throws {
         func report(unreadable part: String, alsoWrite extra: [String: String] = [:]) throws -> String {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("i137-unreadable-\(UUID().uuidString)")
