@@ -1241,13 +1241,46 @@ extension TableCell {
         // Cell Properties
         xml += properties.toXML()
 
-        // Paragraphs (每個儲存格至少需要一個段落)
-        if paragraphs.isEmpty {
-            xml += Paragraph().toXML()
+        // Paragraphs, then nested tables, then the paragraph OOXML requires a
+        // cell to end with.
+        //
+        // The last one is REUSED, not added (PsychQuant/ooxml-swift#155). This
+        // emit flattens the cell — every paragraph first, then every nested
+        // table — so a trailing empty paragraph that sat AFTER a table in the
+        // source comes back out BEFORE it. Appending a fresh `<w:p/>` on top of
+        // that grew the cell by one paragraph on every typed-dirty save,
+        // without limit: a real document measured 9 -> 14 -> 19 -> 24 cell
+        // paragraphs over three generations, one per nested-table cell each
+        // time. The comment here used to say Word appends one "if missing" —
+        // which was true of Word and never true of this code, because it never
+        // checked.
+        //
+        // So the cell's LAST paragraph is held back and emitted after the
+        // tables. A valid cell always ends with a paragraph after its last
+        // nested table — Word writes one unconditionally — so the last entry in
+        // the flattened paragraph list IS that trailing paragraph, whether or
+        // not it is empty. Holding it back therefore both stops the growth and
+        // round-trips the ordinary (content, table, content) cell exactly.
+        //
+        // Requiring the held-back paragraph to be EMPTY was tried first and is
+        // not enough: a real form (12 cell paragraphs over 2 nested-table cells)
+        // still gained one paragraph per cell on the first save, because its
+        // trailing paragraphs carry text. It reached a fixed point on save two
+        // — bounded, but the document had already been changed.
+        //
+        // What this does NOT do is restore the interleaving of a cell holding
+        // SEVERAL nested tables: those still emit adjacent. That needs the typed
+        // model to stop being the serialisation authority (#133 / #129).
+        var leading = paragraphs
+        var trailing: Paragraph?
+        if !nestedTables.isEmpty, !leading.isEmpty {
+            trailing = leading.removeLast()
+        }
+
+        if leading.isEmpty && nestedTables.isEmpty {
+            xml += Paragraph().toXML()          // a cell must hold at least one paragraph
         } else {
-            for para in paragraphs {
-                xml += para.toXML()
-            }
+            for para in leading { xml += para.toXML() }
         }
 
         // v0.17.0+ (#49): nested tables emit as siblings of paragraphs
@@ -1255,11 +1288,8 @@ extension TableCell {
             xml += nested.toXML()
         }
 
-        // OOXML requires the cell to end with a paragraph after a nested table
-        // (Word silently appends one if missing). Append a trailing empty
-        // paragraph so re-saving produces compliant output.
         if !nestedTables.isEmpty {
-            xml += "<w:p/>"
+            xml += (trailing?.toXML() ?? "<w:p/>")
         }
 
         xml += "</w:tc>"
