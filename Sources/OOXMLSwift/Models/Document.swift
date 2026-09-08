@@ -1060,10 +1060,10 @@ public struct WordDocument: Equatable {
                 updatedRun.text = text
                 var updatedPara = cell.paragraphs[0]
                 updatedPara.runs = [updatedRun]
-                table.rows[row].cells[col].paragraphs = [updatedPara]
+                table.rows[row].cells[col].replaceParagraphsKeepingOrder(with: updatedPara)
             } else {
                 // 空 cell，直接設文字（保留 cell properties）
-                table.rows[row].cells[col].paragraphs = [Paragraph(text: text)]
+                table.rows[row].cells[col].replaceParagraphsKeepingOrder(with: Paragraph(text: text))
             }
 
             body.children[actualIndex] = .table(table)

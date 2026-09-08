@@ -277,6 +277,34 @@ public struct TableCell: Equatable {
     /// so the writer can emit `<w:tbl>` siblings of `<w:p>` correctly.
     internal var _legacyNestedTables: [Table] = []
 
+    /// v3.8.0+ (#155): which KINDS of block child this cell holds, in document
+    /// order — not the values, only the shape.
+    ///
+    /// `paragraphs` and `nestedTables` are two separate arrays, so between them
+    /// they cannot say whether a paragraph came before or after a table. The
+    /// reader used to discard the answer at parse time — it collected every
+    /// `<w:p>` in one pass and every `<w:tbl>` in another — and the writer then
+    /// re-emitted that flattening, moving user content and appending a fresh
+    /// trailing paragraph on every save. `A, table, B, C` came back as
+    /// `A, B, C, table, <w:p/>`.
+    ///
+    /// It records KINDS rather than values deliberately. A first attempt stored
+    /// the blocks themselves and had the `paragraphs` / `nestedTables` setters
+    /// discard the record on assignment — which does not work, because Swift
+    /// routes IN-PLACE mutation through the setter too. `transform(&cell.paragraphs[i])`
+    /// with a no-op body was enough to lose the order, and `DocxReader`'s own
+    /// hyperlink-id rewrite does exactly that for every cell of every header,
+    /// footer, footnote and endnote — so the fix did not reach any of them.
+    ///
+    /// Storing only the shape makes those writes harmless: editing a paragraph
+    /// in place, or replacing the array with one of the same length, leaves the
+    /// interleaving valid. `toXML` checks the counts still match before using
+    /// it, so a write that adds or removes a block falls back to the historical
+    /// shape rather than emitting against a stale map.
+    ///
+    /// `nil` means no order was ever recorded — a cell built by a caller.
+    internal var _blockOrder: [CellBlockKind]?
+
     public init() {
         self._legacyParagraphs = [Paragraph()]
         self.properties = TableCellProperties()
@@ -353,6 +381,32 @@ public struct TableCell: Equatable {
         return nil
     }
 
+    /// v3.8.0+ (#155): append a paragraph AND say so in the recorded shape, so a
+    /// cell that holds a nested table keeps its interleaving across the append.
+    ///
+    /// Plain `cell.paragraphs.append(_:)` changes how many blocks the cell holds,
+    /// which invalidates the record and drops the cell back to the historical
+    /// flatten — the paragraphs would jump to the near side of the table. Two
+    /// call sites need the ordered version: `InsertLocation.intoTableCell` and
+    /// `Document.updateCell`.
+    public mutating func appendParagraphKeepingOrder(_ paragraph: Paragraph) {
+        var updated = paragraphs
+        updated.append(paragraph)
+        paragraphs = updated
+        if _blockOrder != nil { _blockOrder?.append(.paragraph) }
+    }
+
+    /// Replace every paragraph with one, keeping the recorded shape usable when
+    /// the cell held exactly one to begin with.
+    public mutating func replaceParagraphsKeepingOrder(with single: Paragraph) {
+        if paragraphs.count == 1 {
+            paragraphs[0] = single          // count unchanged: the record still applies
+        } else {
+            paragraphs = [single]
+            _blockOrder = nil               // the shape genuinely changed; say so
+        }
+    }
+
     /// 取得儲存格純文字
     public func getText() -> String {
         return paragraphs.map { $0.getText() }.joined(separator: "\n")
@@ -377,7 +431,19 @@ extension TableCell {
         return lhs._legacyParagraphs == rhs._legacyParagraphs
             && lhs.properties == rhs.properties
             && lhs._legacyNestedTables == rhs._legacyNestedTables
+            // `_blockOrder` is deliberately NOT compared: it records the shape
+            // the cell was READ with, not what the cell holds. Two cells with
+            // the same paragraphs and tables are equal whether or not one of
+            // them remembers how they were interleaved on disk.
     }
+}
+
+/// v3.8.0+ (#155): the kind of one block-level child of a table cell, used to
+/// remember the order that `paragraphs` and `nestedTables` cannot express
+/// between them. The kind, not the value — see `TableCell._blockOrder`.
+public enum CellBlockKind: Equatable {
+    case paragraph
+    case table
 }
 
 /// 表格儲存格屬性
@@ -1241,25 +1307,96 @@ extension TableCell {
         // Cell Properties
         xml += properties.toXML()
 
-        // Paragraphs (每個儲存格至少需要一個段落)
-        if paragraphs.isEmpty {
-            xml += Paragraph().toXML()
-        } else {
-            for para in paragraphs {
-                xml += para.toXML()
+        // Emit the cell's children IN THEIR OWN ORDER (PsychQuant/ooxml-swift#155).
+        //
+        // This used to flatten the cell — every paragraph, then every nested
+        // table, then a fresh `<w:p/>`. Two things went wrong at once:
+        //
+        //   1. A trailing paragraph that sat AFTER a table came back out BEFORE
+        //      it, and a new `<w:p/>` was appended on top. Every typed-dirty
+        //      save therefore added one paragraph per nested-table cell, with
+        //      no upper bound — a real form measured 12 -> 14 -> 16 -> 18 over
+        //      four generations.
+        //   2. The reordering itself moved user content. `A, table, B, C`
+        //      re-emitted as `A, B, table, C`: ONE nested table was already
+        //      enough to move a paragraph across it.
+        //
+        // A tree-backed cell knows its own order — `xmlNode.children` is the
+        // document order — so there is nothing to infer. Walking it fixes both
+        // at once and needs no premise about what Word writes.
+        //
+        // Holding back the last paragraph was tried first and is NOT enough:
+        // it reverses `before, table` into `table, before` (a cell whose last
+        // block child is a table), and still emits `A, B, table, C`. It stops
+        // the growth while moving content, which the growth measurement cannot
+        // see because the paragraph COUNT is unchanged either way.
+        //
+        // Whichever branch runs, the cell must still END with a paragraph:
+        // that is what OOXML requires of `<w:tc>`, and it is the one thing the
+        // old flatten got right. Counting BLOCKS rather than paragraphs for
+        // that guarantee was wrong for a cell whose only child is a table —
+        // measured: `<w:tc><w:tbl/></w:tc>` emitted no paragraph at all, where
+        // 3.7.0 emitted two. Appending here cannot restart the growth this
+        // issue is about, because it happens only when the cell does not
+        // already end with one: re-reading records that paragraph in `_blocks`,
+        // and the next save emits it rather than adding another.
+        if let node = xmlNode {
+            var lastWasParagraph = false
+            var emitted = 0
+            for child in node.children where child.kind == .element {
+                switch child.localName {
+                case "p":
+                    xml += Paragraph(xmlNode: child).toXML()
+                    emitted += 1
+                    lastWasParagraph = true
+                case "tbl":
+                    xml += Table(xmlNode: child).toXML()
+                    emitted += 1
+                    lastWasParagraph = false
+                default:
+                    // `tcPr` is emitted above from `properties`. Anything else
+                    // a cell may legally hold (block-level SDTs, bookmark
+                    // markers, revision ranges) has no typed representation
+                    // here and is dropped — as it already was before this
+                    // change. Tracked with the rest of the typed-model losses
+                    // in #133 / #129, not widened here.
+                    break
+                }
             }
-        }
+            if emitted == 0 || !lastWasParagraph { xml += Paragraph().toXML() }
+        } else if let order = _blockOrder,
+                  order.filter({ $0 == .paragraph }).count == paragraphs.count,
+                  order.filter({ $0 == .table }).count == nestedTables.count {
+            // The recorded shape still describes this cell — emit against it.
+            var nextParagraph = 0, nextTable = 0
+            var lastWasParagraph = false
+            for kind in order {
+                switch kind {
+                case .paragraph:
+                    xml += paragraphs[nextParagraph].toXML(); nextParagraph += 1
+                    lastWasParagraph = true
+                case .table:
+                    xml += nestedTables[nextTable].toXML(); nextTable += 1
+                    lastWasParagraph = false
+                }
+            }
+            if order.isEmpty || !lastWasParagraph { xml += Paragraph().toXML() }
+        } else {
+            // No order was recorded, or a write changed how many blocks the cell
+            // holds so the record no longer describes it. Emit the historical
+            // shape; there is nothing left to preserve.
+            if paragraphs.isEmpty {
+                xml += Paragraph().toXML()
+            } else {
+                for para in paragraphs { xml += para.toXML() }
+            }
 
-        // v0.17.0+ (#49): nested tables emit as siblings of paragraphs
-        for nested in nestedTables {
-            xml += nested.toXML()
-        }
+            // v0.17.0+ (#49): nested tables emit as siblings of paragraphs
+            for nested in nestedTables { xml += nested.toXML() }
 
-        // OOXML requires the cell to end with a paragraph after a nested table
-        // (Word silently appends one if missing). Append a trailing empty
-        // paragraph so re-saving produces compliant output.
-        if !nestedTables.isEmpty {
-            xml += "<w:p/>"
+            // OOXML wants a paragraph after a nested table; with no usable order
+            // there is no candidate to reuse, so one is added.
+            if !nestedTables.isEmpty { xml += "<w:p/>" }
         }
 
         xml += "</w:tc>"

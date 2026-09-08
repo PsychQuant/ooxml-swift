@@ -3207,33 +3207,59 @@ public struct DocxReader {
             cell.properties = parseTableCellProperties(from: tcPr)
         }
 
-        // 解析段落（傳入 styles 和 numbering 用於語義標註）
-        for p in element.elements(forName: "w:p") {
-            let para = try parseParagraph(
-                from: p,
-                relationships: relationships,
-                styles: styles,
-                numbering: numbering
-            )
-            cell.paragraphs.append(para)
+        // Walk the cell's children ONCE, in document order (#155).
+        //
+        // This used to be two passes — every `<w:p>`, then every `<w:tbl>` —
+        // which threw the interleaving away before the writer could see it. A
+        // cell reading `A, table, B, C` became paragraphs `[A, B, C]` plus one
+        // table, and re-serialising it emitted `A, B, C, table, <w:p/>`: the
+        // paragraphs moved across the table and the cell grew by one on every
+        // save, without bound.
+        var blocks: [CellBlockKind] = []
+        for child in element.children ?? [] {
+            guard let el = child as? XMLElement else { continue }
+            switch el.name {
+            case "w:p":
+                let para = try parseParagraph(
+                    from: el,
+                    relationships: relationships,
+                    styles: styles,
+                    numbering: numbering
+                )
+                blocks.append(.paragraph)
+                cell.paragraphs.append(para)
+            case "w:tbl":
+                // v0.17.0+ (#49): nested tables — recurse into <w:tbl> children
+                let nested = try parseTable(
+                    from: el,
+                    relationships: relationships,
+                    styles: styles,
+                    numbering: numbering,
+                    depth: depth + 1
+                )
+                blocks.append(.table)
+                cell.nestedTables.append(nested)
+            default:
+                continue    // `w:tcPr` is read above; other children have no typed form (#133 / #129)
+            }
         }
 
-        // v0.17.0+ (#49): nested tables — recurse into <w:tbl> children of <w:tc>
-        for nestedEl in element.elements(forName: "w:tbl") {
-            let nested = try parseTable(
-                from: nestedEl,
-                relationships: relationships,
-                styles: styles,
-                numbering: numbering,
-                depth: depth + 1
-            )
-            cell.nestedTables.append(nested)
-        }
-
-        // 確保至少有一個段落
+        // 確保至少有一個段落 — and that `blocks` says the same thing.
+        //
+        // Guarding this append with `blocks.isEmpty` left the two disagreeing
+        // for a cell whose only child is a table: `paragraphs` held the added
+        // empty paragraph while `blocks` held only the table, so the writer
+        // emitted no paragraph at all. The paragraph goes at the END, which is
+        // where `<w:tc>` requires one.
         if cell.paragraphs.isEmpty {
-            cell.paragraphs.append(Paragraph())
+            let empty = Paragraph()
+            cell.paragraphs.append(empty)
+            blocks.append(.paragraph)
         }
+
+        // The recorded shape: which kinds, in which order. `toXML` checks it
+        // still matches the two arrays' counts before using it.
+        cell._blockOrder = blocks
 
         return cell
     }
