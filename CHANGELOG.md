@@ -12,7 +12,23 @@ All notable changes to ooxml-swift will be documented in this file.
 
 - **一個封裝能展開到多大有上限了**（#130）。**修正了一個本分支自己引進的 crash**：`Int64(entry.uncompressedSize)` 對中央目錄宣告的 UInt64 直接轉換，宣告值超過 `Int64.max` 時會 **trap**（"Not enough bits to represent the passed value"）。一個 152 bytes 的偽造封裝就能打掛行程——而且死在它本該被拒絕的那個檢查**之前**，同一個檔案 3.7.0 是正常解開的。改用 `Int64(clamping:)`，飽和後落進拒絕路徑。上限分兩軸，issue 裡的兩個數字分屬不同軸：3000:1 的放大是**磁碟**，1.7 GB 的 RSS 是**記憶體**（把展開後的 part 整份讀進 `Data` 再解析）。兩軸各自有界，且各自以自己的證據拒絕。
   - **磁碟**：解壓前的 policy 預掃（3.7.0 已逐一走訪每個 entry 的那個迴圈）多看三件事——單一 entry 的宣告大小、全部 entry 的宣告合計、單一 entry 的宣告壓縮比。**中央目錄會說謊**，所以解壓後的既有 walk 再累計一次實際位元組，宣告與實際各擋一次。
-  - **這兩層各自擋住什麼，說清楚**：宣告就超標的封裝在**寫出任何位元組之前**被拒；**少報**的封裝則是先寫出來、再由 walk 量到並拒絕，也就是說那些位元組**已經落過磁碟**。所以本項是「拒絕會發生」的保證，不是「不會被寫出」的保證。要真正在寫出當下就中止，需要在解壓的同時計數（見 #157）——ZIPFoundation 的 `Progress` 看似夠用，實則不行：它的 `totalUnitCount` 來自**宣告值**且以 `addChild` 聚合，少報的封裝父層會先飽和，正好在最該生效的案例失效。
+  - **三層，各自擋住不同的東西**：宣告就超標 → **寫出任何位元組之前**拒絕；**解壓進行中**
+    實際寫出超標 → 當場中止（見下）；解壓完成後樹的總量超標 → walk 量到後拒絕（防守縱深）。
+  - **少報的封裝在解壓當下就被攔住**（#157）。中央目錄會說謊，所以宣告值的檢查擋不住它；
+    先前這一類只能等解壓完再由 walk 量到，也就是那些位元組**已經全部落過磁碟**。
+    現在 `ExtractionBudget` 計算解壓器**實際產生**的位元組並在超標當下取消，而 ZIPFoundation
+    的檢查點在每個 chunk 交給 consumer **之前**，所以**超額上限恰好是一個 chunk（16 KiB）**。
+    實測：宣告 1 KB、實際 8 MB 的封裝，上限設 1 MB —— 修改前寫滿 512 個 chunk（整個 8 MB），
+    現在 65 個就停（1 MB ＋ 一個 chunk）。
+  - **這個攔截靠的是實作細節，而且已用測試釘住**：ZIPFoundation 以 `addChild` 掛每個 entry 的
+    progress，覆寫它才拿得到 child（父層的計數在少報時會飽和、看不到真實位元組，實測子層
+    4 194 304 對宣告 1 024、父層停在 1 024）。Foundation 另有一條**不呼叫 `addChild`** 的掛法；
+    若日後 ZIPFoundation 改走那條，攔截會拿到空清單、加總恆為零、**上限無聲消失**。
+    `testTheExtractionBudgetActuallySeesTheEntries` 斷言攔到的 child 數等於檔案 entry 數，
+    讓那種升級變成**測試紅**而不是保護悄悄關掉。
+  - **父層取消不夠，要逐一取消 child**：`Progress.cancel()` 在父層並沒有讓經由覆寫的 `addChild`
+    掛上的 child 的 `isCancelled` 變成 true（實測緊接著讀為 `false`），而 ZIPFoundation 檢查的是
+    **child**。所以預算直接取消每一個 child。
   - **合計的加總本身也會 trap，已修**：`declaredTotal += declared` 在呼叫端把「無上限」寫成
     `maximumTotalBytes: .max`（`Limits` 提供的唯一寫法，而且本 repo 自己的病態 fixture 測試
     就是這樣寫）時，兩個各宣告 `Int64.max - 1` 的 entry 會讓它 overflow —— Swift 對 overflow
