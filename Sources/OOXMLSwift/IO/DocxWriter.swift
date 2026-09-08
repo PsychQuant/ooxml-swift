@@ -337,6 +337,9 @@ public struct DocxWriter {
                 at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try XmlTreeWriter.serialize(tree).write(to: fileURL)
         }
+        // Use the caller's freshness flags: the local typed-to-tree bridge
+        // above must not disguise a typed style edit as an authoritative op.
+        try source.writeFormattingParts(to: tempDir)
     }
 
     /// v1.0 — single-write-path finalization for one XML part. Call AFTER

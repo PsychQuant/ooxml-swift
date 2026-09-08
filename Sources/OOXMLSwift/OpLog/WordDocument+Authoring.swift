@@ -149,6 +149,7 @@ extension WordDocument {
                 """.utf8), "word/_rels/document.xml.rels")
         }
 
+        try writeFormattingParts(to: tempDir)
         let data = try ZipHelper.zipToData(tempDir)
         let tempFile = url.appendingPathExtension("tmp.\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tempFile) }

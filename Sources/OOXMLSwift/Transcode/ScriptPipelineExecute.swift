@@ -87,7 +87,8 @@ public func scriptPipelineExecute(
     scriptPath: String,
     outputPath: String,
     verifyAgainst: String? = nil,
-    overwrite: Bool = false
+    overwrite: Bool = false,
+    formattingProfile: DocumentFormattingProfile? = nil
 ) throws -> ScriptExecuteResult {
     let fm = FileManager.default
     let scriptURL = URL(fileURLWithPath: scriptPath)
@@ -132,6 +133,9 @@ public func scriptPipelineExecute(
 
     var document = WordDocument.emptyAuthoringDocument()
     try document.apply(operations: log.entries.map(\.op))
+    if let formattingProfile {
+        try document.applyFormattingProfile(formattingProfile, context: .existingDocument)
+    }
 
     // Staging lives beside the output so the publish below is a rename, not
     // a cross-device copy. Removed on every path — including the failing
