@@ -11,6 +11,8 @@ internal struct DocumentFormattingState {
 }
 
 extension WordDocument {
+    // 標楷體的 Office family identifier；localized 名稱在 Mac Word 會被替代字型接管。
+    private static let officialEastAsianFont = "DFKai-SB"
     /// Capture completed authoritative operations before committing the op
     /// transaction. Later typed edits use this baseline instead of the import.
     internal func refreshedFormattingState(trees: [String: XmlTree], carried: [String: Data],
@@ -108,7 +110,7 @@ extension WordDocument {
             }
             let fonts = ProfileXML.child(run, "rFonts")!
             fonts.attributes.removeAll { $0.localName == "eastAsiaTheme" }
-            fonts.setWordAttribute("eastAsia", "標楷體")
+            fonts.setWordAttribute("eastAsia", Self.officialEastAsianFont)
         }
         try ProfileXML.validateStyles(imported)
         let stylesXML = try ProfileXML.string(imported)
@@ -121,16 +123,16 @@ extension WordDocument {
             for font in ProfileXML.walk(theme) where font.namespaceURI == ProfileXML.a {
                 if font.localName == "ea" || (font.localName == "font" && font.attributeValue(prefix: nil, localName: "script") == "Hant") {
                     font.attributes.removeAll { $0.localName == "typeface" }
-                    font.attributes.append(XmlAttribute(localName: "typeface", value: "標楷體"))
+                    font.attributes.append(XmlAttribute(localName: "typeface", value: Self.officialEastAsianFont))
                 }
             }
             themeXML = try ProfileXML.string(theme)
         }
         let fonts = try profile.fontsXML.map { try ProfileXML.checked($0, root: "fonts") }
             ?? ProfileXML.parse("<w:fonts xmlns:w=\"\(ProfileXML.w)\"/>")
-        if !fonts.children.contains(where: { ProfileXML.value($0, "name") == "標楷體" }) {
+        if !fonts.children.contains(where: { ProfileXML.value($0, "name") == Self.officialEastAsianFont }) {
             fonts.children.append(.element(prefix: "w", localName: "font", namespaceURI: ProfileXML.w,
-                                           attributes: [XmlAttribute(prefix: "w", localName: "name", value: "標楷體")]))
+                                           attributes: [XmlAttribute(prefix: "w", localName: "name", value: Self.officialEastAsianFont)]))
         }
         next.formattingState = DocumentFormattingState(defaultsXML: try ProfileXML.string(defaults.withWordNamespace()),
             originalStylesXML: stylesXML, baselineStyles: next.styles, themeData: themeXML.map { Data($0.utf8) }, fontsData: try Data(ProfileXML.string(fonts).utf8))
@@ -218,7 +220,7 @@ extension WordDocument {
             } else if treeFreshParts.contains("word/styles.xml"), let tree = xmlTrees["word/styles.xml"] {
                 root = tree.root.deepClone()
             } else {
-                root = try ProfileXML.parse(styles.toStylesXML())
+                root = try ProfileXML.parse(DocxWriter.stylesXML(styles, latentStyles: latentStyles))
                 let original = try ProfileXML.parse(state.originalStylesXML)
                 let baseline = try ProfileXML.parse(state.baselineStyles.toStylesXML())
                 root.copyMissingNamespaces(from: original)
