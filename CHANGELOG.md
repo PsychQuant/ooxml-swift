@@ -23,9 +23,20 @@ All notable changes to ooxml-swift will be documented in this file.
   （`readUncompressed` 的 `guard size <= .max` 對 `UInt64` 恆真，形同無效；stored 那條路徑
   在此之前就已經會 trap。）
 
+  **而 `compressedSize` 那一側更糟，且與本分支無關——它在已發布的 v3.7.0 上就會 crash。**
+  一個 **161 bytes** 的封裝，ZIP64 記錄裡 `uncompressedSize` 誠實寫 64、`compressedSize` 偽造成
+  `UInt64.max`，用**出貨預設值**（不需要 `.max`）就讓 `main` 死在
+  `Archive+Helpers.swift` 的 `Int64(size)`。預掃**不可能**擋到它：唯一碰 `compressed` 的是
+  壓縮比檢查，而 `declared / compressed` 在 compressed 巨大時趨近 0，永遠通過；`Limits` 也
+  沒有任何欄位是關於壓縮後大小的。
+
   現在**在預掃直接拒絕** `uncompressedSize` 或 `compressedSize` 超過 `Int64.max` 的 entry，
   不再 clamping 後往下送——沒有真實文件會宣告 8 EB，而下游每一個轉換都假設它放得下。
-  兩種壓縮方法各有一條測試。上限分兩軸，issue 裡的兩個數字分屬不同軸：3000:1 的放大是**磁碟**，1.7 GB 的 RSS 是**記憶體**（把展開後的 part 整份讀進 `Data` 再解析）。兩軸各自有界，且各自以自己的證據拒絕。
+  兩種壓縮方法各有一條測試，`compressedSize` 那條用預設值跑。
+
+  **同一個寫法還有第三處未處理**：`Archive+Reading.swift` 的 `guard entry.dataOffset <= .max`
+  對 `UInt64` 同樣恆真，隨後 `off_t(entry.dataOffset)`。本次的預掃只守兩個 size 欄位，
+  沒有守 dataOffset——沒有為它做偽造探針，所以只記錄、不宣稱已涵蓋。上限分兩軸，issue 裡的兩個數字分屬不同軸：3000:1 的放大是**磁碟**，1.7 GB 的 RSS 是**記憶體**（把展開後的 part 整份讀進 `Data` 再解析）。兩軸各自有界，且各自以自己的證據拒絕。
   - **磁碟**：解壓前的 policy 預掃（3.7.0 已逐一走訪每個 entry 的那個迴圈）多看三件事——單一 entry 的宣告大小、全部 entry 的宣告合計、單一 entry 的宣告壓縮比。**中央目錄會說謊**，所以解壓後的既有 walk 再累計一次實際位元組，宣告與實際各擋一次。
   - **兩層，各自擋住不同的東西**：宣告就超標 → **寫出任何位元組之前**拒絕；解壓完成後樹的
     總量超標 → walk 量到後拒絕。第三層（解壓當下中止）見下。

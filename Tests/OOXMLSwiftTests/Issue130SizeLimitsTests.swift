@@ -160,6 +160,62 @@ final class Issue130SizeLimitsTests: XCTestCase {
         return Data(raw)
     }
 
+    /// A forged **compressedSize** must be refused too — and this one reaches
+    /// the crash at the SHIPPING DEFAULTS, with no `.max` limits anywhere.
+    ///
+    /// Measured: a 161-byte package whose ZIP64 record declares
+    /// `compressedSize = UInt64.max` and an honest `uncompressedSize` of 64
+    /// kills `main` (v3.7.0 as released) with "Not enough bits to represent the
+    /// passed value". Nothing in the pre-scan could catch it before this
+    /// change: the only place `compressed` was touched is the ratio check, and
+    /// `declared / compressed` tends to zero as `compressed` grows, so it
+    /// always passed. `Limits` has no field bounding compressed size at all.
+    ///
+    /// The trap is inside ZIPFoundation (`Archive+Helpers.swift`), whose
+    /// `guard size <= .max` on a `UInt64` is vacuously true — the same shape as
+    /// `readUncompressed`'s. `Archive+Reading.swift`'s `guard entry.dataOffset
+    /// <= .max` is a third instance of that spelling; it is NOT covered here,
+    /// because this pre-scan guards the two size fields only.
+    func testAForgedCompressedSizeIsRefusedAtTheDefaults() throws {
+        let data = try packageDeclaringCompressedSize(UInt64.max, uncompressed: 64)
+        let ns = "i130-\(UUID().uuidString)"
+        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns)) { error in
+            XCTAssertTrue(String(describing: error).contains("larger than this library can represent"),
+                          String(describing: error))
+        }
+        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
+    }
+
+    /// A package whose ZIP64 record declares an honest uncompressed size and a
+    /// forged compressed one.
+    private func packageDeclaringCompressedSize(_ compressed: UInt64, uncompressed: UInt64) throws -> Data {
+        let archive = try Archive(accessMode: .create)
+        let payload = Data(repeating: 0x41, count: 64)
+        try archive.addEntry(with: "word/document.xml", type: .file, uncompressedSize: Int64(payload.count),
+                             compressionMethod: .deflate,
+                             provider: { pos, size in payload.subdata(in: Int(pos)..<Int(pos) + size) })
+        var raw = [UInt8](archive.data ?? Data())
+        guard let r = raw.firstRange(of: Array("PK\u{01}\u{02}".utf8)) else { XCTFail("no central directory"); return Data() }
+        let base = r.lowerBound
+        func u16(_ at: Int) -> Int { Int(raw[at]) | Int(raw[at + 1]) << 8 }
+        let nameLen = u16(base + 28), extraLen = u16(base + 30)
+        for k in 0..<4 { raw[base + 20 + k] = 0xFF }        // csize → ZIP64
+        for k in 0..<4 { raw[base + 24 + k] = 0xFF }        // usize → ZIP64
+        var extra: [UInt8] = [0x01, 0x00, 0x10, 0x00]       // header 0x0001, 16 bytes
+        for k in 0..<8 { extra.append(UInt8((uncompressed >> (8 * UInt64(k))) & 0xFF)) }
+        for k in 0..<8 { extra.append(UInt8((compressed   >> (8 * UInt64(k))) & 0xFF)) }
+        raw.insert(contentsOf: extra, at: base + 46 + nameLen + extraLen)
+        let ne = extraLen + extra.count
+        raw[base + 30] = UInt8(ne & 0xFF); raw[base + 31] = UInt8((ne >> 8) & 0xFF)
+        if let e = raw.firstRange(of: Array("PK\u{05}\u{06}".utf8), in: base..<raw.count) {
+            let at = e.lowerBound + 12
+            let size = Int(raw[at]) | Int(raw[at+1]) << 8 | Int(raw[at+2]) << 16 | Int(raw[at+3]) << 24
+            let grown = size + extra.count
+            for k in 0..<4 { raw[at + k] = UInt8((grown >> (8 * k)) & 0xFF) }
+        }
+        return Data(raw)
+    }
+
     /// A declaration above `Int64.max` must be REFUSED, not trap — under the
     /// DEFAULT limits, where the size check would also have caught it.
     ///
