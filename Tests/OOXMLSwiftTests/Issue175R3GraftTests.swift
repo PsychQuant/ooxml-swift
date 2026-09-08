@@ -131,6 +131,12 @@ final class Issue175R3GraftTests: XCTestCase {
     }
 
     // MARK: - Inspector hardening
+    //
+    // Fixtures declare `xmlns:w` / `xmlns:c` like real Word output: since
+    // 3.7.0 the inspector refuses an undeclared prefix (as the reader does),
+    // so a `<w:document>` without `xmlns:w` is an unreadable part, not a
+    // minimal one (verify R3 — the R2 sweep of Issue175R2WhitelistInspectorTests
+    // missed this file because the R2 refusal never actually fired).
 
     private func pkg(_ parts: [String: String]) throws -> Data {
         var d: [String: Data] = [:]; for (k, v) in parts { d[k] = Data(v.utf8) }; d["word/media/image1.png"] = onePixelPNG
@@ -139,7 +145,7 @@ final class Issue175R3GraftTests: XCTestCase {
 
     func testCommentedOutDeclarationIsNotADeclaration() throws {
         let data = try pkg([
-            "word/document.xml": "<w:document><w:body><w:p/></w:body></w:document>",
+            "word/document.xml": "<w:document xmlns:w=\"\(wNS)\"><w:body><w:p/></w:body></w:document>",
             "word/_rels/document.xml.rels": #"<Relationships><!-- <Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/> --></Relationships>"#,
         ])
         let r = try PackageInspector.imageConsistencyReport(of: data)
@@ -148,7 +154,7 @@ final class Issue175R3GraftTests: XCTestCase {
 
     func testGreaterThanInsideQuotedTargetDoesNotHideTheRelationship() throws {
         let data = try pkg([
-            "word/document.xml": "<w:document><w:body><w:p/></w:body></w:document>",
+            "word/document.xml": "<w:document xmlns:w=\"\(wNS)\"><w:body><w:p/></w:body></w:document>",
             "word/_rels/document.xml.rels": #"<Relationships><Relationship Target="media/a>b.png" Type="\#(imageType)" Id="rId4"/></Relationships>"#,
         ])
         let r = try PackageInspector.imageConsistencyReport(of: data)
@@ -157,9 +163,9 @@ final class Issue175R3GraftTests: XCTestCase {
 
     func testNestedChartPartOrphanIsDetected() throws {
         let data = try pkg([
-            "word/document.xml": "<w:document><w:body><w:p/></w:body></w:document>",
+            "word/document.xml": "<w:document xmlns:w=\"\(wNS)\"><w:body><w:p/></w:body></w:document>",
             "word/_rels/document.xml.rels": "<Relationships/>",
-            "word/charts/chart1.xml": "<c:chartSpace/>",
+            "word/charts/chart1.xml": "<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"/>",
             "word/charts/_rels/chart1.xml.rels": #"<Relationships><Relationship Id="rId2" Type="\#(imageType)" Target="../media/image1.png"/></Relationships>"#,   // OPC: <dir>/_rels/<name>.rels
         ])
         let r = try PackageInspector.imageConsistencyReport(of: data)

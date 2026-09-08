@@ -21,7 +21,7 @@ final class SyncOrchestratorTests: XCTestCase {
         """
 
     /// Builds the docx in its own temp directory (sidecars land next to it).
-    private func buildFixture() throws -> URL {
+    private func buildFixture(marker: String? = nil) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sync-orch-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -56,6 +56,11 @@ final class SyncOrchestratorTests: XCTestCase {
             """, to: "_rels/.rels")
         try write(Self.initialDocumentXML, to: "word/document.xml")
         try write(Data([0x00, 0x01, 0xFE, 0xFF]), to: "word/media/preserved.bin")
+        if let marker {
+            // An unreferenced media part: invisible to the document model, but it
+            // names the extracted archive as THIS test's (see leakedArchiveDirectories).
+            try write(Data(marker.utf8), to: "word/media/\(marker).bin")
+        }
 
         let docxURL = dir.appendingPathComponent("report.docx")
         let archive = try Archive(url: docxURL, accessMode: .create)
@@ -76,12 +81,29 @@ final class SyncOrchestratorTests: XCTestCase {
         try? FileManager.default.removeItem(at: docxURL.deletingLastPathComponent())
     }
 
+    private var readerArchiveRoot: URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent(ZipHelper.readerNamespace)
+    }
+
     private func extractedPackageDirectories() -> Set<String> {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("che-word-mcp")
-        let names = (try? FileManager.default.contentsOfDirectory(
-            atPath: root.path)) ?? []
-        return Set(names)
+        Set((try? FileManager.default.contentsOfDirectory(
+            atPath: readerArchiveRoot.path)) ?? [])
+    }
+
+    /// Archive directories that appeared under the shared reader namespace since
+    /// `before` **and belong to this test** — recognised by the per-test marker
+    /// media part `buildFixture(marker:)` adds. Other processes extract into the
+    /// same namespace concurrently, so a bare before/after set comparison flaps
+    /// (logic N-L6-R6, regression N-R5-1).
+    /// `TMPDIR` cannot isolate it either: macOS's `NSTemporaryDirectory()`
+    /// ignores it (regression N-R6-2).
+    private func leakedArchiveDirectories(since before: Set<String>, marker: String) -> [String] {
+        extractedPackageDirectories().subtracting(before).filter { name in
+            FileManager.default.fileExists(atPath: readerArchiveRoot
+                .appendingPathComponent(name)
+                .appendingPathComponent("word/media/\(marker).bin").path)
+        }.sorted()
     }
 
     /// Simulates a Word save: rewrites `word/document.xml` inside the zip
@@ -175,7 +197,8 @@ final class SyncOrchestratorTests: XCTestCase {
     }
 
     func testMalformedSidecarBootstrapReleasesArchiveDirectory() throws {
-        let docxURL = try buildFixture()
+        let marker = "leak-marker-\(UUID().uuidString)"
+        let docxURL = try buildFixture(marker: marker)
         defer { cleanup(docxURL) }
         try Data("{malformed-jsonl\n".utf8).write(
             to: SidecarStore.oplogURL(for: docxURL))
@@ -183,7 +206,7 @@ final class SyncOrchestratorTests: XCTestCase {
 
         XCTAssertThrowsError(try SyncOrchestrator.bootstrapFromDocx(url: docxURL))
 
-        XCTAssertEqual(extractedPackageDirectories(), before,
+        XCTAssertEqual(leakedArchiveDirectories(since: before, marker: marker), [],
                        "a failed bootstrap must release its extracted package")
     }
 

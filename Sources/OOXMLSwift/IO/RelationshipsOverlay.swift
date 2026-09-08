@@ -52,9 +52,16 @@ internal struct RelationshipsOverlay {
         typedManagedTypes: Set<String>
     ) -> String {
         var merged: [RelationshipDescriptor] = []
-        let typedById: [String: RelationshipDescriptor] = Dictionary(
-            uniqueKeysWithValues: typedRels.map { ($0.id, $0) }
-        )
+        // First-wins, never `Dictionary(uniqueKeysWithValues:)` (#139): that
+        // initializer traps on a duplicate key, and relationship ids come from
+        // a file on disk — a package declaring `rId5` twice (or `rId5` and
+        // `rId&#53;`, which the reader decodes to the same id) must not be able
+        // to terminate the process. Duplicates are refused with a named error
+        // in `DocxWriter.writeDocumentRelationships` before this runs, so the merged
+        // output below is never actually written for such a document; this
+        // loop only guarantees that the library itself cannot trap.
+        var typedById: [String: RelationshipDescriptor] = [:]
+        for rel in typedRels where typedById[rel.id] == nil { typedById[rel.id] = rel }
         var emittedIds = Set<String>()
 
         // Pass 1: walk original rels in order. Preserve unknown types verbatim;
@@ -73,11 +80,20 @@ internal struct RelationshipsOverlay {
         }
 
         // Pass 2: append typed rels not already emitted (newly added parts).
-        for rel in typedRels where !emittedIds.contains(rel.id) {
+        // `insert` rather than `contains` so a typed id that appears twice is
+        // emitted once here too — first-wins on both passes (#139).
+        for rel in typedRels where emittedIds.insert(rel.id).inserted {
             merged.append(rel)
         }
 
         return Self.serialize(merged)
+    }
+
+    /// The ids the merge will index by — the regex-parsed RAW attribute text,
+    /// in order. Exposed so `DocxWriter` can refuse a package whose raw ids
+    /// differ from what the reader decodes (#139 / #142).
+    static func rawIds(inRelsXML xml: String) -> [String] {
+        parseRels(xml).map(\.id)
     }
 
     // MARK: - Parsing
@@ -88,7 +104,10 @@ internal struct RelationshipsOverlay {
         // for rels files. `[^>]*?` matches lazily so the trailing `/` is not
         // captured into the attrs group; we deliberately do NOT exclude `/`
         // because Type URLs like "http://schemas..." contain forward slashes.
-        let pattern = #"<Relationship\b([^>]*?)/>"#
+        // The element name ends at whitespace, `/` or `>` — `<Relationship-2` is
+        // another element, exactly as the diagnosis regex in DocxWriter and the
+        // XML parser see it (verify R8 logic NEW-L3: `\b` matched before `-`).
+        let pattern = #"<Relationship(?=[\s/>])([^>]*?)/>"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return result }
         let nsString = xml as NSString
         for match in regex.matches(in: xml, range: NSRange(location: 0, length: nsString.length))
@@ -96,7 +115,8 @@ internal struct RelationshipsOverlay {
             let attrs = nsString.substring(with: match.range(at: 1))
             guard let id = attribute(attrs, name: "Id"),
                   let type = attribute(attrs, name: "Type"),
-                  let target = attribute(attrs, name: "Target")
+                  let target = attribute(attrs, name: "Target"),
+                  !isPresentButUnreadable(attrs, name: "TargetMode")     // optional, so the id gate cannot see it (verify R10 DA N-DA10-1)
             else { continue }
             let targetMode = attribute(attrs, name: "TargetMode")
             result.append(RelationshipDescriptor(
@@ -106,16 +126,78 @@ internal struct RelationshipsOverlay {
         return result
     }
 
-    private static func attribute(_ attrs: String, name: String) -> String? {
-        let escaped = NSRegularExpression.escapedPattern(for: name)
-        let pattern = #"\b\#(escaped)="([^"]*)""#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let nsString = attrs as NSString
-        guard let match = regex.firstMatch(
-            in: attrs,
-            range: NSRange(location: 0, length: nsString.length)
-        ), match.numberOfRanges >= 2 else { return nil }
-        return nsString.substring(with: match.range(at: 1))
+    /// The value of the attribute called `name` in a start tag's attribute
+    /// text, read the way the merge has always read it: only the exact
+    /// `Name="value"` form is readable. The text is walked attribute by
+    /// attribute, so every OTHER attribute's value is skipped whole, whatever
+    /// it contains — `Target='x Id="HIJACK"'` is a Target, not an Id (verify R8
+    /// requirements N-R8-2; the diagnosis in `DocxWriter` skips values the
+    /// same way, so the two scans define "the Id" identically). A `Name='v'`
+    /// or `Name = "v"` occurrence is present but unreadable: nil. For `Id` /
+    /// `Type` / `Target` the tag is then skipped and the merge refuses the
+    /// package instead of reading a neighbour (#142); the optional
+    /// `TargetMode` is checked with `isPresentButUnreadable` so an unreadable
+    /// one is refused too, not read as absent (verify R10 DA N-DA10-1).
+    /// `xmlns:Id` / `data-Id` are other names and never match.
+    static func attribute(_ attrs: String, name: String) -> String? {
+        guard let tokens = tokenize(attrs) else { return nil }              // an unterminated value: the tag text is cut, nothing in it is trusted
+        guard let token = tokens.first(where: { $0.name == name }) else { return nil }
+        return token.readable ? token.value : nil
+    }
+
+    /// Whether `name` occurs in the tag text in a form the text scan cannot
+    /// read. `attribute(_:name:)` answers nil for both "absent" and
+    /// "unreadable"; for an optional attribute the difference is the whole
+    /// point — an unreadable `TargetMode` was read as absent, and one legal
+    /// edit silently turned an external link into an internal part path
+    /// (verify R10 DA N-DA10-1). A cut tag counts as unreadable.
+    static func isPresentButUnreadable(_ attrs: String, name: String) -> Bool {
+        guard let tokens = tokenize(attrs) else { return true }
+        return tokens.contains { $0.name == name && !$0.readable }
+    }
+
+
+    /// One attribute of a start tag as the text scan sees it: `readable` only
+    /// for the exact `Name="value"` form. Returns nil when a value has no
+    /// closing quote — the tag regex is lazy up to `/>`, so a `/>` inside a
+    /// value cuts the attribute text mid-value, and a tokenizer that returned
+    /// the prefix let the merge write a truncated Target and drop TargetMode
+    /// (verify R9 logic / requirements N-R9-1: three R8 refusals had become
+    /// silent corruption). Nil → the tag is skipped → the merge refuses.
+    struct AttributeToken: Equatable { var name: String; var value: String; var readable: Bool }
+
+    /// The attributes the merge reads. An unreadable one of THESE skips the tag
+    /// (and the id gate then refuses the package); any other attribute being
+    /// unreadable changes nothing (verify R11 DA N-DA11-3).
+    static let gatedAttributeNames: Set<String> = ["Id", "Type", "Target", "TargetMode"]
+    static func tokenize(_ attrs: String) -> [AttributeToken]? {
+        var tokens: [AttributeToken] = []
+        var i = attrs.startIndex
+        while i < attrs.endIndex {
+            while i < attrs.endIndex, attrs[i].isWhitespace { i = attrs.index(after: i) }
+            guard i < attrs.endIndex else { break }
+            let nameStart = i
+            while i < attrs.endIndex, !attrs[i].isWhitespace, attrs[i] != "=" { i = attrs.index(after: i) }
+            let attrName = String(attrs[nameStart..<i])
+            if attrName.isEmpty { i = attrs.index(after: i); continue }          // a stray character; keep walking
+            var readable = false
+            if i < attrs.endIndex, attrs[i] == "=" {
+                let afterEquals = attrs.index(after: i)
+                readable = afterEquals < attrs.endIndex && attrs[afterEquals] == "\""
+            }
+            while i < attrs.endIndex, attrs[i].isWhitespace { i = attrs.index(after: i) }
+            guard i < attrs.endIndex, attrs[i] == "=" else { tokens.append(AttributeToken(name: attrName, value: "", readable: false)); continue }
+            i = attrs.index(after: i)
+            while i < attrs.endIndex, attrs[i].isWhitespace { i = attrs.index(after: i) }
+            guard i < attrs.endIndex, attrs[i] == "\"" || attrs[i] == "'" else { tokens.append(AttributeToken(name: attrName, value: "", readable: false)); continue }
+            let quote = attrs[i]; i = attrs.index(after: i)
+            let valueStart = i
+            while i < attrs.endIndex, attrs[i] != quote { i = attrs.index(after: i) }
+            guard i < attrs.endIndex else { return nil }                        // no closing quote: cut mid-value
+            tokens.append(AttributeToken(name: attrName, value: String(attrs[valueStart..<i]), readable: readable))
+            i = attrs.index(after: i)
+        }
+        return tokens
     }
 
     // MARK: - Serialization
