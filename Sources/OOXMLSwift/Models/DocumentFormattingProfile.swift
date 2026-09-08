@@ -222,6 +222,54 @@ internal enum ProfileXML {
         for attr in node.attributes { if let prefix = attr.declaredNamespacePrefix { result[prefix] = attr.value } }
         return result
     }
+    /// Normalize Word names on a target tree without filtering target-owned
+    /// extensions. Resolve attribute namespaces before changing any binding.
+    static func canonicalWordTree(_ source: XmlNode) -> XmlNode {
+        let root = source.deepClone()
+        var occupied = Set(walk(source).flatMap { $0.attributes.compactMap(\.declaredNamespacePrefix) })
+        var foreignAliases: [String: String] = [:]
+        func normalizedPrefix(_ prefix: String, uri: String) -> String {
+            if uri == w { return "w" }
+            guard prefix == "w" else { return prefix }
+            if let alias = foreignAliases[uri] { return alias }
+            var index = 1
+            while occupied.contains("profileTarget\(index)") { index += 1 }
+            let alias = "profileTarget\(index)"
+            occupied.insert(alias)
+            foreignAliases[uri] = alias
+            return alias
+        }
+        func visit(_ node: XmlNode, scope: [String: String]) {
+            guard node.kind == .element else { return }
+            var originalScope = scope
+            originalScope.merge(namespaceScope(node)) { _, new in new }
+            var bindings: [String: String] = [:]
+            if let uri = node.namespaceURI {
+                if uri == w { node.prefix = "w"; bindings["w"] = w }
+                else if let prefix = node.prefix {
+                    let mapped = normalizedPrefix(prefix, uri: uri)
+                    node.prefix = mapped
+                    bindings[mapped] = uri
+                }
+            }
+            node.attributes = node.attributes.map { attr in
+                guard !attr.isNamespaceDeclaration, let prefix = attr.prefix,
+                      let uri = originalScope[prefix] else { return attr }
+                var copy = attr
+                let mapped = normalizedPrefix(prefix, uri: uri)
+                copy.prefix = mapped
+                bindings[mapped] = uri
+                return copy
+            }
+            for (prefix, uri) in bindings.sorted(by: { $0.key < $1.key }) {
+                node.attributes.removeAll { $0.declaredNamespacePrefix == prefix }
+                node.attributes.append(XmlAttribute(prefix: "xmlns", localName: prefix, value: uri))
+            }
+            for child in node.children { visit(child, scope: originalScope) }
+        }
+        visit(root, scope: ["xml": "http://www.w3.org/XML/1998/namespace"])
+        return root
+    }
     static func clean(_ node: XmlNode, root: String, inherited: [String: String] = [:], strict: Bool = false) throws -> XmlNode {
         let ns = root == "theme" ? a : w
         guard node.namespaceURI == ns, node.localName == root else { throw DocumentFormattingProfileError.invalidSnapshot("wrong \(root) root") }
@@ -287,8 +335,21 @@ internal enum ProfileXML {
             if name == "cols", (attrs.first(where: { $0.localName == "equalWidth" })?.value == "0") {
                 throw DocumentFormattingProfileError.unsupportedFormatting("unequal columns")
             }
+            let children = try input.children.compactMap { try rebuild($0, scope: scope, parent: name) }
+            if ns == w {
+                var seen: Set<String> = []
+                for child in children {
+                    let repeatable = (name == "styles" && child.localName == "style")
+                        || (name == "fonts" && child.localName == "font")
+                        || (name == "tabs" && child.localName == "tab")
+                    let key = (child.namespaceURI ?? "") + ":" + child.localName
+                    if !repeatable, !seen.insert(key).inserted {
+                        throw DocumentFormattingProfileError.invalidSnapshot("duplicate singleton \(name)/\(child.localName)")
+                    }
+                }
+            }
             return .element(prefix: ns == w ? "w" : "a", localName: name, namespaceURI: ns,
-                            attributes: attrs, children: try input.children.compactMap { try rebuild($0, scope: scope, parent: name) })
+                            attributes: attrs, children: children)
         }
         let result = try rebuild(node, scope: inherited)!
         result.attributes.insert(XmlAttribute(prefix: "xmlns", localName: ns == w ? "w" : "a", value: ns), at: 0)
@@ -310,7 +371,7 @@ internal enum ProfileXML {
         guard defaults.count == 1 else { throw DocumentFormattingProfileError.missingRequiredFormatting("one default paragraph style") }
         for style in styles {
             for name in ["basedOn", "next", "link"] {
-                if let reference = child(style, name) {
+                for reference in style.children where reference.namespaceURI == w && reference.localName == name {
                     guard let target = value(reference, "val"), byID[target] != nil else { throw DocumentFormattingProfileError.invalidSnapshot("dangling \(name)") }
                 }
             }
