@@ -17,6 +17,7 @@ internal struct OperationReplayBase {
 public struct WordDocument: Equatable {
     public var body: Body
     public var styles: [Style]
+    internal var formattingState: DocumentFormattingState?
     public var properties: DocumentProperties
     public var numbering: Numbering
     public var sectionProperties: SectionProperties

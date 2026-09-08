@@ -192,6 +192,24 @@ public struct DocxReader {
             let stylesXML = try XMLDocument(data: try XmlTreeWriter.serialize(stylesTree))
             document.styles = try parseStyles(from: stylesXML)
             document.latentStyles = parseLatentStyles(from: stylesXML)
+            // Retain docDefaults independently of transient carried/tree
+            // freshness, so a typed style edit after reopening cannot reset it.
+            if let defaults = ProfileXML.child(stylesTree.root, "docDefaults") {
+                let copy = defaults.deepClone()
+                for attr in stylesTree.root.attributes where attr.isNamespaceDeclaration {
+                    if !copy.attributes.contains(where: { $0.qualifiedName == attr.qualifiedName }) { copy.attributes.append(attr) }
+                }
+                func optionalXML(_ path: String) throws -> String? {
+                    let url = tempDir.appendingPathComponent(path)
+                    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+                    return try String(contentsOf: url, encoding: .utf8)
+                }
+                document.formattingState = DocumentFormattingState(
+                    defaultsXML: try ProfileXML.string(copy),
+                    originalStylesXML: String(decoding: stylesData, as: UTF8.self), baselineStyles: document.styles,
+                    themeXML: try optionalXML("word/theme/theme1.xml"), fontsXML: try optionalXML("word/fontTable.xml"),
+                    explicitlyApplied: false)
+            }
         }
 
         // 6. 讀取 numbering.xml（可選，用於清單語義標註）
@@ -3493,7 +3511,7 @@ public struct DocxReader {
 
     // MARK: - Styles Parsing
 
-    private static func parseStyles(from xml: XMLDocument) throws -> [Style] {
+    internal static func parseStyles(from xml: XMLDocument) throws -> [Style] {
         var styles: [Style] = []
 
         let styleNodes = try xml.nodes(forXPath: "//*[local-name()='style']")
