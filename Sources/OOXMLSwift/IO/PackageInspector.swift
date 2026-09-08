@@ -261,15 +261,15 @@ public enum PackageInspector {
     ///
     /// - Parameter packageData: the bytes a writer produced (e.g.
     ///   `DocxWriter.writeData(_:)` output, or a file read back from disk).
-    public static func imageConsistencyReport(of packageData: Data) throws -> ImageConsistencyReport {
-        try imageConsistencyReport(extracting: { try ZipHelper.unzip(data: packageData, namespace: ZipHelper.inspectorNamespace) })
+    public static func imageConsistencyReport(of packageData: Data, limits: ZipHelper.Limits = ZipHelper.defaultLimits) throws -> ImageConsistencyReport {
+        try imageConsistencyReport(extracting: { try ZipHelper.unzip(data: packageData, namespace: ZipHelper.inspectorNamespace, limits: limits) }, limits: limits)
     }
 
     /// The same report for a package already on disk. Both entry points read
     /// the bytes into memory, scan them, and extract from one owner-only
     /// private copy; this one only saves the caller the read.
-    public static func imageConsistencyReport(ofPackageAt url: URL) throws -> ImageConsistencyReport {
-        try imageConsistencyReport(extracting: { try ZipHelper.unzip(data: try Data(contentsOf: url), namespace: ZipHelper.inspectorNamespace) })
+    public static func imageConsistencyReport(ofPackageAt url: URL, limits: ZipHelper.Limits = ZipHelper.defaultLimits) throws -> ImageConsistencyReport {
+        try imageConsistencyReport(extracting: { try ZipHelper.unzip(data: try Data(contentsOf: url), namespace: ZipHelper.inspectorNamespace, limits: limits) }, limits: limits)
     }
 
     /// `listSubpaths` / `listDirectory` are the file-system listings the scan
@@ -279,7 +279,8 @@ public enum PackageInspector {
     static func imageConsistencyReport(
         extracting extract: () throws -> URL,
         listSubpaths: (URL) throws -> [String] = { try FileManager.default.subpathsOfDirectory(atPath: $0.path) },
-        listDirectory: (URL) throws -> [String] = { try FileManager.default.contentsOfDirectory(atPath: $0.path) }
+        listDirectory: (URL) throws -> [String] = { try FileManager.default.contentsOfDirectory(atPath: $0.path) },
+        limits: ZipHelper.Limits = ZipHelper.defaultLimits
     ) throws -> ImageConsistencyReport {
         let tempDir: URL
         do {
@@ -321,7 +322,7 @@ public enum PackageInspector {
         func fileData(_ part: String) throws -> Data? {
             let fileURL = tempDir.appendingPathComponent(part)
             guard try identity(fileURL) != nil else { return nil }
-            do { return try ZipHelper.readPart(at: fileURL, describedAs: part) }
+            do { return try ZipHelper.readPart(at: fileURL, describedAs: part, limits: limits) }
             catch { throw WordError.invalidDocx("could not read a part of the extracted package (\(ZipHelper.describeWithoutPaths(error))); no consistency verdict.") }
         }
         /// Whether the file system serves `listed` under the name `<stem><suffix>`
@@ -403,7 +404,7 @@ public enum PackageInspector {
             let part = "word/" + sub
             guard let declaredCount = try declare(part: part), declaredCount > 0 else { continue }
             let partBytes: Data
-            do { partBytes = try ZipHelper.readPart(at: fileURL, describedAs: part) }
+            do { partBytes = try ZipHelper.readPart(at: fileURL, describedAs: part, limits: limits) }
             catch { throw WordError.invalidDocx("could not read a part of the extracted package (\(ZipHelper.describeWithoutPaths(error))); no consistency verdict.") }   // the raw NSError carries the temporary path in userInfo (verify R10 DA N-DA10-6)
             let content = scanPart(partBytes, part: part)
             if !content.parsed { unparsable.insert(part); unparsableContentParts.insert(part) }

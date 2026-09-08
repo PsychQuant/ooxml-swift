@@ -21,12 +21,12 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     /// like — a highly compressible multi-megabyte payload is the point. The
     /// limits are settable precisely so a caller with a reason can lift them;
     /// this is that reason, scoped to one test and restored after it.
-    private func withoutSizeLimits(_ body: () throws -> Void) rethrows {
-        let saved = ZipHelper.limits
-        defer { ZipHelper.limits = saved }
-        ZipHelper.limits = ZipHelper.Limits(maximumEntryBytes: .max, maximumTotalBytes: .max,
-                                            maximumCompressionRatio: .infinity, maximumPartBytes: .max)
-        try body()
+    /// Limits travel with the call now — there is no process-wide policy to
+    /// save and restore, so this hands the body an unlimited value to pass on.
+    private static let unlimited = ZipHelper.Limits(maximumEntryBytes: .max, maximumTotalBytes: .max,
+                                                    maximumCompressionRatio: .infinity, maximumPartBytes: .max)
+    private func withoutSizeLimits(_ body: (ZipHelper.Limits) throws -> Void) rethrows {
+        try body(Self.unlimited)
     }
 
 
@@ -184,7 +184,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     // MARK: - #138 · comments and CDATA are structure, and scanning is linear
 
     func testPathologicalCommentPayloadsFinishImmediatelyAndClaimNoOrphan() throws {
-        try withoutSizeLimits {
+        try withoutSizeLimits { unlimited in
             let n = 20_000
             let payloads: [String: String] = [
                 "unterminated openers":  String(repeating: "<!--", count: n),
@@ -198,7 +198,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
                     extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#,
                             "word/charts/_rels/chart1.xml.rels": rels(payload)])
                 let started = Date()
-                let report = try PackageInspector.imageConsistencyReport(of: data)
+                let report = try PackageInspector.imageConsistencyReport(of: data, limits: unlimited)
                 XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
                                   "\(label): pre-3.7.0 this took 35–60 s on a 2 KB package")
                 // Whatever the parser makes of the payload, it must not invent a
@@ -209,7 +209,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     }
 
     func testCommentShapesThatDegradeLibxml2AreRefusedBeforeParsing() throws {
-        try withoutSizeLimits {
+        try withoutSizeLimits { unlimited in
             // verify R1 requirements R1: replacing the regex moved the quadratic
             // into libxml2's error recovery — `--` inside a comment. 4.6 KB of
             // package, 82 s. These are refused by the linear pre-check instead.
@@ -227,7 +227,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
                                        docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
                                        extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#, "word/charts/_rels/chart1.xml.rels": rels(payload)])
                 let t0 = Date()
-                let report = try PackageInspector.imageConsistencyReport(of: data)
+                let report = try PackageInspector.imageConsistencyReport(of: data, limits: unlimited)
                 XCTAssertLessThan(Date().timeIntervalSince(t0), 1.0, label)
                 XCTAssertEqual(report.unparsableParts, ["word/charts/_rels/chart1.xml.rels"], label)
                 XCTAssertFalse(report.isConsistent, label)
@@ -1612,7 +1612,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     }
 
     func testThePrivateCopyIsOwnerOnlyForAsLongAsItExists() throws {
-        try withoutSizeLimits {
+        try withoutSizeLimits { unlimited in
             // N-DA10-2 (mutation M2): the copy is created by openat(O_CREAT|O_EXCL|O_NOFOLLOW, 0o600);
             // a `createFile(attributes: nil)` copy is 0644 for its whole lifetime. The copy lives
             // for the length of the extraction, so a poller sees it: every sample must be 0600.
@@ -1635,7 +1635,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
                 }
             }
             poller.start()
-            let out = try ZipHelper.unzip(data: data, namespace: ns)
+            let out = try ZipHelper.unzip(data: data, namespace: ns, limits: unlimited)
             poller.cancel()
             ZipHelper.cleanup(out)
             samples.lock.lock(); let modes = samples.modes; samples.lock.unlock()

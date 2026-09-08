@@ -11,9 +11,13 @@ import ZIPFoundation
 /// own evidence — declared sizes before extraction, actual sizes after it.
 final class Issue130SizeLimitsTests: XCTestCase {
 
-    private var saved = ZipHelper.Limits()
-    override func setUp() { super.setUp(); saved = ZipHelper.limits }
-    override func tearDown() { ZipHelper.limits = saved; super.tearDown() }
+    /// Limits are passed to each call, never installed process-wide: a shared
+    /// mutable policy let one test's override leak into another's extraction.
+    private func limits(entry: Int64 = 256 << 20, total: Int64 = 512 << 20,
+                        ratio: Double = 500, part: Int64 = 256 << 20) -> ZipHelper.Limits {
+        ZipHelper.Limits(maximumEntryBytes: entry, maximumTotalBytes: total,
+                         maximumCompressionRatio: ratio, maximumPartBytes: part)
+    }
 
     /// A package whose entries are honestly declared and huge.
     private func bomb(entryBytes: Int, entries: Int = 1) throws -> Data {
@@ -36,11 +40,10 @@ final class Issue130SizeLimitsTests: XCTestCase {
     }
 
     func testAnEntryOverTheLimitIsRefusedBeforeAnythingIsWritten() throws {
-        ZipHelper.limits.maximumEntryBytes = 1 << 20                    // 1 MB
-        ZipHelper.limits.maximumCompressionRatio = .infinity            // the per-entry size is what is under test here
+        let l = limits(entry: 1 << 20, ratio: .infinity)                // the per-entry size is what is under test here
         let data = try bomb(entryBytes: 4 << 20)                        // 4 MB, honestly declared
         let ns = "i130-\(UUID().uuidString)"
-        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns)) { error in
+        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns, limits: l)) { error in
             let message = String(describing: error)
             XCTAssertTrue(message.contains("over the"), message)
             XCTAssertTrue(message.contains("limit"), message)
@@ -53,24 +56,20 @@ final class Issue130SizeLimitsTests: XCTestCase {
     }
 
     func testTheTotalIsBoundedEvenWhenEveryEntryFits() throws {
-        ZipHelper.limits.maximumEntryBytes = 4 << 20
-        ZipHelper.limits.maximumTotalBytes = 6 << 20
-        ZipHelper.limits.maximumCompressionRatio = .infinity            // the total is what is under test here
+        let l = limits(entry: 4 << 20, total: 6 << 20, ratio: .infinity) // the total is what is under test here
         let data = try bomb(entryBytes: 2 << 20, entries: 6)            // 6 x 2 MB = 12 MB total, each entry legal
         let ns = "i130-\(UUID().uuidString)"
-        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns)) { error in
+        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns, limits: l)) { error in
             XCTAssertTrue(String(describing: error).contains("in total"), String(describing: error))
         }
         try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
     }
 
     func testAnExtremeCompressionRatioIsRefused() throws {
-        ZipHelper.limits.maximumEntryBytes = 64 << 20                   // not the binding limit here
-        ZipHelper.limits.maximumTotalBytes = 64 << 20
-        ZipHelper.limits.maximumCompressionRatio = 50                   // real corpus p99.9 is 32x
+        let l = limits(entry: 64 << 20, total: 64 << 20, ratio: 50)     // real corpus p99.9 is 32x
         let data = try bomb(entryBytes: 8 << 20)                        // a run of one byte: ratio far over 50x
         let ns = "i130-\(UUID().uuidString)"
-        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns)) { error in
+        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns, limits: l)) { error in
             XCTAssertTrue(String(describing: error).contains("expands"), String(describing: error))
         }
         try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
@@ -97,13 +96,13 @@ final class Issue130SizeLimitsTests: XCTestCase {
     func testAPartTooLargeToHoldIsRefusedBeforeItIsRead() throws {
         // The memory axis. The file is written directly, so the extraction
         // limits are not what refuses it — `readPart` is.
-        ZipHelper.limits.maximumPartBytes = 1 << 20
+        let small = limits(part: 1 << 20)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("i130-part-\(UUID().uuidString)")
         defer { ZipHelper.removeTreeForcibly(root) }
         try FileManager.default.createDirectory(at: root.appendingPathComponent("word"), withIntermediateDirectories: true)
         let part = root.appendingPathComponent("word/document.xml")
         try Data(repeating: 0x41, count: 4 << 20).write(to: part)
-        XCTAssertThrowsError(try ZipHelper.readPart(at: part, describedAs: "word/document.xml")) { error in
+        XCTAssertThrowsError(try ZipHelper.readPart(at: part, describedAs: "word/document.xml", limits: small)) { error in
             let message = String(describing: error)
             XCTAssertTrue(message.contains("limit for a single part"), message)
             // The part NAME legitimately contains "/" — what must not appear is
@@ -113,7 +112,122 @@ final class Issue130SizeLimitsTests: XCTestCase {
             XCTAssertFalse(message.contains("/var/"), message)
         }
         // Under the limit it reads normally.
-        ZipHelper.limits.maximumPartBytes = 64 << 20
-        XCTAssertEqual(try ZipHelper.readPart(at: part, describedAs: "word/document.xml").count, 4 << 20)
+        XCTAssertEqual(try ZipHelper.readPart(at: part, describedAs: "word/document.xml",
+                                              limits: limits(part: 64 << 20)).count, 4 << 20)
+    }
+
+    // MARK: - A central directory that lies
+
+    /// Build a package, then rewrite its central directory to declare
+    /// `uncompressedSize` for the one entry. The archive's real bytes are
+    /// untouched; only the declaration changes — which is the case the code's
+    /// own comment calls out as possible.
+    private func packageDeclaring(_ declared: UInt64, actualBytes: Int) throws -> Data {
+        let archive = try Archive(accessMode: .create)
+        let payload = Data(repeating: 0x41, count: actualBytes)
+        try archive.addEntry(with: "word/document.xml", type: .file, uncompressedSize: Int64(payload.count),
+                             compressionMethod: .deflate,
+                             provider: { pos, size in payload.subdata(in: Int(pos)..<Int(pos) + size) })
+        var raw = [UInt8](archive.data ?? Data())
+
+        // Central directory header: usize is 4 bytes at +24, name length at +28,
+        // extra length at +30, the extra field itself after the name.
+        guard let i = raw.firstRange(of: Array("PK\u{01}\u{02}".utf8)) else {
+            XCTFail("no central directory"); return Data()
+        }
+        let base = i.lowerBound
+        func u16(_ at: Int) -> Int { Int(raw[at]) | Int(raw[at + 1]) << 8 }
+        let nameLen = u16(base + 28), extraLen = u16(base + 30)
+
+        if declared <= UInt64(UInt32.max) {
+            for k in 0..<4 { raw[base + 24 + k] = UInt8((declared >> (8 * UInt64(k))) & 0xFF) }
+            return Data(raw)
+        }
+        // Over 32 bits: signal ZIP64 in the 32-bit field and carry the real
+        // value in a ZIP64 extended-information extra field (header 0x0001).
+        for k in 0..<4 { raw[base + 24 + k] = 0xFF }
+        var extra: [UInt8] = [0x01, 0x00, 0x08, 0x00]
+        for k in 0..<8 { extra.append(UInt8((declared >> (8 * UInt64(k))) & 0xFF)) }
+        raw.insert(contentsOf: extra, at: base + 46 + nameLen + extraLen)
+        let newExtra = extraLen + extra.count
+        raw[base + 30] = UInt8(newExtra & 0xFF); raw[base + 31] = UInt8((newExtra >> 8) & 0xFF)
+        if let e = raw.firstRange(of: Array("PK\u{05}\u{06}".utf8), in: base..<raw.count) {
+            let at = e.lowerBound + 12
+            let size = Int(raw[at]) | Int(raw[at+1]) << 8 | Int(raw[at+2]) << 16 | Int(raw[at+3]) << 24
+            let grown = size + extra.count
+            for k in 0..<4 { raw[at + k] = UInt8((grown >> (8 * k)) & 0xFF) }
+        }
+        return Data(raw)
+    }
+
+    /// A declaration above `Int64.max` must be REFUSED, not trap.
+    ///
+    /// `Int64(entry.uncompressedSize)` on the UInt64 the central directory
+    /// declares crashed the process — "Not enough bits to represent the passed
+    /// value" — on a 152-byte package, before reaching the check meant to
+    /// refuse it, and on a package v3.7.0 extracted without incident.
+    func testADeclarationAboveInt64MaxIsRefusedRatherThanTrapping() throws {
+        let data = try packageDeclaring(UInt64.max, actualBytes: 32)
+        let ns = "i130-\(UUID().uuidString)"
+        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns, limits: limits())) { error in
+            XCTAssertTrue(String(describing: error).contains("over the"), String(describing: error))
+        }
+        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
+    }
+
+    /// An archive that UNDERSTATES its entry is caught by measuring the tree,
+    /// not by trusting the declaration. Deleting the post-extraction
+    /// accounting leaves every other test in this file green.
+    func testAnArchiveThatUnderstatesItsEntryIsStillRefused() throws {
+        let data = try packageDeclaring(1024, actualBytes: 4 << 20)      // declares 1 KB, writes 4 MB
+        let ns = "i130-\(UUID().uuidString)"
+        let l = limits(entry: 2 << 20, total: 2 << 20, ratio: .infinity) // the declaration passes these; the reality does not
+        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns, limits: l)) { error in
+            let m = String(describing: error)
+            XCTAssertTrue(m.contains("over the") || m.contains("in total"), m)
+        }
+        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
+    }
+
+    // MARK: - The limits reach the callers, not just ZipHelper
+
+    /// Driving a limit through `DocxReader.read`. Reverting its call site to a
+    /// plain `Data(contentsOf:)` / unlimited `unzip` leaves the direct
+    /// `ZipHelper` tests green; this one fails.
+    func testDocxReaderRefusesAPackageOverItsLimits() throws {
+        let data = try bomb(entryBytes: 4 << 20)
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("i130-\(UUID().uuidString).docx")
+        try data.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        XCTAssertThrowsError(try DocxReader.read(from: file, limits: limits(entry: 1 << 20, ratio: .infinity))) { error in
+            XCTAssertTrue(String(describing: error).contains("over the"), String(describing: error))
+        }
+    }
+
+    /// The same through `PackageInspector`, whose extraction is a second,
+    /// independent call site.
+    func testPackageInspectorRefusesAPackageOverItsLimits() throws {
+        let data = try bomb(entryBytes: 4 << 20)
+        XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(of: data,
+                                                                        limits: limits(entry: 1 << 20, ratio: .infinity))) { error in
+            XCTAssertTrue(String(describing: error).contains("could not be extracted") || String(describing: error).contains("over the"),
+                          String(describing: error))
+        }
+    }
+
+    /// The DEFAULT values bind. Raising every default to effectively unlimited
+    /// left every other test here green, because each one names its own limits.
+    func testTheDefaultsThemselvesRefuseAnAmplifiedPackage() throws {
+        let d = ZipHelper.defaultLimits
+        XCTAssertLessThan(d.maximumEntryBytes, Int64(1) << 40, "a default must actually bind")
+        XCTAssertLessThan(d.maximumCompressionRatio, 100_000)
+        // 600 MB of one byte: over the 512 MB default total, declared honestly.
+        let data = try bomb(entryBytes: 100 << 20, entries: 6)
+        let ns = "i130-\(UUID().uuidString)"
+        XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns)) { error in
+            XCTAssertTrue(String(describing: error).contains("in total") || String(describing: error).contains("expands"),
+                          String(describing: error))
+        }
+        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
     }
 }
