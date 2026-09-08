@@ -277,6 +277,24 @@ public struct TableCell: Equatable {
     /// so the writer can emit `<w:tbl>` siblings of `<w:p>` correctly.
     internal var _legacyNestedTables: [Table] = []
 
+    /// v3.8.0+ (#155): the cell's block children in document order, when that
+    /// order is known.
+    ///
+    /// `paragraphs` and `nestedTables` are two separate arrays, so between them
+    /// they cannot say whether a paragraph came before or after a table. The
+    /// reader used to discard the answer at parse time — it collected every
+    /// `<w:p>` in one pass and every `<w:tbl>` in another — and the writer then
+    /// re-emitted that flattening, moving user content and appending a fresh
+    /// trailing paragraph on every save. `A, table, B, C` came back as
+    /// `A, B, C, table, <w:p/>`.
+    ///
+    /// `nil` means no order was recorded: a cell built by a caller, or one
+    /// whose paragraphs or tables have since been replaced wholesale. The
+    /// writer then falls back to the historical shape. It is not `nil` for a
+    /// cell that was read and left alone, which is the case the defect was
+    /// reported for.
+    internal var _blocks: [CellBlock]?
+
     public init() {
         self._legacyParagraphs = [Paragraph()]
         self.properties = TableCellProperties()
@@ -321,7 +339,7 @@ public struct TableCell: Equatable {
                 return Paragraph(xmlNode: child)
             }
         }
-        set { _legacyParagraphs = newValue }
+        set { _legacyParagraphs = newValue; _blocks = nil }
     }
 
     /// v0.31.1+ Mode-aware view of `<w:tbl>` nested tables.
@@ -341,7 +359,7 @@ public struct TableCell: Equatable {
                 return Table(xmlNode: child)
             }
         }
-        set { _legacyNestedTables = newValue }
+        set { _legacyNestedTables = newValue; _blocks = nil }
     }
 
     /// v0.31.1+ Stable identifier for this cell. Same fallback chain as
@@ -377,7 +395,15 @@ extension TableCell {
         return lhs._legacyParagraphs == rhs._legacyParagraphs
             && lhs.properties == rhs.properties
             && lhs._legacyNestedTables == rhs._legacyNestedTables
+            && lhs._blocks == rhs._blocks
     }
+}
+
+/// v3.8.0+ (#155): one block-level child of a table cell, used to remember the
+/// order `paragraphs` and `nestedTables` cannot express between them.
+public enum CellBlock: Equatable {
+    case paragraph(Paragraph)
+    case table(Table)
 }
 
 /// 表格儲存格屬性
@@ -1241,55 +1267,78 @@ extension TableCell {
         // Cell Properties
         xml += properties.toXML()
 
-        // Paragraphs, then nested tables, then the paragraph OOXML requires a
-        // cell to end with.
+        // Emit the cell's children IN THEIR OWN ORDER (PsychQuant/ooxml-swift#155).
         //
-        // The last one is REUSED, not added (PsychQuant/ooxml-swift#155). This
-        // emit flattens the cell — every paragraph first, then every nested
-        // table — so a trailing empty paragraph that sat AFTER a table in the
-        // source comes back out BEFORE it. Appending a fresh `<w:p/>` on top of
-        // that grew the cell by one paragraph on every typed-dirty save,
-        // without limit: a real document measured 9 -> 14 -> 19 -> 24 cell
-        // paragraphs over three generations, one per nested-table cell each
-        // time. The comment here used to say Word appends one "if missing" —
-        // which was true of Word and never true of this code, because it never
-        // checked.
+        // This used to flatten the cell — every paragraph, then every nested
+        // table, then a fresh `<w:p/>`. Two things went wrong at once:
         //
-        // So the cell's LAST paragraph is held back and emitted after the
-        // tables. A valid cell always ends with a paragraph after its last
-        // nested table — Word writes one unconditionally — so the last entry in
-        // the flattened paragraph list IS that trailing paragraph, whether or
-        // not it is empty. Holding it back therefore both stops the growth and
-        // round-trips the ordinary (content, table, content) cell exactly.
+        //   1. A trailing paragraph that sat AFTER a table came back out BEFORE
+        //      it, and a new `<w:p/>` was appended on top. Every typed-dirty
+        //      save therefore added one paragraph per nested-table cell, with
+        //      no upper bound — a real form measured 12 -> 14 -> 16 -> 18 over
+        //      four generations.
+        //   2. The reordering itself moved user content. `A, table, B, C`
+        //      re-emitted as `A, B, table, C`: ONE nested table was already
+        //      enough to move a paragraph across it.
         //
-        // Requiring the held-back paragraph to be EMPTY was tried first and is
-        // not enough: a real form (12 cell paragraphs over 2 nested-table cells)
-        // still gained one paragraph per cell on the first save, because its
-        // trailing paragraphs carry text. It reached a fixed point on save two
-        // — bounded, but the document had already been changed.
+        // A tree-backed cell knows its own order — `xmlNode.children` is the
+        // document order — so there is nothing to infer. Walking it fixes both
+        // at once and needs no premise about what Word writes.
         //
-        // What this does NOT do is restore the interleaving of a cell holding
-        // SEVERAL nested tables: those still emit adjacent. That needs the typed
-        // model to stop being the serialisation authority (#133 / #129).
-        var leading = paragraphs
-        var trailing: Paragraph?
-        if !nestedTables.isEmpty, !leading.isEmpty {
-            trailing = leading.removeLast()
-        }
-
-        if leading.isEmpty && nestedTables.isEmpty {
-            xml += Paragraph().toXML()          // a cell must hold at least one paragraph
+        // Holding back the last paragraph was tried first and is NOT enough:
+        // it reverses `before, table` into `table, before` (a cell whose last
+        // block child is a table), and still emits `A, B, table, C`. It stops
+        // the growth while moving content, which the growth measurement cannot
+        // see because the paragraph COUNT is unchanged either way.
+        if let node = xmlNode {
+            var emitted = 0
+            for child in node.children where child.kind == .element {
+                switch child.localName {
+                case "p":
+                    xml += Paragraph(xmlNode: child).toXML()
+                    emitted += 1
+                case "tbl":
+                    xml += Table(xmlNode: child).toXML()
+                    emitted += 1
+                default:
+                    // `tcPr` is emitted above from `properties`. Anything else
+                    // a cell may legally hold (block-level SDTs, bookmark
+                    // markers, revision ranges) has no typed representation
+                    // here and is dropped — as it already was before this
+                    // change. Tracked with the rest of the typed-model losses
+                    // in #133 / #129, not widened here.
+                    break
+                }
+            }
+            if emitted == 0 { xml += Paragraph().toXML() }   // a cell holds at least one paragraph
+        } else if let blocks = _blocks {
+            // Detached but the reader recorded the order — emit it.
+            if blocks.isEmpty {
+                xml += Paragraph().toXML()          // a cell holds at least one paragraph
+            } else {
+                for block in blocks {
+                    switch block {
+                    case .paragraph(let p): xml += p.toXML()
+                    case .table(let t):     xml += t.toXML()
+                    }
+                }
+            }
         } else {
-            for para in leading { xml += para.toXML() }
-        }
+            // No order was ever recorded: the cell was built by a caller, or its
+            // paragraphs/tables were replaced wholesale. There is nothing to
+            // preserve, so emit the historical shape.
+            if paragraphs.isEmpty {
+                xml += Paragraph().toXML()
+            } else {
+                for para in paragraphs { xml += para.toXML() }
+            }
 
-        // v0.17.0+ (#49): nested tables emit as siblings of paragraphs
-        for nested in nestedTables {
-            xml += nested.toXML()
-        }
+            // v0.17.0+ (#49): nested tables emit as siblings of paragraphs
+            for nested in nestedTables { xml += nested.toXML() }
 
-        if !nestedTables.isEmpty {
-            xml += (trailing?.toXML() ?? "<w:p/>")
+            // OOXML wants a paragraph after a nested table; with no recorded
+            // order there is no candidate to reuse, so one is added.
+            if !nestedTables.isEmpty { xml += "<w:p/>" }
         }
 
         xml += "</w:tc>"

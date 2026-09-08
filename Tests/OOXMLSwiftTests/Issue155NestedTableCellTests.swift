@@ -1,110 +1,130 @@
 import XCTest
 @testable import OOXMLSwift
 
-/// PsychQuant/ooxml-swift#155 — a cell holding a nested table must not gain a
-/// paragraph every time the document is re-serialised from the typed model.
+/// PsychQuant/ooxml-swift#155 — a cell holding a nested table must survive
+/// re-serialisation with its children in the same ORDER and the same COUNT.
 ///
-/// Measured on real documents before the fix (v3.7.0): the same file, one
-/// typed-dirty operation per generation, went 9 -> 14 -> 19 -> 24 cell
-/// paragraphs. Unbounded, and the count of affected cells equalled the
-/// document's nested-table count exactly.
+/// The count alone is not enough, and that is the whole lesson of this issue:
+/// the first fix attempt held the last paragraph back, which kept every count
+/// stable while moving user content across the table. A corpus measurement of
+/// "12 -> 12 -> 12" was green for that broken fix.
 final class Issue155NestedTableCellTests: XCTestCase {
 
-    /// A cell whose content is: one paragraph, a nested table, and the trailing
-    /// paragraph OOXML requires after it — the shape a real document has.
-    private func cellWithNestedTable() -> TableCell {
-        var inner = Table()
-        var innerRow = TableRow()
-        var innerCell = TableCell()
-        innerCell.paragraphs = [Paragraph(text: "inner")]
-        innerRow.cells = [innerCell]
-        inner.rows = [innerRow]
+    private let innerTable = "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol/></w:tblGrid>"
+        + "<w:tr><w:tc><w:p><w:r><w:t>inner</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
 
-        var cell = TableCell()
-        cell.paragraphs = [Paragraph(text: "before"), Paragraph()]   // the trailing empty one
-        cell.nestedTables = [inner]
-        return cell
-    }
-
-    private func paragraphCount(inCellXML xml: String) -> Int {
-        // count <w:p> openers that belong to THIS cell, not the nested table's
-        var depth = 0, count = 0
-        var rest = Substring(xml)
-        while let i = rest.firstIndex(of: "<") {
-            rest = rest[rest.index(after: i)...]
-            if rest.hasPrefix("w:tbl>") || rest.hasPrefix("w:tbl ") { depth += 1 }
-            else if rest.hasPrefix("/w:tbl>") { depth -= 1 }
-            else if depth == 0, rest.hasPrefix("w:p>") || rest.hasPrefix("w:p ") || rest.hasPrefix("w:p/>") { count += 1 }
-        }
-        return count
-    }
-
-    /// The defect, stated as a fixed point: emitting a cell, reading the result
-    /// back and emitting it again must produce the same number of paragraphs.
-    func testReEmittingACellWithANestedTableReachesAFixedPoint() throws {
-        let cell = cellWithNestedTable()
-        let gen1 = cell.toXML()
-        let n1 = paragraphCount(inCellXML: gen1)
-
-        // Re-read gen1 as a tree-backed cell and emit again — the generation
-        // loop the real corpus went through.
-        let doc = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:tbl><w:tr>\(gen1)</w:tr></w:tbl></w:body></w:document>"
+    /// Parse `<w:tc>` content into a tree-backed cell, the way a read document
+    /// produces one.
+    private func cell(holding inner: String) throws -> TableCell {
+        let doc = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
+            + "<w:body><w:tbl><w:tr><w:tc>\(inner)</w:tc></w:tr></w:tbl></w:body></w:document>"
         let tree = try XmlTreeReader.parse(Data(doc.utf8))
         let body = try XCTUnwrap(tree.root.children.first { $0.localName == "body" })
         let tbl = try XCTUnwrap(body.children.first { $0.localName == "tbl" })
         let tr = try XCTUnwrap(tbl.children.first { $0.localName == "tr" })
         let tc = try XCTUnwrap(tr.children.first { $0.localName == "tc" })
-        let gen2 = TableCell(xmlNode: tc).toXML()
-        let n2 = paragraphCount(inCellXML: gen2)
-
-        XCTAssertEqual(n2, n1, "a cell with a nested table must not grow a paragraph per save (was \(n1) -> \(n2))")
+        return TableCell(xmlNode: tc)
     }
 
-    /// The rule the trailing paragraph exists for still holds: after a nested
-    /// table, the cell ends with a paragraph.
-    func testACellStillEndsWithAParagraphAfterItsNestedTable() {
-        let xml = cellWithNestedTable().toXML()
-        let afterLastTable = xml.range(of: "</w:tbl>", options: .backwards).map { String(xml[$0.upperBound...]) } ?? ""
-        XCTAssertTrue(afterLastTable.contains("<w:p"), "a paragraph follows the nested table: \(afterLastTable)")
+    private func para(_ t: String) -> String { "<w:p><w:r><w:t>\(t)</w:t></w:r></w:p>" }
+
+    /// The cell's own block children, in emitted order: "p:<text>" / "tbl".
+    private func blockOrder(_ xml: String) -> [String] {
+        var out: [String] = []
+        var depth = 0
+        var rest = Substring(xml)
+        var pendingParagraph = false
+        var text = ""
+        while let i = rest.firstIndex(of: "<") {
+            rest = rest[rest.index(after: i)...]
+            if rest.hasPrefix("w:tbl>") || rest.hasPrefix("w:tbl ") {
+                if depth == 0 { out.append("tbl") }
+                depth += 1
+            } else if rest.hasPrefix("/w:tbl>") {
+                depth -= 1
+            } else if depth == 0, rest.hasPrefix("w:p>") || rest.hasPrefix("w:p ") {
+                pendingParagraph = true; text = ""
+            } else if depth == 0, rest.hasPrefix("w:p/>") {
+                out.append("p:")
+            } else if depth == 0, pendingParagraph, rest.hasPrefix("w:t>") || rest.hasPrefix("w:t ") {
+                if let close = rest.firstIndex(of: ">"), let end = rest.range(of: "</w:t>") {
+                    text += rest[rest.index(after: close)..<end.lowerBound]
+                }
+            } else if depth == 0, rest.hasPrefix("/w:p>"), pendingParagraph {
+                out.append("p:\(text)"); pendingParagraph = false
+            }
+        }
+        return out
     }
 
-    /// The paragraph that follows the nested table is the cell's own trailing
-    /// paragraph, carried across — not a blank one substituted for it. Holding
-    /// back only EMPTY trailing paragraphs was tried first and left a real form
-    /// gaining a paragraph per nested-table cell on its first save.
-    func testTheTrailingParagraphKeepsItsContent() {
+    // MARK: - The reported defect
+
+    /// The growth: emit, read back, emit again must give the same cell.
+    func testReEmittingACellWithANestedTableIsAFixedPoint() throws {
+        let source = para("before") + innerTable + "<w:p/>"
+        let gen1 = try cell(holding: source).toXML()
+        let gen2 = try cell(holding: String(gen1.dropFirst("<w:tc>".count).dropLast("</w:tc>".count))).toXML()
+        XCTAssertEqual(gen2, gen1, "a cell with a nested table must re-emit identically")
+        XCTAssertEqual(blockOrder(gen1), ["p:before", "tbl", "p:"], "and in the source order")
+    }
+
+    // MARK: - Order, which the count cannot see
+
+    /// A cell whose LAST block child is a table. Holding back the last
+    /// paragraph reversed this into `table, before`.
+    func testACellEndingWithATableKeepsItsParagraphFirst() throws {
+        let xml = try cell(holding: para("before") + innerTable).toXML()
+        XCTAssertEqual(blockOrder(xml), ["p:before", "tbl"],
+                       "the paragraph came before the table in the source and must stay there")
+    }
+
+    /// ONE nested table with two paragraphs after it — an ordinary cell.
+    /// Both the original flattening and the hold-back attempt moved `B`.
+    func testOneNestedTableWithTwoTrailingParagraphs() throws {
+        let xml = try cell(holding: para("A") + innerTable + para("B") + para("C")).toXML()
+        XCTAssertEqual(blockOrder(xml), ["p:A", "tbl", "p:B", "p:C"],
+                       "one nested table is already enough to move a paragraph if order is inferred")
+    }
+
+    /// Several nested tables with paragraphs between them — documented as
+    /// unfixable while the emit flattened; the ordered walk handles it.
+    func testParagraphsBetweenSeveralNestedTables() throws {
+        let xml = try cell(holding: para("A") + innerTable + para("B") + innerTable + para("C")).toXML()
+        XCTAssertEqual(blockOrder(xml), ["p:A", "tbl", "p:B", "tbl", "p:C"])
+    }
+
+    // MARK: - Unchanged behaviour
+
+    func testACellWithoutANestedTableIsUnchanged() throws {
+        XCTAssertEqual(blockOrder(try cell(holding: para("only")).toXML()), ["p:only"])
+    }
+
+    /// An empty tree-backed cell still emits the one paragraph a cell requires.
+    func testAnEmptyCellStillEmitsAParagraph() throws {
+        XCTAssertEqual(blockOrder(try cell(holding: "").toXML()), ["p:"])
+    }
+
+    /// Detached cells have no recorded order, so they keep the pre-#155 shape:
+    /// paragraphs, tables, then an added trailing paragraph.
+    func testADetachedCellKeepsItsPreviousShape() {
         var inner = Table()
-        var innerRow = TableRow()
-        var innerCell = TableCell()
+        var row = TableRow(); var innerCell = TableCell()
         innerCell.paragraphs = [Paragraph(text: "inner")]
-        innerRow.cells = [innerCell]
-        inner.rows = [innerRow]
+        row.cells = [innerCell]; inner.rows = [row]
 
-        var cell = TableCell()
-        cell.paragraphs = [Paragraph(text: "before"), Paragraph(text: "after the table")]
-        cell.nestedTables = [inner]
-
-        let xml = cell.toXML()
-        let tail = xml.range(of: "</w:tbl>", options: .backwards).map { String(xml[$0.upperBound...]) } ?? ""
-        XCTAssertTrue(tail.contains("after the table"),
-                      "the cell's own trailing paragraph follows the table: \(tail)")
-        XCTAssertEqual(paragraphCount(inCellXML: xml), 2, "no paragraph is added")
-    }
-
-    /// A cell with no nested table is untouched by any of this.
-    func testACellWithoutANestedTableIsUnchanged() {
-        var cell = TableCell()
-        cell.paragraphs = [Paragraph(text: "only")]
-        XCTAssertEqual(paragraphCount(inCellXML: cell.toXML()), 1)
+        var c = TableCell()
+        c.paragraphs = [Paragraph(text: "A")]
+        c.nestedTables = [inner]
+        XCTAssertEqual(blockOrder(c.toXML()), ["p:A", "tbl", "p:"])
     }
 
     // MARK: - Real documents (gated)
 
-    /// The generation loop the defect was measured with, over a directory of
-    /// real documents. Off by default — point `OOXML_CORPUS_DIR` at a folder of
-    /// .docx files to run it. Measured on a real 2-nested-table government form:
-    /// 12 -> 14 -> 14 -> 14 before this fix's final form, 12 -> 12 -> 12 -> 12 after.
-    func testRealDocumentsSurviveRepeatedSaves() throws {
+    /// The generation loop over real documents, comparing the EMITTED CELL XML
+    /// rather than a paragraph count — a count is stable under exactly the
+    /// corruption this issue is about. Point `OOXML_CORPUS_DIR` at a folder of
+    /// .docx files to run it.
+    func testRealDocumentsReEmitIdentically() throws {
         guard let dir = ProcessInfo.processInfo.environment["OOXML_CORPUS_DIR"] else {
             throw XCTSkip("set OOXML_CORPUS_DIR to a folder of .docx files to run this")
         }
@@ -115,40 +135,44 @@ final class Issue155NestedTableCellTests: XCTestCase {
 
         var examined = 0
         for f in files {
-            guard let doc = try? DocxReader.read(from: f), nestedTableCells(doc).cells > 0 else { continue }
+            guard let doc = try? DocxReader.read(from: f), !nestedTableCellXML(doc).isEmpty else { continue }
             examined += 1
 
-            var counts: [Int] = []
+            var snapshots: [[String]] = []
             var cur = f
             for gen in 0..<4 {
                 var d = try DocxReader.read(from: cur)
-                counts.append(nestedTableCells(d).paragraphs)
+                snapshots.append(nestedTableCellXML(d))
                 if gen == 3 { break }
-                d.markTypedDirty("word/document.xml")           // the trigger: any typed-dirty op
+                d.markTypedDirty("word/document.xml")       // the trigger: any typed-dirty op
                 let out = URL(fileURLWithPath: NSTemporaryDirectory())
                     .appendingPathComponent("issue155-\(examined)-\(gen).docx")
                 try DocxWriter.write(d, to: out)
                 cur = out
             }
-            XCTAssertEqual(Set(counts).count, 1,
-                           "\(f.lastPathComponent): cell paragraphs moved across saves: \(counts)")
+            for (i, snap) in snapshots.enumerated().dropFirst() {
+                XCTAssertEqual(snap, snapshots[0],
+                               "\(f.lastPathComponent): nested-table cells changed at generation \(i)")
+            }
         }
+        XCTAssertGreaterThan(examined, 0,
+                             "no document in \(root.path) holds a nested table — this test proved nothing")
         print("issue155: examined \(examined) document(s) holding nested tables")
     }
 
-    /// Cells that hold a nested table, and how many paragraphs they hold in total.
-    private func nestedTableCells(_ doc: WordDocument) -> (cells: Int, paragraphs: Int) {
+    /// Emitted XML of every cell that holds a nested table.
+    private func nestedTableCellXML(_ doc: WordDocument) -> [String] {
         var pending: [Table] = doc.body.tables
         for child in doc.body.children { if case .table(let t) = child { pending.append(t) } }
-        var cells = 0, paragraphs = 0
+        var out: [String] = []
         while let t = pending.popLast() {
             for row in t.rows {
                 for cell in row.cells {
-                    if !cell.nestedTables.isEmpty { cells += 1; paragraphs += cell.paragraphs.count }
+                    if !cell.nestedTables.isEmpty { out.append(cell.toXML()) }
                     pending.append(contentsOf: cell.nestedTables)
                 }
             }
         }
-        return (cells, paragraphs)
+        return out
     }
 }
