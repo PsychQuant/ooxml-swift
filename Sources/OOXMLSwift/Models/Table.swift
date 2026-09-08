@@ -1290,16 +1290,29 @@ extension TableCell {
         // block child is a table), and still emits `A, B, table, C`. It stops
         // the growth while moving content, which the growth measurement cannot
         // see because the paragraph COUNT is unchanged either way.
+        //
+        // Whichever branch runs, the cell must still END with a paragraph:
+        // that is what OOXML requires of `<w:tc>`, and it is the one thing the
+        // old flatten got right. Counting BLOCKS rather than paragraphs for
+        // that guarantee was wrong for a cell whose only child is a table —
+        // measured: `<w:tc><w:tbl/></w:tc>` emitted no paragraph at all, where
+        // 3.7.0 emitted two. Appending here cannot restart the growth this
+        // issue is about, because it happens only when the cell does not
+        // already end with one: re-reading records that paragraph in `_blocks`,
+        // and the next save emits it rather than adding another.
         if let node = xmlNode {
+            var lastWasParagraph = false
             var emitted = 0
             for child in node.children where child.kind == .element {
                 switch child.localName {
                 case "p":
                     xml += Paragraph(xmlNode: child).toXML()
                     emitted += 1
+                    lastWasParagraph = true
                 case "tbl":
                     xml += Table(xmlNode: child).toXML()
                     emitted += 1
+                    lastWasParagraph = false
                 default:
                     // `tcPr` is emitted above from `properties`. Anything else
                     // a cell may legally hold (block-level SDTs, bookmark
@@ -1310,19 +1323,17 @@ extension TableCell {
                     break
                 }
             }
-            if emitted == 0 { xml += Paragraph().toXML() }   // a cell holds at least one paragraph
+            if emitted == 0 || !lastWasParagraph { xml += Paragraph().toXML() }
         } else if let blocks = _blocks {
             // Detached but the reader recorded the order — emit it.
-            if blocks.isEmpty {
-                xml += Paragraph().toXML()          // a cell holds at least one paragraph
-            } else {
-                for block in blocks {
-                    switch block {
-                    case .paragraph(let p): xml += p.toXML()
-                    case .table(let t):     xml += t.toXML()
-                    }
+            var lastWasParagraph = false
+            for block in blocks {
+                switch block {
+                case .paragraph(let p): xml += p.toXML(); lastWasParagraph = true
+                case .table(let t):     xml += t.toXML(); lastWasParagraph = false
                 }
             }
+            if blocks.isEmpty || !lastWasParagraph { xml += Paragraph().toXML() }
         } else {
             // No order was ever recorded: the cell was built by a caller, or its
             // paragraphs/tables were replaced wholesale. There is nothing to
