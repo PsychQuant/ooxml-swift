@@ -199,15 +199,15 @@ public struct DocxReader {
                 for attr in stylesTree.root.attributes where attr.isNamespaceDeclaration {
                     if !copy.attributes.contains(where: { $0.qualifiedName == attr.qualifiedName }) { copy.attributes.append(attr) }
                 }
-                func optionalXML(_ path: String) throws -> String? {
+                func optionalData(_ path: String) throws -> Data? {
                     let url = tempDir.appendingPathComponent(path)
                     guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-                    return try String(contentsOf: url, encoding: .utf8)
+                    return try Data(contentsOf: url)
                 }
                 document.formattingState = DocumentFormattingState(
                     defaultsXML: try ProfileXML.string(copy),
                     originalStylesXML: String(decoding: stylesData, as: UTF8.self), baselineStyles: document.styles,
-                    themeXML: try optionalXML("word/theme/theme1.xml"), fontsXML: try optionalXML("word/fontTable.xml"),
+                    themeData: try optionalData("word/theme/theme1.xml"), fontsData: try optionalData("word/fontTable.xml"),
                     explicitlyApplied: false)
             }
         }

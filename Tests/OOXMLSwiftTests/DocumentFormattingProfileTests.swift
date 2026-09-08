@@ -5,6 +5,135 @@ final class DocumentFormattingProfileTests: XCTestCase {
     let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     let a = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
+    func testFreshReducerFormattingSurvivesBothWritersAndLaterTypedEdit() throws {
+        for useProfile in [false, true] {
+            let url = try directory().appendingPathComponent("original.docx")
+            try DocxWriter.writeData(WordDocument()).write(to: url)
+            var doc = try DocxReader.read(from: url)
+            defer { doc.close() }
+            if useProfile { try doc.applyFormattingProfile(DocumentFormattingProfile.importOfficial(from: template()), context: .existingDocument) }
+            let size = try XCTUnwrap(ProfileXML.walk(doc.xmlTrees["word/styles.xml"]!.root).first { $0.localName == "sz" })
+            size.libraryUUID = UUID()
+            try doc.apply(operations: [.updateAttribute(target: ElementID(node: size)!, prefix: "w", localName: "val", value: "48")])
+            for output in [try parts(doc), try parts(doc, authoring: true)] {
+                let root = try ProfileXML.parse(output["word/styles.xml"]!)
+                let defaults = try XCTUnwrap(ProfileXML.child(root, "docDefaults"))
+                XCTAssertEqual(ProfileXML.walk(defaults).first { $0.localName == "sz" }.flatMap { ProfileXML.value($0, "val") }, "48")
+            }
+            try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "Later typed edit"))
+            for output in [try parts(doc), try parts(doc, authoring: true)] {
+                let defaults = try XCTUnwrap(ProfileXML.child(ProfileXML.parse(output["word/styles.xml"]!), "docDefaults"))
+                XCTAssertEqual(ProfileXML.walk(defaults).first { $0.localName == "sz" }.flatMap { ProfileXML.value($0, "val") }, "48")
+                XCTAssertTrue(output["word/styles.xml"]!.contains("Later typed edit"))
+            }
+        }
+    }
+
+    func testLaterAuthoritativeThemeFontsAndCarriedStylesRemainDurable() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.applyFormattingProfile(DocumentFormattingProfile.importOfficial(from: template()), context: .newDocument)
+        let theme = try XCTUnwrap(ProfileXML.walk(doc.xmlTrees["word/theme/theme1.xml"]!.root).first { $0.localName == "latin" })
+        theme.libraryUUID = UUID()
+        try doc.apply(operations: [.updateAttribute(target: ElementID(node: theme)!, prefix: nil, localName: "typeface", value: "Later Theme")])
+        let font = try XCTUnwrap(doc.xmlTrees["word/fontTable.xml"]?.root.children.first { $0.localName == "font" })
+        font.libraryUUID = UUID()
+        try doc.apply(operations: [.updateAttribute(target: ElementID(node: font)!, prefix: "w", localName: "name", value: "Reducer Font")])
+        for output in [try parts(doc), try parts(doc, authoring: true)] {
+            XCTAssertTrue(output["word/fontTable.xml"]!.contains("Reducer Font"))
+        }
+        let changedStyles = try ProfileXML.string(doc.xmlTrees["word/styles.xml"]!.root).replacingOccurrences(of: "w:val=\"24\"", with: "w:val=\"48\"")
+        try doc.apply(operations: [.carryPart(partPath: "word/styles.xml", xml: changedStyles), .carryPart(partPath: "word/fontTable.xml", xml: "<w:fonts xmlns:w=\"\(w)\"><w:font w:name=\"Later Font\"/></w:fonts>")])
+        try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "After XML edits"))
+        for output in [try parts(doc), try parts(doc, authoring: true)] {
+            XCTAssertTrue(output["word/styles.xml"]!.contains("w:val=\"48\""))
+            XCTAssertTrue(output["word/styles.xml"]!.contains("After XML edits"))
+            XCTAssertTrue(output["word/theme/theme1.xml"]!.contains("Later Theme"))
+            XCTAssertTrue(output["word/fontTable.xml"]!.contains("Later Font"))
+        }
+    }
+
+    func testUndoRestoresFormattingBaselineBeforeLaterTypedEdit() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.applyFormattingProfile(DocumentFormattingProfile.importOfficial(from: template()), context: .newDocument)
+        let size = try XCTUnwrap(ProfileXML.walk(doc.xmlTrees["word/styles.xml"]!.root).first { $0.localName == "sz" })
+        size.libraryUUID = UUID()
+        try doc.apply(operations: [.batchBegin(label: "Update defaults"), .updateAttribute(target: ElementID(node: size)!, prefix: "w", localName: "val", value: "48"), .batchEnd])
+        let op = try XCTUnwrap(doc.operationLog.entries.first?.opID)
+        try doc.apply(operations: [.undo(targetOpID: op)])
+        try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "After undo"))
+        for output in [try parts(doc), try parts(doc, authoring: true)] {
+            let defaults = try XCTUnwrap(ProfileXML.child(ProfileXML.parse(output["word/styles.xml"]!), "docDefaults"))
+            XCTAssertEqual(ProfileXML.walk(defaults).first { $0.localName == "sz" }.flatMap { ProfileXML.value($0, "val") }, "24")
+        }
+    }
+
+    func testRemovedDefaultsRemainAbsentAfterLaterTypedEdit() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.applyFormattingProfile(DocumentFormattingProfile.importOfficial(from: template()), context: .newDocument)
+        let defaults = try XCTUnwrap(ProfileXML.child(doc.xmlTrees["word/styles.xml"]!.root, "docDefaults"))
+        defaults.libraryUUID = UUID()
+        try doc.apply(operations: [.removeNode(target: ElementID(node: defaults)!)])
+        for output in [try parts(doc), try parts(doc, authoring: true)] {
+            XCTAssertNil(ProfileXML.child(try ProfileXML.parse(output["word/styles.xml"]!), "docDefaults"))
+        }
+        try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "No defaults"))
+        for output in [try parts(doc), try parts(doc, authoring: true)] {
+            XCTAssertNil(ProfileXML.child(try ProfileXML.parse(output["word/styles.xml"]!), "docDefaults"))
+        }
+    }
+
+    func testAliasedTargetStylesKeepReferencesAndUnknownMarkup() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        let styles = "<x:styles xmlns:x=\"\(w)\" xmlns:custom=\"urn:target-owned\"><x:style x:type=\"paragraph\" x:default=\"1\" x:styleId=\"TargetDefault\"><x:name x:val=\"Default\"/></x:style><x:style x:type=\"paragraph\" x:styleId=\"AliasedTarget\"><x:name x:val=\"Keep target\"/><x:basedOn x:val=\"TargetDefault\"/><custom:preserve custom:setting=\"keep\"/><w:extension xmlns:w=\"urn:shadow\" x:flag=\"kept\"/></x:style></x:styles>"
+        try doc.apply(operations: [.carryPart(partPath: "word/styles.xml", xml: styles), .appendParagraph(in: nil, paragraph: ParagraphPayload(text: "Keep reference", styleId: "AliasedTarget", paraId: "ABCD1234"))])
+        try doc.applyFormattingProfile(DocumentFormattingProfile.importOfficial(from: template()), context: .existingDocument)
+        let output = try parts(doc)
+        XCTAssertTrue(output["word/styles.xml"]!.contains("AliasedTarget"))
+        XCTAssertTrue(output["word/styles.xml"]!.contains("TargetDefault"))
+        XCTAssertTrue(output["word/styles.xml"]!.contains("custom:preserve"))
+        XCTAssertTrue(output["word/document.xml"]!.contains("AliasedTarget"))
+        XCTAssertNotNil(ProfileXML.walk(try ProfileXML.parse(output["word/styles.xml"]!)).first { $0.namespaceURI == "urn:shadow" && $0.localName == "extension" })
+    }
+
+    func testDuplicateSingletonFormattingIsRejectedDuringImportAndDecode() throws {
+        let profile = try DocumentFormattingProfile.importOfficial(from: template())
+        for (key, xml) in [
+            ("stylesXML", profile.stylesXML!.replacingOccurrences(of: "<w:name w:val=\"Normal\"/>", with: "<w:name w:val=\"Normal\"/><w:next w:val=\"a\"/><w:next w:val=\"Missing\"/>")),
+            ("stylesXML", profile.stylesXML!.replacingOccurrences(of: "<w:sz w:val=\"24\"/>", with: "<w:sz w:val=\"24\"/><w:sz w:val=\"48\"/>")),
+            ("stylesXML", profile.stylesXML!.replacingOccurrences(of: "</w:docDefaults>", with: "<w:pPrDefault><w:pPr/></w:pPrDefault></w:docDefaults>")),
+            ("sectionXML", profile.sectionXML!.replacingOccurrences(of: "</w:sectPr>", with: "<w:pgSz w:w=\"1\" w:h=\"2\"/></w:sectPr>"))
+        ] {
+            var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(profile)) as? [String: Any])
+            json[key] = xml
+            XCTAssertThrowsError(try JSONDecoder().decode(DocumentFormattingProfile.self, from: JSONSerialization.data(withJSONObject: json)))
+            if key == "stylesXML" { XCTAssertThrowsError(try DocumentFormattingProfile.importOfficial(from: template(styles: xml))) }
+        }
+    }
+
+    func testGenericReaderPreservesUTF16AncillaryBytesWithoutProfile() throws {
+        let root = try directory()
+        let package = root.appendingPathComponent("package")
+        let original = root.appendingPathComponent("original.docx")
+        try DocxWriter.writeData(WordDocument()).write(to: original)
+        var all = try RawPartChannel.readAllParts(from: original)
+        let fonts = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><w:fonts xmlns:w=\"\(w)\"><w:font w:name=\"UTF16 Font\"/></w:fonts>".data(using: .utf16)!
+        all["word/fontTable.xml"] = fonts
+        for (path, bytes) in all {
+            let url = package.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try bytes.write(to: url)
+        }
+        try ZipHelper.zipToData(package).write(to: original)
+        var doc = try DocxReader.read(from: original)
+        defer { doc.close() }
+        let saved = root.appendingPathComponent("saved.docx")
+        try DocxWriter.write(doc, to: saved)
+        XCTAssertEqual(try RawPartChannel.readAllParts(from: saved)["word/fontTable.xml"], fonts)
+        try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "Still UTF16"))
+        try DocxWriter.write(doc, to: saved)
+        XCTAssertEqual(try RawPartChannel.readAllParts(from: saved)["word/fontTable.xml"], fonts)
+    }
+
     func directory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

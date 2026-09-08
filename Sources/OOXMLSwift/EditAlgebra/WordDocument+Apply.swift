@@ -129,6 +129,8 @@ extension WordDocument {
                 carriedParts: carriedParts,
                 modifiedParts: modifiedParts,
                 treeFreshParts: treeFreshParts,
+                formattingState: formattingState,
+                formattingStyles: formattingState == nil ? nil : styles,
                 logStartIndex: operationLog.entries.count)
         }
 
@@ -173,6 +175,8 @@ extension WordDocument {
             rebuilt.carriedParts = replayBase.carriedParts
             rebuilt.modifiedParts = replayBase.modifiedParts
             rebuilt.treeFreshParts = replayBase.treeFreshParts
+            rebuilt.formattingState = replayBase.formattingState
+            if let styles = replayBase.formattingStyles { rebuilt.styles = styles }
             rebuilt.operationLog = newLog
             rebuilt.operationReplayBase = replayBase
             try rebuilt.appendAndMaterialize(
@@ -442,6 +446,15 @@ extension WordDocument {
         //    opt-in. Future architectural work (content-based Paragraph
         //    Equatable, or always-tree-backed Paragraph that re-reads on
         //    every access) could enable auto-resync — out of scope here.
+        let carriedFormattingPaths = Set(newOps.compactMap { op -> String? in
+            switch op {
+            case .carryPart(let path, _), .carryBinaryPart(let path, _): return path
+            default: return nil
+            }
+        })
+        let refreshedFormatting = try refreshedFormattingState(
+            trees: newTrees, carried: newCarriedParts, freshParts: freshParts,
+            carriedPaths: carriedFormattingPaths)
         self.operationLog = newLog
         self.xmlTrees = newTrees
         self.comments = newComments
@@ -459,6 +472,10 @@ extension WordDocument {
         self.treeFreshParts.subtract(touchedParts.subtracting(freshParts))
         self.treeFreshParts.formUnion(freshParts)
         for part in touchedParts { self.carriedParts.removeValue(forKey: part) }
+        if let refreshedFormatting {
+            self.formattingState = refreshedFormatting.state
+            if let styles = refreshedFormatting.styles { self.styles = styles }
+        }
     }
 
     private func materializeCommentDefinition(

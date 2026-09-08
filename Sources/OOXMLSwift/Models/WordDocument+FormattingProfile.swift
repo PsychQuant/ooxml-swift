@@ -2,15 +2,41 @@ import Foundation
 
 /// Durable value-owned XML, separate from transient tree freshness/carry flags.
 internal struct DocumentFormattingState {
-    var defaultsXML: String
+    var defaultsXML: String?
     var originalStylesXML: String
     var baselineStyles: [Style]
-    var themeXML: String?
-    var fontsXML: String?
+    var themeData: Data?
+    var fontsData: Data?
     var explicitlyApplied = true
 }
 
 extension WordDocument {
+    /// Capture completed authoritative operations before committing the op
+    /// transaction. Later typed edits use this baseline instead of the import.
+    internal func refreshedFormattingState(trees: [String: XmlTree], carried: [String: Data],
+                                           freshParts: Set<String>, carriedPaths: Set<String>) throws
+        -> (state: DocumentFormattingState, styles: [Style]?)? {
+        guard var state = formattingState else { return nil }
+        func bytes(_ path: String) throws -> Data? {
+            if state.explicitlyApplied, carriedPaths.contains(path), let data = carried[path] { return data }
+            if freshParts.contains(path), let tree = trees[path] { return try XmlTreeWriter.serialize(tree) }
+            return nil
+        }
+        var updatedStyles: [Style]?
+        if let data = try bytes("word/styles.xml") {
+            let root = ProfileXML.canonicalWordTree(try ProfileXML.parse(data))
+            let xml = try ProfileXML.string(root)
+            let parsed = try DocxReader.parseStyles(from: XMLDocument(xmlString: xml, options: []))
+            state.defaultsXML = try ProfileXML.child(root, "docDefaults").map(ProfileXML.string)
+            state.originalStylesXML = xml
+            state.baselineStyles = parsed
+            updatedStyles = parsed
+        }
+        if let data = try bytes("word/theme/theme1.xml") { state.themeData = data }
+        if let data = try bytes("word/fontTable.xml") { state.fontsData = data }
+        return (state, updatedStyles)
+    }
+
     /// Applies an explicit profile atomically to this value. No app settings
     /// or Normal template are read here. Existing-document inherit is a no-op.
     public mutating func applyFormattingProfile(_ profile: DocumentFormattingProfile,
@@ -37,7 +63,7 @@ extension WordDocument {
             next.formattingState = DocumentFormattingState(
                 defaultsXML: try ProfileXML.string(defaults.withWordNamespace()),
                 originalStylesXML: try ProfileXML.string(styles), baselineStyles: next.styles,
-                fontsXML: "<w:fonts xmlns:w=\"\(ProfileXML.w)\"/>")
+                fontsData: Data("<w:fonts xmlns:w=\"\(ProfileXML.w)\"/>".utf8))
             next.markTypedDirty("word/styles.xml")
             next.markTypedDirty("word/fontTable.xml")
             self = next
@@ -47,7 +73,13 @@ extension WordDocument {
         let imported = try ProfileXML.checked(profile.stylesXML!, root: "styles")
         let defaultStyle = imported.children.first { $0.localName == "style" && ProfileXML.value($0, "type") == "paragraph" && ["1", "true", "on"].contains(ProfileXML.value($0, "default") ?? "") }!
         let sourceDefault = ProfileXML.value(defaultStyle, "styleId")!
-        let targetDefault = next.styles.first { $0.type == .paragraph && $0.isDefault }?.id ?? sourceDefault
+        let rawTarget: XmlNode
+        if let carried = next.carriedParts["word/styles.xml"] { rawTarget = try ProfileXML.parse(carried) }
+        else if let tree = next.xmlTrees["word/styles.xml"], !next.modifiedParts.contains("word/styles.xml") || next.treeFreshParts.contains("word/styles.xml") { rawTarget = tree.root }
+        else { rawTarget = try ProfileXML.parse(next.styles.toStylesXML()) }
+        let targetXML = ProfileXML.canonicalWordTree(rawTarget)
+        let targetDefault = targetXML.children.first { $0.namespaceURI == ProfileXML.w && $0.localName == "style" && ProfileXML.value($0, "type") == "paragraph" && ["1", "true", "on"].contains(ProfileXML.value($0, "default") ?? "") }
+            .flatMap { ProfileXML.value($0, "styleId") } ?? sourceDefault
         // A localized default ID maps to the target's default, preserving body
         // references and every retained style's existing basedOn chain.
         if sourceDefault != targetDefault {
@@ -63,10 +95,6 @@ extension WordDocument {
         }
         defaultStyle.setWordAttribute("default", "1")
         let importedIDs = Set(imported.children.compactMap { ProfileXML.value($0, "styleId") })
-        let targetXML: XmlNode
-        if let carried = next.carriedParts["word/styles.xml"] { targetXML = try ProfileXML.parse(carried) }
-        else if let tree = next.xmlTrees["word/styles.xml"], !next.modifiedParts.contains("word/styles.xml") || next.treeFreshParts.contains("word/styles.xml") { targetXML = tree.root.deepClone() }
-        else { targetXML = try ProfileXML.parse(next.styles.toStylesXML()) }
         imported.copyMissingNamespaces(from: targetXML)
         for style in targetXML.children where style.kind == .element && style.namespaceURI == ProfileXML.w && style.localName == "style" {
             guard let id = ProfileXML.value(style, "styleId"), !importedIDs.contains(id) else { continue }
@@ -105,7 +133,7 @@ extension WordDocument {
                                            attributes: [XmlAttribute(prefix: "w", localName: "name", value: "標楷體")]))
         }
         next.formattingState = DocumentFormattingState(defaultsXML: try ProfileXML.string(defaults.withWordNamespace()),
-            originalStylesXML: stylesXML, baselineStyles: next.styles, themeXML: themeXML, fontsXML: try ProfileXML.string(fonts))
+            originalStylesXML: stylesXML, baselineStyles: next.styles, themeData: themeXML.map { Data($0.utf8) }, fontsData: try Data(ProfileXML.string(fonts).utf8))
         next.markTypedDirty("word/styles.xml")
         next.xmlTrees["word/styles.xml"] = try XmlTreeReader.parse(Data(stylesXML.utf8))
         next.treeFreshParts.insert("word/styles.xml")
@@ -171,40 +199,58 @@ extension WordDocument {
     /// allowing later typed or reducer style edits to take precedence.
     internal func writeFormattingParts(to directory: URL) throws {
         guard let state = formattingState else { return }
-        guard state.explicitlyApplied || modifiedParts.contains("word/styles.xml") else { return }
+        let writesStyles = state.explicitlyApplied || modifiedParts.contains("word/styles.xml")
+        let freshAncillary = treeFreshParts.intersection(modifiedParts).intersection(["word/theme/theme1.xml", "word/fontTable.xml"])
+        guard writesStyles || !freshAncillary.isEmpty else { return }
+        // Generic carry semantics predate profiles. The authoring writer has
+        // already emitted carried styles verbatim; do not restore older state.
+        if !state.explicitlyApplied, carriedParts["word/styles.xml"] != nil { return }
         func write(_ bytes: Data, _ path: String) throws {
             let url = directory.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try bytes.write(to: url)
         }
-        let root: XmlNode
-        if treeFreshParts.contains("word/styles.xml"), let tree = xmlTrees["word/styles.xml"] {
-            root = tree.root.deepClone()
-        } else {
-            root = try ProfileXML.parse(styles.toStylesXML())
-            let original = try ProfileXML.parse(state.originalStylesXML)
-            let baseline = try ProfileXML.parse(state.baselineStyles.toStylesXML())
-            root.copyMissingNamespaces(from: original)
-            for index in root.children.indices {
-                let node = root.children[index]
-                guard let id = ProfileXML.value(node, "styleId"),
-                      let oldTyped = baseline.children.first(where: { ProfileXML.value($0, "styleId") == id }),
-                      let preserved = original.children.first(where: { ProfileXML.value($0, "styleId") == id }) else { continue }
-                root.children[index] = try Self.mergeFormattingChanges(original: preserved, baseline: oldTyped, current: node)
+        var parts: [(path: String, type: String, rel: String, target: String)] = []
+        if writesStyles {
+            let root: XmlNode
+            if state.explicitlyApplied, let carried = carriedParts["word/styles.xml"] {
+                root = try ProfileXML.parse(carried)
+            } else if treeFreshParts.contains("word/styles.xml"), let tree = xmlTrees["word/styles.xml"] {
+                root = tree.root.deepClone()
+            } else {
+                root = try ProfileXML.parse(styles.toStylesXML())
+                let original = try ProfileXML.parse(state.originalStylesXML)
+                let baseline = try ProfileXML.parse(state.baselineStyles.toStylesXML())
+                root.copyMissingNamespaces(from: original)
+                for index in root.children.indices {
+                    let node = root.children[index]
+                    guard let id = ProfileXML.value(node, "styleId"),
+                          let oldTyped = baseline.children.first(where: { ProfileXML.value($0, "styleId") == id }),
+                          let preserved = original.children.first(where: { ProfileXML.value($0, "styleId") == id }) else { continue }
+                    root.children[index] = try Self.mergeFormattingChanges(original: preserved, baseline: oldTyped, current: node)
+                }
+                root.children.removeAll { $0.namespaceURI == ProfileXML.w && $0.localName == "docDefaults" }
+                if let defaults = state.defaultsXML { root.children.insert(try ProfileXML.parse(defaults), at: 0) }
             }
+            try write(Data(ProfileXML.string(root).utf8), "word/styles.xml")
+            parts.append(("word/styles.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml", "styles", "styles.xml"))
         }
-        root.children.removeAll { $0.namespaceURI == ProfileXML.w && $0.localName == "docDefaults" }
-        root.children.insert(try ProfileXML.parse(state.defaultsXML), at: 0)
-        try write(Data(ProfileXML.string(root).utf8), "word/styles.xml")
-        var parts: [(path: String, type: String, rel: String, target: String)] = [
-            ("word/styles.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml", "styles", "styles.xml")
-        ]
-        if let fonts = state.fontsXML {
-            try write(Data(fonts.utf8), "word/fontTable.xml")
+        func currentAncillary(_ path: String, fallback: Data?) throws -> Data? {
+            guard writesStyles || freshAncillary.contains(path) else { return nil }
+            if let carried = carriedParts[path] { return carried }
+            if treeFreshParts.contains(path), let tree = xmlTrees[path] { return try XmlTreeWriter.serialize(tree) }
+            if !state.explicitlyApplied, modifiedParts.contains(path), let archive = archiveTempDir {
+                let url = archive.appendingPathComponent(path)
+                if FileManager.default.fileExists(atPath: url.path) { return try Data(contentsOf: url) }
+            }
+            return fallback
+        }
+        if let fonts = try currentAncillary("word/fontTable.xml", fallback: state.fontsData) {
+            try write(fonts, "word/fontTable.xml")
             parts.append(("word/fontTable.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml", "fontTable", "fontTable.xml"))
         }
-        if let theme = state.themeXML {
-            try write(Data(theme.utf8), "word/theme/theme1.xml")
+        if let theme = try currentAncillary("word/theme/theme1.xml", fallback: state.themeData) {
+            try write(theme, "word/theme/theme1.xml")
             parts.append(("word/theme/theme1.xml", "application/vnd.openxmlformats-officedocument.theme+xml", "theme", "theme/theme1.xml"))
         }
         let typesURL = directory.appendingPathComponent("[Content_Types].xml")
