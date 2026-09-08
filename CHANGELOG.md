@@ -27,31 +27,13 @@ All notable changes to ooxml-swift will be documented in this file.
   不再 clamping 後往下送——沒有真實文件會宣告 8 EB，而下游每一個轉換都假設它放得下。
   兩種壓縮方法各有一條測試。上限分兩軸，issue 裡的兩個數字分屬不同軸：3000:1 的放大是**磁碟**，1.7 GB 的 RSS 是**記憶體**（把展開後的 part 整份讀進 `Data` 再解析）。兩軸各自有界，且各自以自己的證據拒絕。
   - **磁碟**：解壓前的 policy 預掃（3.7.0 已逐一走訪每個 entry 的那個迴圈）多看三件事——單一 entry 的宣告大小、全部 entry 的宣告合計、單一 entry 的宣告壓縮比。**中央目錄會說謊**，所以解壓後的既有 walk 再累計一次實際位元組，宣告與實際各擋一次。
-  - **三層，各自擋住不同的東西**：宣告就超標 → **寫出任何位元組之前**拒絕；**解壓進行中**
-    實際寫出超標 → 當場中止（見下）；解壓完成後樹的總量超標 → walk 量到後拒絕（防守縱深）。
-  - **少報的封裝在解壓當下就被攔住**（#157）。中央目錄會說謊，所以宣告值的檢查擋不住它；
-    先前這一類只能等解壓完再由 walk 量到，也就是那些位元組**已經全部落過磁碟**。
-    現在 `ExtractionBudget` 計算解壓器**實際產生**的位元組並在超標當下取消，而 ZIPFoundation
-    的檢查點在每個 chunk 交給 consumer **之前**，所以**超額上限恰好是一個 chunk（16 KiB）**。
-    實測：宣告 1 KB、實際 8 MB 的封裝，上限設 1 MB —— 修改前寫滿 512 個 chunk（整個 8 MB），
-    現在 65 個就停（1 MB ＋ 一個 chunk）。
-  - **這個攔截靠的是實作細節，而且已用測試釘住**：ZIPFoundation 以 `addChild` 掛每個 entry 的
-    progress，覆寫它才拿得到 child（父層的計數在少報時會飽和、看不到真實位元組，實測子層
-    4 194 304 對宣告 1 024、父層停在 1 024）。Foundation 另有一條**不呼叫 `addChild`** 的掛法；
-    若日後 ZIPFoundation 改走那條，攔截會拿到空清單、加總恆為零、**上限無聲消失**。
-    `testTheExtractionBudgetActuallySeesTheEntries` 斷言的是**觀察到的位元組總量**等於 entry
-    內容的實際大小，不是 child 的**數量**——後者是第一版的寫法，而它守不住這件事：攔到 child
-    卻沒有註冊 KVO 觀察，數量正確、加總恆為零、上限一樣無聲消失，而測試是綠的。
-    （這不是假想：寫探針時 `_ = child.observe(...)` 沒保留 token，觀察就靜默失效了。日後有人
-    覺得「`observations` 這個陣列沒人讀、刪掉」也會複製同一個形狀。）
-  - **父層取消不夠，要逐一取消 child**：`Progress.cancel()` 在父層並沒有讓經由覆寫的 `addChild`
-    掛上的 child 的 `isCancelled` 變成 true（實測緊接著讀為 `false`），而 ZIPFoundation 檢查的是
-    **child**。所以預算直接取消每一個 child。
-  - **合計的加總本身也會 trap，已修**：`declaredTotal += declared` 在呼叫端把「無上限」寫成
-    `maximumTotalBytes: .max`（`Limits` 提供的唯一寫法，而且本 repo 自己的病態 fixture 測試
-    就是這樣寫）時，兩個各宣告 `Int64.max - 1` 的 entry 會讓它 overflow —— Swift 對 overflow
-    是 trap，實測 SIGTRAP。改用 `addingReportingOverflow`，overflow 直接當成「超過上限」拒絕。
-  - **記憶體**：`ZipHelper.readPart(at:describedAs:limits:)` 在讀之前先看檔案大小，超標即拒。inspector 的兩處 part 讀取與 reader 的 `word/document.xml` 都走它；其餘 part 因為都來自受上限約束的解壓，已被 transitively 界住。**邊界**：`lstat` 失敗或回報非一般檔案時它仍會讀下去，且 `lstat` 與 `Data(contentsOf:)` 之間有 check/use 間隙——現有呼叫點都在私有 0700 目錄內，但這個 helper 本身不比那個環境更強。
+  - **兩層，各自擋住不同的東西**：宣告就超標 → **寫出任何位元組之前**拒絕；解壓完成後樹的
+    總量超標 → walk 量到後拒絕。第三層（解壓當下中止）見下。
+  - **少報的封裝要等解壓完才被拒**，也就是那些位元組**已經落過磁碟**。所以磁碟軸的保證是
+    「拒絕會發生」，不是「不會被寫出」。在解壓當下就中止是可行的，實測有效（512 chunk → 65 chunk），
+    但它伸手進 ZIPFoundation 的 `Progress` 內部，並在本 issue 的三輪審查裡連續產生回歸——包括
+    一次把前一個 commit 才修好的 crash 放回來。因此**拆成 #157 自己的 PR**，當成新工作被審，
+    而不是補丁上的補丁。
   - **`maximumPartBytes` 的 256 MB 沒有語料依據**，另外三個門檻有。它是唯一約束記憶體軸
     （issue 那 1.7 GB RSS）的數字，取的是與 `maximumEntryBytes` 相同的值，理由是「一個 part
     不會比一個 entry 大」，不是量出來的。

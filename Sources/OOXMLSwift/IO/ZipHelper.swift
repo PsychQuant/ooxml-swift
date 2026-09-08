@@ -218,20 +218,7 @@ public struct ZipHelper {
         let privateCopy = tempDir.appendingPathComponent(copyName)
         // Every error from here on is ours to name (verify R7 logic N-L2-R7: a
         // raw POSIX error carried the temporary path to the caller).
-        //
-        // Extraction is now bounded AS IT RUNS, not only afterwards (#157).
-        // `ExtractionBudget` counts the bytes the decompressor actually
-        // produces and cancels the moment they cross the total limit; the check
-        // sits before each chunk is handed to the consumer, so the overshoot is
-        // at most one 16 KiB chunk rather than the whole entry. The declared
-        // sizes were refused above, and the walk below still measures the tree —
-        // this closes the middle case, an archive whose central directory
-        // UNDERSTATES what it writes.
-        let budget = ExtractionBudget(limit: limits.maximumTotalBytes)
-        do { try fm.unzipItem(at: privateCopy, to: tempDir, progress: budget) }
-        catch let error as Archive.ArchiveError where error == .cancelledOperation && budget.exceeded {
-            throw WordError.invalidDocx("the package wrote more than \(describeBytes(limits.maximumTotalBytes)) while being extracted, whatever its central directory declared; refusing it.")
-        }
+        do { try fm.unzipItem(at: privateCopy, to: tempDir) }
         catch { throw WordError.invalidDocx("the package could not be extracted (\(describeWithoutPaths(error))); refusing it.") }
         do { try fm.removeItem(at: privateCopy) }
         catch { throw WordError.invalidDocx("the package's private copy could not be removed after extraction (\(describeWithoutPaths(error)))") }
@@ -546,81 +533,5 @@ public struct ZipHelper {
     /// 清理臨時目錄
     public static func cleanup(_ directory: URL) {
         try? FileManager.default.removeItem(at: directory)
-    }
-}
-
-/// Counts what an extraction actually writes, and stops it when that crosses a
-/// limit (PsychQuant/ooxml-swift#157).
-///
-/// ZIPFoundation reports progress per entry: `unzipItem` builds its own total
-/// from the archive's DECLARED sizes and aggregates per-entry children with
-/// `addChild`. Observing the parent is therefore useless for the case that
-/// matters — an archive that understates its entries makes each child saturate
-/// against its own declared total, so the parent's count stops rising exactly
-/// when the overflow happens. Measured: a child at 4 194 304 actual bytes
-/// against a declared 1 024, with the parent stuck at 1 024 and its
-/// `fractionCompleted` pinned to 1.0.
-///
-/// The CHILD's `completedUnitCount` is the real figure and is not clamped, so
-/// this intercepts the children as they are attached and observes each one.
-/// Cancellation then propagates parent → child, and `readCompressed` checks
-/// `isCancelled` BEFORE handing each chunk to the consumer — so the file on
-/// disk overshoots by at most one `defaultReadChunkSize` (16 KiB).
-///
-/// **The interception rides on an implementation detail**: that ZIPFoundation
-/// attaches its per-entry progress with `addChild(_:withPendingUnitCount:)`.
-/// Foundation has another way to attach a child — `Progress(totalUnitCount:parent:pendingUnitCount:)`
-/// — which does NOT call it. If a future version switches, nothing is captured,
-/// the total stays zero, and the limit disappears with no error at all. That is
-/// the same silent-failure shape as the trap this issue's first round shipped,
-/// so `testTheExtractionBudgetActuallySeesTheEntries` asserts the capture count
-/// matches the archive's file entries: an upgrade that changes the mechanism
-/// turns a test red instead of turning the bound off.
-final class ExtractionBudget: Progress, @unchecked Sendable {
-    private let limit: Int64
-    private var observations: [NSKeyValueObservation] = []
-    private var children: [Progress] = []
-    private var totals: [ObjectIdentifier: Int64] = [:]
-    private(set) var exceeded = false
-    /// How many per-entry children were seen.
-    private(set) var capturedChildren = 0
-
-    /// Bytes actually observed across every child — the mechanism check.
-    ///
-    /// The count of children is NOT that check, which is what this property
-    /// exists to correct: capturing a child while failing to observe it leaves
-    /// `capturedChildren` right and the byte total at zero, which is exactly
-    /// "the bound silently disappears". A dropped `NSKeyValueObservation` does
-    /// that, and it is an easy accident — an `observations` array with no
-    /// reader looks removable.
-    var observedBytes: Int64 { totals.values.reduce(0, +) }
-
-    init(limit: Int64) {
-        self.limit = limit
-        super.init(parent: nil, userInfo: nil)
-    }
-
-    override func addChild(_ child: Progress, withPendingUnitCount inUnitCount: Int64) {
-        capturedChildren += 1
-        children.append(child)
-        // A directory entry is reported by ASSIGNING 1, not by adding bytes, so
-        // it contributes at most one unit each — below any limit worth setting.
-        observations.append(child.observe(\.completedUnitCount, options: [.new]) { [weak self] observed, _ in
-            guard let self else { return }
-            self.totals[ObjectIdentifier(observed)] = observed.completedUnitCount
-            let written = self.totals.values.reduce(0, +)
-            if written > self.limit, !self.exceeded {
-                self.exceeded = true
-                // Cancel each entry's own progress, not just this parent.
-                // `Progress.cancel()` on the parent did NOT set `isCancelled`
-                // on a child attached through the overridden `addChild` —
-                // measured `child.isCancelled == false` immediately after — and
-                // ZIPFoundation checks the CHILD. Cancelling them directly is
-                // what actually stops the next chunk.
-                self.cancel()
-                for child in self.children { child.cancel() }
-            }
-        })
-        super.addChild(child, withPendingUnitCount: inUnitCount)
     }
 }
