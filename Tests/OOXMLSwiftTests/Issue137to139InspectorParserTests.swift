@@ -1681,30 +1681,53 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         swapper.cancel()
     }
 
-    func testAPartThatCannotBeReadIsNamedWithoutAPathAndWithoutAVerdict() throws {
-        // verify R11 DA N-DA11-1: three mutations of PackageInspector's error
-        // hygiene (dropping either `Data(contentsOf:)` wrap, or reverting
-        // `describeWithoutPaths` to `localizedDescription`) passed all 1553
-        // tests — including the one that reopens the temporary-path leak #146
-        // and verify R8 spent two rounds closing. The injectable `extracting:`
-        // seam makes this deterministic: hand the inspector a tree whose
-        // document.xml exists (so `identity()` succeeds) but cannot be read.
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("i137-unreadable-\(UUID().uuidString)")
-        defer { ZipHelper.removeTreeForcibly(root) }
-        let wordDir = root.appendingPathComponent("word")
-        try FileManager.default.createDirectory(at: wordDir, withIntermediateDirectories: true)
-        let part = wordDir.appendingPathComponent("document.xml")
-        try Data(body().utf8).write(to: part)
-        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: part.path)
-        XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(extracting: { root })) { error in
-            guard case WordError.invalidDocx(let message) = error else {
-                return XCTFail("a part that cannot be read is refused as invalidDocx, not \(error)")
+    /// Both reads of a part, and the description they carry.
+    ///
+    /// verify R12 re-ran the DA's mutations on the tag candidate: the fix round
+    /// 12 test covered only `fileData` (M14 RED) — the pass-1 read (M14b) and
+    /// the five `describeWithoutPaths` call sites (M16) were STILL green on all
+    /// 1554 tests, and M16 is the one that reopens the temporary-path leak of
+    /// #146 that verify R8 spent two rounds closing.
+    ///
+    /// The locale-independent difference M16 must be caught by: an NSError's
+    /// `localizedDescription` names the FILE ("The file “header1.xml” couldn't
+    /// be opened…"), while a description built from the error code cannot.
+    /// Asserting the file name is absent therefore fails under M16 in any
+    /// locale — asserting "no `/`" does not, which is why fix round 12's test
+    /// let it through.
+    func testNeitherReadOfAPartCanCarryTheFileNameOrAPathIntoTheMessage() throws {
+        func report(unreadable part: String, alsoWrite extra: [String: String] = [:]) throws -> String {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("i137-unreadable-\(UUID().uuidString)")
+            defer { ZipHelper.removeTreeForcibly(root) }
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("word/_rels"), withIntermediateDirectories: true)
+            try Data(body().utf8).write(to: root.appendingPathComponent("word/document.xml"))
+            for (name, contents) in extra {
+                try Data(contents.utf8).write(to: root.appendingPathComponent(name))
             }
-            XCTAssertTrue(message.contains("could not read a part"), message)
-            XCTAssertTrue(message.contains("no consistency verdict"), message)
-            XCTAssertFalse(message.contains("/"), "no file-system path in the message: \(message)")
-            XCTAssertFalse(message.contains(root.lastPathComponent), message)
+            let target = root.appendingPathComponent(part)
+            if !FileManager.default.fileExists(atPath: target.path) { try Data(body().utf8).write(to: target) }
+            try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: target.path)
+            var captured = ""
+            XCTAssertThrowsError(try PackageInspector.imageConsistencyReport(extracting: { root })) { error in
+                guard case WordError.invalidDocx(let message) = error else {
+                    return XCTFail("a part that cannot be read is refused as invalidDocx, not \(error)")
+                }
+                captured = message
+            }
+            XCTAssertTrue(captured.contains("could not read a part"), captured)
+            XCTAssertTrue(captured.contains("no consistency verdict"), captured)
+            XCTAssertFalse(captured.contains("/"), "no file-system path: \(captured)")
+            XCTAssertFalse(captured.contains(root.lastPathComponent), "no temporary directory name: \(captured)")
+            let fileName = (part as NSString).lastPathComponent
+            XCTAssertFalse(captured.contains(fileName), "the description comes from the error CODE, so it cannot name \(fileName): \(captured)")
+            return captured
         }
+        // (a) the `fileData` read — document.xml is fetched through it.
+        _ = try report(unreadable: "word/document.xml")
+        // (b) the pass-1 read — a part is scanned only when its own rels
+        //     declares at least one relationship, so give header1.xml one.
+        let headerRels = #"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>"#
+        _ = try report(unreadable: "word/header1.xml", alsoWrite: ["word/_rels/header1.xml.rels": headerRels])
     }
 
     func testAnUnreadableTargetModeIsRefusedNotReadAsAbsent() throws {
