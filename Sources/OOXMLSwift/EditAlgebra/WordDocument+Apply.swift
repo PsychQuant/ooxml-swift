@@ -452,6 +452,10 @@ extension WordDocument {
             default: return nil
             }
         })
+        // Match the existing transaction's final authority: a reducer-touched
+        // part has no carried overlay, even when both appear in this batch.
+        // The durable baseline must see exactly the map we commit below.
+        for part in touchedParts { newCarriedParts.removeValue(forKey: part) }
         let refreshedFormatting = try refreshedFormattingState(
             trees: newTrees, carried: newCarriedParts, freshParts: freshParts,
             carriedPaths: carriedFormattingPaths)
@@ -471,7 +475,6 @@ extension WordDocument {
         // revoke its freshness now so the later typed metadata change wins.
         self.treeFreshParts.subtract(touchedParts.subtracting(freshParts))
         self.treeFreshParts.formUnion(freshParts)
-        for part in touchedParts { self.carriedParts.removeValue(forKey: part) }
         if let refreshedFormatting {
             self.formattingState = refreshedFormatting.state
             if let styles = refreshedFormatting.styles { self.styles = styles }
