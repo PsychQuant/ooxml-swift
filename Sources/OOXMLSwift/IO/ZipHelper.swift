@@ -48,9 +48,48 @@ public struct ZipHelper {
 
     /// The same, into a named namespace (one path component) under the
     /// temporary directory. Refuses the same five entry kinds.
+    /// How much a package may expand to. Chosen from the upper edge of a real
+    /// corpus (738 documents, measured 2026-09-08): the largest single entry
+    /// was 17.5 MB, the largest package 26.4 MB in total, and the highest
+    /// compression ratio 117.8x (p99 17.9x, p99.9 32.2x). Each default is
+    /// roughly an order of magnitude above what real documents need, so a
+    /// legitimate file is not refused while a 3000:1 amplification is
+    /// (PsychQuant/ooxml-swift#130: a 0.56 MB package expanded to 1.7 GB).
+    ///
+    /// These bound the DISK axis. The memory axis — reading one expanded part
+    /// into `Data` before parsing it, which is where that PoC's 1.7 GB RSS
+    /// actually came from — is bounded separately by `maximumPartBytes`.
+    public struct Limits: Sendable, Equatable {
+        public var maximumEntryBytes: Int64
+        public var maximumTotalBytes: Int64
+        public var maximumCompressionRatio: Double
+        public var maximumPartBytes: Int64
+        public init(maximumEntryBytes: Int64 = 256 * 1024 * 1024,
+                    maximumTotalBytes: Int64 = 512 * 1024 * 1024,
+                    maximumCompressionRatio: Double = 500,
+                    maximumPartBytes: Int64 = 256 * 1024 * 1024) {
+            self.maximumEntryBytes = maximumEntryBytes
+            self.maximumTotalBytes = maximumTotalBytes
+            self.maximumCompressionRatio = maximumCompressionRatio
+            self.maximumPartBytes = maximumPartBytes
+        }
+    }
+
+    /// The limits every extraction and part read uses. Settable so a caller
+    /// with a genuinely larger corpus can raise them deliberately, rather than
+    /// discovering the ceiling as an unexplained refusal.
+    public nonisolated(unsafe) static var limits = Limits()
+
+    static func describeBytes(_ n: Int64) -> String {
+        n >= 1_048_576 ? String(format: "%.1f MB", Double(n) / 1_048_576)
+                       : String(format: "%.1f KB", Double(n) / 1024)
+    }
+
     static func unzip(data: Data, namespace: String) throws -> URL {
         precondition(!namespace.isEmpty && !namespace.contains("/") && namespace != "." && namespace != "..", "namespace must be one path component")
         let archive = try Archive(data: data, accessMode: .read)
+        let limits = Self.limits
+        var declaredTotal: Int64 = 0
         for entry in archive {
             if entry.type == .symlink {
                 throw WordError.invalidDocx("the package contains a symbolic-link entry (\(displayName(entry.path))); refusing to extract it.")
@@ -62,6 +101,21 @@ public struct ZipHelper {
             let components = path.split(separator: "/", omittingEmptySubsequences: false)
             if path.hasPrefix("/") || components.contains("..") {
                 throw WordError.invalidDocx("the package contains an entry whose path leaves its own directory (\(displayName(path))); refusing to extract it.")
+            }
+            // Size policy, from the archive's own declarations. The central
+            // directory can lie, so the extracted tree is measured again below
+            // (#130): declared and actual are each refused on their own.
+            let declared = Int64(entry.uncompressedSize)
+            if declared > limits.maximumEntryBytes {
+                throw WordError.invalidDocx("the package declares an entry of \(describeBytes(declared)) (\(displayName(path))), over the \(describeBytes(limits.maximumEntryBytes)) limit; refusing to extract it.")
+            }
+            declaredTotal += declared
+            if declaredTotal > limits.maximumTotalBytes {
+                throw WordError.invalidDocx("the package declares more than \(describeBytes(limits.maximumTotalBytes)) of content in total; refusing to extract it.")
+            }
+            let compressed = Int64(entry.compressedSize)
+            if compressed > 0, Double(declared) / Double(compressed) > limits.maximumCompressionRatio {
+                throw WordError.invalidDocx("the package declares an entry that expands \(Int(Double(declared) / Double(compressed)))x (\(displayName(path))), over the \(Int(limits.maximumCompressionRatio))x limit; refusing to extract it.")
             }
         }
         let fm = FileManager.default
@@ -141,6 +195,7 @@ public struct ZipHelper {
             throw WordError.invalidDocx("could not enumerate the extracted package")
         }
         let rootPrefixes = rootPrefixes(of: tempDir)                                // resolved once, not per item (verify R10 security N-S10-4)
+        var actualTotal: Int64 = 0                                                 // the central directory can lie; measure what is on disk (#130)
         for case let item as URL in walker {
             let relative = displayName(relativeName(of: item, rootPrefixes: rootPrefixes))   // an entry name is attacker-controlled text
             // `lstat` + `fchmodat(AT_SYMLINK_NOFOLLOW)`: nothing here follows a
@@ -159,6 +214,18 @@ public struct ZipHelper {
             }
             guard fchmodat(AT_FDCWD, item.path, mode, AT_SYMLINK_NOFOLLOW) == 0 else {
                 throw WordError.invalidDocx("could not make \(relative) in the package owner-only (\(errnoText()))")
+            }
+            // What the archive DECLARED was checked before extraction; this is
+            // what it actually wrote. A central directory that understates its
+            // entries gets no further than the first walk (#130).
+            if mode == 0o600 {
+                actualTotal += Int64(st.st_size)
+                if Int64(st.st_size) > limits.maximumEntryBytes {
+                    throw WordError.invalidDocx("the package expanded \(relative) to \(describeBytes(Int64(st.st_size))), over the \(describeBytes(limits.maximumEntryBytes)) limit; refusing it.")
+                }
+                if actualTotal > limits.maximumTotalBytes {
+                    throw WordError.invalidDocx("the package expanded to more than \(describeBytes(limits.maximumTotalBytes)) on disk; refusing it.")
+                }
             }
         }
         if let walkError { throw WordError.invalidDocx("could not enumerate the extracted package (\(describeWithoutPaths(walkError)))") }
@@ -280,6 +347,22 @@ public struct ZipHelper {
         let resolved = item.resolvingSymlinksInPath().path
         for prefix in rootPrefixes where resolved.hasPrefix(prefix) { return String(resolved.dropFirst(prefix.count)) }
         return item.lastPathComponent
+    }
+
+    /// Read one part of an extracted package, refusing one too large to hold.
+    ///
+    /// The extraction limits already cap any single entry, so a part that came
+    /// through `unzip` cannot exceed `maximumEntryBytes` — this is the second
+    /// line, for parts reached by a path the caller supplied, and it is the
+    /// bound on the MEMORY axis of #130: the PoC's 1.7 GB RSS came from reading
+    /// one expanded part into `Data` before parsing it, not from the extraction
+    /// itself. Refusing before the read means the process never holds it.
+    static func readPart(at url: URL, describedAs name: String) throws -> Data {
+        var st = stat()
+        if lstat(url.path, &st) == 0, st.st_mode & S_IFMT == S_IFREG, Int64(st.st_size) > limits.maximumPartBytes {
+            throw WordError.invalidDocx("\(displayName(name)) is \(describeBytes(Int64(st.st_size))), over the \(describeBytes(limits.maximumPartBytes)) limit for a single part; refusing to read it.")
+        }
+        return try Data(contentsOf: url)
     }
 
     /// `strerror(errno)` for the calling thread's last error.

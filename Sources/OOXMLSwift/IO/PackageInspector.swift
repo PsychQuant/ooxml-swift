@@ -321,7 +321,7 @@ public enum PackageInspector {
         func fileData(_ part: String) throws -> Data? {
             let fileURL = tempDir.appendingPathComponent(part)
             guard try identity(fileURL) != nil else { return nil }
-            do { return try Data(contentsOf: fileURL) }
+            do { return try ZipHelper.readPart(at: fileURL, describedAs: part) }
             catch { throw WordError.invalidDocx("could not read a part of the extracted package (\(ZipHelper.describeWithoutPaths(error))); no consistency verdict.") }
         }
         /// Whether the file system serves `listed` under the name `<stem><suffix>`
@@ -403,7 +403,7 @@ public enum PackageInspector {
             let part = "word/" + sub
             guard let declaredCount = try declare(part: part), declaredCount > 0 else { continue }
             let partBytes: Data
-            do { partBytes = try Data(contentsOf: fileURL) }
+            do { partBytes = try ZipHelper.readPart(at: fileURL, describedAs: part) }
             catch { throw WordError.invalidDocx("could not read a part of the extracted package (\(ZipHelper.describeWithoutPaths(error))); no consistency verdict.") }   // the raw NSError carries the temporary path in userInfo (verify R10 DA N-DA10-6)
             let content = scanPart(partBytes, part: part)
             if !content.parsed { unparsable.insert(part); unparsableContentParts.insert(part) }

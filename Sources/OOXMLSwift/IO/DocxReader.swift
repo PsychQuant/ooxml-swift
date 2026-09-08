@@ -153,7 +153,7 @@ public struct DocxReader {
             throw WordError.parseError("找不到 word/document.xml")
         }
 
-        let documentData = try Data(contentsOf: documentURL)
+        let documentData = try ZipHelper.readPart(at: documentURL, describedAs: "word/document.xml")
         try Self.rejectDTD(documentData, part: "word/document.xml")
 
         // 5. 讀取 styles.xml（先解析，用於語義標註）
