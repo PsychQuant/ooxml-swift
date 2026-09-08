@@ -230,4 +230,47 @@ final class Issue130SizeLimitsTests: XCTestCase {
         }
         try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
     }
+
+    /// Two declarations of `Int64.max - 1` under limits expressed as `.max`.
+    ///
+    /// `declaredTotal += declared` TRAPPED here — Swift traps on overflow, and
+    /// `.max` is the only way `Limits` offers to say "no limit", a spelling this
+    /// repo's own pathological-fixture tests already use. Measured SIGTRAP on
+    /// the second entry. An overflow is "over the limit", so it is refused.
+    func testATotalThatOverflowsIsRefusedRatherThanTrapping() throws {
+        // two entries each declaring Int64.max - 1, with limits expressed as .max
+        let arch = try Archive(accessMode: .create)
+        let payload = Data(repeating: 0x41, count: 64)
+        for n in ["word/document.xml", "word/media/a.bin"] {
+            try arch.addEntry(with: n, type: .file, uncompressedSize: Int64(payload.count),
+                              compressionMethod: .deflate,
+                              provider: { pos, size in payload.subdata(in: Int(pos)..<Int(pos)+size) })
+        }
+        var raw = [UInt8](arch.data ?? Data())
+        // patch both central-directory records to declare Int64.max - 1
+        var idx = 0, patched = 0
+        while let r = raw[idx...].firstRange(of: Array("PK\u{01}\u{02}".utf8)) {
+            let base = r.lowerBound
+            let v = UInt64(bitPattern: Int64.max - 1)
+            let nameLen = Int(raw[base+28]) | Int(raw[base+29]) << 8
+            let extraLen = Int(raw[base+30]) | Int(raw[base+31]) << 8
+            for k in 0..<4 { raw[base + 24 + k] = 0xFF }
+            var extra: [UInt8] = [0x01, 0x00, 0x08, 0x00]
+            for k in 0..<8 { extra.append(UInt8((v >> (8 * UInt64(k))) & 0xFF)) }
+            raw.insert(contentsOf: extra, at: base + 46 + nameLen + extraLen)
+            let ne = extraLen + extra.count
+            raw[base+30] = UInt8(ne & 0xFF); raw[base+31] = UInt8((ne >> 8) & 0xFF)
+            idx = base + 46 + nameLen + ne
+            patched += 1
+            if patched >= 2 { break }
+        }
+        let unlimited = ZipHelper.Limits(maximumEntryBytes: .max, maximumTotalBytes: .max,
+                                         maximumCompressionRatio: .infinity, maximumPartBytes: .max)
+        let ns = "f5-\(UUID().uuidString)"
+        XCTAssertEqual(patched, 2, "both entries must carry the forged declaration")
+        XCTAssertThrowsError(try ZipHelper.unzip(data: Data(raw), namespace: ns, limits: unlimited)) { error in
+            XCTAssertTrue(String(describing: error).contains("in total"), String(describing: error))
+        }
+        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
+    }
 }

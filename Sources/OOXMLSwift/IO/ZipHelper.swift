@@ -127,8 +127,16 @@ public struct ZipHelper {
             if declared > limits.maximumEntryBytes {
                 throw WordError.invalidDocx("the package declares an entry of \(describeBytes(declared)) (\(displayName(path))), over the \(describeBytes(limits.maximumEntryBytes)) limit; refusing to extract it.")
             }
-            declaredTotal += declared
-            if declaredTotal > limits.maximumTotalBytes {
+            // `addingReportingOverflow`, not `+=`: Swift traps on overflow, and a
+            // caller that expresses "no limit" as `maximumTotalBytes: .max` —
+            // the only way `Limits` offers, and the spelling this repo's own
+            // pathological-fixture tests already use — lets two entries of
+            // `Int64.max - 1` reach the addition. Measured: SIGTRAP on the
+            // second entry. An overflow IS "over the limit", so it is refused
+            // rather than crashed on.
+            let (sum, overflowed) = declaredTotal.addingReportingOverflow(declared)
+            declaredTotal = overflowed ? Int64.max : sum
+            if overflowed || declaredTotal > limits.maximumTotalBytes {
                 throw WordError.invalidDocx("the package declares more than \(describeBytes(limits.maximumTotalBytes)) of content in total; refusing to extract it.")
             }
             let compressed = Int64(clamping: entry.compressedSize)

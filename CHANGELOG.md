@@ -13,7 +13,17 @@ All notable changes to ooxml-swift will be documented in this file.
 - **一個封裝能展開到多大有上限了**（#130）。**修正了一個本分支自己引進的 crash**：`Int64(entry.uncompressedSize)` 對中央目錄宣告的 UInt64 直接轉換，宣告值超過 `Int64.max` 時會 **trap**（"Not enough bits to represent the passed value"）。一個 152 bytes 的偽造封裝就能打掛行程——而且死在它本該被拒絕的那個檢查**之前**，同一個檔案 3.7.0 是正常解開的。改用 `Int64(clamping:)`，飽和後落進拒絕路徑。上限分兩軸，issue 裡的兩個數字分屬不同軸：3000:1 的放大是**磁碟**，1.7 GB 的 RSS 是**記憶體**（把展開後的 part 整份讀進 `Data` 再解析）。兩軸各自有界，且各自以自己的證據拒絕。
   - **磁碟**：解壓前的 policy 預掃（3.7.0 已逐一走訪每個 entry 的那個迴圈）多看三件事——單一 entry 的宣告大小、全部 entry 的宣告合計、單一 entry 的宣告壓縮比。**中央目錄會說謊**，所以解壓後的既有 walk 再累計一次實際位元組，宣告與實際各擋一次。
   - **這兩層各自擋住什麼，說清楚**：宣告就超標的封裝在**寫出任何位元組之前**被拒；**少報**的封裝則是先寫出來、再由 walk 量到並拒絕，也就是說那些位元組**已經落過磁碟**。所以本項是「拒絕會發生」的保證，不是「不會被寫出」的保證。要真正在寫出當下就中止，需要在解壓的同時計數（見 #157）——ZIPFoundation 的 `Progress` 看似夠用，實則不行：它的 `totalUnitCount` 來自**宣告值**且以 `addChild` 聚合，少報的封裝父層會先飽和，正好在最該生效的案例失效。
+  - **合計的加總本身也會 trap，已修**：`declaredTotal += declared` 在呼叫端把「無上限」寫成
+    `maximumTotalBytes: .max`（`Limits` 提供的唯一寫法，而且本 repo 自己的病態 fixture 測試
+    就是這樣寫）時，兩個各宣告 `Int64.max - 1` 的 entry 會讓它 overflow —— Swift 對 overflow
+    是 trap，實測 SIGTRAP。改用 `addingReportingOverflow`，overflow 直接當成「超過上限」拒絕。
   - **記憶體**：`ZipHelper.readPart(at:describedAs:limits:)` 在讀之前先看檔案大小，超標即拒。inspector 的兩處 part 讀取與 reader 的 `word/document.xml` 都走它；其餘 part 因為都來自受上限約束的解壓，已被 transitively 界住。**邊界**：`lstat` 失敗或回報非一般檔案時它仍會讀下去，且 `lstat` 與 `Data(contentsOf:)` 之間有 check/use 間隙——現有呼叫點都在私有 0700 目錄內，但這個 helper 本身不比那個環境更強。
+  - **`maximumPartBytes` 的 256 MB 沒有語料依據**，另外三個門檻有。它是唯一約束記憶體軸
+    （issue 那 1.7 GB RSS）的數字，取的是與 `maximumEntryBytes` 相同的值，理由是「一個 part
+    不會比一個 entry 大」，不是量出來的。
+  - **單位**：下面的比值成立的前提是語料上緣與預設值用同一種 MB。本 repo 全程是 MiB 標成 MB
+    （`describeBytes` 除以 1_048_576、`Limits` 預設是 `256 * 1024 * 1024`）；若語料當初以
+    十進位 MB 量，比值會變成 15.3× 與 20.3×，方向不變。
   - **預設值取自真實語料的上緣**（738 份文件，2026-09-08 實測）：最大單一 entry 17.5 MB、最大封裝合計 26.4 MB、最高壓縮比 117.8×（p99 17.9×、p99.9 32.2×）。預設訂在 **256 MB / 512 MB / 500×**——大小約為觀測上緣的 14.6× 與 19.4×，**壓縮比只有 4.24×**（500 / 117.8）。先前寫「各約高出一個數量級」，壓縮比那一項不成立，在此更正。
   - **能通過的最大真實文件，本次量不出來**：壓縮後的檔案大小與 entry 數都沒有直接上限，所以那個數字無法從這些門檻推導；測試裡那個註解說「上緣的封裝仍須開得起來」的案例，實際打開的是一個很小的合成 part，不是語料庫文件。這句宣稱先收回。
   - **代價，明說**：合法但超大的文件會被拒絕——超過 512 MB 未壓縮媒體、單一超過 256 MB 的內嵌物件或 XML part、或壓縮比超過 500× 的高度重複但合法的 `document.xml`。上限現在是**每次呼叫傳入的不可變值**（`ZipHelper.Limits`），有理由的呼叫端自己傳，而不是把天花板當成無法解釋的拒絕來發現。
