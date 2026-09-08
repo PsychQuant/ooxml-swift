@@ -3244,11 +3244,17 @@ public struct DocxReader {
             }
         }
 
-        // 確保至少有一個段落
+        // 確保至少有一個段落 — and that `blocks` says the same thing.
+        //
+        // Guarding this append with `blocks.isEmpty` left the two disagreeing
+        // for a cell whose only child is a table: `paragraphs` held the added
+        // empty paragraph while `blocks` held only the table, so the writer
+        // emitted no paragraph at all. The paragraph goes at the END, which is
+        // where `<w:tc>` requires one.
         if cell.paragraphs.isEmpty {
             let empty = Paragraph()
             cell.paragraphs.append(empty)
-            if blocks.isEmpty { blocks = [.paragraph(empty)] }
+            blocks.append(.paragraph(empty))
         }
 
         // Record the order LAST: the `paragraphs` / `nestedTables` setters above

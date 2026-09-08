@@ -72,9 +72,14 @@ final class Issue155NestedTableCellTests: XCTestCase {
 
     /// A cell whose LAST block child is a table. Holding back the last
     /// paragraph reversed this into `table, before`.
+    ///
+    /// The required trailing paragraph IS added here — the source cell does not
+    /// end with one, and `<w:tc>` must. What must not happen is `before` moving
+    /// across the table, which is what the first position asserts. 3.7.0
+    /// appended one here too; the difference is that it also moved `before`.
     func testACellEndingWithATableKeepsItsParagraphFirst() throws {
         let xml = try cell(holding: para("before") + innerTable).toXML()
-        XCTAssertEqual(blockOrder(xml), ["p:before", "tbl"],
+        XCTAssertEqual(blockOrder(xml), ["p:before", "tbl", "p:"],
                        "the paragraph came before the table in the source and must stay there")
     }
 
@@ -102,6 +107,47 @@ final class Issue155NestedTableCellTests: XCTestCase {
     /// An empty tree-backed cell still emits the one paragraph a cell requires.
     func testAnEmptyCellStillEmitsAParagraph() throws {
         XCTAssertEqual(blockOrder(try cell(holding: "").toXML()), ["p:"])
+    }
+
+    /// A cell whose ONLY child is a nested table still ends with a paragraph.
+    ///
+    /// Counting emitted BLOCKS rather than paragraphs for that guarantee made
+    /// this cell come out as `<w:tc><w:tbl/></w:tc>` — no paragraph at all,
+    /// where 3.7.0 emitted two. Word treats such a cell as damaged.
+    func testACellHoldingOnlyANestedTableStillEndsWithAParagraph() throws {
+        XCTAssertEqual(blockOrder(try cell(holding: innerTable).toXML()), ["tbl", "p:"])
+    }
+
+    /// …and adding it does not restart the growth: the added paragraph is
+    /// recorded on the next read, so the following save emits it rather than
+    /// appending another.
+    func testTheAddedTrailingParagraphIsAFixedPoint() throws {
+        var body = innerTable
+        var seen: [[String]] = []
+        for _ in 0..<3 {
+            let xml = try cell(holding: body).toXML()
+            seen.append(blockOrder(xml))
+            body = String(xml.dropFirst("<w:tc>".count).dropLast("</w:tc>".count))
+        }
+        XCTAssertEqual(Set(seen.map { $0.joined(separator: ",") }).count, 1,
+                       "the cell must stop changing after the required paragraph is added: \(seen)")
+        XCTAssertEqual(seen[0], ["tbl", "p:"])
+    }
+
+    /// The reader's two views of the same cell must agree. Guarding the
+    /// "a cell holds at least one paragraph" append with `blocks.isEmpty` left
+    /// `paragraphs` holding a paragraph that `_blocks` did not know about.
+    func testTheReadersParagraphListAndBlockListAgree() throws {
+        let c = try cell(holding: innerTable)
+        // tree-backed: both views derive from the node, so they cannot disagree
+        XCTAssertEqual(c.paragraphs.count, 0)
+        XCTAssertEqual(c.nestedTables.count, 1)
+
+        // detached, as the reader builds it
+        var detached = TableCell()
+        detached.paragraphs = []
+        detached.nestedTables = []
+        XCTAssertNil(detached._blocks, "a caller-built cell records no order")
     }
 
     /// Detached cells have no recorded order, so they keep the pre-#155 shape:
