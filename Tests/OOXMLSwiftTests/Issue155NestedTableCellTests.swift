@@ -277,6 +277,53 @@ final class Issue155NestedTableCellTests: XCTestCase {
         XCTAssertTrue(order.contains("tbl"))
     }
 
+    /// Cross-model review constructed this recurrence against the previous
+    /// design: read a table-only cell, mutate something INSIDE the nested table,
+    /// save, repeat. Value-type writeback carries the mutation out through the
+    /// outer cell's `nestedTables` setter, which used to discard the record — so
+    /// every generation added another paragraph.
+    func testMutatingInsideTheNestedTableDoesNotGrowTheCell() throws {
+        let (_, original) = try readCell(bodyXML: outerTable(holding: innerTable))
+        var cell = original
+        var seen: [[String]] = []
+        for i in 0..<4 {
+            seen.append(blockOrder(cell.toXML()))
+            // touch the innermost paragraph — the deepest writeback path there is
+            if !cell.nestedTables.isEmpty,
+               !cell.nestedTables[0].rows.isEmpty,
+               !cell.nestedTables[0].rows[0].cells.isEmpty,
+               !cell.nestedTables[0].rows[0].cells[0].paragraphs.isEmpty {
+                cell.nestedTables[0].rows[0].cells[0].paragraphs[0] = Paragraph(text: "inner \(i)")
+            }
+        }
+        XCTAssertEqual(Set(seen.map { $0.joined(separator: ",") }).count, 1,
+                       "editing inside the nested table must not change the outer cell: \(seen)")
+    }
+
+    /// The same, one level deeper: a table inside a table inside the cell.
+    func testATableInsideANestedTableAlsoKeepsItsOrder() throws {
+        let deep = "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol/></w:tblGrid><w:tr><w:tc>"
+            + para("deep") + innerTable + "</w:tc></w:tr></w:tbl>"
+        let (_, cell) = try readCell(bodyXML: outerTable(holding: para("A") + deep + para("B")))
+        XCTAssertEqual(blockOrder(cell.toXML()), ["p:A", "tbl", "p:B"])
+
+        // and the inner cell's own order survives too
+        let inner = try XCTUnwrap(cell.nestedTables.first?.rows.first?.cells.first)
+        XCTAssertEqual(blockOrder(inner.toXML()), ["p:deep", "tbl", "p:"],
+                       "the inner cell ends with the paragraph OOXML requires")
+    }
+
+    /// Equality must not turn on whether a cell remembers how it was read.
+    /// Comparing the record made a reader-created cell unequal to its own copy
+    /// after `copy.paragraphs = copy.paragraphs`.
+    func testRememberingTheOrderDoesNotChangeEquality() throws {
+        let (_, original) = try readCell(bodyXML: outerTable(holding: para("A") + innerTable + para("B")))
+        var reassigned = original
+        reassigned.paragraphs = reassigned.paragraphs      // same public value
+        XCTAssertEqual(original, reassigned,
+                       "identical content must compare equal regardless of recorded provenance")
+    }
+
     // MARK: - Real documents (gated)
 
     /// The generation loop over real documents, comparing each generation
