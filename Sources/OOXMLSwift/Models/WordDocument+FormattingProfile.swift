@@ -13,6 +13,29 @@ internal struct DocumentFormattingState {
 extension WordDocument {
     // 標楷體的 Office family identifier；localized 名稱在 Mac Word 會被替代字型接管。
     private static let officialEastAsianFont = "DFKai-SB"
+
+    /// The theme currently selected by explicit part operations, live trees,
+    /// formatting profiles, or the source archive, in writer precedence order.
+    /// This does not import or sanitize caller-owned theme XML.
+    public func effectiveThemeData() throws -> Data? {
+        try effectiveFormattingPartData("word/theme/theme1.xml", fallback: formattingState?.themeData)
+    }
+
+    private func effectiveFormattingPartData(_ path: String, fallback: Data?) throws -> Data? {
+        if let carried = carriedParts[path] { return carried }
+        if treeFreshParts.contains(path), let tree = xmlTrees[path] { return try XmlTreeWriter.serialize(tree) }
+        func archived() throws -> Data? {
+            guard let archive = archiveTempDir else { return nil }
+            let url = archive.appendingPathComponent(path)
+            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+            return try Data(contentsOf: url)
+        }
+        // Legacy archive edits remain valid for unprofiled documents. For an
+        // applied profile, the old archive is not evidence of a newer edit.
+        if formattingState?.explicitlyApplied != true, modifiedParts.contains(path), let data = try archived() { return data }
+        if let fallback { return fallback }
+        return try archived()
+    }
     /// Capture completed authoritative operations before committing the op
     /// transaction. Later typed edits use this baseline instead of the import.
     internal func refreshedFormattingState(trees: [String: XmlTree], carried: [String: Data],
@@ -200,20 +223,24 @@ extension WordDocument {
     /// Shared writer finalization. Rebuild defaults from durable state while
     /// allowing later typed or reducer style edits to take precedence.
     internal func writeFormattingParts(to directory: URL) throws {
-        guard let state = formattingState else { return }
-        let writesStyles = state.explicitlyApplied || modifiedParts.contains("word/styles.xml")
+        let state = formattingState
+        // Generic carried styles retain their pre-profile writer semantics.
+        // An independently carried theme still needs publication and metadata.
+        let preservesCarriedStyles = state?.explicitlyApplied == false && carriedParts["word/styles.xml"] != nil
+        let writesStyles = state.map { $0.explicitlyApplied || modifiedParts.contains("word/styles.xml") } == true && !preservesCarriedStyles
         let freshAncillary = treeFreshParts.intersection(modifiedParts).intersection(["word/theme/theme1.xml", "word/fontTable.xml"])
-        guard writesStyles || !freshAncillary.isEmpty else { return }
-        // Generic carry semantics predate profiles. The authoring writer has
-        // already emitted carried styles verbatim; do not restore older state.
-        if !state.explicitlyApplied, carriedParts["word/styles.xml"] != nil { return }
+        // Bare carry operations also power byte-equal replay. Only explicitly
+        // dirty carried parts need publication through the ordinary writer;
+        // untouched replay metadata must remain byte-preserved.
+        let carriedAncillary = Set(carriedParts.keys).intersection(modifiedParts).intersection(["word/theme/theme1.xml", "word/fontTable.xml"])
+        guard writesStyles || !freshAncillary.isEmpty || !carriedAncillary.isEmpty else { return }
         func write(_ bytes: Data, _ path: String) throws {
             let url = directory.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try bytes.write(to: url)
         }
         var parts: [(path: String, type: String, rel: String, target: String)] = []
-        if writesStyles {
+        if writesStyles, let state {
             let root: XmlNode
             if state.explicitlyApplied, let carried = carriedParts["word/styles.xml"] {
                 root = try ProfileXML.parse(carried)
@@ -238,20 +265,14 @@ extension WordDocument {
             parts.append(("word/styles.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml", "styles", "styles.xml"))
         }
         func currentAncillary(_ path: String, fallback: Data?) throws -> Data? {
-            guard writesStyles || freshAncillary.contains(path) else { return nil }
-            if let carried = carriedParts[path] { return carried }
-            if treeFreshParts.contains(path), let tree = xmlTrees[path] { return try XmlTreeWriter.serialize(tree) }
-            if !state.explicitlyApplied, modifiedParts.contains(path), let archive = archiveTempDir {
-                let url = archive.appendingPathComponent(path)
-                if FileManager.default.fileExists(atPath: url.path) { return try Data(contentsOf: url) }
-            }
-            return fallback
+            guard writesStyles || freshAncillary.contains(path) || carriedAncillary.contains(path) else { return nil }
+            return try effectiveFormattingPartData(path, fallback: fallback)
         }
-        if let fonts = try currentAncillary("word/fontTable.xml", fallback: state.fontsData) {
+        if let fonts = try currentAncillary("word/fontTable.xml", fallback: state?.fontsData) {
             try write(fonts, "word/fontTable.xml")
             parts.append(("word/fontTable.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml", "fontTable", "fontTable.xml"))
         }
-        if let theme = try currentAncillary("word/theme/theme1.xml", fallback: state.themeData) {
+        if let theme = try currentAncillary("word/theme/theme1.xml", fallback: state?.themeData) {
             try write(theme, "word/theme/theme1.xml")
             parts.append(("word/theme/theme1.xml", "application/vnd.openxmlformats-officedocument.theme+xml", "theme", "theme/theme1.xml"))
         }
