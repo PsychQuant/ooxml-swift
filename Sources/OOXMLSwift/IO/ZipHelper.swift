@@ -115,15 +115,31 @@ public struct ZipHelper {
             // Size policy, from the archive's own declarations. The central
             // directory can lie, so the extracted tree is measured again below
             // (#130): declared and actual are each refused on their own.
-            // `clamping:`, not `Int64(_:)` — these are UInt64 values taken
-            // straight from the central directory, which the comment below
-            // says can lie. A ZIP64 header declaring 2^64-1 made the plain
-            // initializer TRAP ("Not enough bits to represent the passed
-            // value"): a 152-byte forged package killed the process here,
-            // before reaching the check meant to refuse it, and on a package
-            // that 3.7.0 extracted without incident. Saturating instead lands
-            // the value in the refusal below, which is where it belongs.
-            let declared = Int64(clamping: entry.uncompressedSize)
+            // A declaration that does not fit in Int64 is REFUSED HERE, before
+            // anything converts it.
+            //
+            // Clamping was tried instead and is not enough — it is worse than
+            // not enough, because it makes the value PASS this pre-scan when
+            // the caller's limit is `.max`, and then every downstream
+            // conversion sees it. Two of those are inside ZIPFoundation and are
+            // NOT clamped: `totalUnitCountForReading` (reached the moment a
+            // non-nil `Progress` is handed to `unzipItem`, which the extraction
+            // budget below does) and `readUncompressed`. Both trap. Measured: a
+            // ~150-byte package declaring `UInt64.max` killed the process with
+            // "Not enough bits to represent the passed value" — the same crash
+            // class this file's previous round had just fixed, re-opened by
+            // starting to pass a progress object.
+            //
+            // `readUncompressed` even has a `guard size <= .max` that reads like
+            // a check and is vacuously true, since `size` is already `UInt64`.
+            //
+            // No real document declares 8 exabytes, so this refuses rather than
+            // saturating, and it refuses for BOTH compression methods.
+            guard entry.uncompressedSize <= UInt64(Int64.max),
+                  entry.compressedSize <= UInt64(Int64.max) else {
+                throw WordError.invalidDocx("the package declares an entry larger than this library can represent (\(displayName(path))); refusing to extract it.")
+            }
+            let declared = Int64(entry.uncompressedSize)
             if declared > limits.maximumEntryBytes {
                 throw WordError.invalidDocx("the package declares an entry of \(describeBytes(declared)) (\(displayName(path))), over the \(describeBytes(limits.maximumEntryBytes)) limit; refusing to extract it.")
             }
@@ -139,7 +155,7 @@ public struct ZipHelper {
             if overflowed || declaredTotal > limits.maximumTotalBytes {
                 throw WordError.invalidDocx("the package declares more than \(describeBytes(limits.maximumTotalBytes)) of content in total; refusing to extract it.")
             }
-            let compressed = Int64(clamping: entry.compressedSize)
+            let compressed = Int64(entry.compressedSize)
             if compressed > 0, Double(declared) / Double(compressed) > limits.maximumCompressionRatio {
                 throw WordError.invalidDocx("the package declares an entry that expands \(Int(Double(declared) / Double(compressed)))x (\(displayName(path))), over the \(Int(limits.maximumCompressionRatio))x limit; refusing to extract it.")
             }
@@ -566,8 +582,18 @@ final class ExtractionBudget: Progress, @unchecked Sendable {
     private var children: [Progress] = []
     private var totals: [ObjectIdentifier: Int64] = [:]
     private(set) var exceeded = false
-    /// How many per-entry children were seen — the mechanism check above.
+    /// How many per-entry children were seen.
     private(set) var capturedChildren = 0
+
+    /// Bytes actually observed across every child — the mechanism check.
+    ///
+    /// The count of children is NOT that check, which is what this property
+    /// exists to correct: capturing a child while failing to observe it leaves
+    /// `capturedChildren` right and the byte total at zero, which is exactly
+    /// "the bound silently disappears". A dropped `NSKeyValueObservation` does
+    /// that, and it is an easy accident — an `observations` array with no
+    /// reader looks removable.
+    var observedBytes: Int64 { totals.values.reduce(0, +) }
 
     init(limit: Int64) {
         self.limit = limit

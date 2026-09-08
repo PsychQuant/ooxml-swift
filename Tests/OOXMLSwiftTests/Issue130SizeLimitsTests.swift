@@ -122,11 +122,11 @@ final class Issue130SizeLimitsTests: XCTestCase {
     /// `uncompressedSize` for the one entry. The archive's real bytes are
     /// untouched; only the declaration changes — which is the case the code's
     /// own comment calls out as possible.
-    private func packageDeclaring(_ declared: UInt64, actualBytes: Int) throws -> Data {
+    private func packageDeclaring(_ declared: UInt64, actualBytes: Int, stored: Bool = false) throws -> Data {
         let archive = try Archive(accessMode: .create)
         let payload = Data(repeating: 0x41, count: actualBytes)
         try archive.addEntry(with: "word/document.xml", type: .file, uncompressedSize: Int64(payload.count),
-                             compressionMethod: .deflate,
+                             compressionMethod: stored ? .none : .deflate,
                              provider: { pos, size in payload.subdata(in: Int(pos)..<Int(pos) + size) })
         var raw = [UInt8](archive.data ?? Data())
 
@@ -160,17 +160,21 @@ final class Issue130SizeLimitsTests: XCTestCase {
         return Data(raw)
     }
 
-    /// A declaration above `Int64.max` must be REFUSED, not trap.
+    /// A declaration above `Int64.max` must be REFUSED, not trap — under the
+    /// DEFAULT limits, where the size check would also have caught it.
     ///
     /// `Int64(entry.uncompressedSize)` on the UInt64 the central directory
     /// declares crashed the process — "Not enough bits to represent the passed
     /// value" — on a 152-byte package, before reaching the check meant to
-    /// refuse it, and on a package v3.7.0 extracted without incident.
+    /// refuse it, and on a package v3.7.0 extracted without incident. The
+    /// unlimited-limits case, where nothing else would catch it, is
+    /// `testAnUnrepresentableDeclarationIsRefusedForBothCompressionMethods`.
     func testADeclarationAboveInt64MaxIsRefusedRatherThanTrapping() throws {
         let data = try packageDeclaring(UInt64.max, actualBytes: 32)
         let ns = "i130-\(UUID().uuidString)"
         XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns, limits: limits())) { error in
-            XCTAssertTrue(String(describing: error).contains("over the"), String(describing: error))
+            let m = String(describing: error)
+            XCTAssertTrue(m.contains("larger than this library can represent") || m.contains("over the"), m)
         }
         try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
     }
@@ -325,7 +329,75 @@ final class Issue130SizeLimitsTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: src); ZipHelper.removeTreeForcibly(dst) }
 
         try FileManager.default.unzipItem(at: src, to: dst, progress: budget)
-        XCTAssertEqual(budget.capturedChildren, names.count,
-                       "every file entry must be observed, or the byte budget is not actually counting")
+        XCTAssertEqual(budget.capturedChildren, names.count, "every file entry must be captured")
+        // The count of children is not the check. Capturing a child and then
+        // failing to OBSERVE it leaves the count right and the byte total at
+        // zero — the bound gone, silently. Assert the bytes.
+        XCTAssertEqual(budget.observedBytes, Int64(body.count) * Int64(names.count),
+                       "the budget must actually see the bytes, not merely the entries")
+    }
+
+    /// Cancelling the parent as well as each child is load-bearing, and only
+    /// the parent cancel stops an archive whose overflow lands between entries.
+    func testCancellingTheParentIsAlsoNecessary() throws {
+        // several entries, each under the limit, crossing it in aggregate
+        let archive = try Archive(accessMode: .create)
+        let payload = Data(repeating: 0x41, count: 512 << 10)             // 512 KB each
+        for i in 0..<6 {
+            try archive.addEntry(with: "word/media/blob\(i).bin", type: .file, uncompressedSize: Int64(payload.count),
+                                 compressionMethod: .deflate,
+                                 provider: { pos, size in payload.subdata(in: Int(pos)..<Int(pos) + size) })
+        }
+        let ns = "i130-\(UUID().uuidString)"
+        let l = limits(entry: 64 << 20, total: 1 << 20, ratio: .infinity)  // 1 MB total, 3 MB coming
+        XCTAssertThrowsError(try ZipHelper.unzip(data: archive.data ?? Data(), namespace: ns, limits: l)) { error in
+            XCTAssertTrue(String(describing: error).contains("in total")
+                          || String(describing: error).contains("while being extracted"),
+                          String(describing: error))
+        }
+        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
+    }
+
+    /// The budget fires strictly ABOVE the limit, and fires once.
+    ///
+    /// `>=` would refuse a package that lands exactly on the limit — legal, and
+    /// the limit is a maximum. Dropping the `!exceeded` guard would cancel on
+    /// every subsequent chunk; harmless today, but it makes `exceeded` stop
+    /// meaning "the first crossing", which the error branch reads.
+    func testAPackageExactlyOnTheLimitIsAccepted() throws {
+        let exact = 256 << 10
+        let archive = try Archive(accessMode: .create)
+        let payload = Data(repeating: 0x41, count: exact)
+        try archive.addEntry(with: "word/document.xml", type: .file, uncompressedSize: Int64(payload.count),
+                             compressionMethod: .deflate,
+                             provider: { pos, size in payload.subdata(in: Int(pos)..<Int(pos) + size) })
+        let ns = "i130-\(UUID().uuidString)"
+        let l = limits(entry: 64 << 20, total: Int64(exact), ratio: .infinity)
+        let out = try ZipHelper.unzip(data: archive.data ?? Data(), namespace: ns, limits: l)
+        ZipHelper.cleanup(out)
+        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
+    }
+
+    /// A declaration that does not fit in `Int64` is refused, for BOTH
+    /// compression methods, before anything converts it.
+    ///
+    /// Clamping it instead let it pass this pre-scan whenever the caller's
+    /// limit was `.max`, and then ZIPFoundation's own unclamped conversions
+    /// trapped: `totalUnitCountForReading` (live as soon as a progress object
+    /// is passed) and `readUncompressed` (whose `guard size <= .max` on a
+    /// `UInt64` is vacuously true).
+    func testAnUnrepresentableDeclarationIsRefusedForBothCompressionMethods() throws {
+        for stored in [false, true] {
+            let data = try packageDeclaring(UInt64.max, actualBytes: 32, stored: stored)
+            let ns = "i130-\(UUID().uuidString)"
+            let unlimited = ZipHelper.Limits(maximumEntryBytes: .max, maximumTotalBytes: .max,
+                                             maximumCompressionRatio: .infinity, maximumPartBytes: .max)
+            XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns, limits: unlimited),
+                                 "stored=\(stored)") { error in
+                XCTAssertTrue(String(describing: error).contains("larger than this library can represent"),
+                              String(describing: error))
+            }
+            try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(ns))
+        }
     }
 }
