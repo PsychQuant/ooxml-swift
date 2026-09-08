@@ -10,7 +10,22 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ### Added
 
-- **一個封裝能展開到多大有上限了**（#130）。**修正了一個本分支自己引進的 crash**：`Int64(entry.uncompressedSize)` 對中央目錄宣告的 UInt64 直接轉換，宣告值超過 `Int64.max` 時會 **trap**（"Not enough bits to represent the passed value"）。一個 152 bytes 的偽造封裝就能打掛行程——而且死在它本該被拒絕的那個檢查**之前**，同一個檔案 3.7.0 是正常解開的。改用 `Int64(clamping:)`，飽和後落進拒絕路徑。上限分兩軸，issue 裡的兩個數字分屬不同軸：3000:1 的放大是**磁碟**，1.7 GB 的 RSS 是**記憶體**（把展開後的 part 整份讀進 `Data` 再解析）。兩軸各自有界，且各自以自己的證據拒絕。
+- **一個封裝能展開到多大有上限了**（#130）。**修正了一個本分支自己引進的 crash，而且是修了兩次才對**：`Int64(entry.uncompressedSize)`
+  對中央目錄宣告的 UInt64 直接轉換，宣告值超過 `Int64.max` 時會 **trap**（"Not enough bits to
+  represent the passed value"）。約 150 bytes 的偽造封裝就能打掛行程——而且死在它本該被拒絕的
+  那個檢查**之前**，同一個檔案 3.7.0 是正常解開的。
+
+  第一次的修法是 `Int64(clamping:)`，**那是錯的**，而且錯得比沒修更隱蔽：clamping 的效果是讓
+  那個值**通過預掃**（呼叫端的上限若是 `.max`，飽和後的 `Int64.max` 不超標），然後同一種未檢查
+  的轉換在 ZIPFoundation 內部**還有兩處**——`totalUnitCountForReading` 與 `readUncompressed`，
+  兩處都 trap。而本次為了加串流式上限開始傳一個非 nil 的 `Progress` 進 `unzipItem`，正好把
+  `totalUnitCountForReading` 從死碼變成活碼：**同一個 crash 在被宣告修好的下一個 commit 又回來了**。
+  （`readUncompressed` 的 `guard size <= .max` 對 `UInt64` 恆真，形同無效；stored 那條路徑
+  在此之前就已經會 trap。）
+
+  現在**在預掃直接拒絕** `uncompressedSize` 或 `compressedSize` 超過 `Int64.max` 的 entry，
+  不再 clamping 後往下送——沒有真實文件會宣告 8 EB，而下游每一個轉換都假設它放得下。
+  兩種壓縮方法各有一條測試。上限分兩軸，issue 裡的兩個數字分屬不同軸：3000:1 的放大是**磁碟**，1.7 GB 的 RSS 是**記憶體**（把展開後的 part 整份讀進 `Data` 再解析）。兩軸各自有界，且各自以自己的證據拒絕。
   - **磁碟**：解壓前的 policy 預掃（3.7.0 已逐一走訪每個 entry 的那個迴圈）多看三件事——單一 entry 的宣告大小、全部 entry 的宣告合計、單一 entry 的宣告壓縮比。**中央目錄會說謊**，所以解壓後的既有 walk 再累計一次實際位元組，宣告與實際各擋一次。
   - **三層，各自擋住不同的東西**：宣告就超標 → **寫出任何位元組之前**拒絕；**解壓進行中**
     實際寫出超標 → 當場中止（見下）；解壓完成後樹的總量超標 → walk 量到後拒絕（防守縱深）。
@@ -24,8 +39,11 @@ All notable changes to ooxml-swift will be documented in this file.
     progress，覆寫它才拿得到 child（父層的計數在少報時會飽和、看不到真實位元組，實測子層
     4 194 304 對宣告 1 024、父層停在 1 024）。Foundation 另有一條**不呼叫 `addChild`** 的掛法；
     若日後 ZIPFoundation 改走那條，攔截會拿到空清單、加總恆為零、**上限無聲消失**。
-    `testTheExtractionBudgetActuallySeesTheEntries` 斷言攔到的 child 數等於檔案 entry 數，
-    讓那種升級變成**測試紅**而不是保護悄悄關掉。
+    `testTheExtractionBudgetActuallySeesTheEntries` 斷言的是**觀察到的位元組總量**等於 entry
+    內容的實際大小，不是 child 的**數量**——後者是第一版的寫法，而它守不住這件事：攔到 child
+    卻沒有註冊 KVO 觀察，數量正確、加總恆為零、上限一樣無聲消失，而測試是綠的。
+    （這不是假想：寫探針時 `_ = child.observe(...)` 沒保留 token，觀察就靜默失效了。日後有人
+    覺得「`observations` 這個陣列沒人讀、刪掉」也會複製同一個形狀。）
   - **父層取消不夠，要逐一取消 child**：`Progress.cancel()` 在父層並沒有讓經由覆寫的 `addChild`
     掛上的 child 的 `isCancelled` 變成 true（實測緊接著讀為 `false`），而 ZIPFoundation 檢查的是
     **child**。所以預算直接取消每一個 child。
