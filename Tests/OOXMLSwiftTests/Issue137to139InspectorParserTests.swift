@@ -15,6 +15,21 @@ import ZIPFoundation
 /// tests pin the properties that make that emulation unnecessary.
 final class Issue137to139InspectorParserTests: XCTestCase {
 
+    /// Raise the #130 size limits for a test whose fixture is deliberately
+    /// pathological. These fixtures exist to stress the comment stripper and
+    /// the extraction walk, so they are far outside what a real document looks
+    /// like — a highly compressible multi-megabyte payload is the point. The
+    /// limits are settable precisely so a caller with a reason can lift them;
+    /// this is that reason, scoped to one test and restored after it.
+    /// Limits travel with the call now — there is no process-wide policy to
+    /// save and restore, so this hands the body an unlimited value to pass on.
+    private static let unlimited = ZipHelper.Limits(maximumEntryBytes: .max, maximumTotalBytes: .max,
+                                                    maximumCompressionRatio: .infinity, maximumPartBytes: .max)
+    private func withoutSizeLimits(_ body: (ZipHelper.Limits) throws -> Void) rethrows {
+        try body(Self.unlimited)
+    }
+
+
     // MARK: - Fixtures
 
     private let imageType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
@@ -169,55 +184,59 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     // MARK: - #138 · comments and CDATA are structure, and scanning is linear
 
     func testPathologicalCommentPayloadsFinishImmediatelyAndClaimNoOrphan() throws {
-        let n = 20_000
-        let payloads: [String: String] = [
-            "unterminated openers":  String(repeating: "<!--", count: n),
-            "balanced wrong order":  String(repeating: "-->", count: n) + String(repeating: "<!--", count: n),
-            "nested then newline":   String(repeating: "<!--", count: n) + "\n-->",
-        ]
-        for (label, payload) in payloads {
-            let data = try package(
-                document: body(),
-                docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
-                extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#,
-                        "word/charts/_rels/chart1.xml.rels": rels(payload)])
-            let started = Date()
-            let report = try PackageInspector.imageConsistencyReport(of: data)
-            XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
-                              "\(label): pre-3.7.0 this took 35–60 s on a 2 KB package")
-            // Whatever the parser makes of the payload, it must not invent a
-            // chart-part orphan out of a part it could not read.
-            XCTAssertFalse(report.orphanImageRelationshipRefs.contains { $0.part.hasPrefix("word/charts/") }, label)
+        try withoutSizeLimits { unlimited in
+            let n = 20_000
+            let payloads: [String: String] = [
+                "unterminated openers":  String(repeating: "<!--", count: n),
+                "balanced wrong order":  String(repeating: "-->", count: n) + String(repeating: "<!--", count: n),
+                "nested then newline":   String(repeating: "<!--", count: n) + "\n-->",
+            ]
+            for (label, payload) in payloads {
+                let data = try package(
+                    document: body(),
+                    docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
+                    extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#,
+                            "word/charts/_rels/chart1.xml.rels": rels(payload)])
+                let started = Date()
+                let report = try PackageInspector.imageConsistencyReport(of: data, limits: unlimited)
+                XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
+                                  "\(label): pre-3.7.0 this took 35–60 s on a 2 KB package")
+                // Whatever the parser makes of the payload, it must not invent a
+                // chart-part orphan out of a part it could not read.
+                XCTAssertFalse(report.orphanImageRelationshipRefs.contains { $0.part.hasPrefix("word/charts/") }, label)
+            }
         }
     }
 
     func testCommentShapesThatDegradeLibxml2AreRefusedBeforeParsing() throws {
-        // verify R1 requirements R1: replacing the regex moved the quadratic
-        // into libxml2's error recovery — `--` inside a comment. 4.6 KB of
-        // package, 82 s. These are refused by the linear pre-check instead.
-        let n = 800_000
-        let payloads: [String: String] = [
-            "nested openers, newline, one close": String(repeating: "<!--", count: n) + "\n-->",
-            "one comment full of --":             "<!--" + String(repeating: "--", count: n) + "\n-->",
-            "unterminated CDATA":                 "<![CDATA[" + String(repeating: "x", count: n),
-        ]
-        for (label, payload) in payloads {
-            let started = Date()
-            XCTAssertNotNil(PackageInspector.linearPrecheckFailure(Data(payload.utf8)), label)
-            XCTAssertLessThan(Date().timeIntervalSince(started), 0.5, label)
-            let data = try package(document: body(referencing: "rId4"),
-                                   docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
-                                   extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#, "word/charts/_rels/chart1.xml.rels": rels(payload)])
-            let t0 = Date()
-            let report = try PackageInspector.imageConsistencyReport(of: data)
-            XCTAssertLessThan(Date().timeIntervalSince(t0), 1.0, label)
-            XCTAssertEqual(report.unparsableParts, ["word/charts/_rels/chart1.xml.rels"], label)
-            XCTAssertFalse(report.isConsistent, label)
+        try withoutSizeLimits { unlimited in
+            // verify R1 requirements R1: replacing the regex moved the quadratic
+            // into libxml2's error recovery — `--` inside a comment. 4.6 KB of
+            // package, 82 s. These are refused by the linear pre-check instead.
+            let n = 800_000
+            let payloads: [String: String] = [
+                "nested openers, newline, one close": String(repeating: "<!--", count: n) + "\n-->",
+                "one comment full of --":             "<!--" + String(repeating: "--", count: n) + "\n-->",
+                "unterminated CDATA":                 "<![CDATA[" + String(repeating: "x", count: n),
+            ]
+            for (label, payload) in payloads {
+                let started = Date()
+                XCTAssertNotNil(PackageInspector.linearPrecheckFailure(Data(payload.utf8)), label)
+                XCTAssertLessThan(Date().timeIntervalSince(started), 0.5, label)
+                let data = try package(document: body(referencing: "rId4"),
+                                       docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
+                                       extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#, "word/charts/_rels/chart1.xml.rels": rels(payload)])
+                let t0 = Date()
+                let report = try PackageInspector.imageConsistencyReport(of: data, limits: unlimited)
+                XCTAssertLessThan(Date().timeIntervalSince(t0), 1.0, label)
+                XCTAssertEqual(report.unparsableParts, ["word/charts/_rels/chart1.xml.rels"], label)
+                XCTAssertFalse(report.isConsistent, label)
+            }
+            // …and a benign comment of the same size is parsed normally.
+            let benign = "<!-- " + String(repeating: "x", count: n) + " -->"
+            XCTAssertNil(PackageInspector.linearPrecheckFailure(Data((benign + rels("")).utf8)))
+            XCTAssertEqual(PackageInspector.scanRels(Data((benign + rels(#"<Relationship Id="rId4" Type="\#(imageType)" Target="t"/>"#)).utf8)).imageIds, ["rId4"])
         }
-        // …and a benign comment of the same size is parsed normally.
-        let benign = "<!-- " + String(repeating: "x", count: n) + " -->"
-        XCTAssertNil(PackageInspector.linearPrecheckFailure(Data((benign + rels("")).utf8)))
-        XCTAssertEqual(PackageInspector.scanRels(Data((benign + rels(#"<Relationship Id="rId4" Type="\#(imageType)" Target="t"/>"#)).utf8)).imageIds, ["rId4"])
     }
 
     func testOverWideStartTagIsRefusedAndOrdinaryOnesAreNot() throws {
@@ -1593,34 +1612,36 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     }
 
     func testThePrivateCopyIsOwnerOnlyForAsLongAsItExists() throws {
-        // N-DA10-2 (mutation M2): the copy is created by openat(O_CREAT|O_EXCL|O_NOFOLLOW, 0o600);
-        // a `createFile(attributes: nil)` copy is 0644 for its whole lifetime. The copy lives
-        // for the length of the extraction, so a poller sees it: every sample must be 0600.
-        let ns = "i137-copy-\(UUID().uuidString)"
-        let nsDir = FileManager.default.temporaryDirectory.appendingPathComponent(ns)
-        defer { try? FileManager.default.removeItem(at: nsDir) }
-        let data = try zipEntries([("word/document.xml", body()), ("word/media/blob.bin", String(repeating: "0123456789abcdef", count: 3_000_000))])   // 48 MB to extract
-        final class Samples { var modes: [mode_t] = []; let lock = NSLock() }
-        let samples = Samples()
-        let poller = Thread {
-            while !Thread.current.isCancelled {
-                for uuid in (try? FileManager.default.contentsOfDirectory(atPath: nsDir.path)) ?? [] {
-                    let dir = nsDir.appendingPathComponent(uuid)
-                    for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".zip") {
-                        var st = stat()
-                        if lstat(dir.appendingPathComponent(name).path, &st) == 0 { samples.lock.lock(); samples.modes.append(st.st_mode & 0o777); samples.lock.unlock() }
+        try withoutSizeLimits { unlimited in
+            // N-DA10-2 (mutation M2): the copy is created by openat(O_CREAT|O_EXCL|O_NOFOLLOW, 0o600);
+            // a `createFile(attributes: nil)` copy is 0644 for its whole lifetime. The copy lives
+            // for the length of the extraction, so a poller sees it: every sample must be 0600.
+            let ns = "i137-copy-\(UUID().uuidString)"
+            let nsDir = FileManager.default.temporaryDirectory.appendingPathComponent(ns)
+            defer { try? FileManager.default.removeItem(at: nsDir) }
+            let data = try zipEntries([("word/document.xml", body()), ("word/media/blob.bin", String(repeating: "0123456789abcdef", count: 3_000_000))])   // 48 MB to extract
+            final class Samples { var modes: [mode_t] = []; let lock = NSLock() }
+            let samples = Samples()
+            let poller = Thread {
+                while !Thread.current.isCancelled {
+                    for uuid in (try? FileManager.default.contentsOfDirectory(atPath: nsDir.path)) ?? [] {
+                        let dir = nsDir.appendingPathComponent(uuid)
+                        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".zip") {
+                            var st = stat()
+                            if lstat(dir.appendingPathComponent(name).path, &st) == 0 { samples.lock.lock(); samples.modes.append(st.st_mode & 0o777); samples.lock.unlock() }
+                        }
                     }
+                    usleep(50)
                 }
-                usleep(50)
             }
+            poller.start()
+            let out = try ZipHelper.unzip(data: data, namespace: ns, limits: unlimited)
+            poller.cancel()
+            ZipHelper.cleanup(out)
+            samples.lock.lock(); let modes = samples.modes; samples.lock.unlock()
+            XCTAssertFalse(modes.isEmpty, "the poller observed the private copy at least once")
+            XCTAssertEqual(Set(modes), [0o600], "every sample of the private copy's mode is 0600: \(Set(modes).map { String($0, radix: 8) })")
         }
-        poller.start()
-        let out = try ZipHelper.unzip(data: data, namespace: ns)
-        poller.cancel()
-        ZipHelper.cleanup(out)
-        samples.lock.lock(); let modes = samples.modes; samples.lock.unlock()
-        XCTAssertFalse(modes.isEmpty, "the poller observed the private copy at least once")
-        XCTAssertEqual(Set(modes), [0o600], "every sample of the private copy's mode is 0600: \(Set(modes).map { String($0, radix: 8) })")
     }
 
     func testTheExtractionWalkNeverFollowsALinkSwappedInDuringTheWalk() throws {

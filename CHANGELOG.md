@@ -8,6 +8,55 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **一個封裝能展開到多大有上限了**（#130）。**修正了一個本分支自己引進的 crash，而且是修了兩次才對**：`Int64(entry.uncompressedSize)`
+  對中央目錄宣告的 UInt64 直接轉換，宣告值超過 `Int64.max` 時會 **trap**（"Not enough bits to
+  represent the passed value"）。約 150 bytes 的偽造封裝就能打掛行程——而且死在它本該被拒絕的
+  那個檢查**之前**，同一個檔案 3.7.0 是正常解開的。
+
+  第一次的修法是 `Int64(clamping:)`，**那是錯的**，而且錯得比沒修更隱蔽：clamping 的效果是讓
+  那個值**通過預掃**（呼叫端的上限若是 `.max`，飽和後的 `Int64.max` 不超標），然後同一種未檢查
+  的轉換在 ZIPFoundation 內部**還有兩處**——`totalUnitCountForReading` 與 `readUncompressed`，
+  兩處都 trap。而本次為了加串流式上限開始傳一個非 nil 的 `Progress` 進 `unzipItem`，正好把
+  `totalUnitCountForReading` 從死碼變成活碼：**同一個 crash 在被宣告修好的下一個 commit 又回來了**。
+  （`readUncompressed` 的 `guard size <= .max` 對 `UInt64` 恆真，形同無效；stored 那條路徑
+  在此之前就已經會 trap。）
+
+  **而 `compressedSize` 那一側更糟，且與本分支無關——它在已發布的 v3.7.0 上就會 crash。**
+  一個 **161 bytes** 的封裝，ZIP64 記錄裡 `uncompressedSize` 誠實寫 64、`compressedSize` 偽造成
+  `UInt64.max`，用**出貨預設值**（不需要 `.max`）就讓 `main` 死在
+  `Archive+Helpers.swift` 的 `Int64(size)`。預掃**不可能**擋到它：唯一碰 `compressed` 的是
+  壓縮比檢查，而 `declared / compressed` 在 compressed 巨大時趨近 0，永遠通過；`Limits` 也
+  沒有任何欄位是關於壓縮後大小的。
+
+  現在**在預掃直接拒絕** `uncompressedSize` 或 `compressedSize` 超過 `Int64.max` 的 entry，
+  不再 clamping 後往下送——沒有真實文件會宣告 8 EB，而下游每一個轉換都假設它放得下。
+  兩種壓縮方法各有一條測試，`compressedSize` 那條用預設值跑。
+
+  **同一個寫法還有第三處未處理**：`Archive+Reading.swift` 的 `guard entry.dataOffset <= .max`
+  對 `UInt64` 同樣恆真，隨後 `off_t(entry.dataOffset)`。本次的預掃只守兩個 size 欄位，
+  沒有守 dataOffset——沒有為它做偽造探針，所以只記錄、不宣稱已涵蓋。上限分兩軸，issue 裡的兩個數字分屬不同軸：3000:1 的放大是**磁碟**，1.7 GB 的 RSS 是**記憶體**（把展開後的 part 整份讀進 `Data` 再解析）。兩軸各自有界，且各自以自己的證據拒絕。
+  - **磁碟**：解壓前的 policy 預掃（3.7.0 已逐一走訪每個 entry 的那個迴圈）多看三件事——單一 entry 的宣告大小、全部 entry 的宣告合計、單一 entry 的宣告壓縮比。**中央目錄會說謊**，所以解壓後的既有 walk 再累計一次實際位元組，宣告與實際各擋一次。
+  - **兩層，各自擋住不同的東西**：宣告就超標 → **寫出任何位元組之前**拒絕；解壓完成後樹的
+    總量超標 → walk 量到後拒絕。第三層（解壓當下中止）見下。
+  - **少報的封裝要等解壓完才被拒**，也就是那些位元組**已經落過磁碟**。所以磁碟軸的保證是
+    「拒絕會發生」，不是「不會被寫出」。在解壓當下就中止是可行的，實測有效（512 chunk → 65 chunk），
+    但它伸手進 ZIPFoundation 的 `Progress` 內部，並在本 issue 的三輪審查裡連續產生回歸——包括
+    一次把前一個 commit 才修好的 crash 放回來。因此**拆成 #157 自己的 PR**，當成新工作被審，
+    而不是補丁上的補丁。
+  - **`maximumPartBytes` 的 256 MB 沒有語料依據**，另外三個門檻有。它是唯一約束記憶體軸
+    （issue 那 1.7 GB RSS）的數字，取的是與 `maximumEntryBytes` 相同的值，理由是「一個 part
+    不會比一個 entry 大」，不是量出來的。
+  - **單位**：下面的比值成立的前提是語料上緣與預設值用同一種 MB。本 repo 全程是 MiB 標成 MB
+    （`describeBytes` 除以 1_048_576、`Limits` 預設是 `256 * 1024 * 1024`）；若語料當初以
+    十進位 MB 量，比值會變成 15.3× 與 20.3×，方向不變。
+  - **預設值取自真實語料的上緣**（738 份文件，2026-09-08 實測）：最大單一 entry 17.5 MB、最大封裝合計 26.4 MB、最高壓縮比 117.8×（p99 17.9×、p99.9 32.2×）。預設訂在 **256 MB / 512 MB / 500×**——大小約為觀測上緣的 14.6× 與 19.4×，**壓縮比只有 4.24×**（500 / 117.8）。先前寫「各約高出一個數量級」，壓縮比那一項不成立，在此更正。
+  - **能通過的最大真實文件，本次量不出來**：壓縮後的檔案大小與 entry 數都沒有直接上限，所以那個數字無法從這些門檻推導；測試裡那個註解說「上緣的封裝仍須開得起來」的案例，實際打開的是一個很小的合成 part，不是語料庫文件。這句宣稱先收回。
+  - **代價，明說**：合法但超大的文件會被拒絕——超過 512 MB 未壓縮媒體、單一超過 256 MB 的內嵌物件或 XML part、或壓縮比超過 500× 的高度重複但合法的 `document.xml`。上限現在是**每次呼叫傳入的不可變值**（`ZipHelper.Limits`），有理由的呼叫端自己傳，而不是把天花板當成無法解釋的拒絕來發現。
+  - **不再有 process-global 可變上限**。曾有一輪把它做成 `nonisolated(unsafe) static var`；那對一個被別人嵌入的 library 站不住腳：兩個請求共用它，一方的暫時提高會被另一方併發的解壓取用，巢狀的存回還可能讓行程永久停在「無上限」。而且 `unzip` 只快照一次、之後的 `readPart` 又各自重讀，同一次文件操作可能跑在兩套政策下。現在值隨呼叫走。
+  - **仍不在範圍內**：`imageConsistencyReport` 在 che-word-mcp 的 save 路徑上仍是對來源檔的額外一次完整解壓＋讀取（同步、在 actor 上）。那是效能／併發，不是本 issue 的安全軸。
+
 ## [3.7.0] - 2026-09-08
 
 ### Fixed
