@@ -378,6 +378,57 @@ final class DocumentFormattingProfileTests: XCTestCase {
         }
     }
 
+    func testReaderRejectsStylesDTDInEveryUnicodeByteOrder() throws {
+        let sourceURL = try directory().appendingPathComponent("source.docx")
+        try DocxWriter.write(WordDocument(), to: sourceURL)
+        let original = try RawPartChannel.readAllParts(from: sourceURL)
+        let xml = "<?xml version=\"1.0\"?><!DOCTYPE w:styles [<!ENTITY probe \"EXPANDED\">]><w:styles xmlns:w=\"\(w)\"><w:style w:type=\"paragraph\" w:styleId=\"X\"><w:name w:val=\"&probe;\"/></w:style></w:styles>"
+        let encodings: [(String, String.Encoding, [UInt8])] = [
+            ("utf8", .utf8, []),
+            ("utf16be", .utf16BigEndian, []), ("utf16be-bom", .utf16BigEndian, [0xFE, 0xFF]),
+            ("utf16le", .utf16LittleEndian, []), ("utf16le-bom", .utf16LittleEndian, [0xFF, 0xFE]),
+            ("utf32be", .utf32BigEndian, []), ("utf32be-bom", .utf32BigEndian, [0, 0, 0xFE, 0xFF]),
+            ("utf32le", .utf32LittleEndian, []), ("utf32le-bom", .utf32LittleEndian, [0xFF, 0xFE, 0, 0])
+        ]
+        for (name, encoding, bom) in encodings {
+            var parts = original
+            parts["word/styles.xml"] = Data(bom) + xml.data(using: encoding)!
+            let input = try directory().appendingPathComponent("\(name).docx")
+            try writePackage(parts, to: input)
+            XCTAssertThrowsError(try { () -> [Style] in
+                var document = try DocxReader.read(from: input)
+                defer { document.close() }
+                return document.styles
+            }(), name) { error in
+                if name.hasPrefix("utf32") {
+                    guard case WordError.invalidDocx = error else { return XCTFail("unsupported encoding reached the parser: \(error)") }
+                } else {
+                    XCTAssertEqual(error as? XMLHardeningError, .dtdNotAllowed(part: "word/styles.xml"))
+                }
+            }
+        }
+    }
+
+    func testReaderRejectsUnsupportedUTF32StylesWithoutDTD() throws {
+        let sourceURL = try directory().appendingPathComponent("source.docx")
+        try DocxWriter.write(WordDocument(), to: sourceURL)
+        let original = try RawPartChannel.readAllParts(from: sourceURL)
+        let xml = "<?xml version=\"1.0\"?><w:styles xmlns:w=\"\(w)\"><w:style w:type=\"paragraph\" w:styleId=\"X\"><w:name w:val=\"Unexpanded\"/></w:style></w:styles>"
+        for (encoding, bom) in [(String.Encoding.utf32BigEndian, [UInt8]()), (.utf32BigEndian, [0, 0, 0xFE, 0xFF]), (.utf32LittleEndian, []), (.utf32LittleEndian, [0xFF, 0xFE, 0, 0])] {
+            var parts = original
+            parts["word/styles.xml"] = Data(bom) + xml.data(using: encoding)!
+            let input = try directory().appendingPathComponent("unsupported.docx")
+            try writePackage(parts, to: input)
+            XCTAssertThrowsError(try { () -> [Style] in
+                var document = try DocxReader.read(from: input)
+                defer { document.close() }
+                return document.styles
+            }()) { error in
+                guard case WordError.invalidDocx = error else { return XCTFail("unsupported encoding reached the parser: \(error)") }
+            }
+        }
+    }
+
     func testTypedUTF16StylesEditPreservesUnknownMarkupAndMetadata() throws {
         for (encoding, aliased, hasDefaults) in [(String.Encoding.utf16, false, true), (.utf16BigEndian, true, true), (.utf16LittleEndian, false, false)] {
         let url = try directory().appendingPathComponent("utf16.docx")
