@@ -147,6 +147,7 @@ extension Style {
         var runProps = RunProperties()
         runProps.fontSize = 22      // 11pt
         runProps.fontName = "Calibri"
+        runProps.fontOrigin.generated = true
 
         return Style(
             id: "Normal",
@@ -168,6 +169,7 @@ extension Style {
         var runProps = RunProperties()
         runProps.fontSize = 32      // 16pt
         runProps.fontName = "Calibri Light"
+        runProps.fontOrigin.generated = true
         runProps.color = "2F5496"   // 深藍色
         runProps.bold = true
 
@@ -192,6 +194,7 @@ extension Style {
         var runProps = RunProperties()
         runProps.fontSize = 26      // 13pt
         runProps.fontName = "Calibri Light"
+        runProps.fontOrigin.generated = true
         runProps.color = "2F5496"
         runProps.bold = true
 
@@ -216,6 +219,7 @@ extension Style {
         var runProps = RunProperties()
         runProps.fontSize = 24      // 12pt
         runProps.fontName = "Calibri Light"
+        runProps.fontOrigin.generated = true
         runProps.color = "1F3763"
         runProps.bold = true
 
@@ -239,6 +243,7 @@ extension Style {
         var runProps = RunProperties()
         runProps.fontSize = 56      // 28pt
         runProps.fontName = "Calibri Light"
+        runProps.fontOrigin.generated = true
 
         return Style(
             id: "Title",
@@ -260,6 +265,7 @@ extension Style {
         var runProps = RunProperties()
         runProps.fontSize = 24      // 12pt
         runProps.fontName = "Calibri"
+        runProps.fontOrigin.generated = true
         runProps.color = "5A5A5A"   // 灰色
         runProps.italic = true
 
