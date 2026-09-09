@@ -187,29 +187,50 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: stylesURL.path) {
             let stylesData = try Data(contentsOf: stylesURL)
             try Self.rejectDTD(stylesData, part: "word/styles.xml")
-            let stylesTree = try XmlTreeReader.parse(stylesData)
+            // The lossless tree parser expects UTF-8. Decode other XML
+            // encodings through the XML parser; retain the archive bytes for
+            // untouched saves and a valid UTF-8 tree for typed edits.
+            let treeData: Data
+            if !stylesData.contains(0), String(data: stylesData, encoding: .utf8) != nil {
+                treeData = stylesData
+            } else {
+                let bigEndian = stylesData.starts(with: [0xFE, 0xFF]) || stylesData.starts(with: [0, 0x3C])
+                guard let decoded = String(data: stylesData, encoding: bigEndian ? .utf16BigEndian : .utf16LittleEndian) else {
+                    throw WordError.invalidDocx("word/styles.xml has an unsupported XML encoding")
+                }
+                // Keep the existing DTD refusal before introducing an XML
+                // decoder; an encoded declaration must not bypass it.
+                try Self.rejectDTD(Data(decoded.utf8), part: "word/styles.xml")
+                let encodedStyles = try XMLDocument(data: stylesData, options: .nodeLoadExternalEntitiesNever)
+                encodedStyles.characterEncoding = "UTF-8"
+                treeData = encodedStyles.xmlData
+            }
+            let stylesTree = try XmlTreeReader.parse(treeData)
             document.xmlTrees["word/styles.xml"] = stylesTree
-            let stylesXML = try XMLDocument(data: try XmlTreeWriter.serialize(stylesTree))
+            let canonicalStyles = ProfileXML.canonicalWordTree(stylesTree.root)
+            let originalStylesXML = try ProfileXML.string(canonicalStyles)
+            let stylesXML = try XMLDocument(xmlString: originalStylesXML, options: [])
             document.styles = try parseStyles(from: stylesXML)
             document.latentStyles = parseLatentStyles(from: stylesXML)
             // Retain docDefaults independently of transient carried/tree
             // freshness, so a typed style edit after reopening cannot reset it.
-            if let defaults = ProfileXML.child(stylesTree.root, "docDefaults") {
+            let defaultsXML = try ProfileXML.child(canonicalStyles, "docDefaults").map { defaults in
                 let copy = defaults.deepClone()
-                for attr in stylesTree.root.attributes where attr.isNamespaceDeclaration {
+                for attr in canonicalStyles.attributes where attr.isNamespaceDeclaration {
                     if !copy.attributes.contains(where: { $0.qualifiedName == attr.qualifiedName }) { copy.attributes.append(attr) }
                 }
-                func optionalData(_ path: String) throws -> Data? {
-                    let url = tempDir.appendingPathComponent(path)
-                    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-                    return try Data(contentsOf: url)
-                }
-                document.formattingState = DocumentFormattingState(
-                    defaultsXML: try ProfileXML.string(copy),
-                    originalStylesXML: String(decoding: stylesData, as: UTF8.self), baselineStyles: document.styles,
-                    themeData: try optionalData("word/theme/theme1.xml"), fontsData: try optionalData("word/fontTable.xml"),
-                    explicitlyApplied: false)
+                return try ProfileXML.string(copy)
             }
+            func optionalData(_ path: String) throws -> Data? {
+                let url = tempDir.appendingPathComponent(path)
+                guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+                return try Data(contentsOf: url)
+            }
+            document.formattingState = DocumentFormattingState(
+                defaultsXML: defaultsXML,
+                originalStylesXML: originalStylesXML, baselineStyles: document.styles,
+                themeData: try optionalData("word/theme/theme1.xml"), fontsData: try optionalData("word/fontTable.xml"),
+                explicitlyApplied: false)
         }
 
         // 6. 讀取 numbering.xml（可選，用於清單語義標註）
