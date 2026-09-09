@@ -300,6 +300,13 @@ public struct LanguageProperties: Equatable {
     }
 }
 
+/// Internal provenance is not document content and is never serialized.
+/// Equality deliberately ignores it so RunProperties keeps content equality.
+internal struct FontOrigin: Equatable {
+    var generated = false
+    static func == (lhs: Self, rhs: Self) -> Bool { true }
+}
+
 /// Run 格式屬性
 public struct RunProperties: Equatable {
     public var bold: Bool = false {
@@ -315,7 +322,10 @@ public struct RunProperties: Equatable {
         didSet { isStrikethroughSpecified = true }
     }
     public var fontSize: Int?              // 半點 (24 = 12pt)
-    public var fontName: String?           // legacy single-axis; mirrors rFonts.ascii. Use rFonts for 4-axis preservation.
+    public var fontName: String? {         // legacy single-axis; use rFonts for 4-axis preservation.
+        didSet { fontOrigin.generated = false }
+    }
+    internal var fontOrigin = FontOrigin()
     public var color: String?              // RGB hex (e.g., "FF0000")
     public var highlight: HighlightColor?
     public var verticalAlign: VerticalAlign?

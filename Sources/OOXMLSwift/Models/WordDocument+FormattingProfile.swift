@@ -73,22 +73,25 @@ extension WordDocument {
         next.operationReplayBase = nil
         if profile.kind == .inherit {
             for index in next.styles.indices {
-                guard let generated = Style.defaultStyles.first(where: { $0.id == next.styles[index].id }),
-                      let font = generated.runProperties?.fontName,
-                      next.styles[index].runProperties?.fontName == font,
-                      next.styles[index].runProperties?.rFonts == nil || next.styles[index].runProperties?.rFonts == RFontsProperties(ascii: font, hAnsi: font, eastAsia: font, cs: font) else { continue }
+                guard next.styles[index].runProperties?.fontOrigin.generated == true else { continue }
                 next.styles[index].runProperties?.fontName = nil
-                next.styles[index].runProperties?.rFonts = nil
             }
             let styles = try ProfileXML.parse(next.styles.toStylesXML())
             let defaults = ProfileXML.child(styles, "docDefaults")!
             for run in ProfileXML.walk(defaults) where run.localName == "rPr" {
                 run.children.removeAll { $0.localName == "rFonts" }
             }
-            next.formattingState = DocumentFormattingState(
-                defaultsXML: try ProfileXML.string(defaults.withWordNamespace()),
-                originalStylesXML: try ProfileXML.string(styles), baselineStyles: next.styles,
-                fontsData: Data("<w:fonts xmlns:w=\"\(ProfileXML.w)\"/>".utf8))
+            if var owned = next.formattingState {
+                // Read-back XML has no generator provenance. Retain its
+                // defaults and raw styling, merging only known typed edits.
+                owned.explicitlyApplied = true
+                next.formattingState = owned
+            } else {
+                next.formattingState = DocumentFormattingState(
+                    defaultsXML: try ProfileXML.string(defaults.withWordNamespace()),
+                    originalStylesXML: try ProfileXML.string(styles), baselineStyles: next.styles,
+                    fontsData: Data("<w:fonts xmlns:w=\"\(ProfileXML.w)\"/>".utf8))
+            }
             next.markTypedDirty("word/styles.xml")
             next.markTypedDirty("word/fontTable.xml")
             self = next
@@ -213,10 +216,15 @@ extension WordDocument {
         next.sectionProperties = DocxReader.parseSectionProperties(try XMLElement(xmlString: ProfileXML.string(sectionForParsing)))
         next.markTypedDirty("word/document.xml")
         next.treeFreshParts.insert("word/document.xml")
-        for path in ["word/fontTable.xml", "word/theme/theme1.xml", "[Content_Types].xml", "word/_rels/document.xml.rels"] {
-            next.markTypedDirty(path)
+        // Metadata remains authoritative until the finalizer merges the
+        // formatting registrations. Invalidating it here loses raw replay's
+        // only source and needlessly invokes the ordinary typed rels writer.
+        next.markTypedDirty("word/fontTable.xml")
+        if let themeXML {
+            next.markTypedDirty("word/theme/theme1.xml")
+            next.xmlTrees["word/theme/theme1.xml"] = try XmlTreeReader.parse(Data(themeXML.utf8))
+            next.treeFreshParts.insert("word/theme/theme1.xml")
         }
-        if let themeXML { next.xmlTrees["word/theme/theme1.xml"] = try XmlTreeReader.parse(Data(themeXML.utf8)); next.treeFreshParts.insert("word/theme/theme1.xml") }
         self = next
     }
 
@@ -283,25 +291,48 @@ extension WordDocument {
         let relNS = "http://schemas.openxmlformats.org/package/2006/relationships"
         let typeNS = "http://schemas.openxmlformats.org/package/2006/content-types"
         var ids = Set(rels.children.compactMap { $0.attributeValue(prefix: nil, localName: "Id") })
+        var typesChanged = false, relsChanged = false
+        func setAttribute(_ node: XmlNode, _ name: String, _ value: String) {
+            if let index = node.attributes.firstIndex(where: { $0.prefix == nil && $0.localName == name }) {
+                node.attributes[index] = XmlAttribute(localName: name, value: value)
+            } else { node.attributes.append(XmlAttribute(localName: name, value: value)) }
+        }
         for part in parts {
-            types.children.removeAll { $0.namespaceURI == typeNS && $0.localName == "Override" && $0.attributeValue(prefix: nil, localName: "PartName") == "/" + part.path }
-            types.children.append(.element(prefix: types.prefix, localName: "Override", namespaceURI: typeNS, attributes: [
-                XmlAttribute(localName: "PartName", value: "/" + part.path), XmlAttribute(localName: "ContentType", value: part.type)]))
+            if let existing = types.children.first(where: { $0.namespaceURI == typeNS && $0.localName == "Override" && $0.attributeValue(prefix: nil, localName: "PartName") == "/" + part.path }) {
+                if existing.attributeValue(prefix: nil, localName: "ContentType") != part.type {
+                    setAttribute(existing, "ContentType", part.type)
+                    typesChanged = true
+                }
+            } else {
+                types.children.append(.element(prefix: types.prefix, localName: "Override", namespaceURI: typeNS, attributes: [
+                    XmlAttribute(localName: "PartName", value: "/" + part.path), XmlAttribute(localName: "ContentType", value: part.type)]))
+                typesChanged = true
+            }
             let relationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/" + part.rel
             let previous = rels.children.first { $0.namespaceURI == relNS && $0.attributeValue(prefix: nil, localName: "Type") == relationshipType }
-            var id = previous?.attributeValue(prefix: nil, localName: "Id")
-            if id == nil {
+            if let previous {
+                let target = previous.attributeValue(prefix: nil, localName: "Target") ?? ""
+                let resolvedTarget = NSString(string: target.hasPrefix("/") ? target : "/word/" + target).standardizingPath
+                if resolvedTarget != "/" + part.path {
+                    setAttribute(previous, "Target", part.target)
+                    relsChanged = true
+                }
+                if previous.attributeValue(prefix: nil, localName: "TargetMode") == "External" {
+                    previous.attributes.removeAll { $0.prefix == nil && $0.localName == "TargetMode" }
+                    relsChanged = true
+                }
+            } else {
                 var n = 1
                 while ids.contains("rId\(n)") { n += 1 }
-                id = "rId\(n)"
-                ids.insert(id!)
+                let id = "rId\(n)"
+                ids.insert(id)
+                rels.children.append(.element(prefix: rels.prefix, localName: "Relationship", namespaceURI: relNS, attributes: [
+                    XmlAttribute(localName: "Id", value: id), XmlAttribute(localName: "Type", value: relationshipType), XmlAttribute(localName: "Target", value: part.target)]))
+                relsChanged = true
             }
-            rels.children.removeAll { $0.namespaceURI == relNS && $0.attributeValue(prefix: nil, localName: "Type") == relationshipType }
-            rels.children.append(.element(prefix: rels.prefix, localName: "Relationship", namespaceURI: relNS, attributes: [
-                XmlAttribute(localName: "Id", value: id!), XmlAttribute(localName: "Type", value: relationshipType), XmlAttribute(localName: "Target", value: part.target)]))
         }
-        try write(Data(ProfileXML.string(types).utf8), "[Content_Types].xml")
-        try write(Data(ProfileXML.string(rels).utf8), "word/_rels/document.xml.rels")
+        if typesChanged { try write(Data(ProfileXML.string(types).utf8), "[Content_Types].xml") }
+        if relsChanged { try write(Data(ProfileXML.string(rels).utf8), "word/_rels/document.xml.rels") }
     }
 
     /// Apply only typed changes to the preserved style. A rename must not

@@ -337,6 +337,8 @@ final class DocumentFormattingProfileTests: XCTestCase {
 
     func testInheritOnlyRemovesGeneratorFontsForNewDocuments() throws {
         var existing = WordDocument()
+        existing.properties.created = Date(timeIntervalSince1970: 1_700_000_000)
+        existing.properties.modified = existing.properties.created
         let before = try parts(existing)
         try existing.applyFormattingProfile(.inherit, context: .existingDocument)
         XCTAssertEqual(try parts(existing), before)
@@ -350,9 +352,207 @@ final class DocumentFormattingProfileTests: XCTestCase {
         XCTAssertTrue(fonts.contains("Caller Font"))
     }
 
-    func testNewDocumentContextAfterStagingStillOmitsGeneratorFontsAndPreservesDirectFonts() throws {
+    func testInheritPreservesExplicitSameValueFontsAndIgnoresNonFontEdits() throws {
+        for explicitMode in ["setter", "axes", "initializer"] {
+            var doc = WordDocument.emptyAuthoringDocument()
+            let normal = try XCTUnwrap(doc.styles.firstIndex { $0.id == "Normal" })
+            let before = doc.styles[normal]
+            if explicitMode == "axes" {
+                doc.styles[normal].runProperties?.rFonts = RFontsProperties(ascii: "Calibri", hAnsi: "Calibri", eastAsia: "Calibri", cs: "Calibri")
+            } else if explicitMode == "initializer" {
+                doc.styles[normal].runProperties = RunProperties(fontName: "Calibri")
+            } else {
+                doc.styles[normal].runProperties?.fontName = "Calibri"
+                XCTAssertEqual(doc.styles[normal], before, "font origin must not affect content equality")
+            }
+            doc.styles[1].name = "Renamed generated heading"
+            doc.styles[1].runProperties?.bold = false
+            try doc.applyFormattingProfile(.inherit, context: .newDocument)
+            for output in [try parts(doc), try parts(doc, authoring: true)] {
+                let styles = try ProfileXML.parse(output["word/styles.xml"]!)
+                let normal = try XCTUnwrap(styles.children.first { ProfileXML.value($0, "styleId") == "Normal" })
+                XCTAssertEqual(ProfileXML.walk(normal).first { $0.localName == "rFonts" }.flatMap { ProfileXML.value($0, "ascii") }, "Calibri")
+                let heading = try XCTUnwrap(styles.children.first { ProfileXML.value($0, "styleId") == "Heading1" })
+                XCTAssertFalse(ProfileXML.walk(heading).contains { $0.localName == "rFonts" })
+            }
+        }
+    }
+
+    func testTypedUTF16StylesEditPreservesUnknownMarkupAndMetadata() throws {
+        for (encoding, aliased, hasDefaults) in [(String.Encoding.utf16, false, true), (.utf16BigEndian, true, true), (.utf16LittleEndian, false, false)] {
+        let url = try directory().appendingPathComponent("utf16.docx")
+        try DocxWriter.writeData(WordDocument()).write(to: url)
+        var source = try RawPartChannel.readAllParts(from: url)
+        var styles = String(decoding: source["word/styles.xml"]!, as: UTF8.self)
+            .replacingOccurrences(of: "UTF-8", with: "UTF-16")
+            .replacingOccurrences(of: "</w:styles>", with: "<w:style w:type=\"paragraph\" w:styleId=\"Target\"><w:name w:val=\"保留樣式\"/><w:aliases w:val=\"目標別名\"/><x:keep xmlns:x=\"urn:target\" x:value=\"保真\"/></w:style></w:styles>")
+        if !hasDefaults { styles = styles.replacingOccurrences(of: "<w:docDefaults>[\\s\\S]*?</w:docDefaults>", with: "", options: .regularExpression) }
+        let encoded = aliased ? styles.replacingOccurrences(of: "w:", with: "z:").replacingOccurrences(of: "xmlns:w=", with: "xmlns:z=") : styles
+        source["word/styles.xml"] = encoded.data(using: encoding)!
+        try writePackage(source, to: url)
+        var doc = try DocxReader.read(from: url)
+        defer { doc.close() }
+        try doc.updateStyle(id: "Target", with: StyleUpdate(name: "重新命名"))
+        let output = try directory().appendingPathComponent("edited.docx")
+        try DocxWriter.write(doc, to: output)
+        let saved = try RawPartChannel.readAllParts(from: output)
+        let parsed = try ProfileXML.parse(saved["word/styles.xml"]!)
+        XCTAssertNotNil(ProfileXML.walk(parsed).first { $0.namespaceURI == "urn:target" && $0.localName == "keep" })
+        XCTAssertTrue(String(decoding: saved["word/styles.xml"]!, as: UTF8.self).contains("目標別名"))
+        for path in ["[Content_Types].xml", "word/_rels/document.xml.rels"] { XCTAssertEqual(saved[path], source[path], path) }
+        var reopened = try DocxReader.read(from: output)
+        defer { reopened.close() }
+        XCTAssertEqual(reopened.styles.first { $0.id == "Target" }?.name, "重新命名")
+        // Authoring's explicit carry contract supplies the unedited package
+        // parts, while the reader's styles baseline drives the typed merge.
+        try doc.apply(operations: source.keys.sorted().filter { $0 != "word/styles.xml" }.map {
+            .carryPart(partPath: $0, xml: String(decoding: source[$0]!, as: UTF8.self))
+        })
+        let authoring = try directory().appendingPathComponent("authoring.docx")
+        try doc.writeAuthoringPackage(to: authoring)
+        let authored = try RawPartChannel.readAllParts(from: authoring)
+        XCTAssertEqual(authored["word/styles.xml"], saved["word/styles.xml"])
+        for path in ["[Content_Types].xml", "word/_rels/document.xml.rels"] { XCTAssertEqual(authored[path], source[path], path) }
+        }
+    }
+
+    func testMetadataRepairPreservesUnknownAttributesOnUpdatedRegistrations() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        let relNS = "http://schemas.openxmlformats.org/package/2006/relationships"
+        let typeNS = "http://schemas.openxmlformats.org/package/2006/content-types"
+        try doc.apply(operations: [
+            .carryPart(partPath: "[Content_Types].xml", xml: "<Types xmlns=\"\(typeNS)\" xmlns:x=\"urn:metadata\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/styles.xml\" ContentType=\"wrong/type\" x:keep=\"type-owner\"/></Types>"),
+            .carryPart(partPath: "word/_rels/document.xml.rels", xml: "<Relationships xmlns=\"\(relNS)\" xmlns:x=\"urn:metadata\"><Relationship Id=\"ownedStyleID\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"old-styles.xml\" x:keep=\"rel-owner\"/></Relationships>")
+        ])
+        try doc.applyFormattingProfile(DocumentFormattingProfile.importOfficial(from: template()), context: .existingDocument)
+        let result = try parts(doc, authoring: true)
+        let types = try ProfileXML.parse(result["[Content_Types].xml"]!)
+        let registration = try XCTUnwrap(types.children.first { $0.attributeValue(prefix: nil, localName: "PartName") == "/word/styles.xml" })
+        XCTAssertEqual(registration.attributeValue(prefix: "x", localName: "keep"), "type-owner")
+        XCTAssertEqual(registration.attributeValue(prefix: nil, localName: "ContentType"), "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml")
+        let rels = try ProfileXML.parse(result["word/_rels/document.xml.rels"]!)
+        let relationship = try XCTUnwrap(rels.children.first { $0.attributeValue(prefix: nil, localName: "Id") == "ownedStyleID" })
+        XCTAssertEqual(relationship.attributeValue(prefix: "x", localName: "keep"), "rel-owner")
+        XCTAssertEqual(relationship.attributeValue(prefix: nil, localName: "Target"), "styles.xml")
+    }
+
+    func testOfficialWithoutThemePreservesCarriedTargetTheme() throws {
+        let imported = try DocumentFormattingProfile.importOfficial(from: template())
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(imported)) as? [String: Any])
+        json.removeValue(forKey: "themeXML")
+        json["stylesXML"] = imported.stylesXML?.replacingOccurrences(of: " w:asciiTheme=\"minorHAnsi\"", with: "").replacingOccurrences(of: " w:eastAsiaTheme=\"minorEastAsia\"", with: "")
+        let profile = try JSONDecoder().decode(DocumentFormattingProfile.self, from: JSONSerialization.data(withJSONObject: json))
+        var doc = WordDocument.emptyAuthoringDocument()
+        let theme = "<a:theme xmlns:a=\"\(a)\" name=\"Target owned\"/>"
+        try doc.apply(operations: [.carryPart(partPath: "word/theme/theme1.xml", xml: theme)])
+        try doc.applyFormattingProfile(profile, context: .existingDocument)
+        for output in [try parts(doc), try parts(doc, authoring: true)] {
+            XCTAssertEqual(output["word/theme/theme1.xml"], theme)
+            XCTAssertTrue(output["word/_rels/document.xml.rels"]!.contains("theme/theme1.xml"))
+        }
+    }
+
+    func testUnprofiledStyleEditDoesNotRewriteRegisteredMetadata() throws {
+        for target in ["styles.xml", "/word/styles.xml"] {
+        let url = try directory().appendingPathComponent("plain.docx")
+        try DocxWriter.writeData(WordDocument()).write(to: url)
+        var original = try RawPartChannel.readAllParts(from: url)
+        original["word/_rels/document.xml.rels"] = Data(String(decoding: original["word/_rels/document.xml.rels"]!, as: UTF8.self).replacingOccurrences(of: "Target=\"styles.xml\"", with: "Target=\"\(target)\"").utf8)
+        try writePackage(original, to: url)
+        var doc = try DocxReader.read(from: url)
+        defer { doc.close() }
+        try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "Ordinary edit"))
+        try DocxWriter.write(doc, to: url)
+        let saved = try RawPartChannel.readAllParts(from: url)
+        for path in ["[Content_Types].xml", "word/_rels/document.xml.rels"] { XCTAssertEqual(saved[path], original[path], path) }
+        }
+    }
+
+    func writePackage(_ parts: [String: Data], to url: URL) throws {
+        let root = try directory()
+        for (path, bytes) in parts {
+            let target = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try bytes.write(to: target)
+        }
+        try ZipHelper.zipToData(root).write(to: url)
+    }
+
+    func testOfficialPreservesCompletePackageRelationshipsAcrossWritersAndReplay() throws {
+        let root = try directory(), sourceURL = root.appendingPathComponent("source.docx")
+        try DocxWriter.writeData(WordDocument()).write(to: sourceURL)
+        var source = try RawPartChannel.readAllParts(from: sourceURL)
+        let r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        let registrations = [("image", "rIdImage", "media/pixel.png"), ("header", "rIdHeader", "header1.xml"), ("footer", "rIdFooter", "footer1.xml"), ("hyperlink", "rIdLink", "https://example.com/target")]
+        source["word/document.xml"] = Data("""
+        <w:document xmlns:w="\(w)" xmlns:r="\(r)" xmlns:a="\(a)" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:hyperlink r:id="rIdLink"><w:r><w:t>保留超連結</w:t></w:r></w:hyperlink><w:r><w:drawing><wp:inline><wp:extent cx="9525" cy="9525"/><wp:docPr id="1" name="Pixel"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="pixel.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9525" cy="9525"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr></w:body></w:document>
+        """.utf8)
+        source["word/media/pixel.png"] = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")!
+        source["word/header1.xml"] = Data("<w:hdr xmlns:w=\"\(w)\"><w:p><w:r><w:t>頁首</w:t></w:r></w:p></w:hdr>".utf8)
+        source["word/footer1.xml"] = Data("<w:ftr xmlns:w=\"\(w)\"><w:p><w:r><w:t>頁尾</w:t></w:r></w:p></w:ftr>".utf8)
+        var rels = String(decoding: source["word/_rels/document.xml.rels"]!, as: UTF8.self)
+        for (kind, id, target) in registrations {
+            rels = rels.replacingOccurrences(of: "</Relationships>", with: "<Relationship Id=\"\(id)\" Type=\"\(r)/\(kind)\" Target=\"\(target)\"\(kind == "hyperlink" ? " TargetMode=\"External\"" : "")/></Relationships>")
+        }
+        source["word/_rels/document.xml.rels"] = Data(rels.utf8)
+        var types = String(decoding: source["[Content_Types].xml"]!, as: UTF8.self)
+        types = types.replacingOccurrences(of: "</Types>", with: "<Override PartName=\"/word/header1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml\"/><Override PartName=\"/word/footer1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml\"/></Types>")
+        source["[Content_Types].xml"] = Data(types.utf8)
+        try writePackage(source, to: sourceURL)
+        let profile = try DocumentFormattingProfile.importOfficial(from: template())
+        var log = OperationLog()
+        // Binary data uses the actual binary operation, never lossy UTF-8.
+        for path in source.keys.sorted() {
+            if path.hasSuffix(".png") { log.append(.carryBinaryPart(partPath: path, base64: source[path]!.base64EncodedString()), source: .swift) }
+            else { log.append(.carryPart(partPath: path, xml: String(decoding: source[path]!, as: UTF8.self)), source: .swift) }
+        }
+        let script = root.appendingPathComponent("replay.mdocx.swift")
+        try ScriptExporter.exportSwift(log: log).write(to: script, atomically: true, encoding: .utf8)
+        for mode in ["ordinary", "authoring", "script"] {
+            let output = root.appendingPathComponent("\(mode).docx")
+            if mode == "script" { _ = try scriptPipelineExecute(scriptPath: script.path, outputPath: output.path, formattingProfile: profile) }
+            else {
+                var doc = mode == "ordinary" ? try DocxReader.read(from: sourceURL) : WordDocument.emptyAuthoringDocument()
+                defer { doc.close() }
+                if mode == "authoring" { try doc.apply(log: log) }
+                try doc.applyFormattingProfile(profile, context: .existingDocument)
+                if mode == "ordinary" { try DocxWriter.write(doc, to: output) }
+                else { try doc.writeAuthoringPackage(to: output) }
+            }
+            func check(_ bytes: [String: Data]) throws {
+                let formattingParts: Set<String> = ["word/document.xml", "word/styles.xml", "word/fontTable.xml", "word/theme/theme1.xml", "[Content_Types].xml", "word/_rels/document.xml.rels"]
+                for path in source.keys where !formattingParts.contains(path) { XCTAssertEqual(bytes[path], source[path], "\(mode): \(path)") }
+                let rels = try ProfileXML.parse(bytes["word/_rels/document.xml.rels"]!)
+                let types = try ProfileXML.parse(bytes["[Content_Types].xml"]!)
+                let body = try ProfileXML.parse(bytes["word/document.xml"]!)
+                for (kind, id, target) in registrations {
+                    let matches = rels.children.filter { $0.attributeValue(prefix: nil, localName: "Id") == id }
+                    XCTAssertEqual(matches.count, 1, "\(mode): \(id)")
+                    XCTAssertEqual(matches.first?.attributeValue(prefix: nil, localName: "Target"), target)
+                    XCTAssertEqual(matches.first?.attributeValue(prefix: nil, localName: "Type"), "\(r)/\(kind)")
+                    XCTAssertTrue(ProfileXML.walk(body).contains { $0.attributes.contains { $0.prefix == "r" && $0.value == id } })
+                    if kind == "hyperlink" { XCTAssertEqual(matches.first?.attributeValue(prefix: nil, localName: "TargetMode"), "External") }
+                    else { XCTAssertEqual(bytes["word/" + target], source["word/" + target], target) }
+                }
+                for part in ["header1.xml", "footer1.xml", "styles.xml", "fontTable.xml", "theme/theme1.xml"] {
+                    XCTAssertEqual(types.children.filter { $0.attributeValue(prefix: nil, localName: "PartName") == "/word/" + part }.count, 1, part)
+                }
+                XCTAssertEqual(types.children.filter { $0.attributeValue(prefix: nil, localName: "Extension") == "png" }.count, 1)
+            }
+            try check(RawPartChannel.readAllParts(from: output))
+            var reopened = try DocxReader.read(from: output)
+            defer { reopened.close() }
+            try reopened.updateStyle(id: "Normal", with: StyleUpdate(name: "再儲存"))
+            let again = root.appendingPathComponent("\(mode)-again.docx")
+            try DocxWriter.write(reopened, to: again)
+            try check(RawPartChannel.readAllParts(from: again))
+        }
+    }
+
+    func testProfileBeforeStagingOmitsGeneratorFontsAndPreservesDirectFonts() throws {
         var generated = WordDocument()
         generated.body.children.append(.paragraph(Paragraph(runs: [Run(text: "code", properties: RunProperties(fontName: "Menlo"))])))
+        try generated.applyFormattingProfile(.inherit, context: .newDocument)
         let url = try directory().appendingPathComponent("staging.docx")
         try DocxWriter.writeData(generated).write(to: url)
         var staged = try DocxReader.read(from: url)
@@ -361,6 +561,21 @@ final class DocumentFormattingProfileTests: XCTestCase {
         let output = try parts(staged)
         XCTAssertFalse(output["word/styles.xml"]!.contains("Calibri"))
         XCTAssertTrue(output["word/document.xml"]!.contains("Menlo"))
+    }
+
+    func testReadbackNewContextDoesNotGuessFontOrigin() throws {
+        let url = try directory().appendingPathComponent("staging.docx")
+        try DocxWriter.writeData(WordDocument()).write(to: url)
+        var staged = try DocxReader.read(from: url)
+        defer { staged.close() }
+        try staged.applyFormattingProfile(.inherit, context: .newDocument)
+        for output in [try parts(staged), try parts(staged, authoring: true)] {
+            XCTAssertTrue(output["word/styles.xml"]!.contains("Calibri"))
+            let defaults = try XCTUnwrap(ProfileXML.child(ProfileXML.parse(output["word/styles.xml"]!), "docDefaults"))
+            let fonts = try XCTUnwrap(ProfileXML.walk(defaults).first { $0.localName == "rFonts" })
+            XCTAssertEqual(ProfileXML.value(fonts, "ascii"), "Calibri")
+            XCTAssertEqual(ProfileXML.value(fonts, "cs"), "Times New Roman")
+        }
     }
 
     func testOfficialOverridesEastAsiaOnRetainedStylesAndPreservesTargetNumbering() throws {
