@@ -194,8 +194,18 @@ public struct DocxReader {
             if !stylesData.contains(0), String(data: stylesData, encoding: .utf8) != nil {
                 treeData = stylesData
             } else {
-                let bigEndian = stylesData.starts(with: [0xFE, 0xFF]) || stylesData.starts(with: [0, 0x3C])
-                guard let decoded = String(data: stylesData, encoding: bigEndian ? .utf16BigEndian : .utf16LittleEndian) else {
+                let encoding: String.Encoding
+                if stylesData.starts(with: [0xFE, 0xFF]) || stylesData.starts(with: [0, 0x3C]) {
+                    encoding = .utf16BigEndian
+                } else if stylesData.starts(with: [0xFF, 0xFE]) || stylesData.starts(with: [0x3C, 0]) {
+                    encoding = .utf16LittleEndian
+                } else {
+                    throw WordError.invalidDocx("word/styles.xml has an unsupported XML encoding")
+                }
+                // UTF-32LE shares UTF-16LE's leading bytes. Its UTF-16
+                // interpretation contains NULs (invalid in XML); refuse it
+                // before the parser can auto-detect a different encoding.
+                guard let decoded = String(data: stylesData, encoding: encoding), !decoded.contains("\u{0000}") else {
                     throw WordError.invalidDocx("word/styles.xml has an unsupported XML encoding")
                 }
                 // Keep the existing DTD refusal before introducing an XML
