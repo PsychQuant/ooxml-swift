@@ -8,6 +8,16 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Op-level slot 支援多 run 段落**（#131 in PsychQuant/macdoc, PR #92）。3.7.0 只接受最後一次 `setRuns` 恰好一個 run
+  的段落；把多 run 段落指定為 slot 會拋 `TranscodeError.slotDesignationFailure`（reason 含 `needs a single-run setRuns`），
+  而真實範本（90_template_ja 的題名與本文）的格式化段落幾乎都是多 run。現在 slot 預設值是最後一次 `setRuns` 各 run 文字
+  依序串接的結果；以預設值執行時 run 的切分原封不動，重建結果仍 byte-equal。呼叫端給了不同文字時，每個 run 與其格式欄位
+  都保留，新文字放進一個 carrier run、其餘 run 的文字清空；新文字首尾有 XML 空白時 carrier 加上 `xml:space="preserve"`。
+  所有 run 文字皆空的段落仍然拋 `slotDesignationFailure`。**限制**：carrier 固定是第一個文字不全為空白的 run（沒有就取第一個
+  非空 run，再沒有就取第一個 run），替換後的文字一律套用它的格式，呼叫端無法指定別的 run。
+
 ### Fixed
 
 - **`bold` / `italic` / `strikethrough` / `noProof` 分得出「沒寫」「開」「明確關」三種狀態**（#115；PsychQuant/macdoc#173、#174）。
@@ -25,6 +35,11 @@ All notable changes to ooxml-swift will be documented in this file.
 - **追蹤修訂的 `rPrChange` 改用與 run 相同的 `rPr` 輸出**。舊版另寫了一套只含粗體、斜體、底線、顏色、字級、字型六項的輸出，
   其餘屬性（樣式、四軸字型、刪除線、highlight、上下標、字距、語言等）在「修改前格式」裡一律消失；字級還被多乘一次 2
   （`fontSize` 本來就是半點），12pt 記成 24pt。現在修改前格式是完整的 `rPr`，字級正確。
+- **`ScriptExporter.quote()` 正確跳脫 CRLF**（#131 in PsychQuant/macdoc, PR #92）。Swift 把 `"\r\n"` 視為單一
+  `Character`，它既不等於 `"\r"` 也不等於 `"\n"`，所以舊版逐 `Character` 的 `switch` 把 CR LF 原樣寫進字串字面值：slot
+  預設值或段落文字含 CRLF 時，匯出的腳本會在字面值中間斷行。現在逐 Unicode scalar 跳脫，CR 與 LF 各自輸出為 `\r`、`\n`。
+  同一個原因也讓 3.7.0 的 op-level slot 在新文字以 CRLF 開頭或結尾時漏加 `xml:space="preserve"`；邊界空白判定同樣改為逐
+  scalar 檢查。
 
 ### Changed
 
@@ -36,6 +51,7 @@ All notable changes to ooxml-swift will be documented in this file.
   `props.underline = base.underline` 還原，`base` 沒有底線時就會輸出它）。
 - `RunProperties` 的 synthesized `Equatable` 會一併比較「是否明確指定」：Bool 值相同、但一方明確關一方沒寫的兩個實例不再相等。
 - `RunPayload` 新增 `strikethrough`、`noProof` 兩個 optional 欄位；舊的 JSONL log 缺這兩個 key 時解碼為 `nil`。
+
 
 ## [3.7.0] - 2026-09-08
 

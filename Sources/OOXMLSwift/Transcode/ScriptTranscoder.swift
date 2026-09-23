@@ -190,15 +190,16 @@ public enum ScriptExporter {
             }
             // Its text must be substitutable: either the paragraph is
             // DSL-spellable (script-text parameter, the plain path) OR it is a
-            // raw-form paragraph whose text lives in a single-run setRuns or
-            // the appendParagraph itself (op-level substitution). A paragraph
-            // with no unambiguous text target fails loudly.
+            // raw-form paragraph whose text lives in setRuns or the
+            // appendParagraph itself (op-level substitution). Multi-run text
+            // uses a deterministic carrier run when a new binding is supplied;
+            // the default binding keeps the original run partition unchanged.
             let isDSL = paragraphBlock(payload: payload, paraId: slot.paraId, indent: 8) != nil
             if !isDSL {
                 guard opLevelSlotDefault(log: log, paraId: slot.paraId) != nil else {
                     throw TranscodeError.slotDesignationFailure(
                         name: slot.name,
-                        reason: "paragraph \(slot.paraId) has no substitutable text (needs a single-run setRuns or non-empty appendParagraph text)")
+                        reason: "paragraph \(slot.paraId) has no substitutable text (needs non-empty setRuns or appendParagraph text)")
                 }
             }
         }
@@ -429,16 +430,19 @@ public enum ScriptExporter {
     }
 
     /// The substitutable text of a raw-form paragraph for an op-level slot, or
-    /// nil when the paragraph has no unambiguous text target. The chosen target
-    /// is the paragraph's single-run `setRuns` if present, otherwise a non-empty
-    /// `appendParagraph` text. A multi-run setRuns (or an empty paragraph with
-    /// no run text) has no unambiguous target and fails loudly upstream.
+    /// nil when the paragraph has no text target. `setRuns` is preferred and
+    /// its default is the visible text joined in run order; otherwise a
+    /// non-empty `appendParagraph` text is used. Import preserves the exact run
+    /// partition for this default and uses a deterministic carrier only when a
+    /// caller supplies different text.
     static func opLevelSlotDefault(log: OperationLog, paraId: String) -> String? {
+        // setRuns is a sequential overwrite operation, so only the final
+        // occurrence represents the paragraph's visible state.
         for entry in log.entries.reversed() {
             if case .setRuns(let target, let runs) = entry.op,
                target.raw == "w14:paraId=\(paraId)" {
-                guard runs.count == 1, !runs[0].text.isEmpty else { return nil }
-                return runs[0].text
+                let text = runs.map(\.text).joined()
+                return text.isEmpty ? nil : text
             }
         }
         if case .appendParagraph(_, let payload)? = firstAppendParagraph(log: log, paraId: paraId)?.op,
@@ -522,14 +526,16 @@ public enum ScriptExporter {
 
     static func quote(_ s: String) -> String {
         var escaped = ""
-        for ch in s {
-            switch ch {
-            case "\\": escaped += "\\\\"
-            case "\"": escaped += "\\\""
-            case "\n": escaped += "\\n"
-            case "\r": escaped += "\\r"
-            case "\t": escaped += "\\t"
-            default: escaped.append(ch)
+        // Iterate Unicode scalars, not grapheme clusters: Swift treats CRLF
+        // as one Character, but each scalar needs its own source escape.
+        for scalar in s.unicodeScalars {
+            switch scalar.value {
+            case 0x5C: escaped += "\\\\"  // backslash
+            case 0x22: escaped += "\\\""  // quote
+            case 0x0A: escaped += "\\n"
+            case 0x0D: escaped += "\\r"
+            case 0x09: escaped += "\\t"
+            default: escaped.append(String(scalar))
             }
         }
         return "\"\(escaped)\""
@@ -869,22 +875,24 @@ public enum ScriptImporter {
 
     /// Rewrites each op-level-slotted paragraph's text-bearing op with its
     /// call-site value. The substitution target mirrors the exporter's choice
-    /// (`ScriptExporter.opLevelSlotDefault`): the paragraph's single-run
-    /// `setRuns` if present, otherwise its non-empty `appendParagraph` text.
+    /// (`ScriptExporter.opLevelSlotDefault`): the paragraph's non-empty
+    /// `setRuns` text if present, otherwise its non-empty appendParagraph text.
+    /// A default binding leaves setRuns byte-for-byte unchanged. A changed
+    /// binding keeps every run and formatting field, puts the new text into the
+    /// first non-whitespace run, and clears text from the remaining runs.
     private static func applyOpLevelSlots(
         _ log: OperationLog,
         opSlots: [String: String],
         bindings: [String: String]
     ) -> OperationLog {
-        // The final setRuns for a paragraph is its effective text-bearing
-        // occurrence. Earlier entries are history and stay byte-equivalent.
-        var setRunsEntryByParaId: [String: Int] = [:]
-        for index in log.entries.indices.reversed() {
-            let entry = log.entries[index]
-            if case .setRuns(let target, let runs) = entry.op,
-               let pid = paraId(fromTarget: target), runs.count == 1,
-               opSlots[pid] != nil, setRunsEntryByParaId[pid] == nil {
-                setRunsEntryByParaId[pid] = index
+        // setRuns is a sequential overwrite operation. Remember only the
+        // final occurrence for each designated paragraph; earlier history is
+        // replayed verbatim and must never be rewritten by a slot binding.
+        var finalSetRunsIndex: [String: Int] = [:]
+        for (index, entry) in log.entries.enumerated() {
+            if case .setRuns(let target, _) = entry.op,
+               let pid = paraId(fromTarget: target), opSlots[pid] != nil {
+                finalSetRunsIndex[pid] = index
             }
         }
         var rebuilt = OperationLog()
@@ -893,19 +901,33 @@ public enum ScriptImporter {
             switch op {
             case .setRuns(let target, let runs):
                 if let pid = paraId(fromTarget: target), let name = opSlots[pid],
-                   setRunsEntryByParaId[pid] == index, runs.count == 1,
+                   finalSetRunsIndex[pid] == index, !runs.isEmpty,
                    let value = bindings[name] {
-                    var run = runs[0]
-                    run.text = value
-                    if value.first.map(isXMLBoundaryWhitespace) == true
-                        || value.last.map(isXMLBoundaryWhitespace) == true {
-                        run.preserveSpace = true
+                    let original = runs.map(\.text).joined()
+                    if value != original {
+                        // Carrier-run heuristic: the new text goes into the
+                        // first run whose text is not all (Unicode) whitespace,
+                        // falling back to the first non-empty run, then the
+                        // first run. Every other run is kept but blanked, so
+                        // the substituted text takes the carrier's formatting.
+                        // Limit: a binding is plain text, so the caller has no
+                        // way to pick a different run or keep mixed formatting.
+                        let carrier = runs.firstIndex {
+                            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        } ?? runs.firstIndex { !$0.text.isEmpty } ?? runs.startIndex
+                        var replaced = runs
+                        for runIndex in replaced.indices { replaced[runIndex].text = "" }
+                        replaced[carrier].text = value
+                        if value.first.map(isXMLWhitespace) == true
+                            || value.last.map(isXMLWhitespace) == true {
+                            replaced[carrier].preserveSpace = true
+                        }
+                        op = .setRuns(target: target, runs: replaced)
                     }
-                    op = .setRuns(target: target, runs: [run])
                 }
             case .appendParagraph(let container, let payload):
                 if container == nil, let pid = payload.paraId, let name = opSlots[pid],
-                   setRunsEntryByParaId[pid] == nil, let value = bindings[name] {
+                   finalSetRunsIndex[pid] == nil, let value = bindings[name] {
                     var p = payload
                     p.text = value
                     op = .appendParagraph(in: nil, paragraph: p)
@@ -919,15 +941,24 @@ public enum ScriptImporter {
         return rebuilt
     }
 
-    private static func isXMLBoundaryWhitespace(_ character: Character) -> Bool {
-        character == " " || character == "\t" || character == "\n" || character == "\r"
-    }
-
     /// Extracts the paraId from a `w14:paraId=<id>` op target, or nil.
     private static func paraId(fromTarget target: ElementID) -> String? {
         let prefix = "w14:paraId="
         guard target.raw.hasPrefix(prefix) else { return nil }
         return String(target.raw.dropFirst(prefix.count))
+    }
+
+    /// XML's whitespace-only characters; boundary occurrences require
+    /// `xml:space="preserve"` on `<w:t>` to survive consumers faithfully.
+    /// Checked per Unicode scalar, not by Character equality: Swift treats
+    /// CRLF as a single Character, which equals neither "\r" nor "\n".
+    private static func isXMLWhitespace(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy { scalar in
+            switch scalar.value {
+            case 0x20, 0x09, 0x0A, 0x0D: true
+            default: false
+            }
+        }
     }
 
     private static func decodeRawOp(json: String, line: Int) throws -> LogEntry {
