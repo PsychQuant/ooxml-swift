@@ -32,6 +32,8 @@ All notable changes to ooxml-swift will be documented in this file.
   但 `props.bold = false` 這類賦值會讓 writer 輸出 `<w:b w:val="0"/>`，過去則什麼都不輸出。沒有套樣式的段落裡兩者顯示相同；
   段落樣式本身是粗體時（例如 Heading），明確關會蓋過樣式——這正是本次要修的語意，但依賴 byte-level 輸出比對的下游會看到差異
   （例如 `tex-to-docx-swift` 對每個 run 都寫 `props.bold = bold`）。要表達「不指定」，請不要賦值。
+  `underline` 同理：賦值 `nil` 是明確移除，輸出 `<w:u w:val="none"/>`（例如 `md-to-word-swift` 在 `</u>` 後以
+  `props.underline = base.underline` 還原，`base` 沒有底線時就會輸出它）。
 - `RunProperties` 的 synthesized `Equatable` 會一併比較「是否明確指定」：Bool 值相同、但一方明確關一方沒寫的兩個實例不再相等。
 - `RunPayload` 新增 `strikethrough`、`noProof` 兩個 optional 欄位；舊的 JSONL log 缺這兩個 key 時解碼為 `nil`。
 
