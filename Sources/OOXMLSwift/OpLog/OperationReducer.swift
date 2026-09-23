@@ -1457,10 +1457,20 @@ public enum OperationReducer {
             if let v = run.fontHAnsiTheme { rFonts.setAttribute(prefix: "w", localName: "hAnsiTheme", value: v) }
             rPrChildren.append(rFonts)
         }
-        if run.bold == true { rPrChildren.append(XmlNode.element(prefix: "w", localName: "b")) }
-        if run.boldCs == true { rPrChildren.append(XmlNode.element(prefix: "w", localName: "bCs")) }
-        if run.italic == true { rPrChildren.append(XmlNode.element(prefix: "w", localName: "i")) }
-        if run.italicCs == true { rPrChildren.append(XmlNode.element(prefix: "w", localName: "iCs")) }
+        func appendOnOff(_ localName: String, _ value: Bool?) {
+            guard let value else { return }
+            let node = XmlNode.element(prefix: "w", localName: localName)
+            if !value {
+                node.setAttribute(prefix: "w", localName: "val", value: "0")
+            }
+            rPrChildren.append(node)
+        }
+        appendOnOff("b", run.bold)
+        appendOnOff("bCs", run.boldCs)
+        appendOnOff("i", run.italic)
+        appendOnOff("iCs", run.italicCs)
+        appendOnOff("strike", run.strikethrough)
+        appendOnOff("noProof", run.noProof)
         if let color = run.color {
             let c = XmlNode.element(prefix: "w", localName: "color")
             c.setAttribute(prefix: "w", localName: "val", value: color)

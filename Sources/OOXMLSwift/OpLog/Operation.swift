@@ -372,6 +372,10 @@ public struct RunPayload: Equatable, Sendable, Codable {
     /// decodes unchanged.
     public var bold: Bool?
     public var italic: Bool?
+    /// ↔ `<w:strike>`; false emits explicit off.
+    public var strikethrough: Bool?
+    /// ↔ `<w:noProof>`; false emits explicit off.
+    public var noProof: Bool?
     public var color: String?
     /// format-alignment-engine Phase B (task 2.1) — additive rPr fields.
     /// ↔ `<w:rFonts w:ascii>`.
@@ -410,7 +414,9 @@ public struct RunPayload: Equatable, Sendable, Codable {
     /// ↔ `<w:szCs w:val>` (complex-script size, half-points).
     public var sizeCsHalfPoints: Int?
 
-    public init(text: String, bold: Bool? = nil, italic: Bool? = nil, color: String? = nil,
+    public init(text: String, bold: Bool? = nil, italic: Bool? = nil,
+                strikethrough: Bool? = nil, noProof: Bool? = nil,
+                color: String? = nil,
                 fontAscii: String? = nil, fontEastAsia: String? = nil,
                 sizeHalfPoints: Int? = nil, underline: String? = nil,
                 vertAlign: String? = nil,
@@ -422,6 +428,8 @@ public struct RunPayload: Equatable, Sendable, Codable {
         self.text = text
         self.bold = bold
         self.italic = italic
+        self.strikethrough = strikethrough
+        self.noProof = noProof
         self.color = color
         self.fontAscii = fontAscii
         self.fontEastAsia = fontEastAsia

@@ -2129,7 +2129,10 @@ public struct DocxReader {
         var run = Run(text: "")
 
         // 解析 Run 屬性
-        if let rPr = element.elements(forName: "w:rPr").first {
+        // Matched by namespace URI, not the literal `w:` QName: the raw-capture
+        // loop below skips `rPr` / `t` by local name, so a QName-only lookup
+        // silently dropped both for any other prefix bound to WordprocessingML.
+        if let rPr = wordChild(element, localName: "rPr") {
             run.properties = parseRunProperties(from: rPr)
         }
 
@@ -2141,7 +2144,10 @@ public struct DocxReader {
         // WhitespaceOverlay.swift docs). The overlay's pre-parse byte-stream
         // scan recovers those bytes; we consult by sequence index in DOM
         // document order.
-        for t in element.elements(forName: "w:t") {
+        let textElements = (element.children ?? []).compactMap { $0 as? XMLElement }.filter {
+            $0.localName == "t" && isWordprocessingMLElement($0)
+        }
+        for t in textElements {
             let observed = t.stringValue ?? ""
             if let ctx = Self.currentWhitespaceContext {
                 if observed.isEmpty,
@@ -2554,25 +2560,33 @@ public struct DocxReader {
             props.rStyle = val
         }
 
-        // 粗體
-        if element.elements(forName: "w:b").first != nil {
-            props.bold = true
+        // 粗體（OOXML ST_OnOff：presence 不是永遠等於 true）
+        if let bold = wordChild(element, localName: "b") {
+            props.bold = parseOnOff(bold)
         }
 
         // 斜體
-        if element.elements(forName: "w:i").first != nil {
-            props.italic = true
+        if let italic = wordChild(element, localName: "i") {
+            props.italic = parseOnOff(italic)
         }
 
         // 底線
         if let u = element.elements(forName: "w:u").first,
            let val = u.attribute(forName: "w:val")?.stringValue {
-            props.underline = UnderlineType(rawValue: val)
+            if let type = UnderlineType(rawValue: val) {
+                props.underline = type
+            } else if val == "none" {
+                props.underline = nil
+            }
+            // Any other ST_Underline value (wavyDouble, dottedHeavy, …) has no
+            // UnderlineType case. Assigning nil would mark it explicitly
+            // specified and emit w:val="none", cancelling even a style's
+            // underline; leave it unspecified, as through 3.7.0.
         }
 
         // 刪除線
-        if element.elements(forName: "w:strike").first != nil {
-            props.strikethrough = true
+        if let strike = wordChild(element, localName: "strike") {
+            props.strikethrough = parseOnOff(strike)
         }
 
         // 字型大小
@@ -2620,8 +2634,8 @@ public struct DocxReader {
         }
 
         // v0.20.0+ (#60): noProof — suppress spell/grammar check.
-        if element.elements(forName: "w:noProof").first != nil {
-            props.noProof = true
+        if let noProof = wordChild(element, localName: "noProof") {
+            props.noProof = parseOnOff(noProof)
         }
 
         // v0.20.0+ (#60): kern — minimum kerning threshold (half-points).
@@ -2718,6 +2732,8 @@ public struct DocxReader {
     private static func parseOnOff(_ element: XMLElement) -> Bool {
         guard let raw = wordAttributeValue(element, localName: "val")?
             .lowercased() else { return true }
+        // "no" is outside ST_OnOff but was read as off through 3.7.0; keep it,
+        // since any unrecognised value falls through to on.
         return !["0", "false", "off", "no"].contains(raw)
     }
 
