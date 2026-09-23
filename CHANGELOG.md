@@ -8,6 +8,26 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **文件格式 profile：安全的範本格式快照與明確的繼承模式**（#158；PsychQuant/macdoc#185）。
+  - `DocumentFormattingProfile` 有兩種 `Kind`：`inherit` 沿用文件本身的格式；`official` 套用從官方範本匯入的快照
+    （`importOfficial(from:)`）。
+  - 快照只收 styles、section、theme、fonts 四類 XML，匯入時經允許清單與 namespace-aware 驗證。
+  - 帶 `schemaVersion`，原範本只讀不寫。
+  - 不支援的 styles 編碼在 XML 解析之前就拒絕。
+  - v1 明確拒絕帶實際 numbering 的範本。
+- **`WordDocument.applyFormattingProfile(_:)`**：須明確指定 `DocumentFormattingContext`（`newDocument` / `existingDocument`），
+  不會隱式讀取使用者設定。
+  - 一般 writer 與 authoring writer 都同步持久狀態，保留目標文件的 styles、頁首頁尾與 UTF-16 附屬 part。
+  - `ScriptPipelineExecute` 在驗證與發布之前套用 profile。
+- **`effectiveThemeData()`**：讀取端與 writer 共用同一個有效 theme 來源。套用 profile 之後再做 theme、typed 或 carry 修改，
+  都不會被舊 theme 蓋掉。
+- **`DocumentProfileStore`**：以明確的 `configURL` 保存預設 profile 與 official 快照，供 macdoc CLI 與 che-word-mcp 共用。
+  `resolve` 以呼叫端明確指定者優先；既有文件沒有指定時回傳 `nil`、不讀設定檔；只有新文件才退回設定檔的預設 profile。
+  `importOfficial(from:)` 先寫出完整的新快照檔、再更新參照，不改使用者的預設選擇。
+- 繁體中文字型序列化為 `DFKai-SB`；Mac Word 實際匯出確認顯示為標楷體。
+
 ### Fixed
 
 - **raw-channel slot 填入空白段落時，run 繼承段落標記的 rPr**（PsychQuant/macdoc#199）。官方表單的待填欄位通常是只有
