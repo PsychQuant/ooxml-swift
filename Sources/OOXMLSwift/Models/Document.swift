@@ -1,5 +1,18 @@
 import Foundation
 
+/// In-memory replay checkpoint for operation controls. The operation log can
+/// span multiple public `apply` calls, while undo/redo semantics require
+/// replaying active history from the state that existed before that history.
+/// This checkpoint is deliberately not serialized into the DOCX.
+internal struct OperationReplayBase {
+    let trees: [String: XmlTree]
+    let comments: CommentsCollection
+    let carriedParts: [String: Data]
+    let modifiedParts: Set<String>
+    let treeFreshParts: Set<String>
+    let logStartIndex: Int
+}
+
 /// Word 文件結構
 public struct WordDocument: Equatable {
     public var body: Body
@@ -31,6 +44,11 @@ public struct WordDocument: Equatable {
     /// Initial value is empty `OperationLog()` — DocxReader doesn't seed
     /// log entries (the log starts when callers begin invoking `apply`).
     public var operationLog: OperationLog = OperationLog()
+
+    /// Captured before the first locally appended operation in this value.
+    /// Controls may target entries at or after `logStartIndex`; older loaded
+    /// history has no reconstructible pre-state and therefore fails loudly.
+    internal var operationReplayBase: OperationReplayBase?
 
     internal var nextBookmarkId: Int = 1       // 書籤 ID 計數器
     private var nextHyperlinkId: Int = 1      // 超連結 ID 計數器
@@ -77,8 +95,14 @@ public struct WordDocument: Equatable {
     /// time. The op pipeline (appendAndMaterialize) marks dirty + fresh
     /// itself and must NOT route through this.
     internal mutating func markTypedDirty(_ partPath: String) {
+        // A direct typed mutation does not participate in the operation log,
+        // so an older replay checkpoint can no longer reconstruct the current
+        // mixed state. Discard it; the next logged operation starts a new
+        // replayable suffix from the post-mutation document.
+        operationReplayBase = nil
         modifiedParts.insert(partPath)
         treeFreshParts.remove(partPath)
+        carriedParts.removeValue(forKey: partPath)
     }
 
     /// Read-only public accessor for `modifiedParts`. Used by tests and
@@ -345,10 +369,292 @@ public struct WordDocument: Equatable {
         return stamped
     }
 
+    /// #175 (PsychQuant/macdoc#175) — the op-emission fast path in
+    /// `appendParagraph` projects the paragraph into `ParagraphPayload` +
+    /// `RunPayload`. Those payloads speak a deliberately small vocabulary;
+    /// any content outside it is SILENTLY DROPPED by the projection. The
+    /// reported case: a run whose content is a Drawing — rels + media were
+    /// written, but `<w:drawing>` never reached the XML tree, so the saved
+    /// body was missing the image while every status channel reported
+    /// success.
+    ///
+    /// This predicate is a POSITIVE whitelist: it returns true only when
+    /// everything the paragraph carries is representable in the payloads.
+    /// Anything else takes the typed-dirty slow path, which serializes the
+    /// full typed model and loses nothing (coarser op log, correct bytes).
+    /// When adding a field to `Paragraph` / `ParagraphProperties` / `Run` /
+    /// `RunProperties`, decide here whether the payloads carry it —
+    /// defaulting to "not representable" is always safe.
+    private func isOpPayloadRepresentable(_ paragraph: Paragraph) -> Bool {
+        // Tree-backed paragraphs (`Paragraph(xmlNode:)`) expose text-only stub
+        // runs and empty stored collections through their getters, so nothing
+        // below can see what they actually carry — the whitelist is blind to
+        // them by construction. Never fast-path them. (macdoc#175 verify R1.)
+        guard paragraph.xmlNode == nil else { return false }
+
+        // Paragraph-level content the payloads cannot carry. Every
+        // source-positioned child collection that `toXMLSortedByPosition()`
+        // serializes is listed (mirror of `Paragraph.hasSourcePositionedChildren`);
+        // the macdoc#175 R1 verify proved each one that was missing here lost
+        // content silently — four of them carry visible run text.
+        guard !paragraph.hasSourcePositionedChildren,   // the serializer's own list — cannot drift from it (R2 regression)
+              !paragraph.hasPageBreak,
+              paragraph.bookmarks.isEmpty,
+              paragraph.hyperlinks.isEmpty,
+              paragraph.commentIds.isEmpty,            // deprecated field; harmless, kept for detached callers
+              paragraph.commentRangeMarkers.isEmpty,   // the live comment-range source of truth
+              paragraph.permissionRangeMarkers.isEmpty,
+              paragraph.proofErrorMarkers.isEmpty,
+              paragraph.smartTags.isEmpty,
+              paragraph.customXmlBlocks.isEmpty,
+              paragraph.bidiOverrides.isEmpty,
+              paragraph.unrecognizedChildren.isEmpty,
+              paragraph.footnoteIds.isEmpty,
+              paragraph.endnoteIds.isEmpty,
+              paragraph.revisions.isEmpty,
+              paragraph.contentControls.isEmpty,
+              paragraph.bookmarkMarkers.isEmpty,
+              paragraph.fieldSimples.isEmpty,
+              paragraph.alternateContents.isEmpty,
+              paragraph.previousProperties == nil,
+              paragraph.paragraphFormatChangeRevisionId == nil
+        else { return false }
+
+        // ParagraphProperties beyond the projected set
+        // (alignment / spacing / indentation / style / numbering ARE projected).
+        let p = paragraph.properties
+        guard !p.keepNext, !p.keepLines, !p.pageBreakBefore,
+              p.sectionBreak == nil,
+              p.border == nil,
+              p.shading == nil,
+              p.markRunProperties == nil
+        else { return false }
+
+        // Run-level content and properties beyond RunPayload's vocabulary
+        // (text / bold / italic / color / rFonts / size / underline /
+        //  vertAlign ARE projected).
+        for run in paragraph.runs {
+            // Same blindness one layer down: a tree-backed Run exposes stub
+            // properties/drawing through its getters (R2 logic N1).
+            guard run.xmlNode == nil,
+                  run.drawing == nil,
+                  run.rawXML == nil,
+                  (run.rawElements ?? []).isEmpty,
+                  run.revisionId == nil,
+                  run.formatChangeRevisionId == nil,
+                  run.position == nil
+            else { return false }
+            let rp = run.properties
+            guard !rp.strikethrough,
+                  rp.highlight == nil,
+                  rp.characterSpacing == nil,
+                  rp.textEffect == nil,
+                  rp.rawXML == nil,
+                  rp.rStyle == nil,
+                  !rp.noProof,
+                  rp.kern == nil,
+                  rp.lang == nil,
+                  rp.rFonts?.cs == nil          // RunPayload has no complex-script font slot
+            else { return false }
+        }
+        return true
+    }
+
     public mutating func appendParagraph(_ paragraph: Paragraph) {
-        body.children.append(.paragraph(withStampedParaId(paragraph)))
+        let stamped = withStampedParaId(paragraph)
+        if xmlTrees["word/document.xml"] != nil, let paraId = stamped.w14ParaId,
+           isOpPayloadRepresentable(stamped) {
+            let p = stamped.properties
+            var payload = ParagraphPayload(
+                text: stamped.text,
+                styleId: p.style,
+                paraId: paraId,
+                alignment: p.alignment?.rawValue,
+                spacingBefore: p.spacing?.before,
+                spacingAfter: p.spacing?.after,
+                spacingLine: p.spacing?.line,
+                spacingLineRule: p.spacing?.lineRule?.rawValue,
+                indentLeft: p.indentation?.left,
+                indentRight: p.indentation?.right,
+                indentFirstLine: p.indentation?.firstLine,
+                indentHanging: p.indentation?.hanging,
+                numId: p.numbering?.numId,
+                numLevel: p.numbering?.level)
+            payload.textId = stamped.w14TextId   // projected, not dropped (macdoc#175 R1)
+            var ops: [Operation] = [.appendParagraph(in: nil, paragraph: payload)]
+            let runPayloads = stamped.runs.map { run -> RunPayload in
+                let rp = run.properties
+                var runPayload = RunPayload(
+                    text: run.text,
+                    bold: rp.bold ? true : nil,
+                    italic: rp.italic ? true : nil,
+                    color: rp.color,
+                    fontAscii: rp.rFonts?.ascii ?? rp.fontName,
+                    fontEastAsia: rp.rFonts?.eastAsia ?? rp.fontName,
+                    sizeHalfPoints: rp.fontSize,
+                    underline: rp.underline?.rawValue,
+                    vertAlign: rp.verticalAlign?.rawValue,
+                    fontHAnsi: rp.rFonts?.hAnsi ?? rp.fontName,
+                    fontHint: rp.rFonts?.hint)
+                // Same rule the typed serializer uses for xml:space="preserve";
+                // without it the reducer emitted <w:t> bare and Word ate the whitespace.
+                runPayload.preserveSpace = Run.needsXMLSpacePreserve(run.text) ? true : nil
+                return runPayload
+            }
+            if runPayloads.count != 1 || runPayloads.first != RunPayload(text: stamped.text) {
+                ops.append(.setRuns(
+                    target: ElementID(rawString: "w14:paraId=\(paraId)"),
+                    runs: runPayloads))
+            }
+            do {
+                try appendAndMaterialize(ops)
+                // #104: do NOT call resyncBodyFromDocumentTree() here.
+                //
+                // That resync rebuilds body.children from the tree but only
+                // re-types `p` and `tbl`; every other body-level element hits
+                // its `default: continue` and disappears from the typed view
+                // (its own comment says so). Combined with this op-log branch —
+                // added by #96 and taken whenever the document came from disk —
+                // an append silently *overwrote* neighbouring children instead
+                // of appending:
+                //
+                //   before: [paragraph, bookmarkMarker, paragraph]  count 3
+                //   after : [paragraph, paragraph,      paragraph]  count 3
+                //
+                // The XML bytes were fine (they live in xmlTrees); only the
+                // typed projection lost them — and that projection is what
+                // downstream indexes against (che-word-mcp reports append
+                // position as `body.children.count - 1`, its #69 decision).
+                //
+                // An append knows exactly what it changed, so update the typed
+                // view precisely instead of rebuilding it through a lossy path.
+                // The wider "resync drops non-paragraph children at its other 8
+                // call sites" gap is tracked separately.
+                body.children.append(.paragraph(stamped))
+                return
+            } catch {
+                assertionFailure("tree-backed appendParagraph failed: \(error)")
+            }
+        }
+        // Not op-representable. Prefer grafting the serialized paragraph into
+        // the live tree over re-serializing all of document.xml from the typed
+        // model — the typed model is lossy for real Word documents (macdoc#175
+        // R2 regression: 4/27 real files lost body runs on the typed-dirty path).
+        if graftParagraphIntoDocumentTree(stamped) {
+            body.children.append(.paragraph(stamped))
+            return
+        }
+        body.children.append(.paragraph(stamped))
         markTypedDirty("word/document.xml")
     }
+
+    /// Graft a typed paragraph into the live `word/document.xml` tree as an
+    /// XML subtree, leaving every other byte of the part untouched.
+    ///
+    /// The paragraph is serialized by the typed writer, parsed standalone
+    /// under the document's own namespace declarations, detached from the
+    /// scratch buffer (so the tree writer re-emits it instead of blob-copying
+    /// foreign byte ranges), and inserted before a trailing `<w:sectPr>`.
+    /// Returns false when there is no tree or the XML cannot be parsed; the
+    /// caller then falls back to the typed-dirty path.
+    private mutating func graftParagraphIntoDocumentTree(_ paragraph: Paragraph) -> Bool {
+        let part = "word/document.xml"
+        guard let tree = xmlTrees[part],
+              let body = tree.root.children.first(where: { $0.kind == .element && $0.localName == "body" })
+        else { return false }
+        // A typed mutation that has not been bridged back into the tree makes
+        // the tree stale; grafting into it would drop that mutation. Let the
+        // typed-dirty path handle that document instead.
+        guard !(modifiedParts.contains(part) && !treeFreshParts.contains(part)) else { return false }
+        // Parse-time bindings: the document's own declarations fill gaps, the
+        // standard WordprocessingML set wins where they disagree (the typed
+        // serializer wrote standard prefixes, R3 logic N2).
+        var decls: [String: String] = [:]
+        for attr in tree.root.attributes where attr.prefix == "xmlns" { decls[attr.localName] = attr.value }
+        for (k, v) in Self.standardWordNamespaces { decls[k] = v }
+        let xmlns = decls.keys.sorted().map { "xmlns:\($0)=\"\(decls[$0]!)\"" }.joined(separator: " ")
+        let wrapped = "<w:graft \(xmlns)>" + paragraph.toXML() + "</w:graft>"
+        guard let parsed = try? XmlTreeReader.parse(Data(wrapped.utf8)),
+              let node = parsed.root.children.first(where: { $0.kind == .element && $0.localName == "p" })
+        else { return false }
+        Self.detachFromSource(node)
+        // Every prefix the grafted subtree uses must resolve to the URI the
+        // typed serializer meant, or the written XML is not well-formed (Word
+        // refuses it) or lands in the wrong namespace (Word ignores it — the
+        // #175 signature again). The scratch wrapper's declarations do not
+        // travel with the node, and touching the ROOT is not an option: a dirty
+        // root sends the writer down the synthesized-tree branch, which rewrote
+        // a CRLF prolog to LF and dropped the epilog on 70/80 real files
+        // (macdoc#175 R3 logic N1 — a 3.6.3 regression). So the declarations go
+        // on the grafted <w:p> itself: only when the root lacks the prefix or
+        // binds it to a different URI (R3 logic N2). Nothing outside the new
+        // subtree is mutated. A prefix with no known URI cannot be repaired.
+        let rootBindings = Dictionary(uniqueKeysWithValues:
+            tree.root.attributes.filter { $0.prefix == "xmlns" }.map { ($0.localName, $0.value) })
+        for prefix in Self.prefixesUsed(in: node).sorted() {
+            guard let wanted = Self.standardWordNamespaces[prefix] ?? rootBindings[prefix] else { return false }
+            if rootBindings[prefix] == wanted { continue }
+            node.setAttribute(prefix: "xmlns", localName: prefix, value: wanted)
+        }
+        if let sectIdx = body.children.firstIndex(where: { $0.kind == .element && $0.localName == "sectPr" }) {
+            body.children.insert(node, at: sectIdx)
+        } else {
+            body.children.append(node)
+        }
+        // Same bookkeeping the op path performs after materializing: the tree
+        // is now the authority for this part (writer serializes it from the
+        // tree, blob-copying every untouched node), the carried source bytes
+        // are superseded, and a replay checkpoint older than this point can
+        // no longer reproduce the tree (this graft is not in the op log).
+        modifiedParts.insert(part)
+        treeFreshParts.insert(part)
+        carriedParts.removeValue(forKey: part)
+        operationReplayBase = nil
+        return true
+    }
+
+    /// Namespace prefixes an element subtree uses on element and attribute
+    /// names (`xmlns` declarations and the reserved `xml` prefix excluded).
+    private static func prefixesUsed(in node: XmlNode) -> Set<String> {
+        var out: Set<String> = []
+        func walk(_ n: XmlNode) {
+            guard n.kind == .element else { return }
+            if let p = n.prefix, !p.isEmpty, p != "xml" { out.insert(p) }
+            for a in n.attributes {
+                if let p = a.prefix, !p.isEmpty, p != "xmlns", p != "xml" { out.insert(p) }
+            }
+            for c in n.children { walk(c) }
+        }
+        walk(node)
+        return out
+    }
+
+    /// Clear scratch-buffer byte ranges on a parsed subtree so the writer
+    /// emits it from node fields.
+    private static func detachFromSource(_ node: XmlNode) {
+        node.sourceRange = nil
+        node.markDirty()
+        for child in node.children { detachFromSource(child) }
+    }
+
+    private static let standardWordNamespaces: [String: String] = [
+        "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "w14": "http://schemas.microsoft.com/office/word/2010/wordml",
+        "w15": "http://schemas.microsoft.com/office/word/2012/wordml",
+        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+        "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+        "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
+        "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
+        "mc": "http://schemas.openxmlformats.org/markup-compatibility/2006",
+        "v": "urn:schemas-microsoft-com:vml",
+        "o": "urn:schemas-microsoft-com:office:office",
+        "w10": "urn:schemas-microsoft-com:office:word",
+        "wne": "http://schemas.microsoft.com/office/word/2006/wordml",
+        "wps": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+        "wpg": "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+        "xml": "http://www.w3.org/XML/1998/namespace",
+    ]
 
     public mutating func insertParagraph(_ paragraph: Paragraph, at index: Int) {
         let clampedIndex = min(max(0, index), body.children.count)

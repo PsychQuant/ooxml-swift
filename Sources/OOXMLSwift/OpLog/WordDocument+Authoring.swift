@@ -29,6 +29,8 @@ extension WordDocument {
                              value: "http://schemas.openxmlformats.org/wordprocessingml/2006/main"),
                 XmlAttribute(prefix: "xmlns", localName: "w14",
                              value: "http://schemas.microsoft.com/office/word/2010/wordml"),
+                XmlAttribute(prefix: "xmlns", localName: "r",
+                             value: "http://schemas.openxmlformats.org/officeDocument/2006/relationships"),
             ],
             children: [body])
         doc.xmlTrees["word/document.xml"] = XmlTree.synthesized(root: root)
@@ -41,6 +43,19 @@ extension WordDocument {
     /// may regenerate IDs per the `ooxml-script-transcode` contract.
     public mutating func apply(operations: [Operation], source: OpSource = .swift) throws {
         try appendAndMaterialize(operations, source: source)
+        resyncBodyFromDocumentTree()
+    }
+
+    /// Applies a fully formed operation log while preserving every entry's
+    /// identity, timestamp, and source. Use this for script/JSONL replay:
+    /// control operations and `lib:<producer-opID>` references rely on those
+    /// stable IDs and cannot be reconstructed from a bare `[Operation]`.
+    public mutating func apply(log: OperationLog) throws {
+        try appendAndMaterialize(
+            log.entries.map(\.op),
+            replayOpIDs: log.entries.map(\.opID),
+            replayTimestamps: log.entries.map(\.timestamp),
+            replaySources: log.entries.map(\.source))
         resyncBodyFromDocumentTree()
     }
 
@@ -79,8 +94,14 @@ extension WordDocument {
 
         // word/styles.xml — from the tree unless carried verbatim.
         let hasStyles = xmlTrees["word/styles.xml"] != nil || carriedParts["word/styles.xml"] != nil
+        let hasComments = xmlTrees["word/comments.xml"] != nil
+            || carriedParts["word/comments.xml"] != nil
         if carriedParts["word/styles.xml"] == nil, let stylesTree = xmlTrees["word/styles.xml"] {
             try write(try XmlTreeWriter.serialize(stylesTree), "word/styles.xml")
+        }
+        if carriedParts["word/comments.xml"] == nil,
+           let commentsTree = xmlTrees["word/comments.xml"] {
+            try write(try XmlTreeWriter.serialize(commentsTree), "word/comments.xml")
         }
 
         // [Content_Types].xml — synthesized only if not carried verbatim.
@@ -88,12 +109,15 @@ extension WordDocument {
             let stylesOverride = hasStyles
                 ? "\n    <Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>"
                 : ""
+            let commentsOverride = hasComments
+                ? "\n    <Override PartName=\"/word/comments.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml\"/>"
+                : ""
             try write(Data("""
                 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
                 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
                     <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
                     <Default Extension="xml" ContentType="application/xml"/>
-                    <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\(stylesOverride)
+                    <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\(stylesOverride)\(commentsOverride)
                 </Types>
                 """.utf8), "[Content_Types].xml")
         }
@@ -107,13 +131,20 @@ extension WordDocument {
                 """.utf8), "_rels/.rels")
         }
         // word/_rels/document.xml.rels — synthesized only if not carried verbatim.
-        if carriedParts["word/_rels/document.xml.rels"] == nil {
+        if carriedParts["word/_rels/document.xml.rels"] == nil,
+           let relsTree = xmlTrees["word/_rels/document.xml.rels"] {
+            try write(try XmlTreeWriter.serialize(relsTree),
+                      "word/_rels/document.xml.rels")
+        } else if carriedParts["word/_rels/document.xml.rels"] == nil {
             let stylesRel = hasStyles
                 ? "\n    <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>"
                 : ""
+            let commentsRel = hasComments
+                ? "\n    <Relationship Id=\"rIdComments\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments\" Target=\"comments.xml\"/>"
+                : ""
             try write(Data("""
                 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-                <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\(stylesRel)
+                <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\(stylesRel)\(commentsRel)
                 </Relationships>
                 """.utf8), "word/_rels/document.xml.rels")
         }

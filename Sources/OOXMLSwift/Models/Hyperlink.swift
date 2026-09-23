@@ -11,9 +11,8 @@ import Foundation
 /// - `text: String` — computed property `runs.map { $0.text }.joined()`
 ///   so existing 218 MCP tools that read `hyperlink.text` keep working.
 ///   Setter collapses to single Run (matches pre-fix observable behavior).
-/// - `rawAttributes` / `rawChildren` — raw passthrough escape hatch for
-///   unrecognized `<w:hyperlink>` attributes / direct children so they
-///   survive a no-op round-trip even when not modeled.
+/// - `rawAttributes` / `children.rawXML` — passthrough escape hatch for
+///   unrecognized `<w:hyperlink>` attributes / direct children.
 /// - `position: Int` — source-document order, used by Phase 4
 ///   sort-by-position emit in `Paragraph.toXML()`.
 public struct Hyperlink: Equatable {
@@ -36,17 +35,12 @@ public struct Hyperlink: Equatable {
     /// impossible.
     public var rawAttributes: [String: String] = [:]
 
-    /// v0.19.0+ (#56): direct children of `<w:hyperlink>` that are not Runs
-    /// (e.g., nested SDTs, future extensions). Stored as verbatim XML strings
-    /// so unknown content survives a round-trip without typed modeling.
-    public var rawChildren: [String] = []
-
     /// v0.19.3+ (#56 round 2 P0-3): unified ordered children list preserving
     /// source-document order between `<w:r>` and non-run children. Reader
     /// populates this from source XML (so e.g. `<w:r>A</w:r><w:sdt>X</w:sdt><w:r>B</w:r>`
     /// round-trips A→SDT→B, not A→B→SDT). Writer prefers `children` if
-    /// non-empty; falls back to legacy `runs` then `rawChildren` ordering for
-    /// API-built hyperlinks (which never populate `children`).
+    /// non-empty; its `.rawXML` entries replace the removed v1.0
+    /// `rawChildren` bridge.
     public var children: [HyperlinkChild] = []
 
     /// v0.19.0+ (#56): source-document order index for Phase 4 sort-by-position
@@ -105,7 +99,6 @@ public struct Hyperlink: Equatable {
         tooltip: String? = nil,
         history: Bool = true,
         rawAttributes: [String: String] = [:],
-        rawChildren: [String] = [],
         children: [HyperlinkChild] = [],
         position: Int? = nil
     ) {
@@ -117,7 +110,6 @@ public struct Hyperlink: Equatable {
         self.tooltip = tooltip
         self.history = history
         self.rawAttributes = rawAttributes
-        self.rawChildren = rawChildren
         self.children = children
         self.position = position
     }
@@ -196,8 +188,8 @@ extension Hyperlink {
     ///   single hardcoded `<w:r>` with bake-in `Hyperlink` style.
     /// - Emit `rawAttributes` (sorted) so vendor / unmodeled attributes
     ///   (`w:tgtFrame`, `w:docLocation`, etc.) round-trip byte-equivalent.
-    /// - Append `rawChildren` verbatim after runs so non-Run direct children
-    ///   (nested SDT, future extensions) survive.
+    /// - Append `children.rawXML` verbatim after mutated runs so non-Run direct
+    ///   children (nested SDT, future extensions) survive.
     /// - Fallback path for `runs.isEmpty` — happens when `Hyperlink` is built
     ///   via the API initializers using `text:` (which now populates a single
     ///   Run) but defensively also when caller blanks the runs collection.
@@ -239,7 +231,7 @@ extension Hyperlink {
         // (`Hyperlink.text` setter / `replaceText` / `updateHyperlink` /
         // `format_text` / property-only edits like `runs[0].properties.bold`)
         // has touched `runs` and the saved XML must reflect that. Fall through
-        // to the `runs` + `rawChildren` path so mutations are visible on save.
+        // to the `runs` + raw child projection so mutations are visible on save.
         //
         // v0.19.5+ (#56 R5 P1 #1): upgrade detection from joined-text comparison
         // to deep `[Run]` equality (synthesized `Equatable` covers `text` +
@@ -253,6 +245,9 @@ extension Hyperlink {
         let childrenRuns = children.compactMap { child -> Run? in
             if case .run(let run) = child { return run } else { return nil }
         }
+        let rawChildXML = children.compactMap { child -> String? in
+            if case .rawXML(let raw) = child { return raw } else { return nil }
+        }
         let childrenAuthoritative = !children.isEmpty && childrenRuns == runs
 
         if childrenAuthoritative {
@@ -264,7 +259,7 @@ extension Hyperlink {
                     xml += raw
                 }
             }
-        } else if runs.isEmpty && rawChildren.isEmpty {
+        } else if runs.isEmpty && rawChildXML.isEmpty {
             // Empty fallback: emit the hardcoded Hyperlink-styled run so the
             // wrapper stays valid OOXML even when the caller cleared content.
             xml += """
@@ -274,7 +269,7 @@ extension Hyperlink {
             for run in runs {
                 xml += run.toXML()
             }
-            for raw in rawChildren {
+            for raw in rawChildXML {
                 xml += raw
             }
         }

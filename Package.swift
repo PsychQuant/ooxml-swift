@@ -6,7 +6,9 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .library(name: "OOXMLSwift", targets: ["OOXMLSwift"]),
-        .library(name: "WordDSLSwift", targets: ["WordDSLSwift"])
+        .library(name: "WordDSLSwift", targets: ["WordDSLSwift"]),
+        .executable(name: "WordDSLSwiftScriptRunner",
+                    targets: ["WordDSLSwiftScriptRunner"])
     ],
     dependencies: [
         .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.0")
@@ -19,6 +21,9 @@ let package = Package(
         .target(
             name: "WordDSLSwift",
             dependencies: ["OOXMLSwift"]
+        ),
+        .executableTarget(
+            name: "WordDSLSwiftScriptRunner"
         ),
         .testTarget(
             name: "OOXMLSwiftTests",
@@ -35,6 +40,7 @@ let package = Package(
             // design.md Decision 5.
             exclude: [
                 "Fixtures/mdocx",
+                "Fixtures/golden-corpus",
                 // Committed PDF fixtures for RenderGeometryTests
                 // (render-effect-semantics task 1.1) — located via #filePath,
                 // not Bundle resources.

@@ -146,6 +146,22 @@ final class SyncPrimitivesTests: XCTestCase {
                        "after reporting once, the new state becomes the baseline")
     }
 
+    func testContentChangeWithPreservedMtimeTriggers() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("watch-same-mtime-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data("before".utf8).write(to: url)
+        let originalMtime = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]!
+
+        var detector = try DocxChangeDetector(url: url)
+        try Data("after — different bytes".utf8).write(to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: originalMtime], ofItemAtPath: url.path)
+
+        XCTAssertTrue(try detector.poll(),
+                      "content hash must remain authoritative when a replacement preserves mtime")
+    }
+
     // MARK: - 4.6 Word lock-file interaction
 
     func testLockFileURLDerivation() {

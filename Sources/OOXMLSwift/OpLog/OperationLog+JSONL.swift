@@ -261,6 +261,11 @@ internal enum JSONLLineCoder {
                 ("partPath", jsonString(partPath)),
                 ("xml", jsonString(xml))
             ])
+        case .carryBinaryPart(let partPath, let base64):
+            return ("carryBinaryPart", [
+                ("partPath", jsonString(partPath)),
+                ("base64", jsonString(base64))
+            ])
         case .setSectionProperties(let at, let section):
             // Field names `at` / `section` — neither collides with the
             // envelope keys op_id / ts / source / op_type.
@@ -273,6 +278,8 @@ internal enum JSONLLineCoder {
                 ("in", container.map { jsonString($0.raw) } ?? "null"),
                 ("table", encodeCodable(table))
             ])
+        case .appendBlockMarker(let marker):
+            return ("appendBlockMarker", [("marker", encodeCodable(marker))])
         case .setDocumentRoot(let attributes):
             // Field name `attributes` — no envelope-key collision.
             return ("setDocumentRoot", [("attributes", encodeCodable(attributes))])
@@ -448,12 +455,16 @@ internal enum JSONLLineCoder {
             )
         case "carryPart":
             return .carryPart(partPath: try str("partPath"), xml: try str("xml"))
+        case "carryBinaryPart":
+            return .carryBinaryPart(partPath: try str("partPath"), base64: try str("base64"))
         case "setSectionProperties":
             let at = optStr("at").map { ElementID(rawString: $0) }
             return .setSectionProperties(at: at, section: try payload("section", SectionPayload.self))
         case "appendTable":
             let container = optStr("in").map { ElementID(rawString: $0) }
             return .appendTable(in: container, table: try payload("table", TablePayload.self))
+        case "appendBlockMarker":
+            return .appendBlockMarker(marker: try payload("marker", InlineMarker.self))
         case "setDocumentRoot":
             return .setDocumentRoot(attributes: try payload("attributes", [RootAttribute].self))
         case "setDocumentProlog":

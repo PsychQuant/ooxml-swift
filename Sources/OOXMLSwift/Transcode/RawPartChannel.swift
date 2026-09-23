@@ -26,18 +26,39 @@ public enum RawPartChannel {
         return parts
     }
 
+    /// Reads every regular file under an already-extracted package root.
+    /// Used by sync to compare Word's new package against the preserved
+    /// pre-import archive without re-zipping it first.
+    public static func readAllParts(fromDirectory root: URL) throws -> [String: Data] {
+        let fm = FileManager.default
+        let normalizedRoot = root.resolvingSymlinksInPath().path
+        guard let walk = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else {
+            return [:]
+        }
+        var parts: [String: Data] = [:]
+        for case let url as URL in walk {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+            guard values.isRegularFile == true else { continue }
+            let normalized = url.resolvingSymlinksInPath().path
+            guard normalized.hasPrefix(normalizedRoot + "/") else { continue }
+            let path = String(normalized.dropFirst(normalizedRoot.count + 1))
+            parts[path] = try Data(contentsOf: url)
+        }
+        return parts
+    }
+
     /// Reverses the raw channel: every XML part becomes a `carryPart` op so a
     /// rebuild script reproduces it verbatim (the honest-copy baseline).
     /// Deterministic order (sorted by path) for reproducible scripts.
     ///
-    /// Binary media parts (images, embedded fonts) are skipped — a UTF-8
-    /// `String` channel would corrupt their bytes. Dropped parts leave the
-    /// rebuild missing them (Stage B flags it); a base64 media channel is
-    /// deferred and the coverage metric reflects the gap honestly.
+    /// Binary media parts use a base64 raw operation so the text script can
+    /// reconstruct every OPC part without byte corruption.
     public static func carriedPartOps(from parts: [String: Data]) -> [Operation] {
         parts.sorted { $0.key < $1.key }.compactMap { path, bytes in
-            guard let xml = String(data: bytes, encoding: .utf8) else { return nil }
-            return .carryPart(partPath: path, xml: xml)
+            if let xml = String(data: bytes, encoding: .utf8) {
+                return .carryPart(partPath: path, xml: xml)
+            }
+            return .carryBinaryPart(partPath: path, base64: bytes.base64EncodedString())
         }
     }
 

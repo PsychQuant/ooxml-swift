@@ -19,4 +19,10 @@ public struct Run: Equatable, Sendable {
         self.italic = italic
         self.color = color
     }
+
+    /// Grammar-compatible spelling retained by the committed fixture corpus.
+    public init(_ text: String, bold: Bool? = nil, italics: Bool,
+                color: String? = nil) {
+        self.init(text, bold: bold, italic: italics, color: color)
+    }
 }

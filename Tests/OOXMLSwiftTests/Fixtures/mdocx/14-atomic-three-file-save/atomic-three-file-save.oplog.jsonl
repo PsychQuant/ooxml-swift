@@ -1,3 +1,2 @@
-{"op":"InsertSection","id":"main","at":0,"ts":1735689600}
-{"op":"InsertParagraph","id":"p1","in":"main","at":0,"ts":1735689600}
-{"op":"SetRuns","id":"p1","runs":[{"text":"Atomic save smoke content."}],"ts":1735689600}
+{"in":null,"op_id":"00000000-0000-4000-8000-000000000001","op_type":"appendParagraph","paragraph":{"paraId":"p1","text":"Atomic save smoke content."},"source":"swift","ts":"1970-01-01T00:00:00Z"}
+{"at":null,"op_id":"00000000-0000-4000-8000-000000000002","op_type":"setSectionProperties","section":{},"source":"swift","ts":"1970-01-01T00:00:00Z"}

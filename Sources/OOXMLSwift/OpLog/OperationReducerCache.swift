@@ -46,7 +46,19 @@ public actor OperationReducerCache {
     /// just memoized.
     public func materialize(log: OperationLog, base: XmlTree) async throws -> XmlTree {
         let key = ObjectIdentifier(base.root)
+        let tailContainsControl: Bool
         if let entry = cached[key], entry.logLength <= log.entries.count {
+            tailContainsControl = log.entries[entry.logLength...].contains { item in
+                switch item.op {
+                case .undo, .redo: return true
+                default: return false
+                }
+            }
+        } else {
+            tailContainsControl = false
+        }
+        if let entry = cached[key], entry.logLength <= log.entries.count,
+           !tailContainsControl {
             // Tail-replay: clone the cached tree, replay only the new entries.
             var working = entry.materializedTree.deepCopy()
             for i in entry.logLength..<log.entries.count {

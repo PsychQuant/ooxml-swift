@@ -73,7 +73,7 @@ final class MdocxFixtureCorpusTests: XCTestCase {
     /// Master gate for Phase B. Flipped to `true` by the change that lands
     /// the full `WordDSLSwift` implementation (`word-aligned-state-sync`
     /// Phase 4). Do NOT flip this in any other change.
-    static let activatePhaseB: Bool = false
+    static let activatePhaseB: Bool = true
 
     // MARK: - Configuration
 
@@ -551,6 +551,11 @@ final class MdocxFixtureCorpusTests: XCTestCase {
             ))
         }
 
+        let updateGoldens = ProcessInfo.processInfo.environment["UPDATE_MDOCX_GOLDENS"] == "1"
+        if updateGoldens {
+            try normalizedOutput.write(to: normalizedGoldenURL, options: .atomic)
+        }
+
         // 7. Byte-equal compare against <slug>.normalized.docx.
         let goldenBytes: Data
         do {
@@ -578,6 +583,9 @@ final class MdocxFixtureCorpusTests: XCTestCase {
         // 8. If <slug>.oplog.jsonl present → byte-equal op log compare.
         let fm = FileManager.default
         if fm.fileExists(atPath: oplogURL.path) {
+            if updateGoldens {
+                try executionResult.opLogBytes.write(to: oplogURL, options: .atomic)
+            }
             let expectedOplog = try Data(contentsOf: oplogURL)
             guard executionResult.opLogBytes == expectedOplog else {
                 throw FixtureFailure(formatFailure(
@@ -604,6 +612,9 @@ final class MdocxFixtureCorpusTests: XCTestCase {
                     details: "snapshot.json present but Requirement \(requirementNumber) is not eligible",
                     paths: [snapshotURL.path]
                 ))
+            }
+            if updateGoldens, let snapshotBytes = executionResult.snapshotBytes {
+                try snapshotBytes.write(to: snapshotURL, options: .atomic)
             }
             let expectedSnapshot = try Data(contentsOf: snapshotURL)
             guard executionResult.snapshotBytes == expectedSnapshot else {
@@ -632,7 +643,6 @@ final class MdocxFixtureCorpusTests: XCTestCase {
                     paths: [reverseSourceURL.path]
                 ))
             }
-            let expectedReverseSource = try String(contentsOf: reverseSourceURL, encoding: .utf8)
             let reversedSource: String
             do {
                 reversedSource = try runMacdocWordReverse(docxBytes: normalizedOutput)
@@ -644,6 +654,12 @@ final class MdocxFixtureCorpusTests: XCTestCase {
                     details: "`macdoc word reverse` failed: \(error)"
                 ))
             }
+            if updateGoldens {
+                try Data(reversedSource.utf8).write(
+                    to: reverseSourceURL, options: .atomic)
+            }
+            let expectedReverseSource = try String(
+                contentsOf: reverseSourceURL, encoding: .utf8)
             let canonicalProduced = canonicalizeMdocxSource(reversedSource)
             let canonicalExpected = canonicalizeMdocxSource(expectedReverseSource)
             guard canonicalProduced == canonicalExpected else {
@@ -748,22 +764,27 @@ final class MdocxFixtureCorpusTests: XCTestCase {
     /// landed by `word-aligned-state-sync` Phase 4 alongside the
     /// `activatePhaseB` flip; it writes:
     ///   - `<workDir>/out.docx` (always)
-    ///   - `<workDir>/out.oplog.jsonl` (always)
-    ///   - `<workDir>/out.snapshot.json` (only when the script emits one)
+    ///   - `<workDir>/out.docx.oplog.jsonl` (always)
+    ///   - `<workDir>/out.docx.snapshot.json` (only when the script emits one)
     private static func runMdocxScript(scriptURL: URL, workDir: URL) throws -> ScriptExecutionResult {
+        // Execute the product SwiftPM already built for this test run.
+        // Invoking nested `swift run --package-path <same package>` while
+        // XCTest owns the package build lock deadlocks indefinitely.
+        let runner = packageRoot()
+            .appendingPathComponent(".build/debug/WordDSLSwiftScriptRunner")
+        guard FileManager.default.isExecutableFile(atPath: runner.path) else {
+            throw NSError(
+                domain: "MdocxFixtureCorpusTests",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "fixture runner product is missing at \(runner.path)"])
+        }
         try runProcess(
-            executable: "/usr/bin/env",
-            arguments: [
-                "swift", "run",
-                "--package-path", packageRoot().path,
-                "WordDSLSwiftScriptRunner",
-                scriptURL.path,
-                workDir.path
-            ]
-        )
+            executable: runner.path,
+            arguments: [scriptURL.path, workDir.path])
         let docxURL = workDir.appendingPathComponent("out.docx")
-        let oplogURL = workDir.appendingPathComponent("out.oplog.jsonl")
-        let snapshotURL = workDir.appendingPathComponent("out.snapshot.json")
+        let oplogURL = workDir.appendingPathComponent("out.docx.oplog.jsonl")
+        let snapshotURL = workDir.appendingPathComponent("out.docx.snapshot.json")
         let docxBytes = try Data(contentsOf: docxURL)
         let opLogBytes = try Data(contentsOf: oplogURL)
         let fm = FileManager.default
@@ -790,7 +811,7 @@ final class MdocxFixtureCorpusTests: XCTestCase {
             arguments: [
                 "macdoc", "word", "reverse",
                 docxURL.path,
-                "--output", outURL.path
+                "--to-mdocx", outURL.path
             ]
         )
         return try String(contentsOf: outURL, encoding: .utf8)

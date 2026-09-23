@@ -33,10 +33,61 @@ final class VerifyPanelFixesTests: XCTestCase {
 
         let outP = out.root.children[0].children[0]
         let names = outP.children.filter { $0.kind == .element }.map(\.localName)
-        XCTAssertTrue(names.contains("bookmarkStart") && names.contains("bookmarkEnd"),
-                      "setText must not drop bookmark markers; got \(names)")
-        XCTAssertTrue(names.contains("pPr"))
-        XCTAssertEqual(names.filter { $0 == "r" }.count, 1, "runs replaced by one fresh run")
+        XCTAssertEqual(names, ["pPr", "bookmarkStart", "r", "bookmarkEnd"],
+                       "replacement text must remain inside the bookmark range")
+    }
+
+    func testSetTextKeepsCommentRangeAndReferenceInSemanticOrder() throws {
+        let p = XmlNode.element(prefix: "w", localName: "p", namespaceURI: ns)
+        p.setAttribute(prefix: "w14", localName: "paraId", value: "P2")
+        let start = XmlNode.element(prefix: "w", localName: "commentRangeStart", namespaceURI: ns)
+        start.setAttribute(prefix: "w", localName: "id", value: "4")
+        let oldRun = XmlNode.element(prefix: "w", localName: "r", namespaceURI: ns,
+            children: [XmlNode.element(prefix: "w", localName: "t", namespaceURI: ns,
+                                       children: [XmlNode.text("old")])])
+        let end = XmlNode.element(prefix: "w", localName: "commentRangeEnd", namespaceURI: ns)
+        end.setAttribute(prefix: "w", localName: "id", value: "4")
+        let reference = XmlNode.element(prefix: "w", localName: "commentReference", namespaceURI: ns)
+        reference.setAttribute(prefix: "w", localName: "id", value: "4")
+        let referenceRun = XmlNode.element(prefix: "w", localName: "r", namespaceURI: ns,
+                                           children: [reference])
+        p.children = [start, oldRun, end, referenceRun]
+        let body = XmlNode.element(prefix: "w", localName: "body", namespaceURI: ns, children: [p])
+        let root = XmlNode.element(prefix: "w", localName: "document", namespaceURI: ns,
+                                   children: [body])
+        var log = OperationLog()
+        log.append(.setText(target: .init(rawString: "w14:paraId=P2"), text: "new"),
+                   source: .swift)
+
+        let out = try OperationReducer.materialize(
+            log: log, base: .synthesized(root: root))
+        let children = out.root.children[0].children[0].children
+        XCTAssertEqual(children.map(\.localName), [
+            "commentRangeStart", "r", "commentRangeEnd", "r",
+        ])
+        XCTAssertEqual(children.last?.children.first?.localName, "commentReference")
+    }
+
+    func testSetTextPreservesEmptyBookmarkBeforeFollowingText() throws {
+        let p = XmlNode.element(prefix: "w", localName: "p", namespaceURI: ns)
+        p.setAttribute(prefix: "w14", localName: "paraId", value: "P3")
+        let start = XmlNode.element(prefix: "w", localName: "bookmarkStart", namespaceURI: ns)
+        let end = XmlNode.element(prefix: "w", localName: "bookmarkEnd", namespaceURI: ns)
+        let oldRun = XmlNode.element(prefix: "w", localName: "r", namespaceURI: ns,
+            children: [XmlNode.element(prefix: "w", localName: "t", namespaceURI: ns,
+                                       children: [XmlNode.text("old")])])
+        p.children = [start, end, oldRun]
+        let body = XmlNode.element(prefix: "w", localName: "body", namespaceURI: ns, children: [p])
+        let root = XmlNode.element(prefix: "w", localName: "document", namespaceURI: ns,
+                                   children: [body])
+        var log = OperationLog()
+        log.append(.setText(target: .init(rawString: "w14:paraId=P3"), text: "new"),
+                   source: .swift)
+
+        let out = try OperationReducer.materialize(log: log, base: .synthesized(root: root))
+        let children = out.root.children[0].children[0].children
+        XCTAssertEqual(children.map(\.localName), ["bookmarkStart", "bookmarkEnd", "r"],
+                       "replacement must stay where the removed content was")
     }
 
     // MARK: 2 — saveWithSidecars rollback
@@ -131,12 +182,16 @@ final class VerifyPanelFixesTests: XCTestCase {
         try doc.saveWithSidecars(to: url)
         let snapBefore = try SidecarStore.loadSnapshot(alongside: url)
 
-        var orchestrator = try SyncOrchestrator.bootstrapFromDocx(url: url)
+        let orchestrator = try SyncOrchestrator.bootstrapFromDocx(url: url)
         // Simulate a Word-side edit: rewrite the docx with different text.
         var editor = try WordDocument.openWithSidecars(from: url)
+        defer { editor.close() }
         try editor.apply(operations: [.setText(
             target: ElementID(rawString: "w14:paraId=p1"), text: "edited outside")], source: .word)
-        try editor.writeAuthoringPackage(to: url)
+        // Use the ordinary preserve-by-default writer here. The minimal
+        // authoring writer intentionally drops source-package siblings, which
+        // would turn this snapshot-persistence regression into a deletion test.
+        try DocxWriter.write(editor, to: url)
 
         _ = try orchestrator.importFromDisk()
 

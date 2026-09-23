@@ -72,14 +72,18 @@ final class OperationLogTests: XCTestCase {
             .insertBreak(in: id),
             .insertNoBreakHyphen(in: id),
             .carryPart(partPath: "word/styles.xml", xml: "<w:styles/>"),
+            .carryBinaryPart(partPath: "word/media/image1.png", base64: "AP8="),
             .setSectionProperties(at: nil, section: SectionPayload(pageWidth: 11906)),
             .appendTable(in: nil, table: TablePayload(rows: 2, columns: 2, cells: [["a", "b"], ["c", "d"]])),
+            .appendBlockMarker(marker: InlineMarker(
+                localName: "bookmarkStart",
+                attributes: [RootAttribute(prefix: "w", localName: "id", value: "1")])),
             .setDocumentRoot(attributes: [RootAttribute(prefix: "xmlns", localName: "w", value: "NS")]),
             .setParagraphContent(target: ElementID(rawString: "w14:paraId=P1"), items: [.run(RunPayload(text: "x"))]),
             .setDocumentProlog(prolog: "<?xml?>\r\n")
         ]
 
-        XCTAssertEqual(cases.count, 38, "Operation MUST have exactly 38 cases enumerated in the test")
+        XCTAssertEqual(cases.count, 40, "Operation MUST have exactly 40 cases enumerated in the test")
 
         // Pattern-match: each case maps to its expected discriminator.
         for op in cases {
@@ -99,8 +103,8 @@ final class OperationLogTests: XCTestCase {
                  .appendParagraph, .setRuns, .defineStyle,
                  .beginComponent, .endComponent,
                  .insertTab, .insertBreak, .insertNoBreakHyphen,
-                 .carryPart,
-                 .setSectionProperties, .appendTable, .setDocumentRoot,
+                 .carryPart, .carryBinaryPart,
+                 .setSectionProperties, .appendTable, .appendBlockMarker, .setDocumentRoot,
                  .setParagraphContent, .setDocumentProlog:
                 break // matched
             }
