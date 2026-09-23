@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.9.0] - 2026-09-24
+
 ### Added
 
 - **文件格式 profile：安全的範本格式快照與明確的繼承模式**（#158；PsychQuant/macdoc#185）。
