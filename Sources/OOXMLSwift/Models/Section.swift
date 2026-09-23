@@ -28,6 +28,13 @@ public struct SectionProperties {
     public var headerReference: String?     // rId for header
     public var footerReference: String?     // rId for footer
     public var columns: Int                 // 欄數
+    /// Gutter between columns, in twips (`<w:cols w:space>`).
+    /// Defaults to the OOXML default of 720 so documents that never
+    /// said otherwise emit exactly what they emitted before.
+    /// che-word-mcp#176: this used to be a literal in `toXML()`, so any
+    /// other gutter was replaced with 720 the moment a section was
+    /// re-serialized — silently, on edits that never touched layout.
+    public var columnSpacing: Int = 720
     public var docGrid: DocumentGrid?       // 文件格線
 
     /// v0.16.0+ (#44 §4): per-type header/footer references
@@ -46,6 +53,7 @@ public struct SectionProperties {
          headerReference: String? = nil,
          footerReference: String? = nil,
          columns: Int = 1,
+         columnSpacing: Int = 720,
          docGrid: DocumentGrid? = nil) {
         self.pageSize = pageSize
         self.pageMargins = pageMargins
@@ -53,6 +61,7 @@ public struct SectionProperties {
         self.headerReference = headerReference
         self.footerReference = footerReference
         self.columns = columns
+        self.columnSpacing = columnSpacing
         self.docGrid = docGrid
     }
 
@@ -332,9 +341,17 @@ public struct DocumentGrid: Equatable {
     public var linePitch: Int  // 行距（twips）
     public var charSpace: Int? // 字元間距
 
-    public init(linePitch: Int = 360, charSpace: Int? = nil) {
+    /// #84: `<w:docGrid w:type>` — the grid mode (`lines`, `linesAndChars`,
+    /// `snapToChars`, `default`). Absent means `default` (no grid), so dropping
+    /// a source `w:type="lines"` silently turns the line grid off and changes
+    /// CJK line layout. Kept optional so a source that omits it round-trips as
+    /// omitted rather than gaining an invented mode.
+    public var type: String?
+
+    public init(linePitch: Int = 360, charSpace: Int? = nil, type: String? = nil) {
         self.linePitch = linePitch
         self.charSpace = charSpace
+        self.type = type
     }
 }
 
@@ -417,7 +434,7 @@ extension SectionProperties {
         // 欄設定 — attribute order w:num before w:space matches the reducer's
         // canonical <w:cols> emit (authoring-canonical-conformance, design D1:
         // the authoring side conforms to the frozen transcoder form).
-        xml += "<w:cols w:num=\"\(columns)\" w:space=\"720\"/>"
+        xml += "<w:cols w:num=\"\(columns)\" w:space=\"\(columnSpacing)\"/>"
 
         // v0.16.0+ (#44 §4): line numbering
         if let ln = lineNumbers {
@@ -439,7 +456,9 @@ extension SectionProperties {
 
         // 文件格線
         if let grid = docGrid {
-            var gridAttrs = "w:linePitch=\"\(grid.linePitch)\""
+            var gridAttrs = ""
+            if let type = grid.type { gridAttrs += "w:type=\"\(type)\" " }
+            gridAttrs += "w:linePitch=\"\(grid.linePitch)\""
             if let charSpace = grid.charSpace {
                 gridAttrs += " w:charSpace=\"\(charSpace)\""
             }

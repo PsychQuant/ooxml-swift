@@ -160,6 +160,96 @@ final class OperationReducerTests: XCTestCase {
                        "timestamp cutoff t1 must include entries[0] and entries[1] only; entry[2] (t2 > t1) is excluded")
     }
 
+    func testStateTimestampDoesNotLetFutureTargetAffectPastUndo() throws {
+        let (base, ids) = makeDocumentWithRuns(["base"])
+        let targetID = UUID(uuidString: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA")!
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let cutoff = Date(timeIntervalSince1970: 1_700_000_100)
+        let t2 = Date(timeIntervalSince1970: 1_700_000_200)
+
+        // Source order is authoritative and timestamps are explicitly not
+        // guaranteed to be monotonic. At this cutoff only the undo is in the
+        // replay history; its future target must therefore be invisible.
+        var log = OperationLog()
+        log.append(
+            .setText(target: ids[0], text: "future"),
+            source: .swift, opID: targetID, at: t2)
+        log.append(.undo(targetOpID: targetID), source: .swift, at: t0)
+
+        let snapshot = try OperationReducer.state(
+            log: log, base: base, at: .timestamp(cutoff))
+
+        XCTAssertEqual(extractRunText(tree: snapshot, runID: ids[0]), "base")
+    }
+
+    func testStateTimestampRejectsTrulyDanglingUndo() throws {
+        let (base, _) = makeDocumentWithRuns(["base"])
+        let missing = UUID()
+        var log = OperationLog()
+        log.append(.undo(targetOpID: missing), source: .swift,
+                   at: Date(timeIntervalSince1970: 1_700_000_000))
+
+        XCTAssertThrowsError(try OperationReducer.state(
+            log: log, base: base,
+            at: .timestamp(Date(timeIntervalSince1970: 1_700_000_100)))) {
+            XCTAssertEqual($0 as? ReducerError, .cannotUndo(targetOpID: missing))
+        }
+    }
+
+    func testStateTimestampRejectsForwardUndoTarget() throws {
+        let (base, ids) = makeDocumentWithRuns(["base"])
+        let futureTarget = UUID()
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let cutoff = Date(timeIntervalSince1970: 1_700_000_100)
+        let t2 = Date(timeIntervalSince1970: 1_700_000_200)
+        var log = OperationLog()
+        log.append(.undo(targetOpID: futureTarget), source: .swift, at: t0)
+        log.append(
+            .setText(target: ids[0], text: "future"),
+            source: .swift, opID: futureTarget, at: t2)
+
+        XCTAssertThrowsError(try OperationReducer.state(
+            log: log, base: base, at: .timestamp(cutoff))) {
+            XCTAssertEqual($0 as? ReducerError, .cannotUndo(targetOpID: futureTarget))
+        }
+    }
+
+    func testStateTimestampRejectsRedoWithoutPriorUndoEvenWhenTargetIsAfterCutoff() throws {
+        let (base, ids) = makeDocumentWithRuns(["base"])
+        let targetID = UUID()
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let cutoff = Date(timeIntervalSince1970: 1_700_000_100)
+        let t2 = Date(timeIntervalSince1970: 1_700_000_200)
+        var log = OperationLog()
+        log.append(
+            .setText(target: ids[0], text: "future"),
+            source: .swift, opID: targetID, at: t2)
+        log.append(.redo(targetOpID: targetID), source: .swift, at: t0)
+
+        XCTAssertThrowsError(try OperationReducer.state(
+            log: log, base: base, at: .timestamp(cutoff))) {
+            XCTAssertEqual($0 as? ReducerError, .cannotRedo(targetOpID: targetID))
+        }
+    }
+
+    func testStateTimestampExcludesRedoWhenItsPriorUndoIsAfterCutoff() throws {
+        let (base, ids) = makeDocumentWithRuns(["base"])
+        let targetID = UUID()
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let cutoff = Date(timeIntervalSince1970: 1_700_000_100)
+        let t2 = Date(timeIntervalSince1970: 1_700_000_200)
+        var log = OperationLog()
+        log.append(
+            .setText(target: ids[0], text: "admitted"),
+            source: .swift, opID: targetID, at: t0)
+        log.append(.undo(targetOpID: targetID), source: .swift, at: t2)
+        log.append(.redo(targetOpID: targetID), source: .swift, at: t0)
+
+        let snapshot = try OperationReducer.state(
+            log: log, base: base, at: .timestamp(cutoff))
+        XCTAssertEqual(extractRunText(tree: snapshot, runID: ids[0]), "admitted")
+    }
+
     // MARK: - 7. State out-of-range index throws
 
     func testState_outOfRangeIndexThrows() throws {

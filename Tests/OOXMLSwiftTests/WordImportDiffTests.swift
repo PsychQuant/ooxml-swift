@@ -123,6 +123,20 @@ final class WordImportDiffTests: XCTestCase {
                       "identical no-ID paragraphs must pair by fingerprint with no ops")
     }
 
+    func testTextChangeWithoutStableIDRequiresDocumentCarry() throws {
+        let snapshot = try tree(
+            #"<w:p><w:r><w:t>original</w:t></w:r></w:p>"#)
+        let current = try tree(
+            #"<w:p><w:r><w:t>edited in Word</w:t></w:r></w:p>"#)
+
+        let diff = WordImport.diff(snapshot: snapshot, current: current)
+
+        XCTAssertTrue(diff.operations.isEmpty,
+                      "an ID-less paragraph cannot safely emit an element-addressed SetText")
+        XCTAssertTrue(diff.requiresDocumentCarry,
+                      "the importer must surface the change for a raw document.xml carry")
+    }
+
     // MARK: - Word-sourced attribution is the importer's job (integration below)
 
     func testFormattingOnlyChangeIsReportedNotSilentlyDropped() throws {

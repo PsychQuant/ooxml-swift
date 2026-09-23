@@ -42,6 +42,12 @@ public enum TranscodeError: Error, Equatable {
     /// Phase D task 4.1). Strict mode never guesses: an unusable designation
     /// fails loudly instead of silently degrading to verbatim content.
     case slotDesignationFailure(name: String, reason: String)
+    /// A raw-channel slot could not be applied at execution time
+    /// (raw-channel-slot-support, #171): stale directive, paraId no longer
+    /// unique, value outside XML 1.0, or post-surgery well-formedness
+    /// failure. Import re-applies the designation guards — a silently
+    /// unfilled or corrupted official form is worse than a loud stop.
+    case rawSlotExecutionFailure(name: String, reason: String)
 }
 
 // MARK: - SlotDesignation (format-alignment-engine Phase D, task 4.1)
@@ -129,6 +135,7 @@ public enum ScriptExporter {
         // Validate designations up front — strict mode fails loudly.
         var slotByParaId: [String: SlotDesignation] = [:]
         var seenNames: Set<String> = []
+        var rawChannelParaIds: Set<String> = []
         for slot in slots {
             guard WordStyleMap.isIdentifier(slot.name),
                   slot.name.first.map({ $0.isLowercase || $0 == "_" }) == true else {
@@ -151,9 +158,35 @@ public enum ScriptExporter {
             }
             guard let targetEntry = target,
                   case .appendParagraph(_, let payload) = targetEntry.op else {
+                // Raw-channel fallback (raw-channel-slot-support, #171): a
+                // document whose word/document.xml failed the DSL upgrade has
+                // no paragraph-level ops — the paragraph may still live inside
+                // the carried part's XML. Structure-aware location; exactly
+                // one <w:p> carrier designates a raw-channel slot, everything
+                // else fails loudly (closed refusal list, per spec).
+                if let xml = RawChannelSlotSurgery.documentCarryXML(log: log) {
+                    switch RawChannelSlotSurgery.locate(paraId: slot.paraId, in: xml) {
+                    case .unique:
+                        rawChannelParaIds.insert(slot.paraId)
+                        continue
+                    case .duplicate(let count):
+                        throw TranscodeError.slotDesignationFailure(
+                            name: slot.name,
+                            reason: "paragraph \(slot.paraId) is carried by \(count) <w:p> elements in the raw document.xml part — refusing to guess")
+                    case .notOnParagraph(let carrier):
+                        throw TranscodeError.slotDesignationFailure(
+                            name: slot.name,
+                            reason: "id \(slot.paraId) in the raw document.xml part is carried by <\(carrier)>, not a paragraph — refusing")
+                    case .absent:
+                        break
+                    }
+                }
+                let rawNote = RawChannelSlotSurgery.documentCarryXML(log: log) == nil
+                    ? " (document has no raw document.xml part)"
+                    : " nor in the raw document.xml part"
                 throw TranscodeError.slotDesignationFailure(
                     name: slot.name,
-                    reason: "no body paragraph with id \(slot.paraId) in the log")
+                    reason: "paragraph \(slot.paraId) not found in the DSL log\(rawNote)")
             }
             // Its text must be substitutable: either the paragraph is
             // DSL-spellable (script-text parameter, the plain path) OR it is a
@@ -171,15 +204,21 @@ public enum ScriptExporter {
             }
         }
 
-        // Split slots into DSL-form (script-text parameter) and op-level
-        // (raw-form paragraph text substituted via a // @slot directive).
+        // Split slots into DSL-form (script-text parameter), op-level
+        // (raw-form paragraph text substituted via a // @slot directive), and
+        // raw-channel (paragraph inside a carried document.xml part,
+        // substituted via a // @slot-raw directive).
+        let rawSlots = slotByParaId.filter { rawChannelParaIds.contains($0.key) }
         let dslSlots = slotByParaId.filter {
+            guard rawChannelParaIds.contains($0.key) == false else { return false }
             if case .appendParagraph(_, let p)? = firstAppendParagraph(log: log, paraId: $0.key)?.op {
                 return paragraphBlock(payload: p, paraId: $0.key, indent: 8) != nil
             }
             return false
         }
-        let opLevelSlots = slotByParaId.filter { dslSlots[$0.key] == nil }
+        let opLevelSlots = slotByParaId.filter {
+            dslSlots[$0.key] == nil && rawChannelParaIds.contains($0.key) == false
+        }
 
         let body = emitBody(entries: log.entries, slotByParaId: dslSlots)
 
@@ -193,6 +232,16 @@ public enum ScriptExporter {
         }
         for (paraId, slot) in opLevelSlots {
             defaults[slot.name] = opLevelSlotDefault(log: log, paraId: paraId) ?? ""
+        }
+        for (paraId, slot) in rawSlots {
+            // Raw-channel default: the designated paragraph's concatenated
+            // <w:t> text inside the carried document.xml.
+            if let xml = RawChannelSlotSurgery.documentCarryXML(log: log),
+               case .unique(let span) = RawChannelSlotSurgery.locate(paraId: paraId, in: xml) {
+                defaults[slot.name] = RawChannelSlotSurgery.paragraphText(in: span, xml: xml)
+            } else {
+                defaults[slot.name] = ""
+            }
         }
 
         var out: [String] = []
@@ -210,7 +259,15 @@ public enum ScriptExporter {
         for paraId in opLevelSlots.keys.sorted() {
             out.append("// @slot \(opLevelSlots[paraId]!.name) \(paraId)")
         }
-        if !opLevelSlots.isEmpty { out.append("") }
+        // Raw-channel slot directives (raw-channel-slot-support, #171): the
+        // paragraph lives inside a carried document.xml part, so its text has
+        // neither a DSL position nor a text-bearing op. The
+        // `// @slot-raw <name> <paraId>` directive tells the importer to
+        // substitute the paragraph's text inside the carried XML.
+        for paraId in rawSlots.keys.sorted() {
+            out.append("// @slot-raw \(rawSlots[paraId]!.name) \(paraId)")
+        }
+        if !opLevelSlots.isEmpty || !rawSlots.isEmpty { out.append("") }
         out.append("func makeDocument(")
         for (idx, slot) in slots.enumerated() {
             let comma = idx == slots.count - 1 ? "" : ","
@@ -256,6 +313,18 @@ public enum ScriptExporter {
     private static func emitBody(entries: [LogEntry],
                                  slotByParaId: [String: SlotDesignation]) -> [String] {
         var body: [String] = []
+        let canonicalIDByIndex = entries.indices.map { index in
+            String(format: "00000000-0000-4000-8000-%012d", index + 1)
+        }
+        // A damaged log may contain duplicate op IDs. Keep reference lookup
+        // deterministic (first producer wins) and give each emitted entry a
+        // distinct canonical ID; never use Dictionary(uniqueKeysWithValues:),
+        // whose duplicate-key precondition would terminate the process.
+        var canonicalIDs: [String: String] = [:]
+        for (index, entry) in entries.enumerated()
+            where canonicalIDs[entry.opID.uuidString] == nil {
+            canonicalIDs[entry.opID.uuidString] = canonicalIDByIndex[index]
+        }
 
         var i = 0
         while i < entries.count {
@@ -277,7 +346,8 @@ public enum ScriptExporter {
                    return false
                }) {
                 body.append("        \(type)(id: \(quote(id.raw))) {")
-                for inner in entries[(i + 1)..<endIdx] {
+                for innerIndex in (i + 1)..<endIdx {
+                    let inner = entries[innerIndex]
                     if case .appendParagraph(let c, let payload) = inner.op,
                        c == nil, inner.source == .swift,
                        let paraId = payload.paraId, !paraId.isEmpty,
@@ -285,7 +355,10 @@ public enum ScriptExporter {
                                                   slotName: slotByParaId[paraId]?.name) {
                         body.append(contentsOf: block)
                     } else {
-                        body.append("            " + rawOpLine(entry: inner))
+                        body.append("            " + rawOpLine(
+                            entry: inner,
+                            canonicalID: canonicalIDByIndex[innerIndex],
+                            canonicalIDs: canonicalIDs))
                     }
                 }
                 body.append("        }")
@@ -301,7 +374,10 @@ public enum ScriptExporter {
                                           slotName: slotByParaId[paraId]?.name) {
                 body.append(contentsOf: block)
             } else {
-                body.append("        " + rawOpLine(entry: entry))
+                body.append("        " + rawOpLine(
+                    entry: entry,
+                    canonicalID: canonicalIDByIndex[i],
+                    canonicalIDs: canonicalIDs))
             }
             i += 1
         }
@@ -376,19 +452,76 @@ public enum ScriptExporter {
         return nil
     }
 
-    /// `// @op {"op_type":...,"source":...,<op fields>}` — canonical raw
+    /// `// @op {"op_id":...,"ts":...,"op_type":...,"source":...,<op fields>}` — canonical raw
     /// escape reusing the JSONL codec's field encoding (single source of
-    /// truth for op shapes; op_id/timestamp regenerate on import per the
-    /// round-trip contract).
-    private static func rawOpLine(entry: LogEntry) -> String {
+    /// truth for op shapes. Identity is retained because undo/redo and
+    /// `lib:<producer-opID>` targets are referential.
+    private static func rawOpLine(
+        entry: LogEntry, canonicalID: String,
+        canonicalIDs: [String: String]
+    ) -> String {
         let (opType, fields) = JSONLLineCoder.encodeOp(entry.op)
         var parts: [String] = []
+        parts.append("\"op_id\":\(quote(canonicalID))")
+        parts.append("\"ts\":\(quote("1970-01-01T00:00:00Z"))")
         parts.append("\"op_type\":\(quote(opType))")
         parts.append("\"source\":\(quote(entry.source.rawValue))")
         for (key, value) in fields {
-            parts.append("\"\(key)\":\(value)")
+            let remapped = isReferenceField(opType: opType, key: key)
+                ? remapReferenceString(in: value, canonicalIDs: canonicalIDs)
+                : value
+            parts.append("\"\(key)\":\(remapped)")
         }
         return "// @op {\(parts.joined(separator: ","))}"
+    }
+
+    /// Remaps direct UUID/ElementID JSON string fields without touching user
+    /// text that merely contains a UUID as a substring.
+    private static func remapReferenceString(
+        in encodedJSON: String, canonicalIDs: [String: String]
+    ) -> String {
+        guard let data = encodedJSON.data(using: .utf8),
+              let string = try? JSONSerialization.jsonObject(
+                with: data, options: [.fragmentsAllowed]) as? String else {
+            return encodedJSON
+        }
+        if let replacement = canonicalIDs[string] {
+            return JSONLLineCoder.jsonString(replacement)
+        }
+        let prefix = "lib:"
+        if string.hasPrefix(prefix),
+           let replacement = canonicalIDs[String(string.dropFirst(prefix.count))] {
+            return JSONLLineCoder.jsonString(prefix + replacement)
+        }
+        return encodedJSON
+    }
+
+    /// Only these typed fields are operation/element references. Restricting
+    /// alpha-renaming to this allow-list is essential: document text, URLs,
+    /// XML, and unknown future payloads are opaque user data even when a
+    /// string happens to look exactly like an operation UUID.
+    private static func isReferenceField(opType: String, key: String) -> Bool {
+        switch opType {
+        case "insertParagraphAfter": return key == "after"
+        case "insertParagraphBefore": return key == "before"
+        case "removeParagraph", "removeTable", "beginComponent", "endComponent":
+            return key == "id"
+        case "setText", "setParagraphStyle", "setRunFormat", "removeNode",
+             "updateAttribute", "wrapWithHyperlink", "setParagraphContent", "setRuns":
+            return key == "target"
+        case "insertTable", "insertBookmark": return key == "at"
+        case "setCellText": return key == "table"
+        case "insertRun", "appendTable", "appendParagraph", "insertTab",
+             "insertBreak", "insertNoBreakHyphen":
+            return key == "in"
+        case "insertComment": return key == "anchor"
+        case "undo", "redo": return key == "targetOpID"
+        case "insertNode": return key == "parent"
+        case "moveNode": return key == "sourceNode" || key == "destinationParent"
+        case "insertSiblingAfter": return key == "after"
+        case "setSectionProperties": return key == "at"
+        default: return false
+        }
     }
 
     static func quote(_ s: String) -> String {
@@ -452,6 +585,9 @@ public enum ScriptImporter {
         // a paraId to its slot name; the text-bearing op is substituted after
         // the log is built.
         let opLevelSlots = collectOpLevelSlots(source: source)  // paraId -> name
+        // Raw-channel slots (raw-channel-slot-support, #171): `// @slot-raw`
+        // directives target paragraphs inside a carried document.xml part.
+        let rawChannelSlots = try collectRawChannelSlots(source: source)  // paraId -> name
 
         let lines = source.components(separatedBy: "\n")
         for (idx, rawLine) in lines.enumerated() {
@@ -465,7 +601,8 @@ public enum ScriptImporter {
             if line.hasPrefix("// @op ") {
                 let json = String(line.dropFirst("// @op ".count))
                 let entry = try decodeRawOp(json: json, line: lineNo)
-                log.append(entry.op, source: entry.source)
+                log.append(entry.op, source: entry.source,
+                           opID: entry.opID, at: entry.timestamp)
                 continue
             }
             if line.hasPrefix("//") { continue }               // ordinary comment
@@ -658,6 +795,16 @@ public enum ScriptImporter {
         if !opLevelSlots.isEmpty {
             log = applyOpLevelSlots(log, opSlots: opLevelSlots, bindings: slotBindings)
         }
+        // Raw-channel slot substitution (raw-channel-slot-support, #171):
+        // run-level surgery on the carried document.xml. A value equal to the
+        // paragraph's current text leaves the part untouched (identity
+        // shortcut), so an all-default execution stays byte-equal. Guards
+        // re-apply at import time and post-surgery well-formedness is
+        // verified — failures throw, never silently skip.
+        if !rawChannelSlots.isEmpty {
+            log = try RawChannelSlotSurgery.apply(
+                log, rawSlots: rawChannelSlots, bindings: slotBindings)
+        }
         return log
     }
 
@@ -697,6 +844,30 @@ public enum ScriptImporter {
             let parts = line.dropFirst("// @slot ".count)
                 .split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
             guard parts.count == 2 else { continue }
+            slots[String(parts[1])] = String(parts[0])
+        }
+        return slots
+    }
+
+    /// Pre-pass collecting `// @slot-raw <name> <paraId>` directives
+    /// (raw-channel-slot-support, #171). Returns paraId → slot name. Unlike
+    /// the `// @slot` pre-pass, a malformed `// @slot-raw` line THROWS: a
+    /// mangled directive would otherwise leave its makeDocument parameter
+    /// unconsumed and render an unfilled form byte-equal to a correct
+    /// all-default run — the fail-silent class this feature refuses
+    /// (verify round 2, N1).
+    private static func collectRawChannelSlots(source: String) throws -> [String: String] {
+        var slots: [String: String] = [:]
+        for (idx, rawLine) in source.components(separatedBy: "\n").enumerated() {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("// @slot-raw") else { continue }
+            let parts = line.dropFirst("// @slot-raw".count)
+                .split(separator: " ", omittingEmptySubsequences: true)
+            guard parts.count == 2 else {
+                throw TranscodeError.unsupportedSyntax(
+                    line: idx + 1, column: 1,
+                    reason: "malformed // @slot-raw directive (expected `// @slot-raw <name> <paraId>`): \(line.prefix(60))")
+            }
             slots[String(parts[1])] = String(parts[0])
         }
         return slots
@@ -757,7 +928,8 @@ public enum ScriptImporter {
             default:
                 break
             }
-            rebuilt.append(op, source: entry.source)
+            rebuilt.append(op, source: entry.source,
+                           opID: entry.opID, at: entry.timestamp)
         }
         return rebuilt
     }
@@ -771,6 +943,8 @@ public enum ScriptImporter {
 
     /// XML's whitespace-only characters; boundary occurrences require
     /// `xml:space="preserve"` on `<w:t>` to survive consumers faithfully.
+    /// Checked per Unicode scalar, not by Character equality: Swift treats
+    /// CRLF as a single Character, which equals neither "\r" nor "\n".
     private static func isXMLWhitespace(_ character: Character) -> Bool {
         character.unicodeScalars.allSatisfy { scalar in
             switch scalar.value {
@@ -780,7 +954,7 @@ public enum ScriptImporter {
         }
     }
 
-    private static func decodeRawOp(json: String, line: Int) throws -> (op: Operation, source: OpSource) {
+    private static func decodeRawOp(json: String, line: Int) throws -> LogEntry {
         guard let data = json.data(using: .utf8),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let opType = obj["op_type"] as? String else {
@@ -789,8 +963,29 @@ public enum ScriptImporter {
         let source = OpSource(rawValue: (obj["source"] as? String) ?? "swift") ?? .swift
         do {
             let op = try JSONLLineCoder.decodeOp(opType: opType, fullObject: obj, lineIndex: line)
-            return (op, source)
+            let opID: UUID
+            if let rawID = obj["op_id"] as? String {
+                guard let parsed = UUID(uuidString: rawID) else {
+                    throw TranscodeError.malformedRawOp(
+                        line: line, reason: "op_id is not a UUID")
+                }
+                opID = parsed
+            } else {
+                opID = UUID()
+            }
+            let timestamp: Date
+            if let rawTimestamp = obj["ts"] as? String {
+                guard let parsed = JSONLLineCoder.parseISO8601(rawTimestamp) else {
+                    throw TranscodeError.malformedRawOp(
+                        line: line, reason: "ts is not ISO-8601")
+                }
+                timestamp = parsed
+            } else {
+                timestamp = Date()
+            }
+            return LogEntry(opID: opID, op: op, source: source, timestamp: timestamp)
         } catch {
+            if let transcode = error as? TranscodeError { throw transcode }
             throw TranscodeError.malformedRawOp(line: line, reason: "cannot decode op '\(opType)': \(error)")
         }
     }

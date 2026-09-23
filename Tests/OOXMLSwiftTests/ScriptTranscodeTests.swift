@@ -350,6 +350,106 @@ extension ScriptTranscodeTests {
 
 extension ScriptTranscodeTests {
 
+    func testRawControlReferencesPreserveEntryIdentityAndMaterializedMeaning() throws {
+        let paragraphUUID = UUID()
+        let run = XmlNode.element(prefix: "w", localName: "r", children: [
+            XmlNode.element(prefix: "w", localName: "t", children: [.text("base")]),
+        ])
+        let paragraph = XmlNode.element(prefix: "w", localName: "p", children: [run])
+        paragraph.libraryUUID = paragraphUUID
+        let body = XmlNode.element(prefix: "w", localName: "body", children: [paragraph])
+        let base = XmlTree.synthesized(root: .element(
+            prefix: "w", localName: "document", children: [body]))
+
+        let producerID = UUID()
+        var original = OperationLog()
+        original.append(.setText(target: .init(libraryUUID: paragraphUUID), text: "changed"),
+                        source: .swift, opID: producerID)
+        original.append(.undo(targetOpID: producerID), source: .swift)
+
+        let reconstructed = try ScriptImporter.parse(
+            source: ScriptExporter.exportSwift(log: original))
+        guard case .undo(let reconstructedTarget) = reconstructed.entries[1].op else {
+            return XCTFail("expected undo")
+        }
+        XCTAssertEqual(reconstructedTarget, reconstructed.entries[0].opID)
+        let before = try OperationReducer.materialize(log: original, base: base)
+        let after = try OperationReducer.materialize(log: reconstructed, base: base)
+        XCTAssertEqual(after.root.normalizedFingerprint(), before.root.normalizedFingerprint())
+    }
+
+    func testRawLibraryTargetsRemainLinkedToProducerAfterScriptRoundTrip() throws {
+        let bodyUUID = UUID()
+        let body = XmlNode.element(prefix: "w", localName: "body")
+        body.libraryUUID = bodyUUID
+        let base = XmlTree.synthesized(root: .element(
+            prefix: "w", localName: "document", children: [body]))
+        let producerID = UUID()
+        var original = OperationLog()
+        original.append(.insertNode(
+            parent: .init(libraryUUID: bodyUUID), position: 0,
+            nodeXML: #"<w:p><w:r><w:t>linked</w:t></w:r></w:p>"#),
+            source: .swift, opID: producerID)
+        original.append(.updateAttribute(
+            target: .init(libraryUUID: producerID), prefix: "w14",
+            localName: "paraId", value: "LINKED01"), source: .swift)
+
+        let reconstructed = try ScriptImporter.parse(
+            source: ScriptExporter.exportSwift(log: original))
+        guard case .updateAttribute(let reconstructedTarget, _, _, _) =
+                reconstructed.entries[1].op else {
+            return XCTFail("expected updateAttribute")
+        }
+        XCTAssertEqual(reconstructedTarget,
+                       ElementID(libraryUUID: reconstructed.entries[0].opID))
+        let before = try OperationReducer.materialize(log: original, base: base)
+        let after = try OperationReducer.materialize(log: reconstructed, base: base)
+        XCTAssertEqual(after.root.normalizedFingerprint(), before.root.normalizedFingerprint())
+    }
+
+    func testRawIdentityRemappingNeverChangesUserTextOrOpaquePayload() throws {
+        let producerID = UUID()
+        let uuidShapedContent = producerID.uuidString
+        var original = OperationLog()
+        original.append(.batchBegin(label: "producer"), source: .swift, opID: producerID)
+        original.append(
+            .setText(
+                target: .init(rawString: "w14:paraId=CONTENT01"),
+                text: uuidShapedContent),
+            source: .swift)
+        original.append(
+            .unknown(
+                opType: "futureOpaque",
+                payload: .object(["opaque": .string(uuidShapedContent)])),
+            source: .swift)
+
+        let reconstructed = try ScriptImporter.parse(
+            source: ScriptExporter.exportSwift(log: original))
+        guard case .setText(_, let text) = reconstructed.entries[1].op else {
+            return XCTFail("expected setText")
+        }
+        XCTAssertEqual(text, uuidShapedContent,
+                       "UUID-shaped document content is data, not an operation reference")
+        guard case .unknown(_, let payload) = reconstructed.entries[2].op else {
+            return XCTFail("expected opaque future operation")
+        }
+        XCTAssertEqual(payload, .object(["opaque": .string(uuidShapedContent)]),
+                       "unknown payloads must remain byte-semantic opaque")
+    }
+
+    func testDuplicateInputOpIDsNeverTrapExporterAndBecomeUnambiguous() throws {
+        let duplicate = UUID()
+        var original = OperationLog()
+        original.append(.batchBegin(label: "first"), source: .swift, opID: duplicate)
+        original.append(.batchEnd, source: .swift, opID: duplicate)
+
+        let reconstructed = try ScriptImporter.parse(
+            source: ScriptExporter.exportSwift(log: original))
+        XCTAssertEqual(reconstructed.entries.count, 2)
+        XCTAssertNotEqual(reconstructed.entries[0].opID, reconstructed.entries[1].opID,
+                          "exported metadata must not preserve ambiguous duplicate IDs")
+    }
+
     /// 5.5 "Script export covers all operation types in the log" — EVERY
     /// Operation case (all 38, same construction list as the enum pin in
     /// OperationLogTests) must have a Swift representation that survives

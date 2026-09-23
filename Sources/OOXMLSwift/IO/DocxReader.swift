@@ -242,6 +242,18 @@ public struct DocxReader {
                 numbering: document.numbering
             )
         }
+        // #84: body-level <w:sectPr>. parseBody deliberately skips it (it is
+        // not a BodyChild) and nothing else read it, so DocxWriter always
+        // emitted a default-constructed SectionProperties — silently swapping
+        // the source page size (A4 -> US Letter), margins and docGrid, and
+        // dropping header/footer references. Parsed here, after the body, so
+        // what the writer emits round-trips.
+        if let bodyEl = (try? documentXML.nodes(forXPath: "//*[local-name()='body']"))?
+            .first as? XMLElement,
+           let sectPrEl = bodyEl.elements(forName: "w:sectPr").last {
+            document.sectionProperties = Self.parseSectionProperties(sectPrEl)
+        }
+
         document.images = images
 
         // v0.19.4+ (#56 R3-NEW-5): nextBookmarkId calibration moved AFTER
@@ -710,9 +722,11 @@ public struct DocxReader {
         // package into `xmlTrees` so the Phase 2 op log can address parts the
         // typed model does not consume (customXml/*, word/theme/*,
         // word/fontTable.xml, word/webSettings.xml, docProps/*, glossary/…).
-        // Skipped: relationship parts (`_rels/*.rels` — RelationshipsCollection
-        // owns them), `[Content_Types].xml` (package metadata with a dedicated
-        // overlay), and non-XML (binary) parts. A part that fails to parse is
+        // Relationship parts are also loaded into `xmlTrees`: typed
+        // RelationshipsCollection remains the convenience view, while the
+        // tree is the lossless mutation base for addRelationship/comment ops.
+        // Skipped: `[Content_Types].xml` (package metadata with a dedicated
+        // overlay) and non-XML (binary) parts. A part that fails to parse is
         // recorded in `xmlTreeLoadFailures` and does NOT abort the read — its
         // bytes still round-trip verbatim via the overlay save path.
         if let sweep = FileManager.default.enumerator(
@@ -721,11 +735,11 @@ public struct DocxReader {
             for case let fileURL as URL in sweep {
                 let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
                 if isDir { continue }
-                guard fileURL.pathExtension.lowercased() == "xml" else { continue }
+                let partExtension = fileURL.pathExtension.lowercased()
+                guard partExtension == "xml" || partExtension == "rels" else { continue }
                 let partPath = String(
                     fileURL.resolvingSymlinksInPath().path.dropFirst(tempBase.count + 1))
                 if partPath == "[Content_Types].xml" { continue }
-                if partPath.hasPrefix("_rels/") || partPath.contains("/_rels/") { continue }
                 if document.xmlTrees[partPath] != nil { continue }
                 do {
                     let partData = try Data(contentsOf: fileURL)
@@ -1936,11 +1950,10 @@ public struct DocxReader {
         }
 
         // v0.19.3+ (#56 round 2 P0-3): walk children once, building both the
-        // ordered `children` list (source of truth for the writer) AND the
-        // legacy `runs` / `rawChildren` projections (kept for backward-compat
-        // reads from existing callers that still iterate the typed lists).
+        // ordered `children` list (source of truth for the writer) and the
+        // typed `runs` projection. Non-run children live only as `.rawXML`
+        // after the v1.0 rawChildren bridge removal.
         var runs: [Run] = []
-        var rawChildren: [String] = []
         var children: [HyperlinkChild] = []
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement else { continue }
@@ -1950,7 +1963,6 @@ public struct DocxReader {
                 children.append(.run(run))
             } else {
                 let raw = childElement.xmlString
-                rawChildren.append(raw)
                 children.append(.rawXML(raw))
                 // v0.19.12+ (#59 B-CONT-2 P0, R2 finding): nested non-`<w:r>`
                 // hyperlink children (e.g., `<w:fldSimple>`, `<mc:AlternateContent>`,
@@ -2012,7 +2024,6 @@ public struct DocxReader {
             tooltip: tooltip,
             history: history,
             rawAttributes: rawAttributes,
-            rawChildren: rawChildren,
             children: children,
             position: position
         )
@@ -2679,6 +2690,37 @@ public struct DocxReader {
     /// than risk OOM on malformed input. Matches Word's own internal threshold.
     static let MAX_TABLE_NEST_DEPTH = 5
 
+    private static func isWordprocessingMLElement(_ element: XMLElement) -> Bool {
+        element.uri == wordprocessingMLNamespace
+            || (element.uri == nil && element.name?.hasPrefix("w:") == true)
+    }
+
+    private static func wordChild(
+        _ element: XMLElement,
+        localName: String
+    ) -> XMLElement? {
+        (element.children ?? []).compactMap { $0 as? XMLElement }.first {
+            $0.localName == localName && isWordprocessingMLElement($0)
+        }
+    }
+
+    private static func wordAttributeValue(
+        _ element: XMLElement,
+        localName: String
+    ) -> String? {
+        (element.attributes ?? []).first { attribute in
+            guard attribute.localName == localName else { return false }
+            return attribute.uri == wordprocessingMLNamespace
+                || (attribute.uri == nil && attribute.name?.hasPrefix("w:") == true)
+        }?.stringValue
+    }
+
+    private static func parseOnOff(_ element: XMLElement) -> Bool {
+        guard let raw = wordAttributeValue(element, localName: "val")?
+            .lowercased() else { return true }
+        return !["0", "false", "off", "no"].contains(raw)
+    }
+
     private static func parseTable(
         from element: XMLElement,
         relationships: RelationshipsCollection,
@@ -2697,40 +2739,52 @@ public struct DocxReader {
         if let tblPr = element.elements(forName: "w:tblPr").first {
             table.properties = parseTableProperties(from: tblPr)
             // tblInd
-            if let tblInd = tblPr.elements(forName: "w:tblInd").first,
-               let w = tblInd.attribute(forName: "w:w")?.stringValue,
+            if let tblInd = wordChild(tblPr, localName: "tblInd"),
+               let w = wordAttributeValue(tblInd, localName: "w"),
                let value = Int(w) {
                 table.tableIndent = value
             }
             // explicit layout (separate from properties.layout for round-trip clarity)
-            if let layout = tblPr.elements(forName: "w:tblLayout").first,
-               let val = layout.attribute(forName: "w:type")?.stringValue,
+            if let layout = wordChild(tblPr, localName: "tblLayout"),
+               let val = wordAttributeValue(layout, localName: "type"),
                let lay = TableLayout(rawValue: val) {
                 table.explicitLayout = lay
             }
             // conditional styles
-            for stylePr in tblPr.elements(forName: "w:tblStylePr") {
-                guard let typeStr = stylePr.attribute(forName: "w:type")?.stringValue,
+            for stylePr in (tblPr.children ?? []).compactMap({ $0 as? XMLElement })
+            where stylePr.localName == "tblStylePr" && isWordprocessingMLElement(stylePr) {
+                guard let typeStr = wordAttributeValue(stylePr, localName: "type"),
                       let type = TableConditionalStyleType(rawValue: typeStr)
                 else { continue }
                 var props = TableConditionalStyleProperties()
-                if let rPr = stylePr.elements(forName: "w:rPr").first {
-                    if rPr.elements(forName: "w:b").first != nil { props.bold = true }
-                    if rPr.elements(forName: "w:i").first != nil { props.italic = true }
-                    if let c = rPr.elements(forName: "w:color").first?.attribute(forName: "w:val")?.stringValue {
+                if let rPr = wordChild(stylePr, localName: "rPr") {
+                    if let bold = wordChild(rPr, localName: "b") {
+                        props.bold = parseOnOff(bold)
+                    }
+                    if let italic = wordChild(rPr, localName: "i") {
+                        props.italic = parseOnOff(italic)
+                    }
+                    if let color = wordChild(rPr, localName: "color"),
+                       let c = wordAttributeValue(color, localName: "val") {
                         props.color = c
                     }
-                    if let szStr = rPr.elements(forName: "w:sz").first?.attribute(forName: "w:val")?.stringValue,
+                    if let size = wordChild(rPr, localName: "sz"),
+                       let szStr = wordAttributeValue(size, localName: "val"),
                        let sz = Int(szStr) {
                         props.fontSize = sz
                     }
                 }
-                if let tcPr = stylePr.elements(forName: "w:tcPr").first,
-                   let bg = tcPr.elements(forName: "w:shd").first?.attribute(forName: "w:fill")?.stringValue {
+                if let tcPr = wordChild(stylePr, localName: "tcPr"),
+                   let shading = wordChild(tcPr, localName: "shd"),
+                   let bg = wordAttributeValue(shading, localName: "fill") {
                     props.backgroundColor = bg
                 }
                 table.conditionalStyles.append(TableConditionalStyle(type: type, properties: props))
             }
+            table.sourcePropertyProjection = TableSourcePropertyProjection(
+                tableIndent: table.tableIndent,
+                explicitLayout: table.explicitLayout,
+                conditionalStyles: table.conditionalStyles)
         }
 
         // 解析表格行
@@ -2751,27 +2805,334 @@ public struct DocxReader {
     private static func parseTableProperties(from element: XMLElement) -> TableProperties {
         var props = TableProperties()
 
+        let children = (element.children ?? []).compactMap { $0 as? XMLElement }
         // 寬度
-        if let tblW = element.elements(forName: "w:tblW").first {
-            if let w = tblW.attribute(forName: "w:w")?.stringValue {
+        if let tblW = wordChild(element, localName: "tblW") {
+            if let w = wordAttributeValue(tblW, localName: "w") {
                 props.width = Int(w)
             }
-            if let type = tblW.attribute(forName: "w:type")?.stringValue {
+            if let type = wordAttributeValue(tblW, localName: "type") {
                 props.widthType = WidthType(rawValue: type)
             }
         }
 
         // 對齊
-        if let jc = element.elements(forName: "w:jc").first,
-           let val = jc.attribute(forName: "w:val")?.stringValue {
+        if let jc = wordChild(element, localName: "jc"),
+           let val = wordAttributeValue(jc, localName: "val") {
             props.alignment = Alignment(rawValue: val)
         }
 
         // 版面配置
-        if let layout = element.elements(forName: "w:tblLayout").first,
-           let val = layout.attribute(forName: "w:type")?.stringValue {
+        if let layout = wordChild(element, localName: "tblLayout"),
+           let val = wordAttributeValue(layout, localName: "type") {
             props.layout = TableLayout(rawValue: val)
         }
+
+        // Preserve every child, including typed projections. The source
+        // checkpoint lets the writer keep extension attributes on otherwise
+        // typed elements until the caller actually changes that property.
+        let mcNamespace = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+        func expandedNameKey(namespaceURI: String?, localName: String) -> String {
+            (namespaceURI ?? "") + "\u{0}" + localName
+        }
+        var namespaceAncestry: [XMLElement] = []
+        var namespaceCursor: XMLNode? = element
+        while let current = namespaceCursor as? XMLElement {
+            namespaceAncestry.append(current)
+            namespaceCursor = current.parent
+        }
+        var namespaceContext: [String: String] = [:]
+        var processContentNames: Set<String> = []
+        for current in namespaceAncestry.reversed() {
+            for namespace in current.namespaces ?? [] {
+                let prefix = namespace.name ?? ""
+                namespaceContext[prefix] = namespace.stringValue ?? ""
+            }
+            for attribute in current.attributes ?? []
+            where attribute.uri == mcNamespace && attribute.localName == "ProcessContent" {
+                for token in (attribute.stringValue ?? "")
+                    .split(whereSeparator: \.isWhitespace).map(String.init) {
+                    let pieces = token.split(separator: ":", maxSplits: 1).map(String.init)
+                    let prefix = pieces.count == 2 ? pieces[0] : ""
+                    let localName = pieces.count == 2 ? pieces[1] : pieces[0]
+                    processContentNames.insert(expandedNameKey(
+                        namespaceURI: namespaceContext[prefix],
+                        localName: localName))
+                }
+            }
+        }
+        props.processContentCarrierNames = processContentNames
+
+        func directCanonicalSlot(_ child: XMLElement) -> Int? {
+            guard isWordprocessingMLElement(child),
+                  let localName = child.localName else { return nil }
+            return TableProperties.canonicalPosition[localName]
+        }
+        func lexicalContext(
+            for element: XMLElement,
+            namespaces inheritedNamespaces: [String: String],
+            processContent inheritedProcessContent: Set<String>
+        ) -> (namespaces: [String: String], processContent: Set<String>) {
+            var namespaces = inheritedNamespaces
+            for namespace in element.namespaces ?? [] {
+                namespaces[namespace.name ?? ""] = namespace.stringValue ?? ""
+            }
+            var processContent = inheritedProcessContent
+            for attribute in element.attributes ?? []
+            where attribute.uri == mcNamespace && attribute.localName == "ProcessContent" {
+                for token in (attribute.stringValue ?? "")
+                    .split(whereSeparator: \.isWhitespace).map(String.init) {
+                    let pieces = token.split(separator: ":", maxSplits: 1).map(String.init)
+                    let prefix = pieces.count == 2 ? pieces[0] : ""
+                    let localName = pieces.count == 2 ? pieces[1] : pieces[0]
+                    processContent.insert(expandedNameKey(
+                        namespaceURI: namespaces[prefix], localName: localName))
+                }
+            }
+            return (namespaces, processContent)
+        }
+        func isTraversableCarrier(
+            _ element: XMLElement,
+            processContent: Set<String>
+        ) -> Bool {
+            if element.uri == mcNamespace,
+               let localName = element.localName,
+               ["AlternateContent", "Choice", "Fallback"].contains(localName) {
+                return true
+            }
+            guard let localName = element.localName else { return false }
+            return processContent.contains(expandedNameKey(
+                namespaceURI: element.uri,
+                localName: localName))
+        }
+        func representedWMLNames(
+            _ element: XMLElement,
+            namespaces inheritedNamespaces: [String: String],
+            processContent inheritedProcessContent: Set<String>
+        ) -> Set<String> {
+            if isWordprocessingMLElement(element),
+               let localName = element.localName,
+               TableProperties.canonicalPosition[localName] != nil {
+                return [localName]
+            }
+            guard isTraversableCarrier(
+                element, processContent: inheritedProcessContent) else { return [] }
+            let context = lexicalContext(
+                for: element,
+                namespaces: inheritedNamespaces,
+                processContent: inheritedProcessContent)
+            var names: Set<String> = []
+            for case let child as XMLElement in element.children ?? [] {
+                names.formUnion(representedWMLNames(
+                    child,
+                    namespaces: context.namespaces,
+                    processContent: context.processContent))
+            }
+            return names
+        }
+        func representedStyleTypes(
+            _ element: XMLElement,
+            namespaces inheritedNamespaces: [String: String],
+            processContent inheritedProcessContent: Set<String>
+        ) -> Set<String> {
+            if isWordprocessingMLElement(element),
+               element.localName == "tblStylePr",
+               let type = wordAttributeValue(element, localName: "type") {
+                return [type]
+            }
+            guard isTraversableCarrier(
+                element, processContent: inheritedProcessContent) else { return [] }
+            let context = lexicalContext(
+                for: element,
+                namespaces: inheritedNamespaces,
+                processContent: inheritedProcessContent)
+            var types: Set<String> = []
+            for case let child as XMLElement in element.children ?? [] {
+                types.formUnion(representedStyleTypes(
+                    child,
+                    namespaces: context.namespaces,
+                    processContent: context.processContent))
+            }
+            return types
+        }
+        func namespaceBindingsUsed(
+            in element: XMLElement,
+            inheritedNamespaces: [String: String]
+        ) -> [String: String] {
+            var bindings: [String: String] = [:]
+            let carrierRootNamespaces = inheritedNamespaces
+            func record(
+                qualifiedName: String?,
+                namespaceURI: String?,
+                isElement: Bool
+            ) {
+                guard let qualifiedName, let namespaceURI else { return }
+                let pieces = qualifiedName.split(
+                    separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                let prefix: String?
+                if pieces.count == 2 {
+                    prefix = String(pieces[0])
+                } else {
+                    prefix = isElement ? "" : nil
+                }
+                if let prefix, prefix != "xml" {
+                    if carrierRootNamespaces[prefix] == namespaceURI {
+                        // A local declaration remains in the raw fragment,
+                        // while the artificial wrapper must reproduce the
+                        // binding inherited at the carrier root. Otherwise an
+                        // earlier nested rebind can change the expanded name
+                        // of a later ProcessContent wrapper during rewriting.
+                        bindings[prefix] = namespaceURI
+                    } else if bindings[prefix] == nil {
+                        bindings[prefix] = namespaceURI
+                    }
+                }
+            }
+            func walk(
+                _ current: XMLElement,
+                namespaces inheritedNamespaces: [String: String]
+            ) {
+                var namespaces = inheritedNamespaces
+                for namespace in current.namespaces ?? [] {
+                    namespaces[namespace.name ?? ""] = namespace.stringValue ?? ""
+                }
+                record(
+                    qualifiedName: current.name,
+                    namespaceURI: current.uri,
+                    isElement: true)
+                for attribute in current.attributes ?? [] {
+                    record(
+                        qualifiedName: attribute.name,
+                        namespaceURI: attribute.uri,
+                        isElement: false)
+                    if attribute.uri == mcNamespace,
+                       attribute.localName == "ProcessContent" {
+                        for token in (attribute.stringValue ?? "")
+                            .split(whereSeparator: \.isWhitespace) {
+                            let pieces = token.split(
+                                separator: ":", maxSplits: 1,
+                                omittingEmptySubsequences: false)
+                            let prefix = pieces.count == 2 ? String(pieces[0]) : ""
+                            if let uri = namespaces[prefix] {
+                                if carrierRootNamespaces[prefix] == uri {
+                                    bindings[prefix] = uri
+                                } else if bindings[prefix] == nil {
+                                    bindings[prefix] = uri
+                                }
+                            }
+                        }
+                    }
+                }
+                for case let child as XMLElement in current.children ?? [] {
+                    walk(child, namespaces: namespaces)
+                }
+            }
+            walk(element, namespaces: inheritedNamespaces)
+            return bindings
+        }
+        let directSlots = children.map(directCanonicalSlot)
+        var nearestPrevious: [Int?] = Array(repeating: nil, count: children.count)
+        var previous: Int?
+        for index in children.indices {
+            nearestPrevious[index] = previous
+            if let slot = directSlots[index] { previous = slot }
+        }
+        var nearestNext: [Int?] = Array(repeating: nil, count: children.count)
+        var next: Int?
+        for index in children.indices.reversed() {
+            nearestNext[index] = next
+            if let slot = directSlots[index] { next = slot }
+        }
+        var recognizedStyleIndex = 0
+        for (childIndex, child) in children.enumerated() {
+            guard let localName = child.localName else { continue }
+            let styleType = wordAttributeValue(child, localName: "type")
+            let styleProjectionIndex: Int?
+            if isWordprocessingMLElement(child),
+               localName == "tblStylePr",
+               let styleType,
+               TableConditionalStyleType(rawValue: styleType) != nil {
+                styleProjectionIndex = recognizedStyleIndex
+                recognizedStyleIndex += 1
+            } else {
+                styleProjectionIndex = nil
+            }
+
+            // Markup-compatibility wrappers must stay at the schema position
+            // of the property carried by their effective branch. For other
+            // extensions, retain their source position between the nearest
+            // standard siblings instead of moving every extension to the end.
+            let isMarkupCompatibilityWrapper = child.uri == mcNamespace
+                && localName == "AlternateContent"
+            let isProcessContentWrapper = processContentNames.contains(
+                expandedNameKey(namespaceURI: child.uri, localName: localName))
+            let isCompatibilityCarrier = isMarkupCompatibilityWrapper
+                || isProcessContentWrapper
+            let representedNames = isCompatibilityCarrier
+                ? representedWMLNames(
+                    child,
+                    namespaces: namespaceContext,
+                    processContent: processContentNames) : []
+            let descendantSlot = representedNames.compactMap {
+                TableProperties.canonicalPosition[$0]
+            }.min()
+            let previousSlot = nearestPrevious[childIndex]
+            let nextSlot = nearestNext[childIndex]
+            let sourceSlot = directSlots[childIndex]
+                ?? descendantSlot
+                ?? nextSlot
+                ?? previousSlot
+                ?? 900
+            props.rawChildren.append(PreservedTableProperty(
+                qualifiedName: child.name ?? localName,
+                localName: localName,
+                namespaceURI: child.uri,
+                styleProjectionIndex: styleProjectionIndex,
+                representedStyleTypes: isCompatibilityCarrier
+                    ? representedStyleTypes(
+                        child,
+                        namespaces: namespaceContext,
+                        processContent: processContentNames) : [],
+                slotPosition: sourceSlot,
+                sourceOrder: childIndex,
+                representedWMLNames: representedNames,
+                namespaceBindings: namespaceBindingsUsed(
+                    in: child,
+                    inheritedNamespaces: namespaceContext),
+                xml: child.xmlString))
+        }
+
+        // Foundation serializes a child without namespace declarations that
+        // were inherited from tblPr/body/table ancestors. Capture the local
+        // in-scope closure below this XML part's root (the root declarations
+        // are preserved by the container root bridge) and re-declare it on
+        // the rebuilt tblPr.
+        var ancestry: [XMLElement] = []
+        var cursor: XMLNode? = element
+        while let current = cursor as? XMLElement {
+            if current.parent is XMLElement {
+                ancestry.append(current)
+            }
+            cursor = current.parent
+        }
+        for ancestor in ancestry.reversed() {
+            for namespace in ancestor.namespaces ?? [] {
+                let prefix = namespace.name ?? ""
+                props.inScopeNamespaces[prefix] = namespace.stringValue ?? ""
+            }
+        }
+        for attribute in element.attributes ?? [] {
+            guard let name = attribute.name else { continue }
+            props.wrapperAttributes[name] = attribute.stringValue ?? ""
+        }
+
+        props.sourceProjection = TablePropertiesSourceProjection(
+            width: props.width,
+            widthType: props.widthType,
+            alignment: props.alignment,
+            borders: props.borders,
+            cellMargins: props.cellMargins,
+            layout: props.layout)
 
         return props
     }
@@ -2921,15 +3282,185 @@ public struct DocxReader {
             props.shading = shading
         }
 
-        // v0.17.0+ (#49): diagonal borders
+        // v0.17.0+ (#49): diagonal borders.
+        // #99: the four edge borders were never parsed here, so any operation
+        // that re-serialised from the model dropped every cell border in the
+        // document — including cells that were never touched. `CellBorders`
+        // already declared the fields and `TableCellProperties.toXML()` already
+        // emitted all six directions; the gap was read-side only.
         if let tcBorders = element.elements(forName: "w:tcBorders").first {
+            let top = parseBorder(tcBorders.elements(forName: "w:top").first)
+            let bottom = parseBorder(tcBorders.elements(forName: "w:bottom").first)
+            let left = parseBorder(tcBorders.elements(forName: "w:left").first)
+            let right = parseBorder(tcBorders.elements(forName: "w:right").first)
+            // #99: inside borders had no model field, so nothing read them and
+            // nothing could write them back — the same three-sided absence
+            // #101 had for `<w:tcMar>`.
+            let insideH = parseBorder(tcBorders.elements(forName: "w:insideH").first)
+            let insideV = parseBorder(tcBorders.elements(forName: "w:insideV").first)
             let tl2br = parseBorder(tcBorders.elements(forName: "w:tl2br").first)
             let tr2bl = parseBorder(tcBorders.elements(forName: "w:tr2bl").first)
-            if tl2br != nil || tr2bl != nil {
+            // Allocate only when the source actually carried a border: a cell
+            // with no `<w:tcBorders>` (or an empty one) must not gain borders
+            // on read, because `parseBorder` substitutes defaults for absent
+            // attributes and would otherwise invent them.
+            if [top, bottom, left, right, insideH, insideV, tl2br, tr2bl].contains(where: { $0 != nil }) {
                 if props.borders == nil { props.borders = CellBorders() }
+                props.borders?.top = top
+                props.borders?.bottom = bottom
+                props.borders?.left = left
+                props.borders?.right = right
+                props.borders?.insideH = insideH
+                props.borders?.insideV = insideV
                 props.borders?.tl2br = tl2br
                 props.borders?.tr2bl = tr2bl
             }
+        }
+
+        // #101: cell-level margins. `<w:tcMar>` was read by nothing and emitted
+        // by nothing, so any re-serialisation dropped every cell's margins —
+        // the other half of the same `<w:tcPr>` as #99's borders.
+        if let tcMar = element.elements(forName: "w:tcMar").first {
+            let top = parseMarginWidth(tcMar.elements(forName: "w:top").first)
+            let bottom = parseMarginWidth(tcMar.elements(forName: "w:bottom").first)
+            let left = parseMarginWidth(tcMar.elements(forName: "w:left").first)
+            let right = parseMarginWidth(tcMar.elements(forName: "w:right").first)
+            // Allocate only when the source carried at least one edge, and
+            // leave absent edges nil: a partially-specified `<w:tcMar>` must
+            // not have its missing sides invented. Note `w:w="0"` is a real
+            // value (the macdoc#142 sample has top/bottom at 0), so the guard
+            // tests for nil rather than for zero.
+            if [top, bottom, left, right].contains(where: { $0 != nil }) {
+                props.margins = TableCellMargins(top: top, bottom: bottom, left: left, right: right)
+            }
+        }
+
+        return props
+    }
+
+    /// #101 helper: parse the `w:w` (twips) attribute of a `<w:tcMar>` child.
+    /// Returns nil when the element or the attribute is absent, so an
+    /// unspecified edge stays unspecified rather than defaulting to zero.
+    private static func parseMarginWidth(_ element: XMLElement?) -> Int? {
+        guard let el = element,
+              let raw = el.attribute(forName: "w:w")?.stringValue else { return nil }
+        return Int(raw)
+    }
+
+
+    /// #84: parse a body-level `<w:sectPr>` into the typed model.
+    ///
+    /// Before this existed, `parseBody` skipped `<w:sectPr>` (correctly — it is
+    /// not a `BodyChild`) and nothing else read it, so `DocxWriter` always
+    /// emitted a default-constructed `SectionProperties`: US Letter page size,
+    /// generic 1440 margins, no header/footer references. The failure mode was
+    /// not a missing attribute but a whole section block swapped for another
+    /// document's.
+    ///
+    /// Coverage is deliberately the set `SectionProperties.toXML()` can emit,
+    /// so read and write are symmetric. Both attributes this note used to
+    /// list as unexpressible — `<w:docGrid w:type>` and a non-720
+    /// `<w:cols w:space>` — are now modelled and round-trip.
+    static func parseSectionProperties(_ element: XMLElement) -> SectionProperties {
+        var props = SectionProperties()
+
+        func intAttr(_ el: XMLElement?, _ name: String) -> Int? {
+            guard let raw = el?.attribute(forName: name)?.stringValue else { return nil }
+            return Int(raw)
+        }
+
+        // Header / footer references, per w:type.
+        for ref in element.elements(forName: "w:headerReference") {
+            guard let rId = ref.attribute(forName: "r:id")?.stringValue else { continue }
+            switch ref.attribute(forName: "w:type")?.stringValue {
+            case "first": props.headerReferences.firstRef = rId
+            case "even":  props.headerReferences.evenRef = rId
+            default:
+                props.headerReferences.defaultRef = rId
+                props.headerReference = rId
+            }
+        }
+        for ref in element.elements(forName: "w:footerReference") {
+            guard let rId = ref.attribute(forName: "r:id")?.stringValue else { continue }
+            switch ref.attribute(forName: "w:type")?.stringValue {
+            case "first": props.footerReferences.firstRef = rId
+            case "even":  props.footerReferences.evenRef = rId
+            default:
+                props.footerReferences.defaultRef = rId
+                props.footerReference = rId
+            }
+        }
+
+        // Section break type.
+        if let raw = element.elements(forName: "w:type").first?
+            .attribute(forName: "w:val")?.stringValue {
+            props.sectionBreakType = SectionBreakType(rawValue: raw)
+        }
+
+        // Page size + orientation.
+        if let pgSz = element.elements(forName: "w:pgSz").first {
+            let w = intAttr(pgSz, "w:w") ?? props.pageSize.width
+            let h = intAttr(pgSz, "w:h") ?? props.pageSize.height
+            props.pageSize = PageSize(width: w, height: h)
+            if pgSz.attribute(forName: "w:orient")?.stringValue == "landscape" {
+                props.orientation = .landscape
+            }
+        }
+
+        // Page margins — keep the model default for any attribute the source omits.
+        if let pgMar = element.elements(forName: "w:pgMar").first {
+            var m = props.pageMargins
+            m.top = intAttr(pgMar, "w:top") ?? m.top
+            m.right = intAttr(pgMar, "w:right") ?? m.right
+            m.bottom = intAttr(pgMar, "w:bottom") ?? m.bottom
+            m.left = intAttr(pgMar, "w:left") ?? m.left
+            m.header = intAttr(pgMar, "w:header") ?? m.header
+            m.footer = intAttr(pgMar, "w:footer") ?? m.footer
+            m.gutter = intAttr(pgMar, "w:gutter") ?? m.gutter
+            props.pageMargins = m
+        }
+
+        // Page numbering.
+        if let pgNum = element.elements(forName: "w:pgNumType").first {
+            props.pageNumberStartValue = intAttr(pgNum, "w:start")
+            if let fmt = pgNum.attribute(forName: "w:fmt")?.stringValue {
+                props.pageNumberFormat = SectionPageNumberFormat(rawValue: fmt)
+            }
+        }
+
+        // Columns. `w:num` and `w:space` are read independently: a section may
+        // carry a gutter without stating a count (one column is the default),
+        // and reading them together would drop the gutter in that shape.
+        if let cols = element.elements(forName: "w:cols").first {
+            if let num = intAttr(cols, "w:num") { props.columns = num }
+            if let space = intAttr(cols, "w:space") { props.columnSpacing = space }
+        }
+
+        // Line numbering.
+        if let ln = element.elements(forName: "w:lnNumType").first,
+           let countBy = intAttr(ln, "w:countBy") {
+            let restart = ln.attribute(forName: "w:restart")?.stringValue
+                .flatMap(LineNumberRestart.init(rawValue:)) ?? .continuous
+            props.lineNumbers = LineNumbers(
+                countBy: countBy, start: intAttr(ln, "w:start"), restart: restart)
+        }
+
+        // Vertical alignment.
+        if let raw = element.elements(forName: "w:vAlign").first?
+            .attribute(forName: "w:val")?.stringValue {
+            props.verticalAlignment = SectionVerticalAlignment(rawValue: raw)
+        }
+
+        // Distinct title page.
+        props.titlePageDistinct = !element.elements(forName: "w:titlePg").isEmpty
+
+        // Document grid.
+        if let grid = element.elements(forName: "w:docGrid").first,
+           let linePitch = intAttr(grid, "w:linePitch") {
+            props.docGrid = DocumentGrid(
+                linePitch: linePitch,
+                charSpace: intAttr(grid, "w:charSpace"),
+                type: grid.attribute(forName: "w:type")?.stringValue)
         }
 
         return props

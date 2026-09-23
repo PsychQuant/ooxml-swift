@@ -31,21 +31,77 @@ public final class SyncOrchestrator {
     /// diffs run against this.
     private var baselineDocumentTree: XmlTree
 
-    /// Log length at the last flush/bootstrap: entries beyond this index
-    /// with `source == .swift` are "pending" (not yet on disk) for
-    /// conflict-detection purposes.
-    private var flushedOpCount: Int
+    /// Byte-level baseline for every package part. Optional only while
+    /// upgrading a pre-part-hash snapshot; the first successful import or
+    /// flush refreshes it.
+    private var baselinePartSHA256: [String: String]?
+    /// SHA-256 of the exact docx generation this session has accepted.
+    /// `flush()` compares it immediately before replacement so an external
+    /// save cannot be silently overwritten.
+    private var baselineDocxSHA256: String
+
+    /// Swift entries present in the canonical log/in-memory tree but not yet
+    /// materialized in the docx. IDs are required because imported Word ops
+    /// can follow a pending Swift op while already being present on disk.
+    private var pendingSwiftOpIDs: Set<UUID>
 
     private var changeDetector: DocxChangeDetector
+    private var isClosed = false
+
+    /// Releases the reader-owned extracted package. Idempotent; callers may
+    /// close a session explicitly, while `deinit` remains the safety net.
+    public func close() {
+        guard !isClosed else { return }
+        document.close()
+        isClosed = true
+    }
+
+    deinit {
+        document.close()
+    }
 
     private init(document: WordDocument, docxURL: URL,
-                 baseline: XmlTree, flushedOpCount: Int,
+                 baseline: XmlTree, baselinePartSHA256: [String: String]?,
+                 baselineDocxSHA256: String,
+                 pendingSwiftOpIDs: Set<UUID>,
                  changeDetector: DocxChangeDetector) {
         self.document = document
         self.docxURL = docxURL
         self.baselineDocumentTree = baseline
-        self.flushedOpCount = flushedOpCount
+        self.baselinePartSHA256 = baselinePartSHA256
+        self.baselineDocxSHA256 = baselineDocxSHA256
+        self.pendingSwiftOpIDs = pendingSwiftOpIDs
         self.changeDetector = changeDetector
+    }
+
+    private func requireOpen() throws {
+        if isClosed { throw SyncError.sessionClosed }
+    }
+
+    private func requireDiskGeneration(_ expectedSHA256: String) throws {
+        if isLockedByWord {
+            throw SyncError.fileLockedByWord(
+                lockURL: WordLock.lockFileURL(for: docxURL))
+        }
+        let actual = SidecarStore.sha256Hex(of: try Data(contentsOf: docxURL))
+        guard actual == expectedSHA256 else {
+            throw SyncError.externalGenerationChanged(
+                expectedSHA256: expectedSHA256, actualSHA256: actual)
+        }
+    }
+
+    private static func requireDiskGeneration(
+        at url: URL, expectedSHA256: String
+    ) throws {
+        if WordLock.isLockedByWord(url) {
+            throw SyncError.fileLockedByWord(
+                lockURL: WordLock.lockFileURL(for: url))
+        }
+        let actual = SidecarStore.sha256Hex(of: try Data(contentsOf: url))
+        guard actual == expectedSHA256 else {
+            throw SyncError.externalGenerationChanged(
+                expectedSHA256: expectedSHA256, actualSHA256: actual)
+        }
     }
 
     // MARK: - Bootstrap (task 4.7)
@@ -60,28 +116,58 @@ public final class SyncOrchestrator {
     public static func bootstrapFromDocx(
         url: URL, policy: SyncPolicy = .abortOnConflict
     ) throws -> SyncOrchestrator {
-        var document = try DocxReader.read(from: url, wireTreeBackedViews: true)
+        if WordLock.isLockedByWord(url) {
+            throw SyncError.fileLockedByWord(
+                lockURL: WordLock.lockFileURL(for: url))
+        }
+        let bootstrapData = try Data(contentsOf: url)
+        let currentDocxSHA256 = SidecarStore.sha256Hex(of: bootstrapData)
+        let generationDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ooxml-sync-bootstrap-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: generationDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: generationDirectory) }
+        let generationURL = generationDirectory.appendingPathComponent("generation.docx")
+        try bootstrapData.write(to: generationURL)
+
+        var document = try DocxReader.read(
+            from: generationURL, wireTreeBackedViews: true)
+        var transferredDocument = false
+        defer {
+            if !transferredDocument { document.close() }
+        }
         guard let currentTree = document.xmlTrees["word/document.xml"] else {
             throw SyncError.missingDocumentTree(partPath: "word/document.xml")
         }
 
-        let existingLog = try SidecarStore.loadLog(alongside: url)
-        let existingSnapshot = try SidecarStore.loadSnapshot(alongside: url)
+        let existingState = try SidecarStore.loadSyncState(alongside: url)
+        let existingLog = existingState.log
+        let existingSnapshot = existingState.snapshot
 
         if let log = existingLog { document.operationLog = log }
 
         let detector = try DocxChangeDetector(url: url)
+        try requireDiskGeneration(at: url, expectedSHA256: currentDocxSHA256)
 
         guard let snapshot = existingSnapshot else {
             // Fresh start: sidecars created with the docx's current state.
             let orchestrator = SyncOrchestrator(
                 document: document, docxURL: url,
                 baseline: currentTree.deepCopy(),
-                flushedOpCount: document.operationLog.entries.count,
+                baselinePartSHA256: SidecarStore.partSHA256(
+                    try RawPartChannel.readAllParts(from: generationURL)),
+                baselineDocxSHA256: currentDocxSHA256,
+                pendingSwiftOpIDs: [],
                 changeDetector: detector)
-            try document.saveWithSidecars(to: url)
+            try document.saveWithSidecars(
+                to: url, expectedDocxSHA256: currentDocxSHA256)
             // Re-baseline the detector: saveWithSidecars rewrote the docx.
             orchestrator.changeDetector = try DocxChangeDetector(url: url)
+            orchestrator.baselinePartSHA256 = SidecarStore.partSHA256(
+                try RawPartChannel.readAllParts(from: url))
+            orchestrator.baselineDocxSHA256 = SidecarStore.sha256Hex(
+                of: try Data(contentsOf: url))
+            transferredDocument = true
             return orchestrator
         }
 
@@ -93,18 +179,49 @@ public final class SyncOrchestrator {
             baseline = parsed
         }
 
+        let pendingIDs = Set(snapshot.pendingSwiftOpIDs ?? [])
+        let pendingEntries = document.operationLog.entries.filter {
+            pendingIDs.contains($0.opID) && $0.source == .swift
+        }
+        let restoredPendingIDs = Set(pendingEntries.map(\.opID))
+        let missingPendingIDs = pendingIDs.subtracting(restoredPendingIDs)
+        guard missingPendingIDs.isEmpty else {
+            throw SyncError.missingPendingOperations(opIDs: missingPendingIDs.sorted {
+                $0.uuidString < $1.uuidString
+            })
+        }
+        if !pendingEntries.isEmpty, currentDocxSHA256 != snapshot.docxSHA256 {
+            // The live docx contains Word edits newer than the snapshot.
+            // Reconstruct canonical memory from the snapshot baseline first;
+            // otherwise importing the stale delta onto the already-new disk
+            // tree duplicates non-idempotent inserts.
+            document.xmlTrees["word/document.xml"] = baseline.deepCopy()
+            document.resyncBodyFromDocumentTree()
+        }
+        if !pendingEntries.isEmpty {
+            try document.appendAndMaterialize(
+                pendingEntries.map(\.op),
+                source: .swift,
+                replayOpIDs: pendingEntries.map(\.opID),
+                replayTimestamps: pendingEntries.map(\.timestamp),
+                appendToLog: false)
+            document.resyncBodyFromDocumentTree()
+        }
+
         let orchestrator = SyncOrchestrator(
             document: document, docxURL: url,
             baseline: baseline,
-            flushedOpCount: document.operationLog.entries.count,
+            baselinePartSHA256: snapshot.partSHA256,
+            baselineDocxSHA256: currentDocxSHA256,
+            pendingSwiftOpIDs: pendingIDs,
             changeDetector: detector)
 
         // Stale snapshot: Word (or anything) changed the docx since the
         // snapshot was taken — import the intervening changes now.
-        let currentHash = SidecarStore.sha256Hex(of: try Data(contentsOf: url))
-        if currentHash != snapshot.docxSHA256 {
+        if currentDocxSHA256 != snapshot.docxSHA256 {
             try orchestrator.importFromDisk(policy: policy)
         }
+        transferredDocument = true
         return orchestrator
     }
 
@@ -112,7 +229,8 @@ public final class SyncOrchestrator {
 
     /// Polls the docx for a real content change (mtime fast-path + SHA-256).
     public func checkForExternalChange() throws -> Bool {
-        try changeDetector.poll()
+        try requireOpen()
+        return try changeDetector.poll()
     }
 
     /// True while Word's `~$` owner file is present next to the docx.
@@ -128,45 +246,236 @@ public final class SyncOrchestrator {
     /// and advances the baseline. Returns the appended operations.
     @discardableResult
     public func importFromDisk(policy: SyncPolicy = .abortOnConflict) throws -> [Operation] {
-        let onDisk = try DocxReader.read(from: docxURL, wireTreeBackedViews: false)
+        try importFromDisk(
+            policy: policy, immediatelyBeforeSnapshotWrite: nil)
+    }
+
+    /// Test injection is closure-valued and passed per call; production sync
+    /// has no global mutable hook. It lets transaction tests force the second
+    /// sidecar write to fail deterministically.
+    @discardableResult
+    internal func importFromDisk(
+        policy: SyncPolicy,
+        immediatelyBeforeSnapshotWrite: (() throws -> Void)?
+    ) throws -> [Operation] {
+        try requireOpen()
+        if isLockedByWord {
+            throw SyncError.fileLockedByWord(lockURL: WordLock.lockFileURL(for: docxURL))
+        }
+        // Parse and hash one immutable byte generation. Reading the live path
+        // separately for the tree and raw parts can otherwise mix two Word
+        // saves into one baseline.
+        let generationData = try Data(contentsOf: docxURL)
+        let generationSHA256 = SidecarStore.sha256Hex(of: generationData)
+        let generationDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ooxml-sync-generation-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: generationDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: generationDirectory) }
+        let generationURL = generationDirectory.appendingPathComponent("generation.docx")
+        try generationData.write(to: generationURL)
+
+        var onDisk = try DocxReader.read(from: generationURL, wireTreeBackedViews: false)
+        var adoptedOnDisk = false
+        defer { if !adoptedOnDisk { onDisk.close() } }
         guard let diskTree = onDisk.xmlTrees["word/document.xml"] else {
             throw SyncError.missingDocumentTree(partPath: "word/document.xml")
         }
 
         let diff = WordImport.diff(snapshot: baselineDocumentTree, current: diskTree)
-        let pending = Array(document.operationLog.entries.dropFirst(flushedOpCount))
+        let pending = document.operationLog.entries.filter {
+            pendingSwiftOpIDs.contains($0.opID) && $0.source == .swift
+        }
         let resolved = try SyncConflict.resolve(
             wordOps: diff.operations, pendingSwiftOps: pending, policy: policy)
 
-        if !resolved.isEmpty {
-            try document.appendAndMaterialize(resolved, source: .word)
-            document.resyncBodyFromDocumentTree()
-            try SidecarStore.saveLog(document.operationLog, alongside: docxURL)
+        // Prove whether the semantic paragraph ops reproduce the complete
+        // normalized document tree. Anything outside that surface (formatting,
+        // tables, sections, ID-less edits, vendor nodes) rides a raw part op.
+        var semanticCoversDocument = baselineDocumentTree.root.normalizedFingerprint()
+            == diskTree.root.normalizedFingerprint()
+        if !diff.operations.isEmpty {
+            var trialLog = OperationLog()
+            for op in diff.operations { trialLog.append(op, source: .word) }
+            if let trial = try? OperationReducer.materialize(
+                log: trialLog, base: baselineDocumentTree.deepCopy()) {
+                semanticCoversDocument = trial.root.normalizedFingerprint()
+                    == diskTree.root.normalizedFingerprint()
+            }
         }
 
-        // Disk state becomes the new diff baseline; the detector's baseline
-        // is already advanced by the poll (or re-anchored here for direct
-        // importFromDisk calls without a preceding poll).
-        baselineDocumentTree = diskTree.deepCopy()
-        changeDetector = try DocxChangeDetector(url: docxURL)
+        let diskParts = try RawPartChannel.readAllParts(from: generationURL)
+        let diskPartSHA256 = SidecarStore.partSHA256(diskParts)
+        let changedSiblingPaths: [String]
+        if let baselinePartSHA256 {
+            let allPaths = Set(baselinePartSHA256.keys).union(diskPartSHA256.keys)
+            changedSiblingPaths = allPaths.filter {
+                $0 != "word/document.xml"
+                    && baselinePartSHA256[$0] != diskPartSHA256[$0]
+            }.sorted()
+        } else {
+            // An old snapshot has no raw-part hashes. Preserve every current
+            // sibling rather than silently treating current disk bytes as the
+            // previous baseline. The next snapshot upgrades the sidecar.
+            changedSiblingPaths = diskParts.keys.filter {
+                $0 != "word/document.xml"
+            }.sorted()
+        }
 
-        // 7.4 verify P1: persist the advanced baseline. With only the log
-        // saved, reopening before flush() compared the docx against the
-        // STALE snapshot and replayed the same Word diff again.
-        let docxData = try Data(contentsOf: docxURL)
+        var carryOps: [Operation] = []
+        if !semanticCoversDocument || diff.requiresDocumentCarry
+            || !diff.unrepresentedChanges.isEmpty {
+            if let bytes = diskParts["word/document.xml"],
+               let xml = String(data: bytes, encoding: .utf8) {
+                carryOps.append(.carryPart(partPath: "word/document.xml", xml: xml))
+            }
+        }
+        for path in changedSiblingPaths {
+            // Deletions cannot yet be represented by the raw channel. Fail
+            // loudly below instead of pretending the baseline advanced.
+            guard let bytes = diskParts[path] else { continue }
+            if let xml = String(data: bytes, encoding: .utf8) {
+                carryOps.append(.carryPart(partPath: path, xml: xml))
+            } else {
+                carryOps.append(.carryBinaryPart(
+                    partPath: path, base64: bytes.base64EncodedString()))
+            }
+        }
+
+        let deletedParts = changedSiblingPaths.filter { diskParts[$0] == nil }
+        let unsafeExternalParts = carryOps.map { op -> String in
+            switch op {
+            case .carryPart(let path, _), .carryBinaryPart(let path, _): return path
+            default: return ""
+            }
+        } + deletedParts
+        if !deletedParts.isEmpty {
+            throw SyncError.unrepresentedExternalChanges(partPaths: deletedParts)
+        }
+        if !pending.isEmpty && !unsafeExternalParts.isEmpty {
+            throw SyncError.unrepresentedExternalChanges(
+                partPaths: Array(Set(unsafeExternalParts)).sorted())
+        }
+
+        // Recheck immediately before advancing canonical state/sidecars. A
+        // concurrent replace invalidates this import instead of committing a
+        // tree, raw parts, and hash taken from different generations.
+        try requireDiskGeneration(generationSHA256)
+
+        var candidateDocument = document
+        if pending.isEmpty {
+            // No Swift state needs merging: the freshly read Word package is
+            // the exact canonical state. Adopt it wholesale, append semantic
+            // history plus raw operations for unrepresentable/sibling parts,
+            // and retire the old preserved archive.
+            let appended = resolved + carryOps
+            var log = document.operationLog
+            for op in appended { log.append(op, source: .word) }
+            onDisk.operationLog = log
+            onDisk.carriedParts = document.carriedParts
+            for op in carryOps {
+                switch op {
+                case .carryPart(let path, let xml):
+                    onDisk.carriedParts[path] = Data(xml.utf8)
+                case .carryBinaryPart(let path, let base64):
+                    onDisk.carriedParts[path] = Data(base64Encoded: base64)
+                default:
+                    break
+                }
+            }
+            candidateDocument = onDisk
+        } else {
+            if !resolved.isEmpty {
+                try candidateDocument.appendAndMaterialize(resolved, source: .word)
+                candidateDocument.resyncBodyFromDocumentTree()
+            }
+            // normalizedFingerprint deliberately ignores rsid churn, but the
+            // raw attributes still belong to Word's accepted generation.
+            // Merge that identity noise onto the pending tree before flush;
+            // otherwise a same-session import→flush silently erases it.
+            if let candidateTree = candidateDocument.xmlTrees["word/document.xml"] {
+                let mergedTree = candidateTree.deepCopy()
+                if Self.mergeRsidNoise(from: diskTree.root, into: mergedTree.root) {
+                    candidateDocument.xmlTrees["word/document.xml"] = mergedTree
+                    candidateDocument.modifiedParts.insert("word/document.xml")
+                    candidateDocument.treeFreshParts.insert("word/document.xml")
+                    candidateDocument.resyncBodyFromDocumentTree()
+                }
+            }
+        }
+
+        // Build and persist the new log/snapshot generation before advancing
+        // any in-memory baseline. The pair writer rolls both paths back on a
+        // second-write failure, so restart never sees a new log with an old
+        // snapshot (or vice versa).
         var fingerprints: [String: String] = [:]
         for (partPath, tree) in onDisk.xmlTrees {
             fingerprints[partPath] = tree.root.normalizedFingerprint()
         }
         let serializedBaseline = try? XmlTreeWriter.serialize(diskTree)
-        try SidecarStore.saveSnapshot(SyncSnapshot(
-            docxSHA256: SidecarStore.sha256Hex(of: docxData),
+        let nextSnapshot = SyncSnapshot(
+            docxSHA256: generationSHA256,
             savedAt: Date(),
-            opCount: document.operationLog.entries.count,
+            opCount: candidateDocument.operationLog.entries.count,
             partFingerprints: fingerprints,
-            documentXML: serializedBaseline.map { String(decoding: $0, as: UTF8.self) }),
-            alongside: docxURL)
-        return resolved
+            documentXML: serializedBaseline.map { String(decoding: $0, as: UTF8.self) },
+            partSHA256: diskPartSHA256,
+            pendingSwiftOpIDs: pendingSwiftOpIDs.sorted {
+                $0.uuidString < $1.uuidString
+            })
+        try requireDiskGeneration(generationSHA256)
+        let nextDetector = try DocxChangeDetector(url: docxURL)
+        try SidecarStore.saveSyncState(
+            log: candidateDocument.operationLog,
+            snapshot: nextSnapshot,
+            alongside: docxURL,
+            immediatelyBeforeSnapshotWrite: immediatelyBeforeSnapshotWrite)
+
+        if pending.isEmpty {
+            document.close()
+            document = candidateDocument
+            adoptedOnDisk = true
+        } else {
+            document = candidateDocument
+        }
+        baselineDocumentTree = diskTree.deepCopy()
+        baselinePartSHA256 = diskPartSHA256
+        baselineDocxSHA256 = generationSHA256
+        changeDetector = nextDetector
+        return resolved + carryOps
+    }
+
+    /// Copies Word's rsid identity-noise attributes across structurally
+    /// aligned nodes while leaving semantic attributes/content untouched.
+    @discardableResult
+    private static func mergeRsidNoise(from disk: XmlNode, into memory: XmlNode) -> Bool {
+        guard disk.kind == memory.kind,
+              disk.localName == memory.localName else { return false }
+        let diskRsid = disk.attributes.filter(\.isRsidNoise)
+        let memoryRsid = memory.attributes.filter(\.isRsidNoise)
+        var changed = diskRsid != memoryRsid
+        if changed {
+            memory.attributes = memory.attributes.filter { !$0.isRsidNoise } + diskRsid
+        }
+
+        guard disk.kind == .element else { return changed }
+        for (index, memoryChild) in memory.children.enumerated() {
+            let diskChild: XmlNode?
+            if index < disk.children.count,
+               disk.children[index].kind == memoryChild.kind,
+               disk.children[index].localName == memoryChild.localName {
+                diskChild = disk.children[index]
+            } else if let stableID = memoryChild.stableID {
+                diskChild = disk.children.first { $0.stableID == stableID }
+            } else {
+                diskChild = nil
+            }
+            if let diskChild,
+               mergeRsidNoise(from: diskChild, into: memoryChild) {
+                changed = true
+            }
+        }
+        return changed
     }
 
     // MARK: - Flush (log → docx)
@@ -175,14 +484,23 @@ public final class SyncOrchestrator {
     /// sidecars. Refuses while Word holds the file open (spec scenario
     /// "Swift write while Word holds lock").
     public func flush() throws {
+        try requireOpen()
         if isLockedByWord {
             throw SyncError.fileLockedByWord(lockURL: WordLock.lockFileURL(for: docxURL))
         }
-        try document.saveWithSidecars(to: docxURL)
-        flushedOpCount = document.operationLog.entries.count
+        try requireDiskGeneration(baselineDocxSHA256)
+        try document.saveWithSidecars(
+            to: docxURL,
+            pendingSwiftOpIDs: [],
+            expectedDocxSHA256: baselineDocxSHA256)
+        pendingSwiftOpIDs.removeAll()
         if let tree = document.xmlTrees["word/document.xml"] {
             baselineDocumentTree = tree.deepCopy()
         }
+        baselinePartSHA256 = SidecarStore.partSHA256(
+            try RawPartChannel.readAllParts(from: docxURL))
+        baselineDocxSHA256 = SidecarStore.sha256Hex(
+            of: try Data(contentsOf: docxURL))
         // Our own write must not read back as an external change.
         changeDetector = try DocxChangeDetector(url: docxURL)
     }
@@ -192,6 +510,12 @@ public final class SyncOrchestrator {
     /// Convenience: the task-3.15 typed setter, applied to the
     /// orchestrator-owned document (pending until `flush()`).
     public func setParagraphText(id: ElementID, _ text: String) throws {
+        try requireOpen()
+        let previousCount = document.operationLog.entries.count
         try document.setParagraphText(id: id, text)
+        for entry in document.operationLog.entries.dropFirst(previousCount)
+        where entry.source == .swift {
+            pendingSwiftOpIDs.insert(entry.opID)
+        }
     }
 }

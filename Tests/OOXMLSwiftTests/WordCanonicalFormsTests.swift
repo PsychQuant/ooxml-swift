@@ -71,10 +71,12 @@ final class WordCanonicalFormsTests: XCTestCase {
         try doc.apply(operations: [
             .appendParagraph(in: nil, paragraph: ParagraphPayload(text: "t", paraId: "P1")),
         ])
-        // Default authoring root unchanged (byte-identical to pre-extension).
+        // Default authoring root includes relationships for hyperlink-ready
+        // documents; ReverseExtractor uses this same exact default.
         XCTAssertEqual(attrPairs(try documentRoot(doc)), [
             "xmlns:w=http://schemas.openxmlformats.org/wordprocessingml/2006/main",
             "xmlns:w14=http://schemas.microsoft.com/office/word/2010/wordml",
+            "xmlns:r=http://schemas.openxmlformats.org/officeDocument/2006/relationships",
         ])
     }
 

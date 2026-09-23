@@ -19,3 +19,6 @@ xcuserdata/
 
 # IDD per-issue scratch
 .claude/
+
+# IDD parallel worktree isolation (idd-worktree.sh #167) — not tracked in main tree
+.claude/worktrees/
