@@ -1,0 +1,29 @@
+name: Build
+
+# Compiles the library and the whole test target on every push and PR.
+# Until this existed only CodeQL ran, so a test file that no longer
+# type-checked (Issue175R3GraftTests.swift under Swift 6.4) reached main
+# unnoticed and blocked `swift test` for every branch rebased onto it.
+#
+# Tests are compiled, not run: the suite gates private fixtures behind
+# MACDOC_TEMPLATE_DIR and carries timing-sensitive benchmarks, so a green
+# `swift test` here would claim more than it checks.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Build library and tests
+        run: swift build --build-tests
