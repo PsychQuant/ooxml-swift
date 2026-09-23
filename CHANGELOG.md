@@ -17,9 +17,14 @@ All notable changes to ooxml-swift will be documented in this file.
     其他無法辨識的值與過去一樣讀成開。
   - writer 對明確關輸出 `<w:b w:val="0"/>`，不再塌成缺席或裸 `<w:b/>`；`merge`、`rPrChange` 的 previous format、tree-backed append
     與 run payload 三條平行路徑都保留明確關。`merge` 同理區分底線：patch 明確賦值 `underline = nil` 會移除既有底線，沒賦值則不動。
+    reader 只在認得的樣式與明確的 `w:val="none"` 時才設定底線；`UnderlineType` 沒有的 ST_Underline 值（`wavyDouble`、
+    `dottedHeavy` 等）與 3.7.0 一樣維持未指定——若也當成明確指定，編輯過的段落會把它寫成 `w:val="none"`，連樣式帶來的底線一起取消。
   - `rPr`、`t` 與上述四個元素改以 namespace URI 辨識，不再只認字面的 `w:` 前綴。以前別的前綴（例如 `x:` 綁到 WordprocessingML）
     的 run，其 `rPr` 與文字會**靜默消失**——typed 查找找不到，raw 保留又依 local name 把它們當成已處理而跳過。`rPr` 內其他子元素
     （`sz`、`color`、`rFonts` 等）仍只認 `w:`，這個既有不對稱不在本次範圍。
+- **追蹤修訂的 `rPrChange` 改用與 run 相同的 `rPr` 輸出**。舊版另寫了一套只含粗體、斜體、底線、顏色、字級、字型六項的輸出，
+  其餘屬性（樣式、四軸字型、刪除線、highlight、上下標、字距、語言等）在「修改前格式」裡一律消失；字級還被多乘一次 2
+  （`fontSize` 本來就是半點），12pt 記成 24pt。現在修改前格式是完整的 `rPr`，字級正確。
 
 ### Changed
 

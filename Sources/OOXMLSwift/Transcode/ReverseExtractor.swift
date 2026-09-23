@@ -563,7 +563,7 @@ public enum ReverseExtractor {
             throw Unsupported("on-off-attr", "\(path)/\(attrToken(attribute))")
         }
         switch attribute.value.lowercased() {
-        case "0", "false", "off": return false
+        case "0", "false", "off", "no": return false  // "no": same legacy spelling DocxReader.parseOnOff keeps
         default: return true
         }
     }

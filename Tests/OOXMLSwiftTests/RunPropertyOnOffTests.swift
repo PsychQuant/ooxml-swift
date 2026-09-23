@@ -215,6 +215,40 @@ final class RunPropertyOnOffTests: XCTestCase {
         XCTAssertTrue(run.rawElements?.isEmpty ?? true, "rPr/t must not also be raw-captured")
     }
 
+    func testUnmodeledUnderlineStyleStaysUnspecified() throws {
+        // wavyDouble is legal ST_Underline but has no UnderlineType case. It
+        // must not become an explicit w:val="none" on the next typed write.
+        let xml = try XMLDocument(xmlString: #"""
+        <w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:rPr><w:u w:val="wavyDouble"/></w:rPr>
+          <w:t>text</w:t>
+        </w:r>
+        """#)
+        let run = try DocxReader.parseRun(
+            from: try XCTUnwrap(xml.rootElement()),
+            relationships: RelationshipsCollection()
+        )
+
+        XCTAssertNil(run.properties.specifiedUnderlineRawValue)
+        XCTAssertFalse(run.toXML().contains("<w:u "), "Got: \(run.toXML())")
+    }
+
+    func testExplicitUnderlineNoneStaysExplicit() throws {
+        let xml = try XMLDocument(xmlString: #"""
+        <w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:rPr><w:u w:val="none"/></w:rPr>
+          <w:t>text</w:t>
+        </w:r>
+        """#)
+        let run = try DocxReader.parseRun(
+            from: try XCTUnwrap(xml.rootElement()),
+            relationships: RelationshipsCollection()
+        )
+
+        XCTAssertEqual(run.properties.specifiedUnderlineRawValue, "none")
+        XCTAssertTrue(run.toXML().contains(#"<w:u w:val="none"/>"#), "Got: \(run.toXML())")
+    }
+
     func testLegacyNoSpellingStillParsesAsOff() throws {
         // `no` is not in ST_OnOff, but 3.7.0 read it as off. Dropping it would
         // silently turn such runs bold, because unknown values parse as on.
