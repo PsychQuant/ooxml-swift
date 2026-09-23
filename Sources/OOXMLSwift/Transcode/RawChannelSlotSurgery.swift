@@ -451,20 +451,26 @@ enum RawChannelSlotSurgery {
     /// formatting history — none of them describe a run, and the run-level
     /// schema does not allow the first four, so they are dropped.
     private static func paragraphMarkRunProperties(pPr: String) -> String {
-        guard !pPr.isEmpty else { return "" }
-        var search = pPr.startIndex
-        while let open = pPr.range(of: "<w:rPr", range: search..<pPr.endIndex) {
-            search = open.upperBound
-            guard open.upperBound < pPr.endIndex else { return "" }
-            let next = pPr[open.upperBound]
-            guard next == ">" || next == "/" || isXMLWhitespace(next) else { continue }
-            guard let span = elementSpan(name: "w:rPr", openingAt: open.lowerBound, in: pPr) else { return "" }
-            var rPr = String(pPr[span])
-            if rPr.hasSuffix("/>") { return "" }   // `<w:rPr/>`: nothing to inherit
-            for name in ["w:ins", "w:del", "w:moveFrom", "w:moveTo", "w:rPrChange"] {
-                rPr = removingElements(named: name, from: rPr)
+        // Only a direct child of the outer `w:pPr` is the mark's rPr; walk the
+        // children one element at a time so a nested snapshot (e.g. inside a
+        // non-conforming `w:pPrChange`) can never be picked up by mistake.
+        guard !pPr.isEmpty, let outer = scanTag(in: pPr, from: pPr.startIndex), !outer.selfClosing else { return "" }
+        var i = outer.end
+        while i < pPr.endIndex, let lt = pPr[i...].firstIndex(of: "<") {
+            let after = pPr.index(after: lt)
+            guard after < pPr.endIndex, pPr[after] != "/" else { return "" }   // reached </w:pPr>
+            if pPr[lt...].hasPrefix("<!--") { i = skipPast("-->", from: lt, in: pPr); continue }
+            let name = String(tagName(in: pPr, from: after))
+            guard let span = elementSpan(name: name, openingAt: lt, in: pPr) else { return "" }
+            if name == "w:rPr" {
+                var rPr = String(pPr[span])
+                if rPr.hasSuffix("/>") { return "" }   // `<w:rPr/>`: nothing to inherit
+                for element in ["w:ins", "w:del", "w:moveFrom", "w:moveTo", "w:rPrChange"] {
+                    rPr = removingElements(named: element, from: rPr)
+                }
+                return rPr == "<w:rPr></w:rPr>" ? "" : rPr
             }
-            return rPr == "<w:rPr></w:rPr>" ? "" : rPr
+            i = span.upperBound
         }
         return ""
     }
