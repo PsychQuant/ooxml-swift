@@ -33,13 +33,22 @@ final class Issue175R3GraftTests: XCTestCase {
     private let oddBody = #"<w:customXml w:element="oddblock"><w:p w14:paraId="0A0A0A0A"><w:r w:rsidR="00AB12CD"><w:t>kept-verbatim</w:t></w:r></w:p></w:customXml><w:p w14:paraId="11111111" w14:textId="11111111"><w:r><w:t>One</w:t></w:r></w:p>"#
 
     private func docx(body: String, docRels: String = "", withImage: Bool = false, minimalRoot: Bool = false, crlfProlog: Bool = false, foreignW: Bool = false) throws -> URL {
+        // Built in typed steps: as one `+` chain inside the dictionary literal
+        // this exceeded Swift 6.4's type-checker budget and broke the test target.
+        let prologBreak: String = crlfProlog ? "\r\n" : "\n"
+        let trailer: String = crlfProlog ? "\r\n" : ""
+        let wNamespace: String = foreignW ? "urn:vendor:not-wordprocessingml" : wNS
+        let extraNamespaces: String = minimalRoot ? "" : " xmlns:w14=\"\(w14NS)\" xmlns:r=\"\(rNS)\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\""
+        let prolog: String = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" + prologBreak
+        let root: String = "<w:document xmlns:w=\"\(wNamespace)\"\(extraNamespaces)><w:body>\(body)</w:body></w:document>"
+        let documentXML: String = prolog + root + trailer
         var parts: [String: Data] = [
             "[Content_Types].xml": Data("""
             <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>
             """.utf8),
             "_rels/.rels": Data(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.utf8),
-            "word/document.xml": Data(("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" + (crlfProlog ? "\r\n" : "\n") + "<w:document xmlns:w=\"\(foreignW ? "urn:vendor:not-wordprocessingml" : wNS)\"" + (minimalRoot ? "" : " xmlns:w14=\"\(w14NS)\" xmlns:r=\"\(rNS)\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\"") + "><w:body>\(body)</w:body></w:document>" + (crlfProlog ? "\r\n" : "")).utf8),
+            "word/document.xml": Data(documentXML.utf8),
             "word/_rels/document.xml.rels": Data(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#.utf8 + Data(docRels.utf8) + Data("</Relationships>".utf8)),
         ]
         if withImage { parts["word/media/image1.png"] = onePixelPNG }
