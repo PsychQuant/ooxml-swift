@@ -159,7 +159,11 @@ enum RawChannelSlotSurgery {
         openingTag = String(fragment[..<tagEnd])
         let content = String(fragment[tagEnd..<fragment.index(fragment.endIndex, offsetBy: -"</w:p>".count)])
         let pPr = leadingPropertiesBlock(name: "w:pPr", in: content)
+        // A paragraph with no run at all (an official form's blank field)
+        // takes the paragraph mark's rPr — what Word gives text typed into an
+        // empty paragraph (macdoc#199). With runs, the dominant-run rule stands.
         let rPr = dominantRunProperties(inContent: content)
+            ?? paragraphMarkRunProperties(pPr: pPr)
         return openingTag + pPr + runBlock(rPr: rPr, escaped: escaped) + "</w:p>"
     }
 
@@ -406,7 +410,9 @@ enum RawChannelSlotSurgery {
     /// inline wrappers (`w:hyperlink`, `w:sdt`, `w:fldSimple`) count — an
     /// official form's only formatted run often lives there (verify round 2
     /// N2). Span boundaries are depth-aware (`w:rPrChange` nests `w:rPr`).
-    private static func dominantRunProperties(inContent content: String) -> String {
+    /// Returns nil when the paragraph has no run at all, so the caller can tell
+    /// "no run" apart from "a run without rPr" (#199).
+    private static func dominantRunProperties(inContent content: String) -> String? {
         var best = ""
         var bestLength = -1
         var i = content.startIndex
@@ -436,7 +442,50 @@ enum RawChannelSlotSurgery {
             }
             i = runSpan.upperBound
         }
-        return best
+        return bestLength < 0 ? nil : best
+    }
+
+    /// The paragraph mark's run properties (`<w:pPr><w:rPr>`) as a run's
+    /// `<w:rPr>`. The mark's `w:ins` / `w:del` / `w:moveFrom` / `w:moveTo`
+    /// record revisions *of the mark*, and its `w:rPrChange` is the mark's
+    /// formatting history — none of them describe a run, and the run-level
+    /// schema does not allow the first four, so they are dropped.
+    private static func paragraphMarkRunProperties(pPr: String) -> String {
+        guard !pPr.isEmpty else { return "" }
+        var search = pPr.startIndex
+        while let open = pPr.range(of: "<w:rPr", range: search..<pPr.endIndex) {
+            search = open.upperBound
+            guard open.upperBound < pPr.endIndex else { return "" }
+            let next = pPr[open.upperBound]
+            guard next == ">" || next == "/" || isXMLWhitespace(next) else { continue }
+            guard let span = elementSpan(name: "w:rPr", openingAt: open.lowerBound, in: pPr) else { return "" }
+            var rPr = String(pPr[span])
+            if rPr.hasSuffix("/>") { return "" }   // `<w:rPr/>`: nothing to inherit
+            for name in ["w:ins", "w:del", "w:moveFrom", "w:moveTo", "w:rPrChange"] {
+                rPr = removingElements(named: name, from: rPr)
+            }
+            return rPr == "<w:rPr></w:rPr>" ? "" : rPr
+        }
+        return ""
+    }
+
+    /// Every `<name …/>` or `<name …>…</name>` element removed from `xml`
+    /// (depth-aware, quote-aware via `elementSpan`).
+    private static func removingElements(named name: String, from xml: String) -> String {
+        var out = xml
+        var search = out.startIndex
+        while let open = out.range(of: "<\(name)", range: search..<out.endIndex) {
+            guard open.upperBound < out.endIndex else { break }
+            let next = out[open.upperBound]
+            guard next == ">" || next == "/" || isXMLWhitespace(next),
+                  let span = elementSpan(name: name, openingAt: open.lowerBound, in: out) else {
+                search = open.upperBound; continue
+            }
+            let offset = out.distance(from: out.startIndex, to: span.lowerBound)
+            out.removeSubrange(span)
+            search = out.index(out.startIndex, offsetBy: offset)
+        }
+        return out
     }
 
     /// Concatenated, unescaped `<w:t>` content of a fragment. `<w:t` matched

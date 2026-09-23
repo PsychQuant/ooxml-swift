@@ -583,4 +583,47 @@ extension RawChannelSlotTests {
         XCTAssertGreaterThan(refused, 0,
                              "fixture carries w:tr-owned ids — some refusals expected")
     }
+
+    // MARK: - Empty paragraph inherits the paragraph mark's rPr (macdoc#199)
+
+    /// An official form's blank field is a paragraph with a pPr (carrying the
+    /// mark's font and size) and no runs. Word gives text typed there the
+    /// mark's rPr; the collapsed run must do the same. The mark's own revision
+    /// markers describe the mark, not a run, so they must not be copied.
+    private static let blankFieldDocumentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:tbl><w:tblPr/><w:tr><w:tc><w:p w14:paraId="CCCC3333"><w:r><w:t>姓名</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p w14:paraId="DDDD4444"><w:pPr><w:jc w:val="left"/><w:rPr><w:ins w:id="7" w:author="A" w:date="2026-01-01T00:00:00Z"/><w:rFonts w:eastAsia="標楷體"/><w:sz w:val="28"/><w:rPrChange w:id="8" w:author="A" w:date="2026-01-01T00:00:00Z"><w:rPr><w:sz w:val="24"/></w:rPr></w:rPrChange></w:rPr></w:pPr></w:p><w:p w14:paraId="EEEE5555"><w:pPr><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:r><w:t>既有</w:t></w:r></w:p><w:sectPr/></w:body></w:document>
+        """
+
+    func testEmptyParagraphSlotInheritsParagraphMarkRPr() throws {
+        let reference = try makeTableReference(documentXML: Self.blankFieldDocumentXML)
+        let log = try reverseExpectingRaw(reference)
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "applicant", paraId: "DDDD4444"),
+        ])
+        XCTAssertTrue(script.contains("applicant: \"\""), "a blank field's default is the empty string")
+        script = script.replacingOccurrences(of: "applicant: \"\"", with: "applicant: \"王小明\"")
+        let outXML = String(data: try execute(script: script)["word/document.xml"]!, encoding: .utf8)!
+
+        XCTAssertTrue(outXML.contains(
+            "<w:r><w:rPr><w:rFonts w:eastAsia=\"標楷體\"/><w:sz w:val=\"28\"/></w:rPr><w:t xml:space=\"preserve\">王小明</w:t></w:r>"),
+            "the run takes the mark's rPr, minus the mark's revision markers")
+        let run = outXML.components(separatedBy: "<w:r>").last ?? ""
+        XCTAssertFalse(run.contains("<w:ins"), "the mark's insertion marker is not a run property")
+        XCTAssertFalse(run.contains("w:rPrChange"), "the mark's change history is not the run's")
+        XCTAssertTrue(outXML.contains("<w:pPr><w:jc w:val=\"left\"/><w:rPr><w:ins w:id=\"7\""),
+                      "the paragraph's own pPr (mark revision included) is preserved verbatim")
+    }
+
+    func testParagraphWithAnUnformattedRunKeepsTheRunRule() throws {
+        let reference = try makeTableReference(documentXML: Self.blankFieldDocumentXML)
+        let log = try reverseExpectingRaw(reference)
+        var script = try ScriptExporter.exportSwift(log: log, slots: [
+            SlotDesignation(name: "existing", paraId: "EEEE5555"),
+        ])
+        script = script.replacingOccurrences(of: "existing: \"既有\"", with: "existing: \"改寫\"")
+        let outXML = String(data: try execute(script: script)["word/document.xml"]!, encoding: .utf8)!
+        XCTAssertTrue(outXML.contains("<w:r><w:t xml:space=\"preserve\">改寫</w:t></w:r>"),
+                      "a paragraph that has runs keeps the dominant-run rule; the mark rPr is not a fallback there")
+    }
 }
