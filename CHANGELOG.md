@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-09-23
+
 ### Added
 
 - **Op-level slot 支援多 run 段落**（#131 in PsychQuant/macdoc, PR #92）。3.7.0 只接受最後一次 `setRuns` 恰好一個 run
@@ -26,9 +28,10 @@ All notable changes to ooxml-swift will be documented in this file.
   - reader 依 ST_OnOff 解析 `w:val`：`0` / `false` / `off` 為關，省略或 `1` / `true` / `on` 為開。非標準的 `no` **維持 3.7.0 的讀法（關）**；
     其他無法辨識的值與過去一樣讀成開。
   - writer 對明確關輸出 `<w:b w:val="0"/>`，不再塌成缺席或裸 `<w:b/>`；`merge`、`rPrChange` 的 previous format、tree-backed append
-    與 run payload 三條平行路徑都保留明確關。`merge` 同理區分底線：patch 明確賦值 `underline = nil` 會移除既有底線，沒賦值則不動。
+    與 run payload 這四條平行路徑都保留明確關。`merge` 同理區分底線：patch 明確賦值 `underline = nil` 會移除既有底線，沒賦值則不動。
     reader 只在認得的樣式與明確的 `w:val="none"` 時才設定底線；`UnderlineType` 沒有的 ST_Underline 值（`wavyDouble`、
     `dottedHeavy` 等）與 3.7.0 一樣維持未指定——若也當成明確指定，編輯過的段落會把它寫成 `w:val="none"`，連樣式帶來的底線一起取消。
+  - 同一套解析也用於 `styles.xml` 裡樣式的 `rPr`：樣式的 `<w:b w:val="0"/>` 過去同樣讀成粗體，樣式經 typed 重寫（例如 `updateStyle`）後變成 `<w:b/>`；現在一併修正。
   - `rPr`、`t` 與上述四個元素改以 namespace URI 辨識，不再只認字面的 `w:` 前綴。以前別的前綴（例如 `x:` 綁到 WordprocessingML）
     的 run，其 `rPr` 與文字會**靜默消失**——typed 查找找不到，raw 保留又依 local name 把它們當成已處理而跳過。`rPr` 內其他子元素
     （`sz`、`color`、`rFonts` 等）仍只認 `w:`，這個既有不對稱不在本次範圍。
