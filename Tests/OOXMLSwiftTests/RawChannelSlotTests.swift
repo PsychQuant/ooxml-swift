@@ -179,14 +179,7 @@ final class RawChannelSlotTests: XCTestCase {
     // MARK: - End-to-end on the REC-O-01 fixture (tasks 4.1–4.2)
 
     private func recFixtureURL() throws -> URL {
-        // packages/ooxml-swift/Tests/OOXMLSwiftTests/ → repo root /test-files/
-        var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        for _ in 0..<4 { dir.deleteLastPathComponent() }
-        let url = dir.appendingPathComponent("test-files/REC-O-01-新案審查送件核對單-20250220公告.docx")
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw XCTSkip("REC-O-01 fixture not present at \(url.path)")
-        }
-        return url
+        try TemplateFixtureGate.requireTemplate(TemplateFixtureGate.recFixtureName)
     }
 
     /// The real table-bearing official form: designation succeeds and the
