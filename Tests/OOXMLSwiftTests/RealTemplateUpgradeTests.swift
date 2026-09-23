@@ -231,12 +231,9 @@ final class RealTemplateUpgradeTests: XCTestCase {
     /// cannot carry; that is a documented pre-existing raw-channel limitation,
     /// not a regression from this change.)
     func testThesisFixtureNoRegress() throws {
-        let dir = ProcessInfo.processInfo.environment["MACDOC_TEMPLATE_DIR"]
-        guard let dir else { throw XCTSkip("set MACDOC_TEMPLATE_DIR") }
-        let url = URL(fileURLWithPath: dir).appendingPathComponent("thesis-fixture.docx")
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw XCTSkip("thesis-fixture.docx not present under MACDOC_TEMPLATE_DIR")
-        }
+        let url = try TemplateFixtureGate.requireTemplate(
+            TemplateFixtureGate.thesisFixtureName
+        )
         let reference = try RawPartChannel.readAllParts(from: url)
         let result = try ReverseExtractor.reverse(parts: reference)
         // The key no-regress: document.xml must NOT be falsely claimed as DSL.

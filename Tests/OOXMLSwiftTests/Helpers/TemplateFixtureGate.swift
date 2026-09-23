@@ -17,18 +17,36 @@ enum TemplateFixtureGate {
     /// design.
     static var baselineTemplateName: String { "90_template_ja.docx" }
 
+    /// Private real-world REC form used by the raw-channel slot E2E matrix.
+    /// The filename is stable, but the document lives outside version control
+    /// and is supplied through the same MACDOC_TEMPLATE_DIR gate.
+    static var recFixtureName: String {
+        "REC-O-01-新案審查送件核對單-20250220公告.docx"
+    }
+
+    /// Private thesis corpus fixture used by the content-equality matrix.
+    static var thesisFixtureName: String { "thesis-fixture.docx" }
+
     /// Resolves a real-template fixture `name` under the gate directory
     /// (`dirOverride` when given — for tests injecting a temp dir without
     /// mutating process env — otherwise `$MACDOC_TEMPLATE_DIR`). Throws
     /// `XCTSkip` when the gate is unset or the file is missing, so the calling
     /// test skips loudly rather than failing on CI.
+    static func missingGateMessage(for name: String) -> String {
+        "set MACDOC_TEMPLATE_DIR to a directory containing '\(name)' to run this test"
+    }
+
+    static func missingFixtureMessage(for name: String) -> String {
+        "fixture '\(name)' not found under MACDOC_TEMPLATE_DIR"
+    }
+
     static func requireTemplate(_ name: String, dirOverride: String? = nil) throws -> URL {
         guard let dir = dirOverride ?? ProcessInfo.processInfo.environment["MACDOC_TEMPLATE_DIR"] else {
-            throw XCTSkip("set MACDOC_TEMPLATE_DIR to a directory of real .docx templates to run this test")
+            throw XCTSkip(missingGateMessage(for: name))
         }
         let url = URL(fileURLWithPath: dir).appendingPathComponent(name)
         guard FileManager.default.fileExists(atPath: url.path) else {
-            throw XCTSkip("template '\(name)' not found under \(dir) — gate present but file absent")
+            throw XCTSkip(missingFixtureMessage(for: name))
         }
         return url
     }
