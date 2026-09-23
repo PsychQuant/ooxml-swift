@@ -286,23 +286,10 @@ extension TrackedParagraph {
 extension RunProperties {
     /// 產生 rPrChange 內的舊格式 XML
     func toChangeXML() -> String {
-        var xml = "<w:rPr>"
-
-        if bold == true { xml += "<w:b/>" }
-        if italic == true { xml += "<w:i/>" }
-        if let underline = underline { xml += "<w:u w:val=\"\(underline.rawValue)\"/>" }
-        // v0.19.4+ (#56 R3-NEW-6 codex P1): toChangeXML is a parallel emit path
-        // (rPrChange's previousFormat) that pre-fix only escaped fontName.
-        // color is a String? — same injection sink as RunProperties.toXML's
-        // color emit. Route through escapeXML for parity.
-        if let color = color { xml += "<w:color w:val=\"\(escapeXML(color))\"/>" }
-        if let fontSize = fontSize { xml += "<w:sz w:val=\"\(fontSize * 2)\"/>" }
-        if let fontName = fontName {
-            xml += "<w:rFonts w:ascii=\"\(escapeXML(fontName))\" w:hAnsi=\"\(escapeXML(fontName))\"/>"
-        }
-
-        xml += "</w:rPr>"
-        return xml
+        // rPrChange embeds the same CT_RPr grammar as a live run. Reuse the
+        // canonical emitter so ordering, escaping, and on/off presence cannot
+        // drift through a second hand-written path.
+        "<w:rPr>\(toXML())</w:rPr>"
     }
 }
 

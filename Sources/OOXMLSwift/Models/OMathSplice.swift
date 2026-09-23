@@ -227,8 +227,8 @@ internal extension RunProperties {
             out.rFonts = self.rFonts
             out.fontName = self.fontName
             out.fontSize = self.fontSize
-            out.bold = self.bold
-            out.italic = self.italic
+            if let bold = self.specifiedBold { out.bold = bold }
+            if let italic = self.specifiedItalic { out.italic = italic }
             return out
         case .discard:
             return RunProperties()

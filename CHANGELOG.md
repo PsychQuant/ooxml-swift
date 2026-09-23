@@ -20,11 +20,38 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ### Fixed
 
+- **`bold` / `italic` / `strikethrough` / `noProof` 分得出「沒寫」「開」「明確關」三種狀態**（#115；PsychQuant/macdoc#173、#174）。
+  過去這四個 on/off 屬性只有一個 `Bool`：`<w:b w:val="0"/>` 讀進來是 true，於是任何觸發 typed 重寫的存檔，都會把**沒被動到的**
+  run 改成粗體；反過來，`RunProperties()` patch 裡的 `bold = false` 在 `merge` 時被當成「沒寫」，無法取消既有粗體。現在：
+  - reader 依 ST_OnOff 解析 `w:val`：`0` / `false` / `off` 為關，省略或 `1` / `true` / `on` 為開。非標準的 `no` **維持 3.7.0 的讀法（關）**；
+    其他無法辨識的值與過去一樣讀成開。
+  - writer 對明確關輸出 `<w:b w:val="0"/>`，不再塌成缺席或裸 `<w:b/>`；`merge`、`rPrChange` 的 previous format、tree-backed append
+    與 run payload 三條平行路徑都保留明確關。`merge` 同理區分底線：patch 明確賦值 `underline = nil` 會移除既有底線，沒賦值則不動。
+    reader 只在認得的樣式與明確的 `w:val="none"` 時才設定底線；`UnderlineType` 沒有的 ST_Underline 值（`wavyDouble`、
+    `dottedHeavy` 等）與 3.7.0 一樣維持未指定——若也當成明確指定，編輯過的段落會把它寫成 `w:val="none"`，連樣式帶來的底線一起取消。
+  - `rPr`、`t` 與上述四個元素改以 namespace URI 辨識，不再只認字面的 `w:` 前綴。以前別的前綴（例如 `x:` 綁到 WordprocessingML）
+    的 run，其 `rPr` 與文字會**靜默消失**——typed 查找找不到，raw 保留又依 local name 把它們當成已處理而跳過。`rPr` 內其他子元素
+    （`sz`、`color`、`rFonts` 等）仍只認 `w:`，這個既有不對稱不在本次範圍。
+- **追蹤修訂的 `rPrChange` 改用與 run 相同的 `rPr` 輸出**。舊版另寫了一套只含粗體、斜體、底線、顏色、字級、字型六項的輸出，
+  其餘屬性（樣式、四軸字型、刪除線、highlight、上下標、字距、語言等）在「修改前格式」裡一律消失；字級還被多乘一次 2
+  （`fontSize` 本來就是半點），12pt 記成 24pt。現在修改前格式是完整的 `rPr`，字級正確。
 - **`ScriptExporter.quote()` 正確跳脫 CRLF**（#131 in PsychQuant/macdoc, PR #92）。Swift 把 `"\r\n"` 視為單一
   `Character`，它既不等於 `"\r"` 也不等於 `"\n"`，所以舊版逐 `Character` 的 `switch` 把 CR LF 原樣寫進字串字面值：slot
   預設值或段落文字含 CRLF 時，匯出的腳本會在字面值中間斷行。現在逐 Unicode scalar 跳脫，CR 與 LF 各自輸出為 `\r`、`\n`。
   同一個原因也讓 3.7.0 的 op-level slot 在新文字以 CRLF 開頭或結尾時漏加 `xml:space="preserve"`；邊界空白判定同樣改為逐
   scalar 檢查。
+
+### Changed
+
+- **對這四個屬性賦值 `false` 現在是「明確關」**。公開介面仍是 `Bool`，初始化參數預設由 `false` 改為 `nil`（既有呼叫點照常編譯），
+  但 `props.bold = false` 這類賦值會讓 writer 輸出 `<w:b w:val="0"/>`，過去則什麼都不輸出。沒有套樣式的段落裡兩者顯示相同；
+  段落樣式本身是粗體時（例如 Heading），明確關會蓋過樣式——這正是本次要修的語意，但依賴 byte-level 輸出比對的下游會看到差異
+  （例如 `tex-to-docx-swift` 對每個 run 都寫 `props.bold = bold`）。要表達「不指定」，請不要賦值。
+  `underline` 同理：賦值 `nil` 是明確移除，輸出 `<w:u w:val="none"/>`（例如 `md-to-word-swift` 在 `</u>` 後以
+  `props.underline = base.underline` 還原，`base` 沒有底線時就會輸出它）。
+- `RunProperties` 的 synthesized `Equatable` 會一併比較「是否明確指定」：Bool 值相同、但一方明確關一方沒寫的兩個實例不再相等。
+- `RunPayload` 新增 `strikethrough`、`noProof` 兩個 optional 欄位；舊的 JSONL log 缺這兩個 key 時解碼為 `nil`。
+
 
 ## [3.7.0] - 2026-09-08
 
