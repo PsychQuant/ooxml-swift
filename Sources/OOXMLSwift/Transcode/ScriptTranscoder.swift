@@ -905,6 +905,13 @@ public enum ScriptImporter {
                    let value = bindings[name] {
                     let original = runs.map(\.text).joined()
                     if value != original {
+                        // Carrier-run heuristic: the new text goes into the
+                        // first run whose text is not all (Unicode) whitespace,
+                        // falling back to the first non-empty run, then the
+                        // first run. Every other run is kept but blanked, so
+                        // the substituted text takes the carrier's formatting.
+                        // Limit: a binding is plain text, so the caller has no
+                        // way to pick a different run or keep mixed formatting.
                         let carrier = runs.firstIndex {
                             !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         } ?? runs.firstIndex { !$0.text.isEmpty } ?? runs.startIndex
