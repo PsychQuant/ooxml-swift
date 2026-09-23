@@ -2573,7 +2573,15 @@ public struct DocxReader {
         // 底線
         if let u = element.elements(forName: "w:u").first,
            let val = u.attribute(forName: "w:val")?.stringValue {
-            props.underline = UnderlineType(rawValue: val)
+            if let type = UnderlineType(rawValue: val) {
+                props.underline = type
+            } else if val == "none" {
+                props.underline = nil
+            }
+            // Any other ST_Underline value (wavyDouble, dottedHeavy, …) has no
+            // UnderlineType case. Assigning nil would mark it explicitly
+            // specified and emit w:val="none", cancelling even a style's
+            // underline; leave it unspecified, as through 3.7.0.
         }
 
         // 刪除線
