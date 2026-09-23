@@ -17,6 +17,8 @@ The system SHALL distinguish absent, explicitly on, and explicitly off states fo
 - **THEN** its Bool accessor is false and its state is explicitly specified
 - **WHEN** the element omits `w:val` or uses `1`, `true`, or `on`
 - **THEN** its Bool accessor is true and its state is explicitly specified
+- **WHEN** the element uses the non-standard spelling `no`
+- **THEN** its Bool accessor is false and its state is explicitly specified, as it was read through 3.7.0 (any other unrecognised value still reads as on)
 
 #### Scenario: Parallel copy and revision paths preserve explicit off
 
@@ -28,7 +30,8 @@ The system SHALL distinguish absent, explicitly on, and explicitly off states fo
 #### Scenario: WordprocessingML namespace aliases are accepted
 
 - **WHEN** a run uses a non-`w` prefix bound to the WordprocessingML namespace and carries explicit-off properties
-- **THEN** the typed reader recognizes the elements and values by namespace URI
+- **THEN** the typed reader recognizes the run's `rPr` and `t`, and the bold, italic, strikethrough and noProof elements and their values, by namespace URI
+- **AND** the run text is read
 - **AND** the Bool accessors remain false and specified
 
 ### Requirement: Run-property merge distinguishes omission from explicit false
