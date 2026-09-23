@@ -131,29 +131,26 @@ internal enum OMathExtractor {
     /// `<w:p>` but `XMLElement.xmlString` doesn't carry inherited declarations
     /// — the extracted rawXML must be self-contained for round-trip correctness.
     static func ensureXmlnsDeclared(in xml: String) -> String {
-        guard let prefix = OMathNamespace.extractPrefix(from: xml), !prefix.isEmpty else {
-            // Default-namespace OMath — assume xmlns="..." declared elsewhere or not needed.
+        guard let rootStartTag = rootElementStartTag(in: xml),
+              let qualifiedName = rootElementQualifiedName(in: rootStartTag) else {
             return xml
         }
-        // Already declared?
-        if xml.contains("xmlns:\(prefix)=") || xml.contains("xmlns:\(prefix) =") {
+        // Only a declaration on the root binds the root QName. A nested
+        // declaration of the same prefix must not suppress self-containment.
+        if OMathNamespace.extractURI(from: rootStartTag) != nil {
             return xml
         }
-        // Inject after the opening element name. Find the first `<prefix:` and inject
-        // ` xmlns:prefix="..."` after the element name (before any other attributes).
-        let openTag = "<\(prefix):"
+        // Inject after the root element name, before any existing attributes.
+        let openTag = "<\(qualifiedName)"
         guard let openIdx = xml.range(of: openTag) else { return xml }
-        // Find end of element name (first whitespace or `>` or `/`).
-        var nameEnd = openIdx.upperBound
-        while nameEnd < xml.endIndex,
-              !xml[nameEnd].isWhitespace,
-              xml[nameEnd] != ">",
-              xml[nameEnd] != "/" {
-            nameEnd = xml.index(after: nameEnd)
-        }
         let standardURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
-        let injection = " xmlns:\(prefix)=\"\(standardURI)\""
-        return String(xml[..<nameEnd]) + injection + String(xml[nameEnd...])
+        let declaration: String
+        if let prefix = OMathNamespace.extractPrefix(from: rootStartTag) {
+            declaration = " xmlns:\(prefix)=\"\(standardURI)\""
+        } else {
+            declaration = " xmlns=\"\(standardURI)\""
+        }
+        return String(xml[..<openIdx.upperBound]) + declaration + String(xml[openIdx.upperBound...])
     }
 }
 
@@ -167,43 +164,103 @@ internal enum OMathNamespace {
     /// one used in the opening element name (e.g. `<mml:oMath xmlns:mml="...">` → `mml`).
     /// Falls back to scanning for any `xmlns:` declaration if prefix detection fails.
     static func extractURI(from xml: String) -> String? {
-        // Find the prefix from the opening tag (e.g. `<m:oMath` → "m", `<mml:oMath` → "mml").
-        guard let lessThan = xml.firstIndex(of: "<") else { return nil }
-        let afterLT = xml.index(after: lessThan)
-        guard let colonIdx = xml[afterLT...].firstIndex(of: ":") else {
-            // Could be default-namespace OMath (no prefix). Scan for any `xmlns="..."`.
-            return extractURIByPattern(xml: xml, pattern: #"\bxmlns\s*=\s*"([^"]+)""#)
+        guard let rootStartTag = rootElementStartTag(in: xml) else { return nil }
+        // Restrict prefix detection to the root QName. Searching the whole
+        // fragment would mistake the colon in a default URI such as
+        // `xmlns="urn:vendor"` for an element prefix.
+        if let prefix = extractPrefix(from: rootStartTag) {
+            return rootElementAttributeValue(named: "xmlns:\(prefix)", in: rootStartTag)
+                .map(decodeXMLAttributeValue)
         }
-        let prefix = String(xml[afterLT..<colonIdx])
-        // Look for `xmlns:<prefix>="<URI>"`.
-        let pattern = #"\bxmlns:"# + NSRegularExpression.escapedPattern(for: prefix) + #"\s*=\s*"([^"]+)""#
-        return extractURIByPattern(xml: xml, pattern: pattern)
+        return rootElementAttributeValue(named: "xmlns", in: rootStartTag)
+            .map(decodeXMLAttributeValue)
     }
 
     /// Extracts the OMath prefix (e.g. "m" or "mml") from the opening element.
     /// Returns nil if no prefix used (default namespace).
     static func extractPrefix(from xml: String) -> String? {
-        guard let lessThan = xml.firstIndex(of: "<") else { return nil }
-        let afterLT = xml.index(after: lessThan)
-        guard let colonIdx = xml[afterLT...].firstIndex(of: ":") else {
-            return nil
-        }
-        // Verify the colon belongs to the element name (no whitespace before it).
-        let candidate = String(xml[afterLT..<colonIdx])
-        guard !candidate.isEmpty,
-              candidate.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }) else {
-            return nil
-        }
-        return candidate
+        guard let qualifiedName = rootElementQualifiedName(in: xml) else { return nil }
+        let components = qualifiedName.split(
+            separator: ":",
+            omittingEmptySubsequences: false
+        )
+        // QName syntax permits exactly one namespace separator. Avoid a
+        // hand-written NCName character allowlist: valid prefixes may contain
+        // dots and non-ASCII name characters.
+        guard components.count == 2,
+              !components[0].isEmpty,
+              !components[1].isEmpty else { return nil }
+        return String(components[0])
     }
 
-    private static func extractURIByPattern(xml: String, pattern: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let ns = xml as NSString
-        guard let match = regex.firstMatch(in: xml, range: NSRange(location: 0, length: ns.length)),
-              match.numberOfRanges > 1 else { return nil }
-        return ns.substring(with: match.range(at: 1))
+}
+
+/// Applies the entity and character-reference portion of XML attribute-value
+/// normalization. Namespace comparison needs the semantic URI, not its lexical
+/// spelling. Unknown or malformed references remain literal so invalid input
+/// cannot accidentally acquire standard-OMML meaning.
+private func decodeXMLAttributeValue(_ raw: String) -> String {
+    var output = ""
+    var index = raw.startIndex
+
+    while index < raw.endIndex {
+        guard raw[index] == "&",
+              let semicolon = raw[index...].firstIndex(of: ";") else {
+            output.append(raw[index])
+            index = raw.index(after: index)
+            continue
+        }
+
+        let entityStart = raw.index(after: index)
+        let entity = String(raw[entityStart..<semicolon])
+        let decoded: String?
+        switch entity {
+        case "amp": decoded = "&"
+        case "lt": decoded = "<"
+        case "gt": decoded = ">"
+        case "quot": decoded = "\""
+        case "apos": decoded = "'"
+        default:
+            let scalarValue: UInt32?
+            if entity.hasPrefix("#x") {
+                let digits = entity.dropFirst(2)
+                let isHex = !digits.isEmpty && digits.utf8.allSatisfy {
+                    ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 70) || ($0 >= 97 && $0 <= 102)
+                }
+                scalarValue = isHex ? UInt32(digits, radix: 16) : nil
+            } else if entity.hasPrefix("#") {
+                let digits = entity.dropFirst()
+                let isDecimal = !digits.isEmpty && digits.utf8.allSatisfy { $0 >= 48 && $0 <= 57 }
+                scalarValue = isDecimal ? UInt32(digits, radix: 10) : nil
+            } else {
+                scalarValue = nil
+            }
+            if let scalarValue,
+               isValidXML10Scalar(scalarValue),
+               let scalar = UnicodeScalar(scalarValue) {
+                decoded = String(scalar)
+            } else {
+                decoded = nil
+            }
+        }
+
+        if let decoded {
+            output += decoded
+        } else {
+            output += String(raw[index...semicolon])
+        }
+        index = raw.index(after: semicolon)
     }
+    return output
+}
+
+private func isValidXML10Scalar(_ value: UInt32) -> Bool {
+    value == 0x9
+        || value == 0xA
+        || value == 0xD
+        || (value >= 0x20 && value <= 0xD7FF)
+        || (value >= 0xE000 && value <= 0xFFFD)
+        || (value >= 0x10000 && value <= 0x10FFFF)
 }
 
 // MARK: - Internal: rPr propagation modes
@@ -213,7 +270,7 @@ internal extension RunProperties {
     ///
     /// - `.full`: returns self verbatim (deep copy via Equatable struct semantics).
     /// - `.omathOnly`: returns a new `RunProperties` with only OMath-rendering-relevant fields:
-    ///   `rFonts`, `fontName`, `fontSize`, `bold`, `italic`. Other fields (rStyle / color /
+    ///   `rFonts`, `fontName`, `fontSize` (sz + szCs), `lang`, `bold`, `italic`. Other fields (rStyle / color /
     ///   highlight / verticalAlign / etc.) are dropped.
     /// - `.discard`: returns `RunProperties()` (default-initialized).
     ///
@@ -227,6 +284,7 @@ internal extension RunProperties {
             out.rFonts = self.rFonts
             out.fontName = self.fontName
             out.fontSize = self.fontSize
+            out.lang = self.lang
             if let bold = self.specifiedBold { out.bold = bold }
             if let italic = self.specifiedItalic { out.italic = italic }
             return out

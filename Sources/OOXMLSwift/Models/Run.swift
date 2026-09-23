@@ -14,6 +14,120 @@ public struct RawElement: Equatable {
     }
 }
 
+/// Returns the root start tag, stopping only at an unquoted `>`.
+internal func rootElementStartTag(in xml: String) -> String? {
+    let trimmed = xml.drop(while: { $0.isWhitespace })
+    guard trimmed.first == "<" else { return nil }
+
+    var quote: Character?
+    var index = trimmed.index(after: trimmed.startIndex)
+    while index < trimmed.endIndex {
+        let character = trimmed[index]
+        if let activeQuote = quote {
+            if character == activeQuote { quote = nil }
+        } else if character == "\"" || character == "'" {
+            quote = character
+        } else if character == ">" {
+            return String(trimmed[...index])
+        }
+        index = trimmed.index(after: index)
+    }
+    return nil
+}
+
+/// Returns the qualified name of the root element in a raw XML fragment.
+///
+/// Raw carrier fragments are produced from `XMLElement.xmlString`, so they
+/// start at the element itself (no XML declaration). Keeping this parser tiny
+/// avoids reparsing a fragment solely to distinguish `<m:oMath>` from a full
+/// `<w:r>` raw replacement.
+internal func rootElementQualifiedName(in xml: String) -> String? {
+    guard let startTag = rootElementStartTag(in: xml) else { return nil }
+    let trimmed = startTag[...]
+    guard trimmed.first == "<" else { return nil }
+    let nameStart = trimmed.index(after: trimmed.startIndex)
+    guard nameStart < trimmed.endIndex,
+          trimmed[nameStart] != "/",
+          trimmed[nameStart] != "!",
+          trimmed[nameStart] != "?" else {
+        return nil
+    }
+
+    var nameEnd = nameStart
+    while nameEnd < trimmed.endIndex {
+        let character = trimmed[nameEnd]
+        if character.isWhitespace || character == ">" || character == "/" {
+            break
+        }
+        nameEnd = trimmed.index(after: nameEnd)
+    }
+    guard nameEnd > nameStart else { return nil }
+    return String(trimmed[nameStart..<nameEnd])
+}
+
+/// Returns the namespace-independent local name of a raw fragment's root.
+internal func rootElementLocalName(in xml: String) -> String? {
+    guard let qualifiedName = rootElementQualifiedName(in: xml) else { return nil }
+    return String(qualifiedName.split(separator: ":").last ?? "")
+}
+
+/// Reads one actual attribute from the root start tag. The tokenizer is
+/// quote-aware, so namespace-looking text inside an unrelated attribute value
+/// is never mistaken for a declaration. An explicitly empty value is returned
+/// as `""`, distinct from an absent attribute (`nil`).
+internal func rootElementAttributeValue(named targetName: String, in xml: String) -> String? {
+    guard let startTag = rootElementStartTag(in: xml),
+          let qualifiedName = rootElementQualifiedName(in: startTag),
+          let rootRange = startTag.range(of: "<\(qualifiedName)") else {
+        return nil
+    }
+
+    var index = rootRange.upperBound
+    func skipWhitespace() {
+        while index < startTag.endIndex, startTag[index].isWhitespace {
+            index = startTag.index(after: index)
+        }
+    }
+
+    while index < startTag.endIndex {
+        skipWhitespace()
+        guard index < startTag.endIndex,
+              startTag[index] != ">",
+              startTag[index] != "/" else { return nil }
+
+        let nameStart = index
+        while index < startTag.endIndex {
+            let character = startTag[index]
+            if character.isWhitespace || character == "=" || character == ">" || character == "/" {
+                break
+            }
+            index = startTag.index(after: index)
+        }
+        guard index > nameStart else { return nil }
+        let attributeName = String(startTag[nameStart..<index])
+
+        skipWhitespace()
+        guard index < startTag.endIndex, startTag[index] == "=" else { return nil }
+        index = startTag.index(after: index)
+        skipWhitespace()
+        guard index < startTag.endIndex,
+              startTag[index] == "\"" || startTag[index] == "'" else { return nil }
+
+        let quote = startTag[index]
+        index = startTag.index(after: index)
+        let valueStart = index
+        while index < startTag.endIndex, startTag[index] != quote {
+            index = startTag.index(after: index)
+        }
+        guard index < startTag.endIndex else { return nil }
+        let value = String(startTag[valueStart..<index])
+        index = startTag.index(after: index)
+
+        if attributeName == targetName { return value }
+    }
+    return nil
+}
+
 public struct Run {
     /// v0.31.1+ (Spectra `sibling-types-tree-projection-impl`,
     /// `word-aligned-state-sync` Phase 1 task 2.2): when non-nil, this Run is
@@ -484,10 +598,34 @@ public enum VerticalAlign: String, Codable {
 // MARK: - XML 生成
 
 extension Run {
+    /// A rawXML payload whose root is an inline OMML element is a child of the
+    /// logical Run, not a complete serialized Run replacement. Source-loaded
+    /// OMath remains in `rawXML` for API compatibility, but serializers must
+    /// wrap this fragment so rPr and the `<w:r>` carrier survive dirty resaves.
+    internal var rawOMathFragment: String? {
+        guard let rawXML,
+              let localName = rootElementLocalName(in: rawXML),
+              localName == "oMath" || localName == "oMathPara" else {
+            return nil
+        }
+        // A local-name match is insufficient because rawXML is a public
+        // generic replacement carrier. Preserve exact-replacement semantics
+        // when the root explicitly declares a non-OMML namespace. A missing
+        // declaration remains accepted because DocxReader fragments can
+        // inherit the standard `m` binding from an ancestor element.
+        if let declaredURI = OMathNamespace.extractURI(from: rawXML),
+           declaredURI != "http://schemas.openxmlformats.org/officeDocument/2006/math" {
+            return nil
+        }
+        return rawXML
+    }
+
     /// 轉換為 OOXML XML 字串
     func toXML() -> String {
-        // 如果 Run 本身有原始 XML，直接輸出（用於欄位代碼、SDT 等）
-        if let rawXML = self.rawXML {
+        // Complete raw Run replacements still bypass typed serialization.
+        // An OMath root is different: it is a Run child and must be wrapped.
+        let rawOMathFragment = self.rawOMathFragment
+        if let rawXML = self.rawXML, rawOMathFragment == nil {
             return rawXML
         }
 
@@ -507,6 +645,8 @@ extension Run {
         // Drawing (圖片) - 如果有圖片，優先輸出圖片
         if let drawing = drawing {
             xml += drawing.toXML()
+        } else if let rawOMathFragment {
+            xml += rawOMathFragment
         } else if !text.isEmpty || (rawElements?.isEmpty ?? true) {
             // v0.14.0+ (che-word-mcp#52): when a Run carries only rawElements
             // (e.g., VML watermark with no text child), suppress the synthetic

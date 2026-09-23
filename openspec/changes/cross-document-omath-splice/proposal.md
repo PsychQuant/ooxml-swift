@@ -12,7 +12,7 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 - Add `OMathSpliceRpRMode` enum: `.full` (default) / `.omathOnly` / `.discard` — controls source-Run rPr (font/size/lang) propagation to target
 - Add `OMathSpliceNamespacePolicy` enum: `.lenient` (default) / `.strict` — controls behavior on namespace prefix vs URI mismatch
 - Add `OMathSpliceError` enum: 6 cases covering the failure taxonomy
-- Carrier preservation: source's `Run.rawXML` OMath splices into target as `Run.rawXML`; source's direct-child `unrecognizedChildren` OMath splices into target as `unrecognizedChildren` (visual semantics — inline stays inline, display stays display)
+- Carrier preservation: source's `Run.rawXML` OMath splices into target as `Run.rawXML`; source's direct-child `unrecognizedChildren` OMath splices into target as `unrecognizedChildren` (visual semantics — inline stays inline, display stays display). Serializers MUST distinguish an OMath-root raw fragment from a complete raw Run replacement so the inline target retains `<w:r>` and rPr (#117).
 - Mid-paragraph splice via anchor-Run split (does not touch the other 12 position-indexed paragraph carriers — isolated blast radius; mirrors `replaceText` pattern)
 
 ## Non-Goals (optional)
@@ -24,6 +24,13 @@ The 郭嘉員 thesis rescue pipeline (`kiki830621/collaboration_guo_analysis`) n
 ### New Capabilities
 
 - `omath-splice`: Cross-document verbatim copy of `<m:oMath>` XML blocks between `WordDocument` paragraphs, preserving carrier shape (inline vs direct-child), source rPr, and namespace declarations. Includes single-OMath low-level API and paragraph-level batch API.
+
+### Correctness remediation
+
+- PsychQuant/ooxml-swift#117 keeps the established inline raw-XML representation for compatibility with flattened text, anchor lookup, and existing callers, but changes serialization semantics when the raw fragment's root is an OMath element. Such a fragment is emitted as a child of the typed Run, making all three rPr propagation modes observable and preserving the inline carrier across later dirty saves.
+- The explicit-off portion of the OMath-only mode depends on the verified tri-state RunProperties work from #115. PR #121 is stacked on that branch until PR #116 is human-merged and the dependency can be rebased onto main.
+
+Verification also surfaced separate pre-existing concerns tracked independently as #122 (boundary ordering), #123 (byte-equality contract), and #124 (direct-child OMath paragraph metadata).
 
 ### Modified Capabilities
 
