@@ -64,47 +64,92 @@ final class RealTemplateUpgradeTests: XCTestCase {
     }
 
     /// (b) task 3.2(b) acceptance: `--slot` works end-to-end on the real JPA
-    /// template. A formatted paragraph (raw-form, single-run setRuns) is
-    /// designated as a slot; substituting new text at the call site lands the
-    /// new content in document.xml while every non-document XML part stays
-    /// byte-equal to the reference.
+    /// template with two explicitly designated, multi-run `title` and `body`
+    /// slots. Both replacements land in document.xml, the original text is
+    /// removed, paragraph/run formatting and section operations stay intact,
+    /// and every non-document XML part remains byte-equal to the reference.
     func testRealTemplateSlotSubstitution() throws {
         let url = try TemplateFixtureGate.requireTemplate(TemplateFixtureGate.baselineTemplateName)
         let reference = try RawPartChannel.readAllParts(from: url)
         let log = try ReverseExtractor.reverse(parts: reference).log
 
-        // Find a slottable formatted paragraph: a single-run setRuns with
-        // non-empty text whose paragraph is op-level substitutable.
-        var slotParaId: String?
-        for entry in log.entries {
+        // Explicit designation remains caller-controlled (no semantic role
+        // inference). The baseline fixture contract locates its title and body
+        // as the first and eighth populated multi-run paragraphs respectively.
+        // The ordinal is intentional: it avoids publishing private fixture
+        // text while still pinning both concrete document positions.
+        let paraIds = log.entries.compactMap { entry -> String? in
             guard case .setRuns(let target, let runs) = entry.op,
-                  runs.count == 1, !runs[0].text.isEmpty,
-                  target.raw.hasPrefix("w14:paraId=") else { continue }
-            let pid = String(target.raw.dropFirst("w14:paraId=".count))
-            if ScriptExporter.opLevelSlotDefault(log: log, paraId: pid) != nil {
-                slotParaId = pid
-                break
-            }
+                  runs.count > 1,
+                  runs.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+                  target.raw.hasPrefix("w14:paraId=") else { return nil }
+            return String(target.raw.dropFirst("w14:paraId=".count))
         }
-        let paraId = try XCTUnwrap(slotParaId,
-            "expected at least one slottable formatted paragraph in the JPA template")
+        XCTAssertGreaterThanOrEqual(paraIds.count, 8,
+            "expected title/body multi-run paragraphs in the JPA template")
+        let titleParaId = paraIds[0]
+        let bodyParaId = paraIds[7]
+        let titleOriginal = try XCTUnwrap(
+            ScriptExporter.opLevelSlotDefault(log: log, paraId: titleParaId))
+        let bodyOriginal = try XCTUnwrap(
+            ScriptExporter.opLevelSlotDefault(log: log, paraId: bodyParaId))
 
         var script = try ScriptExporter.exportSwift(log: log, slots: [
-            SlotDesignation(name: "slot0", paraId: paraId),
+            SlotDesignation(name: "title", paraId: titleParaId),
+            SlotDesignation(name: "body", paraId: bodyParaId),
         ])
-        XCTAssertTrue(script.contains("// @slot slot0 \(paraId)"),
-                      "op-level slot directive expected")
+        XCTAssertTrue(script.contains("// @slot title \(titleParaId)"))
+        XCTAssertTrue(script.contains("// @slot body \(bodyParaId)"))
 
-        let sentinel = "＿＿差し込みテスト＿＿"
-        let original = try XCTUnwrap(ScriptExporter.opLevelSlotDefault(log: log, paraId: paraId))
+        let titleSentinel = "＿＿新規題名＿＿"
+        let bodySentinel = "＿＿新規本文＿＿"
         script = script.replacingOccurrences(
-            of: "    slot0: \(ScriptExporter.quote(original))",
-            with: "    slot0: \(ScriptExporter.quote(sentinel))")
+            of: "    title: \(ScriptExporter.quote(titleOriginal)),",
+            with: "    title: \(ScriptExporter.quote(titleSentinel)),")
+        script = script.replacingOccurrences(
+            of: "    body: \(ScriptExporter.quote(bodyOriginal))",
+            with: "    body: \(ScriptExporter.quote(bodySentinel))")
+
+        let substitutedLog = try ScriptImporter.parse(source: script)
+        let slotIds = Set([titleParaId, bodyParaId])
+        let expectedText = [
+            titleParaId: titleSentinel,
+            bodyParaId: bodySentinel,
+        ]
+        func runs(in log: OperationLog, paraId: String) throws -> [RunPayload] {
+            try XCTUnwrap(log.entries.compactMap { entry -> [RunPayload]? in
+                guard case .setRuns(let target, let runs) = entry.op,
+                      target.raw == "w14:paraId=\(paraId)" else { return nil }
+                return runs
+            }.first)
+        }
+        for paraId in slotIds {
+            let before = try runs(in: log, paraId: paraId)
+            let after = try runs(in: substitutedLog, paraId: paraId)
+            XCTAssertEqual(after.map(\.text).joined(), expectedText[paraId],
+                           "the slot must replace all visible text for \(paraId)")
+            XCTAssertEqual(after.map { var run = $0; run.text = ""; return run },
+                           before.map { var run = $0; run.text = ""; return run },
+                           "run formatting must survive for \(paraId)")
+            XCTAssertEqual(ScriptExporter.firstAppendParagraph(log: substitutedLog, paraId: paraId)?.op,
+                           ScriptExporter.firstAppendParagraph(log: log, paraId: paraId)?.op,
+                           "paragraph formatting must survive for \(paraId)")
+        }
+        let originalSections = log.entries.compactMap { entry -> OOXMLSwift.Operation? in
+            guard case .setSectionProperties = entry.op else { return nil }
+            return entry.op
+        }
+        let substitutedSections = substitutedLog.entries.compactMap { entry -> OOXMLSwift.Operation? in
+            guard case .setSectionProperties = entry.op else { return nil }
+            return entry.op
+        }
+        XCTAssertEqual(substitutedSections, originalSections,
+                       "section layout operations must remain unchanged")
 
         let rebuilt = try executeScript(script)
         let docXML = String(decoding: rebuilt["word/document.xml"] ?? Data(), as: UTF8.self)
-        XCTAssertTrue(docXML.contains(sentinel),
-                      "the slot must land the new text in document.xml")
+        XCTAssertTrue(docXML.contains(titleSentinel), "title slot must land in document.xml")
+        XCTAssertTrue(docXML.contains(bodySentinel), "body slot must land in document.xml")
 
         // Every non-document XML part stays byte-equal (the slot only touches
         // document.xml); binary media is skipped (documented raw-channel limit).
