@@ -608,7 +608,11 @@ extension RawChannelSlotTests {
         XCTAssertTrue(outXML.contains(
             "<w:r><w:rPr><w:rFonts w:eastAsia=\"標楷體\"/><w:sz w:val=\"28\"/></w:rPr><w:t xml:space=\"preserve\">王小明</w:t></w:r>"),
             "the run takes the mark's rPr, minus the mark's revision markers")
-        let run = outXML.components(separatedBy: "<w:r>").last ?? ""
+        guard case .unique(let span) = RawChannelSlotSurgery.locate(paraId: "DDDD4444", in: outXML) else {
+            return XCTFail("target paragraph must still be locatable")
+        }
+        let paragraph = String(outXML[span.range])
+        let run = String(paragraph[paragraph.range(of: "<w:r>")!.lowerBound...])
         XCTAssertFalse(run.contains("<w:ins"), "the mark's insertion marker is not a run property")
         XCTAssertFalse(run.contains("w:rPrChange"), "the mark's change history is not the run's")
         XCTAssertTrue(outXML.contains("<w:pPr><w:jc w:val=\"left\"/><w:rPr><w:ins w:id=\"7\""),
