@@ -8,6 +8,14 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **raw-channel slot 填入空白段落時，run 繼承段落標記的 rPr**（PsychQuant/macdoc#199）。官方表單的待填欄位通常是只有
+  `<w:pPr>`、沒有任何 run 的段落；先前坍縮出來的 run 沒有 `<w:rPr>`，Word 因此套用 docDefaults，填入的文字落在
+  新細明體／Times New Roman，而不是表單的標楷體。現在段落裡一個 run 都沒有時，改用段落標記的 `<w:pPr><w:rPr>`，
+  與 Word 在空段落打字的行為一致；已有 run 的段落維持「文字最長的 run」規則。段落標記的 `w:ins`／`w:del`／
+  `w:moveFrom`／`w:moveTo` 與 `w:rPrChange` 描述的是段落標記本身，不會複製到 run 上。
+
 ## [3.8.0] - 2026-09-23
 
 ### Added
