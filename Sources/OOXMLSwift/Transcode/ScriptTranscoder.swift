@@ -916,7 +916,7 @@ public enum ScriptImporter {
                             !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         } ?? runs.firstIndex { !$0.text.isEmpty } ?? runs.startIndex
                         var replaced = runs
-                        for index in replaced.indices { replaced[index].text = "" }
+                        for runIndex in replaced.indices { replaced[runIndex].text = "" }
                         replaced[carrier].text = value
                         if value.first.map(isXMLWhitespace) == true
                             || value.last.map(isXMLWhitespace) == true {
