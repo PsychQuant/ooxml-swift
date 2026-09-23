@@ -2129,7 +2129,10 @@ public struct DocxReader {
         var run = Run(text: "")
 
         // 解析 Run 屬性
-        if let rPr = element.elements(forName: "w:rPr").first {
+        // Matched by namespace URI, not the literal `w:` QName: the raw-capture
+        // loop below skips `rPr` / `t` by local name, so a QName-only lookup
+        // silently dropped both for any other prefix bound to WordprocessingML.
+        if let rPr = wordChild(element, localName: "rPr") {
             run.properties = parseRunProperties(from: rPr)
         }
 
@@ -2141,7 +2144,10 @@ public struct DocxReader {
         // WhitespaceOverlay.swift docs). The overlay's pre-parse byte-stream
         // scan recovers those bytes; we consult by sequence index in DOM
         // document order.
-        for t in element.elements(forName: "w:t") {
+        let textElements = (element.children ?? []).compactMap { $0 as? XMLElement }.filter {
+            $0.localName == "t" && isWordprocessingMLElement($0)
+        }
+        for t in textElements {
             let observed = t.stringValue ?? ""
             if let ctx = Self.currentWhitespaceContext {
                 if observed.isEmpty,
@@ -2555,12 +2561,12 @@ public struct DocxReader {
         }
 
         // 粗體（OOXML ST_OnOff：presence 不是永遠等於 true）
-        if let bold = element.elements(forName: "w:b").first {
+        if let bold = wordChild(element, localName: "b") {
             props.bold = parseOnOff(bold)
         }
 
         // 斜體
-        if let italic = element.elements(forName: "w:i").first {
+        if let italic = wordChild(element, localName: "i") {
             props.italic = parseOnOff(italic)
         }
 
@@ -2571,7 +2577,7 @@ public struct DocxReader {
         }
 
         // 刪除線
-        if let strike = element.elements(forName: "w:strike").first {
+        if let strike = wordChild(element, localName: "strike") {
             props.strikethrough = parseOnOff(strike)
         }
 
@@ -2620,7 +2626,7 @@ public struct DocxReader {
         }
 
         // v0.20.0+ (#60): noProof — suppress spell/grammar check.
-        if let noProof = element.elements(forName: "w:noProof").first {
+        if let noProof = wordChild(element, localName: "noProof") {
             props.noProof = parseOnOff(noProof)
         }
 
@@ -2718,7 +2724,9 @@ public struct DocxReader {
     private static func parseOnOff(_ element: XMLElement) -> Bool {
         guard let raw = wordAttributeValue(element, localName: "val")?
             .lowercased() else { return true }
-        return !["0", "false", "off"].contains(raw)
+        // "no" is outside ST_OnOff but was read as off through 3.7.0; keep it,
+        // since any unrecognised value falls through to on.
+        return !["0", "false", "off", "no"].contains(raw)
     }
 
     private static func parseTable(

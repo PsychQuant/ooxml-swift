@@ -48,7 +48,9 @@ final class RunPropertyOnOffTests: XCTestCase {
     }
 
     func testReaderAcceptsOnSpellingsForTypedBooleans() throws {
-        for value in [nil, "1", "true", "on", "no"] as [String?] {
+        // "no" is deliberately absent: it stays off, as in 3.7.0
+        // (testLegacyNoSpellingStillParsesAsOff).
+        for value in [nil, "1", "true", "on"] as [String?] {
             let attribute = value.map { " w:val=\"\($0)\"" } ?? ""
             let source = try buildFixture(documentXML: documentXML(
                 firstRunProperties: "<w:b\(attribute)/><w:i\(attribute)/><w:strike\(attribute)/><w:noProof\(attribute)/>"
@@ -184,10 +186,51 @@ final class RunPropertyOnOffTests: XCTestCase {
             relationships: RelationshipsCollection()
         )
 
-        XCTAssertFalse(run.properties.bold)
-        XCTAssertFalse(run.properties.italic)
-        XCTAssertFalse(run.properties.strikethrough)
-        XCTAssertFalse(run.properties.noProof)
+        // All-false Bools alone cannot tell "parsed as off" from "never
+        // parsed": the text and the specified state prove the reader saw
+        // the aliased elements.
+        XCTAssertEqual(run.text, "text")
+        XCTAssertEqual(run.properties.specifiedBold, false)
+        XCTAssertEqual(run.properties.specifiedItalic, false)
+        XCTAssertEqual(run.properties.specifiedStrikethrough, false)
+        XCTAssertEqual(run.properties.specifiedNoProof, false)
+    }
+
+    func testAlternateWordprocessingMLPrefixParsesExplicitOn() throws {
+        let xml = try XMLDocument(xmlString: #"""
+        <x:r xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <x:rPr><x:b/><x:i x:val="1"/></x:rPr>
+          <x:t>text</x:t>
+        </x:r>
+        """#)
+        let element = try XCTUnwrap(xml.rootElement())
+        let run = try DocxReader.parseRun(
+            from: element,
+            relationships: RelationshipsCollection()
+        )
+
+        XCTAssertEqual(run.text, "text")
+        XCTAssertTrue(run.properties.bold)
+        XCTAssertTrue(run.properties.italic)
+        XCTAssertTrue(run.rawElements?.isEmpty ?? true, "rPr/t must not also be raw-captured")
+    }
+
+    func testLegacyNoSpellingStillParsesAsOff() throws {
+        // `no` is not in ST_OnOff, but 3.7.0 read it as off. Dropping it would
+        // silently turn such runs bold, because unknown values parse as on.
+        let xml = try XMLDocument(xmlString: #"""
+        <w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:rPr><w:b w:val="no"/></w:rPr>
+          <w:t>text</w:t>
+        </w:r>
+        """#)
+        let element = try XCTUnwrap(xml.rootElement())
+        let run = try DocxReader.parseRun(
+            from: element,
+            relationships: RelationshipsCollection()
+        )
+
+        XCTAssertEqual(run.properties.specifiedBold, false)
     }
 
     private func documentXML(firstRunProperties: String) -> String {
