@@ -967,10 +967,19 @@ public struct DocxReader {
             encoding = .shiftJIS
         default:
             // No declaration, or one the raw-byte scanner couldn't read
-            // (`nil`) — including any UTF-16 case, per the comment above.
-            // XML 1.0 Appendix F: a BOM wins over any declared encoding;
-            // absent one, fall back to the null-byte position
-            // `word/styles.xml` already used before this generalization.
+            // (`nil`) — including any UTF-16 case, per the comment above,
+            // AND any declared name this function does not otherwise
+            // recognize (e.g. "windows-1252"). This reader treats the BOM
+            // as authoritative once one is physically present — a design
+            // choice this reader already made before #171 generalized it
+            // (`testReaderBOMAndDeclarationMismatchCounterexamples`'s
+            // `utf16le-bom/utf8-decl` case: BOM=LE wins over a completely
+            // unrelated declared "UTF-8"), not a hard requirement XML 1.0
+            // Appendix F imposes (Appendix F is autodetection guidance for
+            // when there is no OTHER reliable signal, not a mandate that a
+            // BOM must override an explicit, readable declaration). Absent
+            // a BOM, fall back to the null-byte position `word/styles.xml`
+            // already used before this generalization.
             if data.starts(with: [0xFE, 0xFF]) || data.starts(with: [0, 0x3C]) {
                 encoding = .utf16BigEndian
             } else if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0x3C, 0]) {
@@ -1031,22 +1040,40 @@ public struct DocxReader {
     }
 
     /// Replaces JUST the `<?xml ... ?>` prolog (if present) with one
-    /// declaring UTF-8, leaving every other byte of `text` — including
-    /// whitespace-only content — untouched. `text` is assumed ASCII-safe
-    /// in its prolog region (guaranteed by XML 1.0: the declaration itself
-    /// must be parseable before an encoding is even known), so a plain
-    /// substring search for the FIRST `<?xml` / `?>` pair is safe and
-    /// cannot match body content (a literal `<` in element content or an
-    /// attribute value would have to be escaped or quoted, never `<?xml`
-    /// verbatim outside the prolog). No declaration present is already
-    /// correct as-is: XML 1.0 without a declared `encoding` defaults to
-    /// UTF-8, which these bytes now are.
+    /// declaring UTF-8, leaving every other character of `text` —
+    /// including whitespace-only content — untouched.
+    ///
+    /// Codex R2 HIGH-1: a plain whole-text search for `"<?xml"` is NOT
+    /// safe — `<![CDATA[...<?xml version="1.0"?>...]]>` may legally
+    /// contain that literal text as DATA, and `<?xml-stylesheet ...?>` is
+    /// a legal, ordinary processing instruction (its target is
+    /// `"xml-stylesheet"`, not the reserved `"xml"` the declaration uses)
+    /// that also starts with the same 5 characters. Matching either would
+    /// corrupt user content or destroy a legitimate PI. XML 1.0 requires
+    /// the declaration, if present, to be the FIRST thing in the document
+    /// (optionally after a byte-order-mark the decode above would have
+    /// already consumed into a leading U+FEFF) — so this function looks
+    /// ONLY at the start of `text`, never searches the rest of it, and
+    /// additionally requires `<?xml` to be followed by XML whitespace
+    /// (`VersionInfo`'s leading `S` in the XMLDecl grammar) so
+    /// `<?xml-stylesheet` — `-`, not whitespace, right after `<?xml` —
+    /// cannot match either. No declaration present at the start is
+    /// already correct as-is: XML 1.0 without a declared `encoding`
+    /// defaults to UTF-8, which these bytes now are.
     private static func rewrittenAsUTF8Declaration(_ text: String) -> String {
-        guard let open = text.range(of: "<?xml"),
-              let close = text.range(of: "?>", range: open.upperBound..<text.endIndex) else {
-            return text
-        }
-        return text.replacingCharacters(in: open.lowerBound..<close.upperBound, with: "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+        var start = text.startIndex
+        if text[start...].hasPrefix("\u{FEFF}") { start = text.index(after: start) }
+        let marker = "<?xml"
+        guard text[start...].hasPrefix(marker) else { return text }
+        let afterMarker = text.index(start, offsetBy: marker.count)
+        guard afterMarker < text.endIndex, isXMLDeclWhitespace(text[afterMarker]) else { return text }
+        guard let close = text.range(of: "?>", range: afterMarker..<text.endIndex) else { return text }
+        return text.replacingCharacters(in: start..<close.upperBound, with: "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+    }
+
+    /// XML 1.0 `S` (whitespace) production: space, tab, CR, LF.
+    private static func isXMLDeclWhitespace(_ c: Character) -> Bool {
+        c == " " || c == "\t" || c == "\r" || c == "\n"
     }
 
     /// A fresh, always-`encoding="UTF-8"`-labeled re-serialization of

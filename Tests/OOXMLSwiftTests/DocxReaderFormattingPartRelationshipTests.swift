@@ -134,10 +134,16 @@ final class DocxReaderFormattingPartRelationshipTests: XCTestCase {
     /// `implicitPart`-throwing case `resolvedFormattingPart` catches).
     func testDocxReaderFallsBackToDefaultStylesPathWhenRelationshipIsExternal() throws {
         var parts = try baseParts()
-        var rels = String(decoding: try XCTUnwrap(parts["word/_rels/document.xml.rels"]), as: UTF8.self)
-        rels = rels.replacingOccurrences(
+        let originalRels = String(decoding: try XCTUnwrap(parts["word/_rels/document.xml.rels"]), as: UTF8.self)
+        // Codex R2 MEDIUM-3(5): assert the replacement actually fired
+        // before relying on it — a silent no-op here would make this test
+        // pass vacuously via the untouched, already-default-path styles
+        // relationship instead of exercising the External fallback at all.
+        XCTAssertTrue(originalRels.contains("Target=\"styles.xml\""), "fixture rels no longer name styles.xml directly")
+        let rels = originalRels.replacingOccurrences(
             of: "Target=\"styles.xml\"",
             with: "Target=\"https://example.com/styles.xml\" TargetMode=\"External\"")
+        XCTAssertTrue(rels.contains("TargetMode=\"External\""), "fixture edit did not actually produce an External relationship")
         parts["word/_rels/document.xml.rels"] = Data(rels.utf8)
         var doc = try DocxReader.read(from: try package(parts))
         defer { doc.close() }
