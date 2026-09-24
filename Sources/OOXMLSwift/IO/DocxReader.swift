@@ -46,6 +46,35 @@ public struct DocxReader {
     /// (e.g., add `"sectPr"`), update both sites in lockstep.
     internal static let walkerPreConsumed: Set<String> = ["pPr"]
 
+    /// v3.12.0+ (#168): direct children of `<w:pPr>` that `parseParagraphProperties`
+    /// already extracts into a typed `ParagraphProperties` field. Anything
+    /// else — `<w:kinsoku>`, `<w:snapToGrid>`, `<w:widowControl>`, `<w:wordWrap>`,
+    /// and the rest of CT_PPrBase's long tail — is captured verbatim into
+    /// `ParagraphProperties.rawChildren` instead of being silently dropped.
+    ///
+    /// `sectPr` and `pPrChange` are excluded from raw capture on purpose:
+    /// - `pPrChange` is consumed separately (see the `pPrChange` handling in
+    ///   `parseParagraph`, right after this function returns) into a typed
+    ///   `Revision` + `previousProperties`; raw-capturing it too would
+    ///   duplicate it in the writer's output (once from that revision path,
+    ///   once verbatim from `rawChildren`).
+    /// - `sectPr` (mid-body section break) is not parsed by this reader at
+    ///   all today — a pre-existing, separately-tracked gap. Raw-capturing it
+    ///   here would place a structurally significant, position-sensitive
+    ///   element in `rawChildren`'s emit slot (before the paragraph-mark
+    ///   `<w:rPr>`), which is the wrong position for `sectPr` per ECMA-376
+    ///   §17.3.1.27 CT_PPr (last child, after `rPr`). Left dropped rather
+    ///   than preserved-but-misplaced; unchanged from pre-#168 behavior.
+    ///
+    /// Grow this set in lockstep with `parseParagraphProperties` whenever a
+    /// new pPr child gains typed extraction — otherwise the newly-typed field
+    /// and `rawChildren` would both carry the same source element.
+    internal static let recognizedPPrChildNames: Set<String> = [
+        "pStyle", "jc", "spacing", "ind", "numPr",
+        "keepNext", "keepLines", "pageBreakBefore",
+        "rPr", "pPrChange", "sectPr",
+    ]
+
     // MARK: - Whitespace overlay context (#59 sub-stack B, v0.19.10+)
 
     /// Per-part whitespace recovery context. Class (not struct) so the counter
@@ -2074,6 +2103,19 @@ public struct DocxReader {
         // thesis fixture round-trip.
         if let markRPr = element.elements(forName: "w:rPr").first {
             props.markRunProperties = parseRunProperties(from: markRPr)
+        }
+
+        // v3.12.0+ (#168): preserve pPr children outside the typed
+        // vocabulary above (`<w:kinsoku>`, `<w:snapToGrid>`, `<w:widowControl>`,
+        // …) instead of silently dropping them — see `recognizedPPrChildNames`
+        // and `ParagraphProperties.rawChildren` for the full rationale.
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement,
+                  let localName = childElement.localName,
+                  !Self.recognizedPPrChildNames.contains(localName) else {
+                continue
+            }
+            props.rawChildren.append(RawElement(name: localName, xml: childElement.xmlString))
         }
 
         return props
