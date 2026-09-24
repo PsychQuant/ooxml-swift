@@ -345,7 +345,9 @@ public struct DocumentProfileStore: Sendable {
 /// - `open(O_CREAT | O_RDWR | O_CLOEXEC, 0600)`, then `fchmod(fd, 0600)`
 ///   because the open mode is only a request under the umask.
 /// - `flock(fd, LOCK_EX | LOCK_NB)` polled every 50 ms; give up with an error
-///   after 5 s.
+///   after 5 s measured on a monotonic clock. Only EWOULDBLOCK/EAGAIN
+///   (contention) is polled and EINTR retried at once; any other errno is
+///   thrown immediately with that errno.
 /// - Hold the lock across the whole read → merge → atomic write.
 /// - Release with `flock(fd, LOCK_UN)`, then `close(fd)`.
 /// - Never delete the lock file: a recreated one is a different inode, and
@@ -358,6 +360,7 @@ enum ConfigFileLock {
         forConfigAt path: String,
         pollInterval: TimeInterval = ConfigFileLock.defaultPollInterval,
         timeout: TimeInterval = ConfigFileLock.defaultTimeout,
+        acquire: (Int32, Int32) -> Int32 = { flock($0, $1) },
         _ body: () throws -> T
     ) throws -> T {
         let lockPath = path + ".lock"
@@ -368,10 +371,23 @@ enum ConfigFileLock {
         defer { close(fd) }
         _ = fchmod(fd, 0o600)
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
-            if Date() >= deadline { throw DocumentProfileStoreError.configLockTimeout(lockPath) }
-            Thread.sleep(forTimeInterval: pollInterval)
+        // The budget runs on a monotonic clock: a wall-clock change cannot
+        // stretch or cut the wait.
+        let start = DispatchTime.now().uptimeNanoseconds
+        let budget = UInt64(max(0, timeout) * 1_000_000_000)
+        while acquire(fd, LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            // Only contention is waited out; EINTR is retried at once. Any
+            // other failure is not contention and is reported immediately.
+            guard code == EWOULDBLOCK || code == EAGAIN || code == EINTR else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [
+                    NSFilePathErrorKey: lockPath,
+                    NSLocalizedDescriptionKey: "無法鎖定設定檔鎖（errno \(code)）：\(lockPath)"])
+            }
+            if DispatchTime.now().uptimeNanoseconds - start >= budget {
+                throw DocumentProfileStoreError.configLockTimeout(lockPath)
+            }
+            if code != EINTR { Thread.sleep(forTimeInterval: pollInterval) }
         }
         defer { flock(fd, LOCK_UN) }
 
