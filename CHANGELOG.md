@@ -10,9 +10,9 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ### Changed
 
-- **格式 profile 匯入：依 relationship 讀 part**（PsychQuant/macdoc#213）。沒有新增或變更
-  `DocumentFormattingProfileError` 的 case，exhaustive `switch` 不受影響；改變的是 associated value 的字串與哪些範本會被
-  拒絕，各項末尾列出。
+- **格式 profile 匯入：依 relationship 讀 part、只收 UTF-8**（PsychQuant/macdoc#213、PsychQuant/macdoc#214）。兩項都
+  沒有新增或變更 `DocumentFormattingProfileError` 的 case，exhaustive `switch` 不受影響；改變的是 associated value 的字串
+  與哪些範本會被拒絕，各項末尾列出。
   - **styles／theme／fontTable 依 relationship 解析實際 part**（PsychQuant/macdoc#213）。`importOfficial` 不再讀固定路徑，
     改讀 `word/_rels/document.xml.rels` 裡對應 relationship 指向的 part（沿用 3.10.0 的詞法正規化與同 Type 重複檢查），
     所以 Target 指向 `word/customStyles.xml` 之類非預設 part 的範本可以匯入，預設路徑上的過期 part 不會被讀到。
@@ -28,6 +28,18 @@ All notable changes to ooxml-swift will be documented in this file.
     既有限制，本版未改。**相容性**：過去能匯入、現在會被拒絕的範本——沒有 styles relationship；formatting
     relationship 指向不存在的 part 或 External；theme 只以孤立 part 存在而樣式引用 theme 字型；非預設路徑的 numbering
     part 有編號定義。relationship 指向非預設 part 的範本，現在讀到的是那個 part，不再是預設路徑上的 part。
+  - **格式 profile 路徑只收 UTF-8**（PsychQuant/macdoc#214）。`importOfficial` 讀的每個 part（rels、numbering、styles、
+    document、theme、fontTable），以及快照 decode 與套用時的 XML payload，都必須是合法的 UTF-8（可帶 UTF-8 BOM、
+    不含 NUL），而且 XML 宣告沒有 `encoding` 或宣告為 `UTF-8`（不分大小寫）。宣告其他編碼（`ISO-8859-1`、
+    `Shift_JIS`、`UTF-16`…）、位元組不是合法 UTF-8、或宣告無法解析時丟 `invalidSnapshot`，訊息指出是哪個 part、
+    宣告了什麼。以前這些位元組一律當成 UTF-8 存進快照（不合法的位元組變成 U+FFFD），與 Word 依宣告解碼看到的文字
+    可能不同。UTF-16 維持 3.10.0 的拒絕（不擴充字元集），訊息由 `malformed XML` 改為指名編碼。3.9.0 起匯入寫出的
+    快照一律宣告 `UTF-8`，既有快照不受影響。一般的 `DocxReader` 行為不變，現況已用測試鎖住並寫進註解：
+    `word/styles.xml` 的位元組只要是合法 UTF-8 就以 UTF-8 解碼、不看宣告；`word/document.xml` 則不一致——typed model
+    由 `XMLDocument(data:)` 建立、依宣告解碼，lossless tree 以 UTF-8 解碼，未編輯的存檔逐位元組保留，編輯後的存檔把
+    宣告改寫成 `UTF-8` 而保留原位元組，Word 看到的未編輯文字因此改變。後者是鎖住的現況，不是認可的行為。
+    **相容性**：UTF-16 範本的 `invalidSnapshot` 訊息改變；任一 part 宣告非 UTF-8 編碼或含不合法 UTF-8 位元組的範本，
+    過去能匯入，現在會被拒絕。
 
 ## [3.10.0] - 2026-09-24
 

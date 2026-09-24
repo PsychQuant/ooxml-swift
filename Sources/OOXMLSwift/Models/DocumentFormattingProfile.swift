@@ -88,6 +88,9 @@ public struct DocumentFormattingProfile: Codable, Equatable, Sendable {
     /// absent, is refused; theme and fontTable without a relationship are
     /// absent, even if an orphan part sits at the default path. The main
     /// part itself is still `word/document.xml`.
+    ///
+    /// PsychQuant/macdoc#214: every part read here must be UTF-8 and must not
+    /// declare another encoding (`ProfileXML.requireUTF8`).
     public static func importOfficial(from templateURL: URL) throws -> Self {
         let archive = try Archive(url: templateURL, accessMode: .read)
         func read(_ path: String) throws -> XmlNode? {
@@ -108,6 +111,7 @@ public struct DocumentFormattingProfile: Codable, Equatable, Sendable {
                 }
                 bytes.append(chunk)
             }
+            try ProfileXML.requireUTF8(bytes, part: path)
             return try ProfileXML.parseRejectingDTD(bytes)
         }
         // PsychQuant/macdoc#196: a template whose relationships name two
@@ -425,11 +429,91 @@ internal enum ProfileXML {
         result.attributes.insert(XmlAttribute(prefix: "xmlns", localName: ns == w ? "w" : "a", value: ns), at: 0)
         return result
     }
-    static func checked(_ xml: String, root: String) throws -> XmlNode { try clean(parseRejectingDTD(Data(xml.utf8)), root: root, strict: true) }
+    /// Snapshot payloads (decode and apply) pass the same encoding gate as
+    /// imported parts; import itself always writes `encoding="UTF-8"`.
+    static func checked(_ xml: String, root: String) throws -> XmlNode {
+        let data = Data(xml.utf8)
+        try requireUTF8(data, part: "格式快照 \(snapshotKeys[root] ?? root)")
+        return try clean(parseRejectingDTD(data), root: root, strict: true)
+    }
+    static let snapshotKeys = ["styles": "stylesXML", "sectPr": "sectionXML", "theme": "themeXML", "fonts": "fontsXML"]
 
     /// At most `limit` characters of template-controlled text for a message.
     static func excerpt(_ text: String, limit: Int = 40) -> String {
         text.count > limit ? String(text.prefix(limit)) + "…" : text
+    }
+
+    // MARK: - PsychQuant/macdoc#214 encoding gate
+
+    /// The profile path persists what it parses. `XmlTreeReader` decodes
+    /// every byte as UTF-8 and skips the XML declaration, while Word decodes
+    /// by the declared `encoding`, so a part declaring ISO-8859-1 or
+    /// Shift_JIS whose bytes happen to be valid UTF-8 would be stored as
+    /// text Word never shows. Profile import and snapshot payloads are
+    /// therefore accepted only when:
+    /// - the bytes are not UTF-16/UTF-32 (a BOM, or a NUL in the first two
+    ///   bytes) — UTF-16 stays refused as in 3.10.0 (no charset expansion),
+    ///   now with a message naming it;
+    /// - the bytes are valid UTF-8 without NUL (an optional UTF-8 BOM), so
+    ///   nothing is stored with U+FFFD replacement characters;
+    /// - the XML declaration, located the way `XmlTreeReader` locates it, is
+    ///   absent, has no `encoding`, or declares `UTF-8` (ASCII
+    ///   case-insensitive). A declaration this gate cannot read is refused.
+    /// `DocxReader` keeps its own, wider decoding for ordinary documents.
+    static func requireUTF8(_ data: Data, part: String) throws {
+        let bytes = [UInt8](data)
+        if bytes.starts(with: [0xFE, 0xFF]) || bytes.starts(with: [0xFF, 0xFE])
+            || (bytes.count >= 2 && (bytes[0] == 0 || bytes[1] == 0)) {
+            throw DocumentFormattingProfileError.invalidSnapshot("\(part) 是 UTF-16／UTF-32 編碼，格式 profile 只接受 UTF-8")
+        }
+        guard !bytes.contains(0), String(bytes: bytes, encoding: .utf8) != nil else {
+            throw DocumentFormattingProfileError.invalidSnapshot("\(part) 不是合法的 UTF-8（含無法解碼的位元組或 NUL），格式 profile 只接受 UTF-8")
+        }
+        if let declared = try declaredEncoding(bytes, part: part), declared.lowercased() != "utf-8" {
+            throw DocumentFormattingProfileError.invalidSnapshot("\(part) 的 XML 宣告編碼為「\(excerpt(declared))」，格式 profile 只接受 UTF-8")
+        }
+    }
+
+    /// The `encoding` pseudo-attribute of the XML declaration: after an
+    /// optional UTF-8 BOM and whitespace (as `XmlTreeReader.skipProlog`
+    /// accepts), `<?xml` followed by whitespace or `?`. Pseudo-attributes
+    /// must be `name = "value"` or `'value'`, each at most once, up to `?>`.
+    static func declaredEncoding(_ bytes: [UInt8], part: String) throws -> String? {
+        func isSpace(_ byte: UInt8) -> Bool { byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D }
+        func isNameByte(_ byte: UInt8) -> Bool {
+            (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(byte) || (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+        }
+        let unreadable = DocumentFormattingProfileError.invalidSnapshot("\(part) 的 XML 宣告無法解析")
+        var index = bytes.starts(with: [0xEF, 0xBB, 0xBF]) ? 3 : 0
+        while index < bytes.count, isSpace(bytes[index]) { index += 1 }
+        let open = Array("<?xml".utf8)
+        guard bytes.count > index + open.count, Array(bytes[index..<index + open.count]) == open,
+              isSpace(bytes[index + open.count]) || bytes[index + open.count] == UInt8(ascii: "?") else { return nil }
+        index += open.count
+        var pseudoAttributes: [String: String] = [:]
+        while true {
+            while index < bytes.count, isSpace(bytes[index]) { index += 1 }
+            guard index < bytes.count else { throw unreadable }
+            if bytes[index] == UInt8(ascii: "?") {
+                guard index + 1 < bytes.count, bytes[index + 1] == UInt8(ascii: ">") else { throw unreadable }
+                return pseudoAttributes["encoding"]
+            }
+            let nameStart = index
+            while index < bytes.count, isNameByte(bytes[index]) { index += 1 }
+            let name = String(decoding: bytes[nameStart..<index], as: UTF8.self)
+            while index < bytes.count, isSpace(bytes[index]) { index += 1 }
+            guard !name.isEmpty, index < bytes.count, bytes[index] == UInt8(ascii: "=") else { throw unreadable }
+            index += 1
+            while index < bytes.count, isSpace(bytes[index]) { index += 1 }
+            guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") || bytes[index] == UInt8(ascii: "'") else { throw unreadable }
+            let quote = bytes[index]
+            index += 1
+            let valueStart = index
+            while index < bytes.count, bytes[index] != quote, bytes[index] != UInt8(ascii: "<"), bytes[index] != UInt8(ascii: ">") { index += 1 }
+            guard index < bytes.count, bytes[index] == quote, pseudoAttributes[name] == nil else { throw unreadable }
+            pseudoAttributes[name] = String(decoding: bytes[valueStart..<index], as: UTF8.self)
+            index += 1
+        }
     }
 
     /// Profile payloads and template formatting parts refuse any DTD, like
