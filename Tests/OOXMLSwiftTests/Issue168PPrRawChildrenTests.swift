@@ -373,9 +373,15 @@ final class Issue168PPrRawChildrenTests: XCTestCase {
         let shdNodes = pPr.children.filter { $0.kind == .element && $0.localName == "shd" }
         XCTAssertEqual(shdNodes.count, 1,
                        "exactly one <w:shd> must survive — a raw-captured old one plus a typed new one would both be schema-invalid and ambiguous to Word")
-        if let fill = shdNodes.first?.attributes.first(where: { $0.prefix == "w" && $0.localName == "fill" })?.value {
-            XCTAssertEqual(fill, "00FF00", "the typed override must win, not the stale raw-captured value")
-        }
+        // Codex round-3 review, LOW finding #2: the `if let` form let a
+        // `<w:shd>` with no `w:fill` attribute at all pass this assertion —
+        // the count check above guarded the duplicate-emission bug, but not
+        // the "new value actually wins" claim in this test's name.
+        // `XCTUnwrap` makes a missing `w:fill` an explicit failure.
+        let fill = try XCTUnwrap(
+            shdNodes.first?.attributes.first { $0.prefix == "w" && $0.localName == "fill" }?.value,
+            "the surviving <w:shd> must carry a w:fill attribute")
+        XCTAssertEqual(fill, "00FF00", "the typed override must win, not the stale raw-captured value")
     }
 
     // MARK: - Section C: real-world template (MACDOC_TEMPLATE_DIR-gated)
