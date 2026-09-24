@@ -67,6 +67,10 @@ public struct DocumentFormattingProfile: Codable, Equatable, Sendable {
         try validate()
     }
 
+    /// Upper bound for one formatting part read from a template, enforced on
+    /// both the declared and the actually inflated size.
+    static let maxFormattingPartBytes = 4 * 1024 * 1024
+
     /// Read only the fixed formatting parts directly from ZIP, never extract
     /// archive-controlled paths. Unsupported numbering fails explicitly.
     public static func importOfficial(from templateURL: URL) throws -> Self {
@@ -78,11 +82,20 @@ public struct DocumentFormattingProfile: Codable, Equatable, Sendable {
                 if required { throw DocumentFormattingProfileError.missingRequiredFormatting(path) }
                 return nil
             }
-            guard entry.uncompressedSize <= 4 * 1024 * 1024 else {
+            // The declared size is only a cheap precheck: a deflated entry
+            // inflates for as long as its compressed stream lasts, whatever
+            // the metadata says, so the cap is enforced on the actual bytes
+            // (PsychQuant/macdoc#194).
+            guard entry.uncompressedSize <= UInt64(maxFormattingPartBytes) else {
                 throw DocumentFormattingProfileError.invalidSnapshot("formatting part too large")
             }
             var bytes = Data()
-            _ = try archive.extract(entry) { bytes.append($0) }
+            _ = try archive.extract(entry) { chunk in
+                guard bytes.count + chunk.count <= maxFormattingPartBytes else {
+                    throw DocumentFormattingProfileError.invalidSnapshot("formatting part too large")
+                }
+                bytes.append(chunk)
+            }
             return try ProfileXML.parseRejectingDTD(bytes)
         }
         // PsychQuant/macdoc#196: formatting parts are read from fixed paths,
