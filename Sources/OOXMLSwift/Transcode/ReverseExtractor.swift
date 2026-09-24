@@ -103,6 +103,118 @@ public enum ReverseExtractor {
         return Result(log: log, dslParts: dslParts, rawReasons: rawReasons, formGaps: formGaps)
     }
 
+    // MARK: - Paragraphs-only reverse (#172)
+
+    /// A `BodyChild` other than `.paragraph` that `paragraphsOnly` cannot
+    /// carry into the script — this path only extracts paragraph text +
+    /// `pStyle`, so every other body-level element is omitted, not
+    /// preserved.
+    ///
+    /// **Closed, versioned enum** (per #172): the extraction switches
+    /// exhaustively over `BodyChild`'s own non-`.paragraph` cases (four as of
+    /// this writing — `table`, `contentControl`, `bookmarkMarker`,
+    /// `rawBlockElement`), with no `default:` branch. If `BodyChild` ever
+    /// grows a case this switch hasn't been taught to label, the build
+    /// breaks loudly here instead of that case silently falling through
+    /// unlabeled.
+    ///
+    /// **Version promise**: adding a new case to this enum is a **MINOR**
+    /// release — additive, and existing exhaustive `switch`es over it
+    /// without `@unknown default:` will fail to build, which is the
+    /// intended signal that a new omission class exists (not a silently
+    /// changed behavior). Renaming or removing an existing case, or changing
+    /// `rawBlockElement`'s associated value shape, is a **MAJOR** release.
+    public enum OmittedBodyBlockReason: Equatable, Hashable, Sendable {
+        case table
+        case contentControl
+        case bookmarkMarker
+        /// `RawElement.name` — the element's local name (e.g. `"sdt"`,
+        /// `"oMath"`, `"customXml"`) — carried through for diagnostics.
+        case rawBlockElement(name: String)
+    }
+
+    /// One omitted body-level block, positioned by its index into
+    /// `WordDocument.body.children` (document order, paragraphs included in
+    /// the count) — the same addressing scheme `body.children[index]` uses.
+    public struct OmittedBodyBlock: Equatable, Sendable {
+        public let index: Int
+        public let reason: OmittedBodyBlockReason
+
+        public init(index: Int, reason: OmittedBodyBlockReason) {
+            self.index = index
+            self.reason = reason
+        }
+    }
+
+    /// docx → paragraphs-only `.mdocx.swift` script: paragraph text +
+    /// `pStyle` only — the behavior `macdoc word reverse --paragraphs-only`
+    /// and che-word-mcp's `export_script(paragraphs_only: true)` shared as
+    /// two independently-maintained copies before #172 moved the single
+    /// implementation here. Every other body-level element (tables, content
+    /// controls, bookmark markers, raw block elements) is OMITTED, not
+    /// preserved; re-executing the returned script is content-equivalent to
+    /// the source's paragraph text, never guaranteed byte-equal — contrast
+    /// with `reverse(parts:)`, whose upgrade rule only marks a part DSL when
+    /// the trial rebuild is byte-equal.
+    ///
+    /// Paragraphs without a native `w14:paraId` get a synthesized sequential
+    /// id (`"p<N>"`, `N` counting every top-level paragraph from 1) so the
+    /// script always uses DSL `Paragraph` blocks and `slots` can address
+    /// them — re-executing then stamps that id into the rebuilt docx rather
+    /// than reproducing the paraId-less source exactly.
+    ///
+    /// Does NOT consult an oplog sidecar next to `url`. Callers that care
+    /// about sidecar precedence make that decision before calling this: the
+    /// CLI silently exports the sidecar log instead whenever one exists
+    /// (ignoring paragraphs-only entirely), while the MCP server refuses
+    /// outright with a dedicated error — the two callers' policies differ on
+    /// purpose and neither belongs inside this library function.
+    ///
+    /// - Parameters:
+    ///   - url: source `.docx` path.
+    ///   - slots: optional named-slot designations, forwarded verbatim to
+    ///     `ScriptExporter.exportSwift(log:slots:)` — empty slots (the
+    ///     default) delegate to the canonical (non-parameterized) exporter.
+    /// - Returns: the exported `.mdocx.swift` source text, and every omitted
+    ///   body-level block in document order.
+    /// - Throws: `TranscodeError.slotDesignationFailure` for an invalid or
+    ///   unresolvable slot designation (propagated from `ScriptExporter`,
+    ///   never swallowed); file/parse errors from `DocxReader.read`.
+    public static func paragraphsOnly(
+        url: URL, slots: [SlotDesignation] = []
+    ) throws -> (script: String, omittedBlocks: [OmittedBodyBlock]) {
+        let document = try DocxReader.read(from: url, wireTreeBackedViews: true)
+        var log = OperationLog()
+        var omitted: [OmittedBodyBlock] = []
+
+        var paragraphIndex = 0
+        for (bodyIndex, child) in document.body.children.enumerated() {
+            switch child {
+            case .paragraph(let paragraph):
+                paragraphIndex += 1
+                var paraId: String?
+                if let raw = paragraph.elementID?.raw, raw.hasPrefix("w14:paraId=") {
+                    paraId = String(raw.dropFirst("w14:paraId=".count))
+                }
+                log.append(.appendParagraph(in: nil, paragraph: ParagraphPayload(
+                    text: paragraph.text,
+                    styleId: paragraph.properties.style,
+                    paraId: paraId ?? "p\(paragraphIndex)")), source: .swift)
+            case .table:
+                omitted.append(OmittedBodyBlock(index: bodyIndex, reason: .table))
+            case .contentControl:
+                omitted.append(OmittedBodyBlock(index: bodyIndex, reason: .contentControl))
+            case .bookmarkMarker:
+                omitted.append(OmittedBodyBlock(index: bodyIndex, reason: .bookmarkMarker))
+            case .rawBlockElement(let raw):
+                omitted.append(OmittedBodyBlock(
+                    index: bodyIndex, reason: .rawBlockElement(name: raw.name)))
+            }
+        }
+        let script = try ScriptExporter.exportSwift(log: log, slots: slots)
+        return (script, omitted)
+    }
+
     // MARK: - document.xml typed extraction (trial + byte-compare)
 
     enum Upgrade {
