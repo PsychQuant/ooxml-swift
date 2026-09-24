@@ -679,6 +679,25 @@ final class DocumentFormattingProfileTests: XCTestCase {
                           ProfileXML.normalizedRelationshipTarget("/etc/hosts"))
     }
 
+    /// Only percent-escapes of RFC 3986 unreserved characters (ALPHA,
+    /// DIGIT, `-`, `.`, `_`, `~`) are decoded; every other escape stays
+    /// encoded with uppercase hex. So `%2F` never becomes a separator and a
+    /// double-encoded `%252F` never collapses onto `%2F`.
+    func testRelationshipTargetDecodesOnlyUnreservedEscapes() {
+        let n = ProfileXML.normalizedRelationshipTarget
+        XCTAssertEqual(n("%73tyles.xml"), n("styles.xml"))
+        XCTAssertEqual(n("a%7eb.xml"), n("a~b.xml"))
+        XCTAssertEqual(n("a%7Eb.xml"), n("a~b.xml"))
+        XCTAssertEqual(n("a%2fb.xml"), n("a%2Fb.xml"), "hex digits are case-insensitive")
+        XCTAssertEqual(n("a%2fb.xml"), "/word/a%2Fb.xml", "reserved escapes stay encoded, hex uppercased")
+        XCTAssertNotEqual(n("a%252Fb.xml"), n("a%2Fb.xml"), "double encoding is not equivalence")
+        XCTAssertEqual(n("a%252Fb.xml"), "/word/a%252Fb.xml")
+        XCTAssertNotEqual(n("%2Fword%2Fstyles.xml"), n("/word/styles.xml"))
+        XCTAssertNotEqual(n("a%20b.xml"), n("a b.xml"), "space is not unreserved")
+        XCTAssertEqual(n("%2E%2E/word/styles.xml"), "/word/styles.xml", "%2E is an unreserved dot")
+        XCTAssertEqual(n("100%.xml"), "/word/100%.xml", "a lone percent is left as written")
+    }
+
     /// Policy point 2 on the IMPORT path. ECMA-376 allows at most one
     /// implicit styles/theme/fontTable relationship from the main part; a
     /// template naming two distinct parts for one Type is malformed, and
