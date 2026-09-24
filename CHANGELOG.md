@@ -16,29 +16,37 @@ All notable changes to ooxml-swift will be documented in this file.
     帶一份 `xmlns:w` 宣告，每次開檔再 typed edit 會讓宣告數隨輪數複合成長；別名／未知 namespace 的決議邏輯與
     `DocxReader` 替 detached `docDefaults` clone 補上 root 宣告的既有行為不變。
   - **OPC relationship Target 改為純詞法正規化，重複 relationship 一律 fail closed**（PsychQuant/macdoc#196）。
-    `styles.xml`、`./styles.xml`、`/word/styles.xml`、`../word/styles.xml` 與 percent-encoded 的非保留字元視為同一個
-    part；`%2F`／`%5C` 屬 segment 內資料不解碼，空 segment 保留，大小寫不摺疊。不再使用會查主機檔案系統的
+    `styles.xml`、`./styles.xml`、`/word/styles.xml`、`../word/styles.xml` 視為同一個 part；percent-escape 只解碼
+    RFC 3986 unreserved 字元（`%73tyles.xml` 即 `styles.xml`），其餘 escape（`%2F`、`%5C`、`%25`…）一律保留並把 hex
+    轉為大寫，所以 `a%252Fb.xml` 與 `a%2Fb.xml` 是不同 part；空 segment 保留，大小寫不摺疊。不再使用會查主機檔案系統的
     `NSString.standardizingPath`（它把 `/private/tmp` 與 `/tmp` 當成同一個 part）。main part 的 styles／theme／fontTable
-    同一 Type 指向不同 part 時，`importOfficial`、`applyFormattingProfile`（任何變更之前）與 writer（寫任何格式 part
-    之前）都丟新的 `DocumentFormattingProfileError.duplicateRelationship`。`importOfficial` 與快照 decode 也與
-    `DocxReader` 一致拒絕 DOCTYPE。section 快照接受 ECMA-376 的 `sectPr/type` 與 `pgSz/@code`（真實範本
-    `90_template_ja.docx` 的最終 section 兩者都有）。另補上 UTF-16 四種 BOM／位元組序、BOM 與編碼宣告不一致、
-    四軸 `rFonts` 字型中立的回歸矩陣。
+    同一 Type 指向不同 part 時丟新的 `DocumentFormattingProfileError.duplicateRelationship`：`importOfficial`、
+    `applyFormattingProfile`（任何變更之前）都會檢查，兩個 writer 則共用一道寫入前檢查。**寫入端的決策**：本 library
+    保留它沒碰的內容——既不發布格式 part、也不改寫 `word/_rels/document.xml.rels` 的存檔（例如只改本文）照原樣保留
+    既有的畸形 relationship，不拒絕；只要會發布格式 part（套用 profile、typed style／theme／font 編輯）或改寫
+    relationships（typed relationship 變動、Target 修復），就在寫任何 part 之前檢查，拒絕時來源 archive 與既有目的檔
+    都不變。Target 修復會把同 Type 的每一筆等價註冊都改指向發布的 part（保留每筆註冊與 Id，不去重），修復後的最終集合
+    寫入前再驗一次。`importOfficial`、快照 decode、套用與寫出時讀的 relationship XML 都與 `DocxReader` 一致拒絕
+    DOCTYPE。section 快照接受 ECMA-376 的 `sectPr/type` 與 `pgSz/@code`（真實範本 `90_template_ja.docx` 的最終
+    section 兩者都有）。另補上 UTF-16 四種 BOM／位元組序、BOM 與編碼宣告不一致、四軸 `rFonts` 字型中立的回歸矩陣。
   - **匯入上限、權限與快照維護**（PsychQuant/macdoc#194）。`importOfficial` 的 4 MiB 上限改以實際解壓出的位元組計算
     （ZIP metadata 謊報大小也擋得住）。`DocumentProfileStore` 的 profiles 目錄為 0700，快照與 `config.json` 一律 0600、
     不受 umask 影響；快照維持不覆寫既有檔名（含 symlink）。`resolve` 找不到快照檔時丟新的
-    `DocumentProfileStoreError.snapshotFileMissing`。新增 `garbageCollectOfficialSnapshots(dryRun:)`，只列出／刪除未被
-    目前 `officialSnapshot` 參照的 `profiles/official-*.json`。信任邊界為單一使用者的 `~/.config`，不是多租戶環境。
+    `DocumentProfileStoreError.snapshotFileMissing`，且在設定檔鎖內讀參照與快照，不會與快照清理競爭（設定目錄不可寫
+    時不取鎖直接讀）。新增 `garbageCollectOfficialSnapshots(dryRun:)`，只列出／刪除未被目前 `officialSnapshot` 參照的
+    `profiles/official-*.json`。信任邊界為單一使用者的 `~/.config`，不是多租戶環境。
   - **`config.json` 跨程序鎖**（PsychQuant/macdoc#204）。`DocumentProfileStore` 的寫入（`setDefaultProfile`、
     `importOfficial`、快照清理）與 pdf-to-latex-swift 的 `AIConfig.save` 採用同一套協定：`<config>.lock`、
     `flock(LOCK_EX|LOCK_NB)` 每 50 ms 輪詢、5 秒逾時丟新的 `DocumentProfileStoreError.configLockTimeout`，鎖涵蓋整段
-    read → merge → 原子寫入，鎖檔 0600 且永不刪除。兩邊實作必須保持一致。
+    read → merge → 原子寫入，鎖檔 0600 且永不刪除。兩邊實作必須保持一致；另以 perl 的 `flock` 在獨立程序持鎖驗證跨程序互斥。
   - **表格 cell 段落級定址**（PsychQuant/macdoc#156）。新增 `WordDocument.cellParagraphTexts(tableIndex:row:col:)` 與
     `updateCellParagraph(tableIndex:row:col:paragraphIndex:text:)`：只改寫 cell 內指定的段落，沿用原第一個 run 的
     格式，段落 pPr 與同格其他段落不動；座標在任何寫入前檢查。多段落 cell 不再只能整格覆寫或全域取代。
-  - **相容性**：`DocumentFormattingProfileError` 與 `DocumentProfileStoreError` 各新增 case，對它們做 exhaustive
-    `switch` 的呼叫端需要補上；`DocumentProfileStoreError` 改為 `Equatable`。`importOfficial` 現在會拒絕
-    `word/_rels/document.xml.rels` 格式錯誤、含 DOCTYPE 或含重複 implicit relationship 的範本。
+  - **相容性（對 exhaustive `switch` 是 source-breaking）**：`DocumentFormattingProfileError` 新增 `duplicateRelationship`，
+    `DocumentProfileStoreError` 新增 `snapshotFileMissing` 與 `configLockTimeout`；對這兩個 enum 做 exhaustive `switch`
+    （沒有 `default`）的呼叫端會編譯失敗，必須補上新 case。`DocumentProfileStoreError` 改為 `Equatable`。
+    `importOfficial` 現在會拒絕 `word/_rels/document.xml.rels` 格式錯誤、含 DOCTYPE 或含重複 implicit relationship 的範本；
+    會發布格式 part 或改寫 relationships 的存檔也會拒絕這類畸形套件。
 
 ## [3.9.0] - 2026-09-24
 
