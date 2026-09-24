@@ -1072,8 +1072,17 @@ public struct DocxReader {
     }
 
     /// XML 1.0 `S` (whitespace) production: space, tab, CR, LF.
+    ///
+    /// Codex R3 MEDIUM: checked against `c`'s FIRST Unicode scalar, not
+    /// `c` itself — Swift's `Character` is an extended grapheme cluster,
+    /// so a `<?xml\r\nversion=...` declaration's CR+LF right after
+    /// `<?xml` is ONE `Character` (`"\r\n"`), which matches none of ` `,
+    /// `\t`, `\r`, `\n` individually and would make this function refuse
+    /// to recognize an otherwise well-formed declaration, leaving the
+    /// (wrong) source encoding label on now-UTF-8 bytes.
     private static func isXMLDeclWhitespace(_ c: Character) -> Bool {
-        c == " " || c == "\t" || c == "\r" || c == "\n"
+        guard let scalar = c.unicodeScalars.first else { return false }
+        return scalar == " " || scalar == "\t" || scalar == "\r" || scalar == "\n"
     }
 
     /// A fresh, always-`encoding="UTF-8"`-labeled re-serialization of
