@@ -1,4 +1,5 @@
 import XCTest
+import ZIPFoundation
 @testable import OOXMLSwift
 
 final class DocumentFormattingProfileTests: XCTestCase {
@@ -982,6 +983,54 @@ final class DocumentFormattingProfileTests: XCTestCase {
             XCTAssertTrue(xml.contains("w:w=\"720\""))
             XCTAssertTrue(xml.contains("w14:ligatures"))
             XCTAssertTrue(xml.contains("w:w=\"72\""))
+        }
+    }
+
+    // MARK: - PsychQuant/macdoc#194 inflate cap
+
+    /// Rewrites the declared uncompressed size of `path` in both its local
+    /// file header and its central-directory record, leaving the deflated
+    /// stream untouched: an archive whose metadata lies about the part.
+    func zipDeclaringUncompressedSize(_ zip: Data, path: String, as declared: UInt32) throws -> Data {
+        var bytes = [UInt8](zip)
+        let name = [UInt8](path.utf8)
+        func u16(_ at: Int) -> Int { Int(bytes[at]) | Int(bytes[at + 1]) << 8 }
+        func put32(_ value: UInt32, at: Int) { for i in 0..<4 { bytes[at + i] = UInt8((value >> (8 * UInt32(i))) & 0xFF) } }
+        var local = 0, central = 0
+        var i = 0
+        while i + 46 <= bytes.count {
+            if bytes[i..<i + 4] == [0x50, 0x4B, 0x03, 0x04], i + 30 + u16(i + 26) <= bytes.count,
+               Array(bytes[i + 30..<i + 30 + u16(i + 26)]) == name {
+                XCTAssertEqual(u16(i + 6) & 0x08, 0, "entry uses a data descriptor; patch it too")
+                XCTAssertEqual(u16(i + 8), 8, "entry must be deflated for the lie to matter")
+                put32(declared, at: i + 22)
+                local += 1
+            } else if bytes[i..<i + 4] == [0x50, 0x4B, 0x01, 0x02], Array(bytes[i + 46..<i + 46 + u16(i + 28)]) == name {
+                put32(declared, at: i + 24)
+                central += 1
+            }
+            i += 1
+        }
+        XCTAssertEqual(local, 1)
+        XCTAssertEqual(central, 1)
+        return Data(bytes)
+    }
+
+    /// The 4 MiB formatting-part cap is enforced on the bytes that actually
+    /// inflate, not only on the size the ZIP metadata declares. Both the
+    /// local header and the central directory claim 1 KiB for a deflated
+    /// styles part that inflates to 5 MiB of otherwise valid XML.
+    func testImportRejectsFormattingPartWhoseInflatedBytesExceedTheCap() throws {
+        let padding = String(repeating: " ", count: 5 * 1024 * 1024)
+        let styles = "<x:styles xmlns:x=\"\(w)\"><x:docDefaults><x:rPrDefault><x:rPr><x:sz x:val=\"24\"/></x:rPr></x:rPrDefault><x:pPrDefault><x:pPr/></x:pPrDefault></x:docDefaults>\(padding)<x:style x:type=\"paragraph\" x:default=\"1\" x:styleId=\"a\"><x:name x:val=\"Normal\"/></x:style></x:styles>"
+        let url = try template(styles: styles)
+        XCTAssertThrowsError(try DocumentFormattingProfile.importOfficial(from: url), "honest metadata") { error in
+            XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("formatting part too large"))
+        }
+        try zipDeclaringUncompressedSize(Data(contentsOf: url), path: "word/styles.xml", as: 1024).write(to: url)
+        XCTAssertEqual(try XCTUnwrap(Archive(url: url, accessMode: .read)["word/styles.xml"]).uncompressedSize, 1024)
+        XCTAssertThrowsError(try DocumentFormattingProfile.importOfficial(from: url), "lying metadata") { error in
+            XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("formatting part too large"))
         }
     }
 
