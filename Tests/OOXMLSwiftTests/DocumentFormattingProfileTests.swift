@@ -1444,13 +1444,14 @@ final class DocumentFormattingProfileTests: XCTestCase {
 
     /// importOfficial's outcome on each unmodified real template is pinned.
     /// Neither is rejected by the relationship guard; both stop at
-    /// pre-existing first-version completeness rules this issue does not
-    /// change: 90_template_ja declares no docDefaults font size and an empty
-    /// pPrDefault (it relies on Word's implicit defaults), and the REC form
-    /// defines numbering (abstractNum/num; styles reference numId 1 and 2),
-    /// which the first profile version explicitly does not support.
+    /// first-version completeness rules: 90_template_ja declares no
+    /// docDefaults font size (it relies on Word's implicit default; its
+    /// empty pPrDefault is accepted), named precisely since
+    /// PsychQuant/macdoc#212, and the REC form defines numbering
+    /// (abstractNum/num; styles reference numId 1 and 2), which the first
+    /// profile version explicitly does not support.
     func testImportOfficialOutcomeOnRealTemplatesIsPinned() throws {
-        for (name, expected) in [(TemplateFixtureGate.baselineTemplateName, DocumentFormattingProfileError.missingRequiredFormatting("docDefaults/rPrDefault/sz and pPrDefault")),
+        for (name, expected) in [(TemplateFixtureGate.baselineTemplateName, DocumentFormattingProfileError.missingRequiredFormatting("docDefaults/rPrDefault/rPr/sz")),
                                  (TemplateFixtureGate.recFixtureName, .unsupportedNumbering)] {
             let url = try TemplateFixtureGate.requireTemplate(name)
             let before = try Data(contentsOf: url)
