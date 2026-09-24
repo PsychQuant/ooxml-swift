@@ -194,16 +194,34 @@ public struct DocxReader {
         // serialization — typed views are structurally a projection of the
         // tree (`typed = f(tree)`), and any tree lossless gap would surface
         // immediately as a typed-parse difference in round-trip tests.
-        let documentTree = try XmlTreeReader.parse(documentData)
+        //
+        // PsychQuant/ooxml-swift#171: `documentData` is gated through
+        // `utf8TreeInputData` first — same rule as word/styles.xml (#214) —
+        // so the tree below decodes the SAME bytes a genuinely non-UTF-8,
+        // non-UTF-16 document.xml would previously have decoded with U+FFFD
+        // replacement characters; that class of document is now refused
+        // instead of silently corrupted.
+        let documentTree = try XmlTreeReader.parse(Self.utf8TreeInputData(documentData, part: "word/document.xml"))
         document.xmlTrees["word/document.xml"] = documentTree
         let projectedDocumentData = try XmlTreeWriter.serialize(documentTree)
-        // PsychQuant/macdoc#214 (locked, characterization not endorsement:
-        // testReaderDocumentPartTypedTextFollowsDeclarationWhileTreeStaysUTF8):
-        // XMLDocument(data:) honours the XML declaration's `encoding`, while
-        // the tree above decodes UTF-8. For a part declaring e.g. ISO-8859-1
-        // whose bytes are valid UTF-8, typed text and tree text differ, and a
-        // save after an edit writes a UTF-8 declaration over the kept bytes.
-        let documentXML = try XMLDocument(data: projectedDocumentData)
+        // PsychQuant/ooxml-swift#171 (was macdoc#214, characterization not
+        // endorsement — now fixed, testReaderDocumentPartTypedTextFollowsDeclarationWhileTreeStaysUTF8
+        // replaced by testReaderDocumentPartTypedModelAgreesWithTreeRegardlessOfDeclaration):
+        // `projectedDocumentData` above keeps the ORIGINAL declaration
+        // (whatever it said) — it is what `xmlTrees["word/document.xml"]`
+        // round-trips through for byte-exact preservation of untouched
+        // content, and what `parseDocumentRootAttributes` below reads. The
+        // TYPED MODEL must NOT be built from it: `XMLDocument(data:)`
+        // honours a declaration `XmlTreeReader` above ignored, so for a
+        // part declaring e.g. ISO-8859-1 whose bytes are valid UTF-8, typed
+        // text used to read differently from the tree's text, and a save
+        // after an edit used to silently change what Word shows for
+        // UNEDITED text (the declaration got rewritten to UTF-8 over kept,
+        // differently-encoded bytes). Building the typed model from a
+        // FRESH, always-UTF-8-labeled re-serialization of the SAME tree
+        // (`typedModelInputXML`) makes it agree with the tree by
+        // construction, whatever the source declaration said.
+        let documentXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: documentTree), options: [])
 
         // 5a. v0.19.0+ (PsychQuant/che-word-mcp#56): preserve every attribute
         // (xmlns:* declarations, mc:Ignorable, anything else) on the source
@@ -238,39 +256,13 @@ public struct DocxReader {
             // PsychQuant/macdoc#214 (decided, locked by
             // testReaderDecodesUTF8ValidStylesAsUTF8DespiteNonUTF8Declaration):
             // bytes that are valid UTF-8 without NUL are decoded as UTF-8 and
-            // the XML declaration's `encoding` is NOT consulted, so a part
-            // declaring ISO-8859-1 or Shift_JIS whose bytes happen to be valid
-            // UTF-8 reads differently here than in Word. The general reader
-            // keeps this behavior (word/document.xml differs; see the note at
-            // its XMLDocument construction); only
-            // DocumentFormattingProfile.importOfficial (and snapshot decode),
-            // which persist what they read, refuse any declaration other than
-            // UTF-8 (ProfileXML.requireUTF8).
-            let treeData: Data
-            if !stylesData.contains(0), String(data: stylesData, encoding: .utf8) != nil {
-                treeData = stylesData
-            } else {
-                let encoding: String.Encoding
-                if stylesData.starts(with: [0xFE, 0xFF]) || stylesData.starts(with: [0, 0x3C]) {
-                    encoding = .utf16BigEndian
-                } else if stylesData.starts(with: [0xFF, 0xFE]) || stylesData.starts(with: [0x3C, 0]) {
-                    encoding = .utf16LittleEndian
-                } else {
-                    throw WordError.invalidDocx("\(stylesPath) has an unsupported XML encoding")
-                }
-                // UTF-32LE shares UTF-16LE's leading bytes. Its UTF-16
-                // interpretation contains NULs (invalid in XML); refuse it
-                // before the parser can auto-detect a different encoding.
-                guard let decoded = String(data: stylesData, encoding: encoding), !decoded.contains("\u{0000}") else {
-                    throw WordError.invalidDocx("\(stylesPath) has an unsupported XML encoding")
-                }
-                // Keep the existing DTD refusal before introducing an XML
-                // decoder; an encoded declaration must not bypass it.
-                try Self.rejectDTD(Data(decoded.utf8), part: stylesPath)
-                let encodedStyles = try XMLDocument(data: stylesData, options: .nodeLoadExternalEntitiesNever)
-                encodedStyles.characterEncoding = "UTF-8"
-                treeData = encodedStyles.xmlData
-            }
+            // the XML declaration's `encoding` is NOT consulted — a part
+            // declaring ISO-8859-1 or Shift_JIS whose bytes happen to be
+            // valid UTF-8 is read as UTF-8 anyway. PsychQuant/ooxml-swift#171
+            // extended this exact rule (`utf8TreeInputData`) to every part
+            // this reader treats as a tree + typed-model pair, closing the
+            // gap that previously existed for word/document.xml and others.
+            let treeData = try Self.utf8TreeInputData(stylesData, part: stylesPath)
             let stylesTree = try XmlTreeReader.parse(treeData)
             document.xmlTrees["word/styles.xml"] = stylesTree
             let canonicalStyles = ProfileXML.canonicalWordTree(stylesTree.root)
@@ -310,9 +302,9 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: numberingURL.path) {
             let numberingData = try Data(contentsOf: numberingURL)
             try Self.rejectDTD(numberingData, part: numberingPath)
-            let numberingTree = try XmlTreeReader.parse(numberingData)
+            let numberingTree = try XmlTreeReader.parse(Self.utf8TreeInputData(numberingData, part: numberingPath))
             document.xmlTrees["word/numbering.xml"] = numberingTree
-            let numberingXML = try XMLDocument(data: try XmlTreeWriter.serialize(numberingTree))
+            let numberingXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: numberingTree), options: [])
             document.numbering = try parseNumbering(from: numberingXML)
         }
 
@@ -323,7 +315,7 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: settingsURL.path) {
             let settingsData = try Data(contentsOf: settingsURL)
             try Self.rejectDTD(settingsData, part: "word/settings.xml")
-            document.xmlTrees["word/settings.xml"] = try XmlTreeReader.parse(settingsData)
+            document.xmlTrees["word/settings.xml"] = try XmlTreeReader.parse(Self.utf8TreeInputData(settingsData, part: "word/settings.xml"))
 
             // word-aligned-state-sync Phase 1 task 2.5 (#69): typed settings
             // flags are tree-backed. Populate them from the parsed tree so
@@ -344,7 +336,13 @@ public struct DocxReader {
         // v0.19.10+ (#59 sub-stack B): wrap body parse in WhitespaceContext so
         // parseRun can recover whitespace-only `<w:t>` content that Foundation's
         // XMLDocument silently strips at parse time.
-        let bodyWhitespaceContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: documentData))
+        // PsychQuant/ooxml-swift#171: scan the SAME bytes the tree and typed
+        // model were built from (`documentTree.sourceBytes`), not the raw
+        // archive bytes — identical to `documentData` except when
+        // `utf8TreeInputData` transcoded a genuinely UTF-16 document.xml,
+        // where scanning the original (still-UTF-16) bytes for ASCII `<w:t>`
+        // byte patterns would not find them.
+        let bodyWhitespaceContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: documentTree.sourceBytes))
         document.body = try Self.withWhitespaceContext(bodyWhitespaceContext) {
             try parseBody(
                 from: documentXML,
@@ -396,9 +394,9 @@ public struct DocxReader {
             guard FileManager.default.fileExists(atPath: headerURL.path) else { continue }
             let headerData = try Data(contentsOf: headerURL)
             try Self.rejectDTD(headerData, part: "word/\(rel.target)")
-            let headerTree = try XmlTreeReader.parse(headerData)
+            let headerTree = try XmlTreeReader.parse(Self.utf8TreeInputData(headerData, part: "word/\(rel.target)"))
             document.xmlTrees["word/\(rel.target)"] = headerTree
-            let headerXML = try XMLDocument(data: try XmlTreeWriter.serialize(headerTree))
+            let headerXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: headerTree), options: [])
             // v0.19.5+ (#56 R5-CONT P1 #8): load per-container rels
             // (`word/_rels/header*.xml.rels`) and merge with document-scope
             // rels so hyperlinks inside the header resolve their URLs via
@@ -419,7 +417,7 @@ public struct DocxReader {
             // <w:p> and <w:tbl> direct children in source order. Pre-R5
             // parseContainerParagraphs silently dropped tables.
             // v0.19.10+ (#59 sub-stack B): per-header whitespace context.
-            let headerWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: headerData))
+            let headerWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: headerTree.sourceBytes))
             let bodyChildren = try Self.withWhitespaceContext(headerWsContext) {
                 try parseContainerBody(
                     from: headerXML,
@@ -455,9 +453,9 @@ public struct DocxReader {
             guard FileManager.default.fileExists(atPath: footerURL.path) else { continue }
             let footerData = try Data(contentsOf: footerURL)
             try Self.rejectDTD(footerData, part: "word/\(rel.target)")
-            let footerTree = try XmlTreeReader.parse(footerData)
+            let footerTree = try XmlTreeReader.parse(Self.utf8TreeInputData(footerData, part: "word/\(rel.target)"))
             document.xmlTrees["word/\(rel.target)"] = footerTree
-            let footerXML = try XMLDocument(data: try XmlTreeWriter.serialize(footerTree))
+            let footerXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: footerTree), options: [])
             // v0.19.5+ (#56 R5-CONT P1 #8): per-container rels — see header parse.
             // Container rels prepended for first-match correctness.
             let footerRelsURL = tempDir
@@ -467,7 +465,7 @@ public struct DocxReader {
             mergedRels.relationships = footerRels.relationships + relationships.relationships
             // v0.19.5+ (#56 R5 P0 #6): see header parse comment.
             // v0.19.10+ (#59 sub-stack B): per-footer whitespace context.
-            let footerWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: footerData))
+            let footerWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: footerTree.sourceBytes))
             let bodyChildren = try Self.withWhitespaceContext(footerWsContext) {
                 try parseContainerBody(
                     from: footerXML,
@@ -488,9 +486,9 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: footnotesURL.path) {
             let footnotesData = try Data(contentsOf: footnotesURL)
             try Self.rejectDTD(footnotesData, part: "word/footnotes.xml")
-            let footnotesTree = try XmlTreeReader.parse(footnotesData)
+            let footnotesTree = try XmlTreeReader.parse(Self.utf8TreeInputData(footnotesData, part: "word/footnotes.xml"))
             document.xmlTrees["word/footnotes.xml"] = footnotesTree
-            let footnotesXML = try XMLDocument(data: try XmlTreeWriter.serialize(footnotesTree))
+            let footnotesXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: footnotesTree), options: [])
             // v0.19.5+ (#56 R5-CONT P1 #8): per-collection rels for the
             // footnotes part. See header parse comment for full rationale.
             let footnotesRels = try Self.parseRelationshipsFile(
@@ -507,7 +505,7 @@ public struct DocxReader {
             // the same XML part — the byte-stream scan covers all `<w:t>` tags
             // in footnotes.xml, and the per-`<w:t>` sequence counter advances
             // monotonically across all `<w:footnote>` children.
-            let footnotesWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: footnotesData))
+            let footnotesWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: footnotesTree.sourceBytes))
             try Self.withWhitespaceContext(footnotesWsContext) {
             if let root = footnotesXML.rootElement() {
                 for child in root.children ?? [] {
@@ -543,9 +541,9 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: endnotesURL.path) {
             let endnotesData = try Data(contentsOf: endnotesURL)
             try Self.rejectDTD(endnotesData, part: "word/endnotes.xml")
-            let endnotesTree = try XmlTreeReader.parse(endnotesData)
+            let endnotesTree = try XmlTreeReader.parse(Self.utf8TreeInputData(endnotesData, part: "word/endnotes.xml"))
             document.xmlTrees["word/endnotes.xml"] = endnotesTree
-            let endnotesXML = try XMLDocument(data: try XmlTreeWriter.serialize(endnotesTree))
+            let endnotesXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: endnotesTree), options: [])
             // v0.19.5+ (#56 R5-CONT P1 #8): per-collection rels for endnotes.
             let endnotesRels = try Self.parseRelationshipsFile(
                 at: tempDir.appendingPathComponent("word/_rels/endnotes.xml.rels")
@@ -557,7 +555,7 @@ public struct DocxReader {
             // v0.19.2+ (#56 follow-up F4): preserve `<w:endnotes>` root attributes.
             document.endnotes.rootAttributes = try Self.parseContainerRootAttributes(from: endnotesData)
             // v0.19.10+ (#59 sub-stack B): endnotes-part-wide whitespace context.
-            let endnotesWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: endnotesData))
+            let endnotesWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: endnotesTree.sourceBytes))
             try Self.withWhitespaceContext(endnotesWsContext) {
             if let root = endnotesXML.rootElement() {
                 for child in root.children ?? [] {
@@ -593,9 +591,9 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: coreURL.path) {
             let coreData = try Data(contentsOf: coreURL)
             try Self.rejectDTD(coreData, part: "docProps/core.xml")
-            let coreTree = try XmlTreeReader.parse(coreData)
+            let coreTree = try XmlTreeReader.parse(Self.utf8TreeInputData(coreData, part: "docProps/core.xml"))
             document.xmlTrees["docProps/core.xml"] = coreTree
-            let coreXML = try XMLDocument(data: try XmlTreeWriter.serialize(coreTree))
+            let coreXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: coreTree), options: [])
             document.properties = try parseCoreProperties(from: coreXML)
         }
 
@@ -605,10 +603,10 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: commentsURL.path) {
             let commentsData = try Data(contentsOf: commentsURL)
             try Self.rejectDTD(commentsData, part: "word/comments.xml")
-            let commentsTree = try XmlTreeReader.parse(commentsData)
+            let commentsTree = try XmlTreeReader.parse(Self.utf8TreeInputData(commentsData, part: "word/comments.xml"))
             document.xmlTrees["word/comments.xml"] = commentsTree
-            let commentsXML = try XMLDocument(data: try XmlTreeWriter.serialize(commentsTree))
-            let commentsWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: commentsData))
+            let commentsXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: commentsTree), options: [])
+            let commentsWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: commentsTree.sourceBytes))
             document.comments = try Self.withWhitespaceContext(commentsWsContext) {
                 try parseComments(from: commentsXML)
             }
@@ -718,9 +716,9 @@ public struct DocxReader {
         if FileManager.default.fileExists(atPath: commentsExtURL.path) {
             let extData = try Data(contentsOf: commentsExtURL)
             try Self.rejectDTD(extData, part: "word/commentsExtended.xml")
-            let extTree = try XmlTreeReader.parse(extData)
+            let extTree = try XmlTreeReader.parse(Self.utf8TreeInputData(extData, part: "word/commentsExtended.xml"))
             document.xmlTrees["word/commentsExtended.xml"] = extTree
-            let extXML = try XMLDocument(data: try XmlTreeWriter.serialize(extTree))
+            let extXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: extTree), options: [])
             try parseCommentsExtended(from: extXML, into: &document.comments)
         }
 
@@ -855,7 +853,13 @@ public struct DocxReader {
                 do {
                     let partData = try Data(contentsOf: fileURL)
                     try Self.rejectDTD(partData, part: partPath)
-                    document.xmlTrees[partPath] = try XmlTreeReader.parse(partData)
+                    // PsychQuant/ooxml-swift#171: same encoding gate as every
+                    // part parsed above — a genuinely non-UTF-8/UTF-16/
+                    // ISO-8859-1/Shift_JIS part is recorded into
+                    // `xmlTreeLoadFailures` (this loop's existing
+                    // error-tolerant contract) rather than silently decoded
+                    // with U+FFFD replacement characters.
+                    document.xmlTrees[partPath] = try XmlTreeReader.parse(Self.utf8TreeInputData(partData, part: partPath))
                 } catch {
                     document.xmlTreeLoadFailures[partPath] = String(describing: error)
                 }
@@ -869,6 +873,121 @@ public struct DocxReader {
         document.modifiedParts.removeAll()
 
         return document
+    }
+
+    // MARK: - PsychQuant/ooxml-swift#171 encoding consistency
+
+    /// Bytes safe to feed to `XmlTreeReader.parse` (which always decodes
+    /// UTF-8 and never consults the XML declaration) — a REAL transcode
+    /// when `data` is not already UTF-8, not a relabel: every byte,
+    /// declaration included, is re-derived from the decoded text, so the
+    /// tree parsed from the result (and everything raw-byte-copied from it
+    /// on a later partial edit — `XmlTreeWriter`'s clean-subtree blob copy)
+    /// is consistently UTF-8 end to end, prolog and all. A declaration
+    /// left saying e.g. `ISO-8859-1` over now-UTF-8 body bytes would
+    /// reintroduce exactly the bug this closes.
+    ///
+    /// - Already valid UTF-8 (no NUL): returned unchanged, whatever the
+    ///   declaration says, right or wrong — matches `word/styles.xml`'s
+    ///   existing, locked behavior (PsychQuant/macdoc#214,
+    ///   `testReaderDecodesUTF8ValidStylesAsUTF8DespiteNonUTF8Declaration`):
+    ///   a part that IS UTF-8 reads correctly regardless of a wrong label.
+    /// - Otherwise, decoded per the declared `encoding` (read the way
+    ///   `ProfileXML.declaredEncoding` reads it) when it names one of the
+    ///   encodings below, or by UTF-16 BOM/null-pattern sniffing when
+    ///   there is no declaration (Word/tools sometimes omit `encoding=`
+    ///   for UTF-16). Named set: UTF-16 (BE/LE), ISO-8859-1, Shift_JIS —
+    ///   real-world `.docx` document parts are UTF-8, so this covers the
+    ///   legacy encodings this issue was asked to demonstrate rather than
+    ///   attempting every encoding Foundation happens to know; anything
+    ///   else declared is refused, not guessed at.
+    /// - A DTD is refused (`rejectDTD`) on the DECODED text — the same
+    ///   ASCII-losslessness reason the pre-#171 UTF-16 branch already
+    ///   rejected on decoded text rather than raw bytes: a byte-level scan
+    ///   for `<!DOCTYPE` over still-encoded (e.g. UTF-16) bytes would miss
+    ///   it — BEFORE any XML parser (`XMLDocument`) sees the content, so a
+    ///   hostile DTD hidden behind an unusual declared encoding is caught
+    ///   pre-parse exactly like a plain-UTF-8 one already is by the
+    ///   caller's `rejectDTD` on the raw bytes.
+    internal static func utf8TreeInputData(_ data: Data, part: String) throws -> Data {
+        if !data.contains(0), String(data: data, encoding: .utf8) != nil {
+            return data
+        }
+        let declared = ((try? ProfileXML.declaredEncoding([UInt8](data), part: part)) ?? nil)?.lowercased()
+        let encoding: String.Encoding
+        switch declared {
+        case "iso-8859-1", "iso8859-1", "latin1":
+            encoding = .isoLatin1
+        case "shift_jis", "shift-jis", "sjis":
+            encoding = .shiftJIS
+        case "utf-16be":
+            encoding = .utf16BigEndian
+        case "utf-16le":
+            encoding = .utf16LittleEndian
+        case nil, "utf-16":
+            // No declaration (or one that doesn't say which byte order):
+            // fall back to the BOM/null-pattern sniffing word/styles.xml
+            // already used before this generalization.
+            if data.starts(with: [0xFE, 0xFF]) || data.starts(with: [0, 0x3C]) {
+                encoding = .utf16BigEndian
+            } else if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0x3C, 0]) {
+                encoding = .utf16LittleEndian
+            } else {
+                throw WordError.invalidDocx("\(part) has an unsupported XML encoding")
+            }
+        default:
+            throw WordError.invalidDocx("\(part) has an unsupported XML encoding")
+        }
+        // UTF-32LE shares UTF-16LE's leading bytes. Its UTF-16
+        // interpretation contains NULs (invalid in XML); refuse it before
+        // the parser can auto-detect a different encoding. ISO-8859-1
+        // never fails to decode (every byte 0–255 is a valid Latin-1
+        // scalar); Shift_JIS can, for byte sequences that are not
+        // well-formed Shift_JIS.
+        guard let decoded = String(data: data, encoding: encoding), !decoded.contains("\u{0000}") else {
+            throw WordError.invalidDocx("\(part) has an unsupported XML encoding")
+        }
+        // DTD-reject on the DECODED text, before any XML parser sees the
+        // ORIGINAL bytes — `decoded` is only used for this pre-check, not
+        // for constructing the result (see below).
+        try Self.rejectDTD(Data(decoded.utf8), part: part)
+        // Let libxml2 re-derive the result from the ORIGINAL bytes, not
+        // from `decoded`: `XMLDocument(xmlString:)` on a string that still
+        // carries the OLD declaration text (e.g. `encoding="UTF-16"`)
+        // fails outright — "Document labelled UTF-16 but has UTF-8
+        // content" — because the native string is necessarily UTF-8/16
+        // internally already, mismatching its own stale label.
+        // `XMLDocument(data:)` decodes the ORIGINAL bytes itself per that
+        // same declaration (matched by construction, since we validated
+        // `encoding` against it above) and produces a correct document;
+        // DTD safety comes from the pre-check above having already run.
+        let encoded = try XMLDocument(data: data, options: .nodeLoadExternalEntitiesNever)
+        encoded.characterEncoding = "UTF-8"
+        return encoded.xmlData
+    }
+
+    /// A fresh, always-`encoding="UTF-8"`-labeled re-serialization of
+    /// `tree`'s root, safe to feed to `XMLDocument(xmlString:)` so the
+    /// typed model reads identical text to `XmlTreeReader`'s tree —
+    /// whatever the ORIGINAL part's declaration said (PsychQuant/ooxml-swift#171).
+    ///
+    /// `document.xmlTrees[canonicalPath] = tree` (set by every call site
+    /// below) keeps the tree `XmlTreeReader.parse` produced — original
+    /// `sourceRange`s intact — so an untouched save still blob-copies the
+    /// exact original bytes (including the original declaration) via the
+    /// whole-part preserve-by-default archive copy, and a PARTIAL edit's
+    /// clean subtrees still blob-copy from that SAME original tree. This
+    /// function only supplies a SEPARATE, throwaway input for constructing
+    /// the typed model — it does not touch what gets written.
+    ///
+    /// Reuses `ProfileXML.string`, which already does exactly this (deep
+    /// clone, wipe every node's `sourceRange`, serialize via
+    /// `XmlTree.synthesized`) for the narrower, cleaned styles/section
+    /// subset `DocumentFormattingProfile` works with — the walk-and-emit
+    /// itself does not depend on that vocabulary, so it works unmodified
+    /// on an arbitrary, uncleaned tree.
+    internal static func typedModelInputXML(from tree: XmlTree) throws -> String {
+        try ProfileXML.string(tree.root)
     }
 
     // MARK: - Relationships Parsing
@@ -888,7 +1007,7 @@ public struct DocxReader {
         guard FileManager.default.fileExists(atPath: relsURL.path) else { return nil }
         let data = try Data(contentsOf: relsURL)
         try Self.rejectDTD(data, part: relsURL.lastPathComponent)
-        return try XmlTreeReader.parse(data).root
+        return try XmlTreeReader.parse(Self.utf8TreeInputData(data, part: relsURL.lastPathComponent)).root
     }
 
     /// PsychQuant/ooxml-swift#173. Which part's bytes to read for
@@ -944,8 +1063,10 @@ public struct DocxReader {
         try Self.rejectDTD(relsData, part: "word/_rels/document.xml.rels")
         // v1.0 task 6.1: rels parts go through the tree projection too —
         // typed parse consumes the tree's serialization, never raw bytes.
-        let relsTree = try XmlTreeReader.parse(relsData)
-        let relsXML = try XMLDocument(data: try XmlTreeWriter.serialize(relsTree))
+        // PsychQuant/ooxml-swift#171: gated + typed-model-from-tree like
+        // every other part pair this reader builds.
+        let relsTree = try XmlTreeReader.parse(Self.utf8TreeInputData(relsData, part: "word/_rels/document.xml.rels"))
+        let relsXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: relsTree), options: [])
 
         // 取得所有 Relationship 節點
         let relNodes = try relsXML.nodes(forXPath: "//*[local-name()='Relationship']")

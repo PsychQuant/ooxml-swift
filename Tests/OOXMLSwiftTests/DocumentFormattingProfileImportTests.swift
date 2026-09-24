@@ -338,14 +338,17 @@ final class DocumentFormattingProfileImportTests: XCTestCase {
         }
     }
 
-    // MARK: - PsychQuant/macdoc#214 DocxReader keeps its behavior (locked)
+    // MARK: - PsychQuant/ooxml-swift#171 (was macdoc#214) DocxReader encoding consistency
 
-    /// Decision: the general reader is unchanged. For `word/styles.xml`,
-    /// bytes that are valid UTF-8 are decoded as UTF-8 whatever the XML
-    /// declaration says (the declaration is not consulted); other bytes go
-    /// through the UTF-16 path or are refused (see
-    /// testReaderBOMAndDeclarationMismatchCounterexamples). Only the
-    /// profile import path fails closed.
+    /// Decision: bytes that are valid UTF-8 are decoded as UTF-8 whatever
+    /// the XML declaration says (the declaration is not consulted); other
+    /// bytes are decoded per the declared encoding (UTF-16, ISO-8859-1,
+    /// Shift_JIS) or refused (see
+    /// testReaderBOMAndDeclarationMismatchCounterexamples). This now holds
+    /// for EVERY part the reader treats as a tree + typed-model pair, not
+    /// just word/styles.xml — see
+    /// testReaderDocumentPartTypedModelAgreesWithTreeRegardlessOfDeclaration
+    /// below for word/document.xml, which used to disagree with this part.
     func testReaderDecodesUTF8ValidStylesAsUTF8DespiteNonUTF8Declaration() throws {
         let source = try directory().appendingPathComponent("source.docx")
         try DocxWriter.write(WordDocument(), to: source)
@@ -359,14 +362,21 @@ final class DocumentFormattingProfileImportTests: XCTestCase {
         }
     }
 
-    /// Characterization, not endorsement (a follow-up is suggested in
-    /// PsychQuant/macdoc#214): for `word/document.xml` the typed model is
-    /// built by libxml2 (`XMLDocument(data:)`), which honours the
-    /// declaration, while the lossless tree decodes UTF-8. An untouched save
-    /// keeps the bytes; a save after a body edit writes a UTF-8 declaration
-    /// over the original bytes, so what Word shows for untouched text changes
-    /// from the declared decoding to UTF-8.
-    func testReaderDocumentPartTypedTextFollowsDeclarationWhileTreeStaysUTF8() throws {
+    /// Fixed (was: characterization, not endorsement — PsychQuant/macdoc#214;
+    /// resolved by PsychQuant/ooxml-swift#171). `word/document.xml`'s typed
+    /// model used to be built by libxml2 (`XMLDocument(data:)`) directly
+    /// from the declaration-preserving tree serialization, honouring
+    /// whatever the declaration said, while the lossless tree always
+    /// decoded UTF-8; an edit's resave then rewrote the declaration to
+    /// UTF-8 over the ORIGINAL (differently-encoded) kept bytes, silently
+    /// changing what Word would show for text the edit never touched.
+    ///
+    /// Now the typed model is built from a fresh, always-UTF-8-labeled
+    /// re-serialization of the SAME tree (`DocxReader.typedModelInputXML`),
+    /// so it agrees with the tree by construction, whatever the source
+    /// declaration said — this mirrors word/styles.xml's existing,
+    /// unaffected behavior in the test above.
+    func testReaderDocumentPartTypedModelAgreesWithTreeRegardlessOfDeclaration() throws {
         let source = try directory().appendingPathComponent("source.docx")
         var seed = WordDocument()
         seed.appendParagraph(Paragraph(text: "PLACEHOLDER"))
@@ -374,23 +384,108 @@ final class DocumentFormattingProfileImportTests: XCTestCase {
         var parts = try RawPartChannel.readAllParts(from: source)
         let original = String(decoding: try XCTUnwrap(parts["word/document.xml"]), as: UTF8.self)
         XCTAssertTrue(original.contains("encoding=\"UTF-8\""))
+        // The declaration lies (says ISO-8859-1) while the bytes are
+        // actually valid UTF-8 — the "already valid UTF-8, ignore the
+        // label" branch, same as the styles.xml test above.
         let declared = Data(original.replacingOccurrences(of: "encoding=\"UTF-8\"", with: "encoding=\"ISO-8859-1\"")
             .replacingOccurrences(of: "PLACEHOLDER", with: "名稱").utf8)
         parts["word/document.xml"] = declared
         var doc = try DocxReader.read(from: try package(parts))
         defer { doc.close() }
-        XCTAssertEqual(doc.getText(), String(data: Data("名稱".utf8), encoding: .isoLatin1), "typed text follows the declaration")
+        XCTAssertEqual(doc.getText(), "名稱", "typed model no longer follows a wrong declaration")
         let treeText = ProfileXML.walk(try XCTUnwrap(doc.xmlTrees["word/document.xml"]).root).filter { $0.kind == .text }.map(\.textContent).joined()
-        XCTAssertEqual(treeText, "名稱", "the tree decodes UTF-8")
+        XCTAssertEqual(treeText, "名稱", "the tree still decodes UTF-8")
+        // Untouched save: still byte-exact (the whole-part preserve-by-
+        // default archive copy bypasses the tree entirely when nothing
+        // marks word/document.xml dirty — unaffected by this fix).
         let untouched = try directory().appendingPathComponent("untouched.docx")
         try DocxWriter.write(doc, to: untouched)
         XCTAssertEqual(try RawPartChannel.readAllParts(from: untouched)["word/document.xml"], declared)
+        // Edited save: an UNRELATED edit must not change what the
+        // PRE-EXISTING text decodes to — it did not before (mislabeled but
+        // actually-UTF-8 bytes), and it must not after.
         doc.appendParagraph(Paragraph(text: "edit"))
         let edited = try directory().appendingPathComponent("edited.docx")
         try DocxWriter.write(doc, to: edited)
-        let saved = String(decoding: try XCTUnwrap(RawPartChannel.readAllParts(from: edited)["word/document.xml"]), as: UTF8.self)
+        let savedBytes = try XCTUnwrap(RawPartChannel.readAllParts(from: edited)["word/document.xml"])
+        let saved = String(decoding: savedBytes, as: UTF8.self)
         XCTAssertTrue(saved.hasPrefix("<?xml version=\"1.0\" encoding=\"UTF-8\""), String(saved.prefix(80)))
         XCTAssertTrue(saved.contains("名稱"))
+        var reopened = try DocxReader.read(from: edited)
+        defer { reopened.close() }
+        XCTAssertTrue(reopened.getText().contains("名稱"), "the pre-existing text still decodes to the same characters after an unrelated edit")
+    }
+
+    /// PsychQuant/ooxml-swift#171's explicit ask: a document.xml GENUINELY
+    /// encoded (not just mislabeled) in ISO-8859-1 or Shift_JIS, with an
+    /// edit unrelated to the pre-existing text, must decode to the SAME
+    /// Word-visible text before and after the edit.
+    func testReaderDocumentPartSurvivesUnrelatedEditForISO88591AndShiftJIS() throws {
+        // ISO-8859-1 (Latin-1) cannot represent CJK — "Müller café" is the
+        // representative non-ASCII string for that declaration; Shift_JIS
+        // represents Japanese kanji directly.
+        for (label, declared, encoding, text) in [
+            ("ISO-8859-1", "ISO-8859-1", String.Encoding.isoLatin1, "Müller café"),
+            ("Shift_JIS", "Shift_JIS", .shiftJIS, "名稱")
+        ] {
+            let source = try directory().appendingPathComponent("source-\(label).docx")
+            var seed = WordDocument()
+            seed.appendParagraph(Paragraph(text: "PLACEHOLDER"))
+            try DocxWriter.write(seed, to: source)
+            var parts = try RawPartChannel.readAllParts(from: source)
+            let original = String(decoding: try XCTUnwrap(parts["word/document.xml"]), as: UTF8.self)
+            let relabeled = original.replacingOccurrences(of: "encoding=\"UTF-8\"", with: "encoding=\"\(declared)\"")
+                .replacingOccurrences(of: "PLACEHOLDER", with: text)
+            // A REAL transcode, not a relabel: the bytes are genuinely
+            // ISO-8859-1/Shift_JIS-encoded, not UTF-8 wearing a wrong label.
+            let realBytes = try XCTUnwrap(relabeled.data(using: encoding), label)
+            parts["word/document.xml"] = realBytes
+            var doc = try DocxReader.read(from: try package(parts))
+            defer { doc.close() }
+            XCTAssertEqual(doc.getText(), text, "\(label): typed model decodes the genuinely-encoded bytes correctly")
+            doc.appendParagraph(Paragraph(text: "unrelated edit"))
+            let edited = try directory().appendingPathComponent("edited-\(label).docx")
+            try DocxWriter.write(doc, to: edited)
+            var reopened = try DocxReader.read(from: edited)
+            defer { reopened.close() }
+            XCTAssertTrue(reopened.getText().contains(text), "\(label): pre-existing text unchanged by an unrelated edit")
+            XCTAssertTrue(reopened.getText().contains("unrelated edit"), label)
+        }
+    }
+
+    /// PsychQuant/ooxml-swift#171: "header、footer 等其他 part 也要涵蓋" —
+    /// the same declared-encoding decode and edit-preserves-meaning
+    /// contract for a header (a representative non-document.xml part that
+    /// also carries a tree + typed-model pair, via a per-container rels
+    /// merge path document.xml does not exercise).
+    func testReaderHeaderPartSurvivesUnrelatedEditForShiftJIS() throws {
+        let source = try directory().appendingPathComponent("header-source.docx")
+        var seed = WordDocument()
+        seed.appendParagraph(Paragraph(text: "BODY"))
+        let header = Header(id: "rIdHeader", paragraphs: [Paragraph(text: "PLACEHOLDER")], type: .default, originalFileName: "header1.xml")
+        seed.headers.append(header)
+        try DocxWriter.write(seed, to: source)
+        var parts = try RawPartChannel.readAllParts(from: source)
+        let headerPath = "word/header1.xml"
+        let original = String(decoding: try XCTUnwrap(parts[headerPath]), as: UTF8.self)
+        XCTAssertTrue(original.contains("encoding=\"UTF-8\""))
+        let relabeled = original.replacingOccurrences(of: "encoding=\"UTF-8\"", with: "encoding=\"Shift_JIS\"")
+            .replacingOccurrences(of: "PLACEHOLDER", with: "名稱")
+        parts[headerPath] = try XCTUnwrap(relabeled.data(using: .shiftJIS))
+        var doc = try DocxReader.read(from: try package(parts))
+        defer { doc.close() }
+        func headerText(_ document: WordDocument) -> String {
+            document.headers.first?.bodyChildren.compactMap {
+                if case .paragraph(let p) = $0 { return p.getText() } else { return nil }
+            }.joined() ?? ""
+        }
+        XCTAssertEqual(headerText(doc), "名稱")
+        doc.appendParagraph(Paragraph(text: "unrelated body edit"))
+        let edited = try directory().appendingPathComponent("header-edited.docx")
+        try DocxWriter.write(doc, to: edited)
+        var reopened = try DocxReader.read(from: edited)
+        defer { reopened.close() }
+        XCTAssertEqual(headerText(reopened), "名稱", "header text unchanged by an unrelated body edit")
     }
 
     // MARK: - PsychQuant/macdoc#212 actionable completeness errors
