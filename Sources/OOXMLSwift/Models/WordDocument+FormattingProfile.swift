@@ -233,32 +233,65 @@ extension WordDocument {
         self = next
     }
 
-    /// Shared writer finalization. Rebuild defaults from durable state while
-    /// allowing later typed or reducer style edits to take precedence.
-    internal func writeFormattingParts(to directory: URL) throws {
+    /// Which formatting parts the finalizer publishes on this save.
+    private struct FormattingPublication {
+        let writesStyles: Bool
+        let freshAncillary: Set<String>
+        let carriedAncillary: Set<String>
+        var isEmpty: Bool { !writesStyles && freshAncillary.isEmpty && carriedAncillary.isEmpty }
+    }
+
+    private var formattingPublication: FormattingPublication {
         let state = formattingState
         // Generic carried styles retain their pre-profile writer semantics.
         // An independently carried theme still needs publication and metadata.
         let preservesCarriedStyles = state?.explicitlyApplied == false && carriedParts["word/styles.xml"] != nil
         let writesStyles = state.map { $0.explicitlyApplied || modifiedParts.contains("word/styles.xml") } == true && !preservesCarriedStyles
-        let freshAncillary = treeFreshParts.intersection(modifiedParts).intersection(["word/theme/theme1.xml", "word/fontTable.xml"])
+        let ancillary: Set<String> = ["word/theme/theme1.xml", "word/fontTable.xml"]
         // Bare carry operations also power byte-equal replay. Only explicitly
         // dirty carried parts need publication through the ordinary writer;
         // untouched replay metadata must remain byte-preserved.
-        let carriedAncillary = Set(carriedParts.keys).intersection(modifiedParts).intersection(["word/theme/theme1.xml", "word/fontTable.xml"])
-        guard writesStyles || !freshAncillary.isEmpty || !carriedAncillary.isEmpty else { return }
-        // PsychQuant/macdoc#196: validate the package's final relationships
-        // before any formatting part is written; the same tree is updated
-        // below.
+        return FormattingPublication(
+            writesStyles: writesStyles,
+            freshAncillary: treeFreshParts.intersection(modifiedParts).intersection(ancillary),
+            carriedAncillary: Set(carriedParts.keys).intersection(modifiedParts).intersection(ancillary))
+    }
+
+    /// PsychQuant/macdoc#196 — the relationship gate both writers
+    /// (`DocxWriter` and `writeAuthoringPackage`) run before writing any part.
+    ///
+    /// Decision: the library preserves what it does not touch. A save that
+    /// neither publishes formatting parts nor rewrites
+    /// `word/_rels/document.xml.rels` leaves a pre-existing malformed
+    /// relationship set exactly as it was and is not rejected. Whenever the
+    /// save will publish formatting parts (a profile applied this session,
+    /// typed style/theme/font edits) or rewrite the relationships (typed
+    /// relationship changes, or the finalizer's Target repair), the
+    /// relationships the save starts from — `relationships()`, in the
+    /// writer's own precedence — are parsed with DTD refusal and checked for
+    /// duplicate implicit registrations first, so a refusal leaves every
+    /// part, the source archive and the destination untouched.
+    internal func validateRelationshipsBeforeWrite(rewritesRelationships: Bool,
+                                                   relationships: () throws -> Data?) throws {
+        guard rewritesRelationships || !formattingPublication.isEmpty else { return }
+        guard let data = try relationships() else { return }
+        try ProfileXML.rejectDuplicateImplicitRelationships(in: ProfileXML.parseRejectingDTD(data))
+    }
+
+    /// Shared writer finalization. Rebuild defaults from durable state while
+    /// allowing later typed or reducer style edits to take precedence.
+    /// Every byte is staged first; the final relationship set is validated
+    /// before any part is written.
+    internal func writeFormattingParts(to directory: URL) throws {
+        let state = formattingState
+        let publication = formattingPublication
+        guard !publication.isEmpty else { return }
+        let writesStyles = publication.writesStyles
         let relNS = ProfileXML.relationshipsNS
         let relsURL = directory.appendingPathComponent("word/_rels/document.xml.rels")
         let rels = try ProfileXML.parseRejectingDTD(Data(contentsOf: relsURL))
         try ProfileXML.rejectDuplicateImplicitRelationships(in: rels)
-        func write(_ bytes: Data, _ path: String) throws {
-            let url = directory.appendingPathComponent(path)
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try bytes.write(to: url)
-        }
+        var staged: [(path: String, bytes: Data)] = []
         var parts: [(path: String, type: String, rel: String, target: String)] = []
         if writesStyles, let state {
             let root: XmlNode
@@ -281,19 +314,19 @@ extension WordDocument {
                 root.children.removeAll { $0.namespaceURI == ProfileXML.w && $0.localName == "docDefaults" }
                 if let defaults = state.defaultsXML { root.children.insert(try ProfileXML.parse(defaults), at: 0) }
             }
-            try write(Data(ProfileXML.string(root).utf8), "word/styles.xml")
+            staged.append(("word/styles.xml", Data(try ProfileXML.string(root).utf8)))
             parts.append(("word/styles.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml", "styles", "styles.xml"))
         }
         func currentAncillary(_ path: String, fallback: Data?) throws -> Data? {
-            guard writesStyles || freshAncillary.contains(path) || carriedAncillary.contains(path) else { return nil }
+            guard writesStyles || publication.freshAncillary.contains(path) || publication.carriedAncillary.contains(path) else { return nil }
             return try effectiveFormattingPartData(path, fallback: fallback)
         }
         if let fonts = try currentAncillary("word/fontTable.xml", fallback: state?.fontsData) {
-            try write(fonts, "word/fontTable.xml")
+            staged.append(("word/fontTable.xml", fonts))
             parts.append(("word/fontTable.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml", "fontTable", "fontTable.xml"))
         }
         if let theme = try currentAncillary("word/theme/theme1.xml", fallback: state?.themeData) {
-            try write(theme, "word/theme/theme1.xml")
+            staged.append(("word/theme/theme1.xml", theme))
             parts.append(("word/theme/theme1.xml", "application/vnd.openxmlformats-officedocument.theme+xml", "theme", "theme/theme1.xml"))
         }
         let typesURL = directory.appendingPathComponent("[Content_Types].xml")
@@ -317,19 +350,27 @@ extension WordDocument {
                     XmlAttribute(localName: "PartName", value: "/" + part.path), XmlAttribute(localName: "ContentType", value: part.type)]))
                 typesChanged = true
             }
+            // Repair every registration of this Type, not just the first:
+            // equivalent spellings of the old part (the only kind the check
+            // above lets through) are all repointed at the published part,
+            // keeping each registration and its Id.
             let relationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/" + part.rel
-            let previous = rels.children.first { $0.namespaceURI == relNS && $0.attributeValue(prefix: nil, localName: "Type") == relationshipType }
-            if let previous {
-                let target = previous.attributeValue(prefix: nil, localName: "Target") ?? ""
+            let registrations = rels.children.filter {
+                $0.kind == .element && $0.namespaceURI == relNS && $0.localName == "Relationship"
+                    && $0.attributeValue(prefix: nil, localName: "Type") == relationshipType
+            }
+            for registration in registrations {
+                let target = registration.attributeValue(prefix: nil, localName: "Target") ?? ""
                 if ProfileXML.normalizedRelationshipTarget(target) != "/" + part.path {
-                    setAttribute(previous, "Target", part.target)
+                    setAttribute(registration, "Target", part.target)
                     relsChanged = true
                 }
-                if previous.attributeValue(prefix: nil, localName: "TargetMode") == "External" {
-                    previous.attributes.removeAll { $0.prefix == nil && $0.localName == "TargetMode" }
+                if registration.attributeValue(prefix: nil, localName: "TargetMode") == "External" {
+                    registration.attributes.removeAll { $0.prefix == nil && $0.localName == "TargetMode" }
                     relsChanged = true
                 }
-            } else {
+            }
+            if registrations.isEmpty {
                 var n = 1
                 while ids.contains("rId\(n)") { n += 1 }
                 let id = "rId\(n)"
@@ -339,8 +380,15 @@ extension WordDocument {
                 relsChanged = true
             }
         }
-        if typesChanged { try write(Data(ProfileXML.string(types).utf8), "[Content_Types].xml") }
-        if relsChanged { try write(Data(ProfileXML.string(rels).utf8), "word/_rels/document.xml.rels") }
+        // The final relationship set is validated before any part is written.
+        try ProfileXML.rejectDuplicateImplicitRelationships(in: rels)
+        if typesChanged { staged.append(("[Content_Types].xml", Data(try ProfileXML.string(types).utf8))) }
+        if relsChanged { staged.append(("word/_rels/document.xml.rels", Data(try ProfileXML.string(rels).utf8))) }
+        for (path, bytes) in staged {
+            let url = directory.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try bytes.write(to: url)
+        }
     }
 
     /// The main-part relationships this document would publish, in writer

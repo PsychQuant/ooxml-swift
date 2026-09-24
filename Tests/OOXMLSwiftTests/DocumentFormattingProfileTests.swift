@@ -782,6 +782,129 @@ final class DocumentFormattingProfileTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
     }
 
+    // MARK: - PsychQuant/macdoc#196 shared pre-write relationship gate
+
+    /// A plain package whose main-part relationships are rewritten by `edit`.
+    func packageWithRelationships(_ edit: (String) -> String) throws -> (url: URL, parts: [String: Data]) {
+        let url = try directory().appendingPathComponent("package.docx")
+        try DocxWriter.writeData(WordDocument()).write(to: url)
+        var parts = try RawPartChannel.readAllParts(from: url)
+        parts["word/_rels/document.xml.rels"] = Data(edit(String(decoding: parts["word/_rels/document.xml.rels"]!, as: UTF8.self)).utf8)
+        try writePackage(parts, to: url)
+        return (url, parts)
+    }
+
+    func appendingRelationships(_ extra: String) -> (String) -> String {
+        { $0.replacingOccurrences(of: "</Relationships>", with: extra + "</Relationships>") }
+    }
+
+    func fileSnapshot(of root: URL) throws -> [String: Data] {
+        var result: [String: Data] = [:]
+        let base = root.resolvingSymlinksInPath().path
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]))
+        for case let file as URL in enumerator where (try file.resourceValues(forKeys: [.isRegularFileKey])).isRegularFile == true {
+            result[String(file.resolvingSymlinksInPath().path.dropFirst(base.count))] = try Data(contentsOf: file)
+        }
+        return result
+    }
+
+    /// Decision (lossless preservation): a save that neither publishes
+    /// formatting parts nor rewrites the relationships leaves a malformed
+    /// relationship set exactly as it was, through both writers.
+    func testBodyOnlySaveOfMalformedPackagePreservesItUnchanged() throws {
+        let (url, source) = try packageWithRelationships(appendingRelationships(
+            "<Relationship Id=\"rIdOther\" Type=\"\(Self.officeRel)/styles\" Target=\"other-styles.xml\"/>"))
+        var doc = try DocxReader.read(from: url)
+        defer { doc.close() }
+        doc.appendParagraph(Paragraph(text: "body only"))
+        let output = try directory().appendingPathComponent("body-only.docx")
+        XCTAssertNoThrow(try DocxWriter.write(doc, to: output))
+        let saved = try RawPartChannel.readAllParts(from: output)
+        for path in ["word/_rels/document.xml.rels", "word/styles.xml", "[Content_Types].xml"] { XCTAssertEqual(saved[path], source[path], path) }
+        XCTAssertTrue(String(decoding: try XCTUnwrap(saved["word/document.xml"]), as: UTF8.self).contains("body only"))
+
+        var authoring = WordDocument.emptyAuthoringDocument()
+        let rels = relationshipsXML([("styles", "styles.xml"), ("styles", "other-styles.xml")])
+        try authoring.apply(operations: [
+            .carryPart(partPath: "word/_rels/document.xml.rels", xml: rels),
+            .appendParagraph(in: nil, paragraph: ParagraphPayload(text: "body only", styleId: nil, paraId: "0A0B0C0D"))
+        ])
+        let authored = try directory().appendingPathComponent("authoring.docx")
+        XCTAssertNoThrow(try authoring.writeAuthoringPackage(to: authored))
+        XCTAssertEqual(try RawPartChannel.readAllParts(from: authored)["word/_rels/document.xml.rels"], Data(rels.utf8))
+    }
+
+    /// Whenever a save will publish formatting parts (a typed style edit) or
+    /// rewrite the relationships, the relationship set it starts from is
+    /// validated before any part is written: the reader's backing archive is
+    /// untouched and a pre-existing destination stays byte-identical.
+    func testFormattingOrRelationshipSaveOfMalformedPackageFailsBeforeAnyWrite() throws {
+        let cases: [(type: String, extra: String, edit: (inout WordDocument) throws -> Void)] = [
+            ("styles", "<Relationship Id=\"rIdOther\" Type=\"\(Self.officeRel)/styles\" Target=\"other-styles.xml\"/>",
+             { try $0.updateStyle(id: "Normal", with: StyleUpdate(name: "typed style edit")) }),
+            ("theme", "<Relationship Id=\"rIdThemeA\" Type=\"\(Self.officeRel)/theme\" Target=\"theme/theme1.xml\"/><Relationship Id=\"rIdThemeB\" Type=\"\(Self.officeRel)/theme\" Target=\"theme/theme2.xml\"/>",
+             { $0.markPartDirty("word/_rels/document.xml.rels") })
+        ]
+        for (type, extra, edit) in cases {
+            let (url, _) = try packageWithRelationships(appendingRelationships(extra))
+            var doc = try DocxReader.read(from: url)
+            defer { doc.close() }
+            doc.appendParagraph(Paragraph(text: "body edit"))
+            try edit(&doc)
+            let archive = try XCTUnwrap(doc.archiveTempDir)
+            let before = try fileSnapshot(of: archive)
+            let destination = try directory().appendingPathComponent("existing.docx")
+            try Data("previous output".utf8).write(to: destination)
+            XCTAssertThrowsError(try DocxWriter.write(doc, to: destination), type) { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .duplicateRelationship(type), type)
+            }
+            XCTAssertEqual(try fileSnapshot(of: archive), before, "\(type): a part was written before the gate")
+            XCTAssertEqual(try Data(contentsOf: destination), Data("previous output".utf8), type)
+        }
+
+        var authoring = WordDocument.emptyAuthoringDocument()
+        try authoring.applyFormattingProfile(DocumentFormattingProfile.importOfficial(from: template()), context: .existingDocument)
+        try authoring.apply(operations: [.carryPart(partPath: "word/_rels/document.xml.rels",
+                                                    xml: relationshipsXML([("styles", "styles.xml"), ("styles", "other-styles.xml")]))])
+        let destination = try directory().appendingPathComponent("existing-authoring.docx")
+        try Data("previous output".utf8).write(to: destination)
+        XCTAssertThrowsError(try authoring.writeAuthoringPackage(to: destination)) { error in
+            XCTAssertEqual(error as? DocumentFormattingProfileError, .duplicateRelationship("styles"))
+        }
+        XCTAssertEqual(try Data(contentsOf: destination), Data("previous output".utf8))
+    }
+
+    /// Target repair rewrites every registration of the Type that names the
+    /// old part. Equivalent spellings are all repointed at the canonical part
+    /// (both registrations and their Ids are kept, not deduplicated), so they
+    /// can never end up naming different parts.
+    func testTargetRepairRewritesEveryEquivalentRegistration() throws {
+        func stylesTargets(_ relsXML: String?) throws -> [String] {
+            let rels = try ProfileXML.parse(try XCTUnwrap(relsXML))
+            return rels.children.filter { $0.attributeValue(prefix: nil, localName: "Type") == "\(Self.officeRel)/styles" }
+                .compactMap { $0.attributeValue(prefix: nil, localName: "Target") }
+        }
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.apply(operations: [
+            .carryPart(partPath: "[Content_Types].xml", xml: "<Types xmlns=\"\(Self.typeNS)\"><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>"),
+            .carryPart(partPath: "word/_rels/document.xml.rels", xml: relationshipsXML([("styles", "old-styles.xml"), ("styles", "./old-styles.xml")]))
+        ])
+        try doc.applyFormattingProfile(DocumentFormattingProfile.importOfficial(from: template()), context: .existingDocument)
+        XCTAssertEqual(try stylesTargets(parts(doc, authoring: true)["word/_rels/document.xml.rels"]), ["styles.xml", "styles.xml"])
+
+        let (url, _) = try packageWithRelationships {
+            $0.replacingOccurrences(of: "Target=\"styles.xml\"", with: "Target=\"old-styles.xml\"")
+                .replacingOccurrences(of: "</Relationships>", with: "<Relationship Id=\"rIdAlias\" Type=\"\(Self.officeRel)/styles\" Target=\"./old-styles.xml\"/></Relationships>")
+        }
+        var reader = try DocxReader.read(from: url)
+        defer { reader.close() }
+        try reader.updateStyle(id: "Normal", with: StyleUpdate(name: "repair both"))
+        let output = try directory().appendingPathComponent("repaired.docx")
+        try DocxWriter.write(reader, to: output)
+        let saved = try RawPartChannel.readAllParts(from: output)["word/_rels/document.xml.rels"].map { String(decoding: $0, as: UTF8.self) }
+        XCTAssertEqual(try stylesTargets(saved), ["styles.xml", "styles.xml"])
+    }
+
     /// The same write-path guard through the plain writer on a genuinely
     /// round-tripped archive (no profile applied; an ordinary typed style
     /// edit is what triggers the formatting finalizer).

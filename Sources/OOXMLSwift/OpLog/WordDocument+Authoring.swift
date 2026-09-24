@@ -65,6 +65,14 @@ extension WordDocument {
     /// `word/styles.xml` when a styles tree exists. Atomic single-file write
     /// (temp + rename).
     public func writeAuthoringPackage(to url: URL) throws {
+        // PsychQuant/macdoc#196: shared pre-write relationship gate, before
+        // any part is written. This writer never rewrites the relationships
+        // itself (only the formatting finalizer does); a synthesized part
+        // registers styles at most once, so there is nothing to validate.
+        try validateRelationshipsBeforeWrite(rewritesRelationships: false) {
+            if let carried = carriedParts["word/_rels/document.xml.rels"] { return carried }
+            return try xmlTrees["word/_rels/document.xml.rels"].map { try XmlTreeWriter.serialize($0) }
+        }
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("mdocx-authoring-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
