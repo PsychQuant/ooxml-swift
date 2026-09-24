@@ -874,6 +874,37 @@ final class DocumentFormattingProfileTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: destination), Data("previous output".utf8))
     }
 
+    /// The authoring writer decides like DocxWriter from what it will
+    /// publish: a relationships tree modified this session (here by
+    /// addRelationship ops, no profile involved) is validated before any
+    /// part is written; an untouched malformed tree is published as it is.
+    func testAuthoringWriterValidatesAModifiedRelationshipsTreeWithoutAProfile() throws {
+        let relsPath = "word/_rels/document.xml.rels"
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.apply(operations: [
+            .addRelationship(part: relsPath, id: "rIdStyles", type: "\(Self.officeRel)/styles", target: "styles.xml", targetMode: nil),
+            .addRelationship(part: relsPath, id: "rIdConflict", type: "\(Self.officeRel)/styles", target: "other-styles.xml", targetMode: nil)
+        ])
+        XCTAssertNil(doc.formattingState)
+        let destination = try directory().appendingPathComponent("existing.docx")
+        try Data("previous output".utf8).write(to: destination)
+        XCTAssertThrowsError(try doc.writeAuthoringPackage(to: destination)) { error in
+            XCTAssertEqual(error as? DocumentFormattingProfileError, .duplicateRelationship("styles"))
+        }
+        XCTAssertEqual(try Data(contentsOf: destination), Data("previous output".utf8))
+
+        let (url, source) = try packageWithRelationships(appendingRelationships(
+            "<Relationship Id=\"rIdOther\" Type=\"\(Self.officeRel)/styles\" Target=\"other-styles.xml\"/>"))
+        var untouched = try DocxReader.read(from: url)
+        defer { untouched.close() }
+        try untouched.apply(operations: [.appendParagraph(in: nil, paragraph: ParagraphPayload(text: "body only", styleId: nil, paraId: "0B0C0D0E"))])
+        let output = try directory().appendingPathComponent("untouched.docx")
+        XCTAssertNoThrow(try untouched.writeAuthoringPackage(to: output))
+        let saved = try RawPartChannel.readAllParts(from: output)
+        XCTAssertEqual(saved[relsPath], source[relsPath])
+        XCTAssertTrue(String(decoding: try XCTUnwrap(saved["word/document.xml"]), as: UTF8.self).contains("body only"))
+    }
+
     /// Target repair rewrites every registration of the Type that names the
     /// old part. Equivalent spellings are all repointed at the canonical part
     /// (both registrations and their Ids are kept, not deduplicated), so they
