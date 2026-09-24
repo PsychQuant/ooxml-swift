@@ -71,7 +71,7 @@ extension WordDocument {
         // PsychQuant/macdoc#196: refuse a malformed target package before
         // anything is mutated; the writer re-checks the final relationships.
         if let relationships = try mainRelationshipsData() {
-            try ProfileXML.rejectDuplicateImplicitRelationships(in: ProfileXML.parse(relationships))
+            try ProfileXML.rejectDuplicateImplicitRelationships(in: ProfileXML.parseRejectingDTD(relationships))
         }
         var next = self
         next.xmlTrees = xmlTrees.mapValues { $0.deepCopy() }
@@ -252,7 +252,7 @@ extension WordDocument {
         // below.
         let relNS = ProfileXML.relationshipsNS
         let relsURL = directory.appendingPathComponent("word/_rels/document.xml.rels")
-        let rels = try ProfileXML.parse(Data(contentsOf: relsURL))
+        let rels = try ProfileXML.parseRejectingDTD(Data(contentsOf: relsURL))
         try ProfileXML.rejectDuplicateImplicitRelationships(in: rels)
         func write(_ bytes: Data, _ path: String) throws {
             let url = directory.appendingPathComponent(path)

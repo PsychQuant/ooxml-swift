@@ -759,6 +759,29 @@ final class DocumentFormattingProfileTests: XCTestCase {
         }
     }
 
+    /// The target's relationship XML is parsed with the same DTD refusal as
+    /// profile payloads, on apply and on write alike.
+    func testRelationshipsWithDoctypeAreRejectedOnApplyAndWrite() throws {
+        let profile = try DocumentFormattingProfile.importOfficial(from: template())
+        let rels = relationshipsXML([("styles", "styles.xml")])
+            .replacingOccurrences(of: "<Relationships", with: "<!DOCTYPE Relationships [<!ENTITY unused \"x\">]><Relationships")
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.apply(operations: [.carryPart(partPath: "word/_rels/document.xml.rels", xml: rels)])
+        XCTAssertThrowsError(try doc.applyFormattingProfile(profile, context: .existingDocument)) { error in
+            XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("DTD not allowed"))
+        }
+        XCTAssertNil(doc.formattingState)
+
+        var applied = WordDocument.emptyAuthoringDocument()
+        try applied.applyFormattingProfile(profile, context: .existingDocument)
+        try applied.apply(operations: [.carryPart(partPath: "word/_rels/document.xml.rels", xml: rels)])
+        let output = try directory().appendingPathComponent("doctype.docx")
+        XCTAssertThrowsError(try applied.writeAuthoringPackage(to: output)) { error in
+            XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("DTD not allowed"))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+    }
+
     /// The same write-path guard through the plain writer on a genuinely
     /// round-tripped archive (no profile applied; an ordinary typed style
     /// edit is what triggers the formatting finalizer).
