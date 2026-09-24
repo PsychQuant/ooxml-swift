@@ -71,7 +71,7 @@ extension WordDocument {
         // PsychQuant/macdoc#196: refuse a malformed target package before
         // anything is mutated; the writer re-checks the final relationships.
         if let relationships = try mainRelationshipsData() {
-            try ProfileXML.rejectDuplicateImplicitRelationships(in: ProfileXML.parseRejectingDTD(relationships))
+            try ProfileXML.validateImplicitRelationships(in: ProfileXML.parseRejectingDTD(relationships))
         }
         var next = self
         next.xmlTrees = xmlTrees.mapValues { $0.deepCopy() }
@@ -269,13 +269,14 @@ extension WordDocument {
     /// relationship changes, or the finalizer's Target repair), the
     /// relationships the save starts from — `relationships()`, in the
     /// writer's own precedence — are parsed with DTD refusal and checked for
-    /// duplicate implicit registrations first, so a refusal leaves every
-    /// part, the source archive and the destination untouched.
+    /// implicit registrations that are not part names or are duplicated
+    /// first, so a refusal leaves every part, the source archive and the
+    /// destination untouched.
     internal func validateRelationshipsBeforeWrite(rewritesRelationships: Bool,
                                                    relationships: () throws -> Data?) throws {
         guard rewritesRelationships || !formattingPublication.isEmpty else { return }
         guard let data = try relationships() else { return }
-        try ProfileXML.rejectDuplicateImplicitRelationships(in: ProfileXML.parseRejectingDTD(data))
+        try ProfileXML.validateImplicitRelationships(in: ProfileXML.parseRejectingDTD(data))
     }
 
     /// Shared writer finalization. Rebuild defaults from durable state while
@@ -290,7 +291,7 @@ extension WordDocument {
         let relNS = ProfileXML.relationshipsNS
         let relsURL = directory.appendingPathComponent("word/_rels/document.xml.rels")
         let rels = try ProfileXML.parseRejectingDTD(Data(contentsOf: relsURL))
-        try ProfileXML.rejectDuplicateImplicitRelationships(in: rels)
+        try ProfileXML.validateImplicitRelationships(in: rels)
         var staged: [(path: String, bytes: Data)] = []
         var parts: [(path: String, type: String, rel: String, target: String)] = []
         if writesStyles, let state {
@@ -381,7 +382,7 @@ extension WordDocument {
             }
         }
         // The final relationship set is validated before any part is written.
-        try ProfileXML.rejectDuplicateImplicitRelationships(in: rels)
+        try ProfileXML.validateImplicitRelationships(in: rels)
         if typesChanged { staged.append(("[Content_Types].xml", Data(try ProfileXML.string(types).utf8))) }
         if relsChanged { staged.append(("word/_rels/document.xml.rels", Data(try ProfileXML.string(rels).utf8))) }
         for (path, bytes) in staged {

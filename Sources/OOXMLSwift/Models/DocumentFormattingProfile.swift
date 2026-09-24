@@ -15,6 +15,11 @@ public enum DocumentFormattingProfileError: Error, Equatable, LocalizedError {
     /// on import, apply and write before anything is written
     /// (PsychQuant/macdoc#196). The payload is the relationship Type suffix.
     case duplicateRelationship(String)
+    /// A main-part styles/theme/fontTable relationship whose Target resolves
+    /// to a path ending in `/` (for example `styles.xml/.`), which is not an
+    /// OPC part name (PsychQuant/macdoc#196). The payload is the Target as
+    /// written.
+    case invalidRelationshipTarget(String)
 
     public var errorDescription: String? {
         switch self {
@@ -23,6 +28,7 @@ public enum DocumentFormattingProfileError: Error, Equatable, LocalizedError {
         case .invalidSnapshot(let reason): return "格式快照無效：\(reason)"
         case .unsupportedFormatting(let field): return "無法安全保留範本格式：\(field)"
         case .unsupportedNumbering: return "格式快照第一版不支援編號定義或非零 numId"
+        case .invalidRelationshipTarget(let target): return "relationship Target「\(target)」解析後以 / 結尾，不是合法的 OPC part 名稱"
         case .duplicateRelationship(let type): return "文件套件內同一 Type（\(type)）出現多筆 Target 不同的 Relationship，屬於不合法輸入"
         }
     }
@@ -102,7 +108,7 @@ public struct DocumentFormattingProfile: Codable, Equatable, Sendable {
         // so a template whose relationships name two different parts for
         // one implicit Type is refused rather than half-honoured.
         if let relationships = try read("word/_rels/document.xml.rels") {
-            try ProfileXML.rejectDuplicateImplicitRelationships(in: relationships)
+            try ProfileXML.validateImplicitRelationships(in: relationships)
         }
         if let numbering = try read("word/numbering.xml") {
             guard numbering.namespaceURI == ProfileXML.w, numbering.localName == "numbering" else {
@@ -417,19 +423,25 @@ internal enum ProfileXML {
     ///   `styles.xml`. Every other escape — `%2F`, `%5C`, `%25`, … — stays
     ///   encoded with uppercase hex (§6.2.2.1), so an encoded `/` is data
     ///   inside a segment and `%252F` never collapses onto `%2F`.
-    /// - `.` and `..` segments are removed (§5.2.4); empty segments are kept.
+    /// - `.` and `..` segments are removed (§5.2.4); a final `.` or `..`
+    ///   leaves a trailing slash (`styles.xml/.` is `/word/styles.xml/`,
+    ///   not the part `styles.xml`); empty segments are kept.
     /// - Case is not folded. This is the decided, locked behavior: a
     ///   case-different Target names a different part here.
     static func normalizedRelationshipTarget(_ target: String) -> String {
         let path = target.hasPrefix("/") ? target : "/word/" + target
         var segments: [String] = []
+        var endsInDirectory = false
         for raw in path.split(separator: "/", omittingEmptySubsequences: false).dropFirst() {
-            switch normalizedPercentEncoding(raw) {
+            let segment = normalizedPercentEncoding(raw)
+            endsInDirectory = segment == "." || segment == ".."
+            switch segment {
             case ".": continue
             case "..": if !segments.isEmpty { segments.removeLast() }
-            case let segment: segments.append(segment)
+            default: segments.append(segment)
             }
         }
+        if endsInDirectory, !segments.isEmpty { segments.append("") }
         return "/" + segments.joined(separator: "/")
     }
 
@@ -475,19 +487,28 @@ internal enum ProfileXML {
         return String(decoding: output, as: UTF8.self)
     }
 
-    /// PsychQuant/macdoc#196 policy point 2. ECMA-376 allows at most one
-    /// implicit styles/theme/fontTable relationship from the main document
-    /// part. Registrations of one Type that resolve to different parts make
-    /// the package malformed: fail closed instead of letting a `.first`
-    /// lookup pick one. Equivalent spellings of one part are not a violation.
-    static func rejectDuplicateImplicitRelationships(in rels: XmlNode) throws {
+    /// PsychQuant/macdoc#196 policy points 1 and 2 for the main part's
+    /// implicit styles/theme/fontTable relationships:
+    /// - a Target that resolves to a path ending in `/` is not an OPC part
+    ///   name (`invalidRelationshipTarget`);
+    /// - ECMA-376 allows at most one implicit relationship of each of these
+    ///   Types, so registrations of one Type that resolve to different parts
+    ///   make the package malformed (`duplicateRelationship`) — fail closed
+    ///   instead of letting a `.first` lookup pick one. Equivalent spellings
+    ///   of one part are not a violation.
+    static func validateImplicitRelationships(in rels: XmlNode) throws {
         for rel in implicitRelationshipTypes {
             let relationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/" + rel
             let targets = rels.children.filter {
                 $0.kind == .element && $0.namespaceURI == relationshipsNS && $0.localName == "Relationship"
                     && $0.attributeValue(prefix: nil, localName: "Type") == relationshipType
-            }.map { normalizedRelationshipTarget($0.attributeValue(prefix: nil, localName: "Target") ?? "") }
-            guard Set(targets).count <= 1 else { throw DocumentFormattingProfileError.duplicateRelationship(rel) }
+            }.map { $0.attributeValue(prefix: nil, localName: "Target") ?? "" }
+            for target in targets where normalizedRelationshipTarget(target).hasSuffix("/") {
+                throw DocumentFormattingProfileError.invalidRelationshipTarget(target)
+            }
+            guard Set(targets.map(normalizedRelationshipTarget)).count <= 1 else {
+                throw DocumentFormattingProfileError.duplicateRelationship(rel)
+            }
         }
     }
 
