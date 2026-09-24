@@ -239,7 +239,16 @@ internal enum ProfileXML {
             foreignAliases[uri] = alias
             return alias
         }
-        func visit(_ node: XmlNode, scope: [String: String]) {
+        // `declared` tracks, for the OUTPUT tree being built, which prefix→URI
+        // bindings an ancestor has already written as an `xmlns:` attribute.
+        // It is distinct from `scope`/`originalScope` (which track the INPUT
+        // tree's bindings, used for `normalizedPrefix`/attribute-prefix
+        // resolution): a node only needs to declare a binding once for its
+        // whole subtree to inherit it via ordinary XML namespace scoping.
+        // Without this, every element that carries the `w` (or an aliased
+        // target) namespace re-declares it, bloating `word/styles.xml`
+        // linearly with the element count (#195).
+        func visit(_ node: XmlNode, scope: [String: String], declared: [String: String]) {
             guard node.kind == .element else { return }
             var originalScope = scope
             originalScope.merge(namespaceScope(node)) { _, new in new }
@@ -261,13 +270,16 @@ internal enum ProfileXML {
                 bindings[mapped] = uri
                 return copy
             }
+            var childDeclared = declared
             for (prefix, uri) in bindings.sorted(by: { $0.key < $1.key }) {
                 node.attributes.removeAll { $0.declaredNamespacePrefix == prefix }
+                guard declared[prefix] != uri else { continue }
                 node.attributes.append(XmlAttribute(prefix: "xmlns", localName: prefix, value: uri))
+                childDeclared[prefix] = uri
             }
-            for child in node.children { visit(child, scope: originalScope) }
+            for child in node.children { visit(child, scope: originalScope, declared: childDeclared) }
         }
-        visit(root, scope: ["xml": "http://www.w3.org/XML/1998/namespace"])
+        visit(root, scope: ["xml": "http://www.w3.org/XML/1998/namespace"], declared: [:])
         return root
     }
     static func clean(_ node: XmlNode, root: String, inherited: [String: String] = [:], strict: Bool = false) throws -> XmlNode {
