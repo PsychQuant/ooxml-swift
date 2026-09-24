@@ -25,7 +25,9 @@ All notable changes to ooxml-swift will be documented in this file.
     **套用與寫出**：writer 一律把格式 part 發布到預設路徑，並把同 Type 的每一筆 relationship 改指向它（3.10.0 的決策），
     寫出的套件本身一致；但既有文件的格式狀態由 `DocxReader` 從固定路徑讀入，relationship 指向非預設 part 的文件在套用
     profile 或 typed style 編輯後，會以預設路徑上的內容（或空白）為準，原本的 part 變成孤立 part。這是一般讀取器的
-    既有限制，本版未改。**相容性**：過去能匯入、現在會被拒絕的範本——沒有 styles relationship；formatting
+    既有限制，本版未改。**相容性**：過去能匯入、現在會被拒絕的範本——沒有 styles relationship（包括只放
+    `word/styles.xml`、`word/document.xml` 而沒有 `word/_rels/document.xml.rels` 的最小合成套件，下游測試常這樣建範本；
+    這類 fixture 要補上 rels，theme 也要有對應的 relationship 才會被讀到）；formatting
     relationship 指向不存在的 part 或 External；theme 只以孤立 part 存在而樣式引用 theme 字型；非預設路徑的 numbering
     part 有編號定義。relationship 指向非預設 part 的範本，現在讀到的是那個 part，不再是預設路徑上的 part。
   - **格式 profile 路徑只收 UTF-8**（PsychQuant/macdoc#214）。`importOfficial` 讀的每個 part（rels、numbering、styles、
