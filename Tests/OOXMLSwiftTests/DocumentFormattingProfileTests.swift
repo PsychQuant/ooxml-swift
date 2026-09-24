@@ -1498,9 +1498,10 @@ final class DocumentFormattingProfileTests: XCTestCase {
 
     /// Unsupported-by-profile encodings stay rejected rather than decoded:
     /// importOfficial accepts UTF-8 (with or without BOM) and fails closed on
-    /// UTF-16 in every byte order (no charset expansion), and — like the
-    /// reader — refuses a DTD even when no entity is referenced, on import
-    /// and on snapshot decode alike.
+    /// UTF-16 in every byte order (no charset expansion; since
+    /// PsychQuant/macdoc#214 the error names the encoding instead of
+    /// "malformed XML"), and — like the reader — refuses a DTD even when no
+    /// entity is referenced, on import and on snapshot decode alike.
     func testImportAndDecodeEncodingAndDTDMatrix() throws {
         let styles = "<?xml version=\"1.0\" encoding=\"%@\"?><x:styles xmlns:x=\"\(w)\"><x:docDefaults><x:rPrDefault><x:rPr><x:sz x:val=\"24\"/></x:rPr></x:rPrDefault><x:pPrDefault><x:pPr/></x:pPrDefault></x:docDefaults><x:style x:type=\"paragraph\" x:default=\"1\" x:styleId=\"a\"><x:name x:val=\"內文\"/></x:style></x:styles>"
         let base = try RawPartChannel.readAllParts(from: template())
@@ -1518,7 +1519,7 @@ final class DocumentFormattingProfileTests: XCTestCase {
         for (label, encoding, bom) in [("be-bom", String.Encoding.utf16BigEndian, [UInt8]([0xFE, 0xFF])), ("le-bom", .utf16LittleEndian, [0xFF, 0xFE]),
                                        ("be", .utf16BigEndian, []), ("le", .utf16LittleEndian, [])] {
             XCTAssertThrowsError(try importing(Data(bom) + utf16.data(using: encoding)!), label) { error in
-                XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("malformed XML"), label)
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("word/styles.xml 是 UTF-16／UTF-32 編碼，格式 profile 只接受 UTF-8"), label)
             }
         }
         let doctype = "<!DOCTYPE x:styles [<!ENTITY unused \"EXPANDED\">]>"

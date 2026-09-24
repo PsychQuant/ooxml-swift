@@ -200,4 +200,149 @@ final class DocumentFormattingProfileImportTests: XCTestCase {
         parts["word/_rels/document.xml.rels"] = relationships(Self.defaultTargets + [("numbering", "numbering.xml/.")])
         assertImport(parts, throws: .invalidRelationshipTarget("numbering.xml/."))
     }
+
+    // MARK: - PsychQuant/macdoc#214 encoding gate on the profile path
+
+    /// Every part import reads must be UTF-8 and must not declare another
+    /// encoding: Word decodes by the declaration while this library decodes
+    /// UTF-8, so the stored snapshot could differ from what Word shows.
+    func testImportRejectsPartsDeclaringNonUTF8Encodings() throws {
+        let base = try baseParts()
+        for part in ["word/styles.xml", "word/document.xml", "word/theme/theme1.xml", "word/fontTable.xml", "word/_rels/document.xml.rels"] {
+            for declared in ["ISO-8859-1", "Shift_JIS", "UTF-16", "windows-1252"] {
+                var parts = base
+                let body = String(decoding: try XCTUnwrap(base[part], part), as: UTF8.self)
+                let stripped = body.hasPrefix("<?xml") ? String(body[body.range(of: "?>")!.upperBound...]) : body
+                parts[part] = Data("<?xml version=\"1.0\" encoding=\"\(declared)\" standalone=\"yes\"?>\(stripped)".utf8)
+                assertImport(parts, throws: .invalidSnapshot("\(part) 的 XML 宣告編碼為「\(declared)」，格式 profile 只接受 UTF-8"), "\(part) \(declared)")
+            }
+        }
+        var numbered = base
+        numbered["word/_rels/document.xml.rels"] = relationships(Self.defaultTargets + [("numbering", "numbering.xml")])
+        numbered["word/numbering.xml"] = Data("<?xml version='1.0' encoding='Shift_JIS'?><w:numbering xmlns:w=\"\(Self.w)\"/>".utf8)
+        assertImport(numbered, throws: .invalidSnapshot("word/numbering.xml 的 XML 宣告編碼為「Shift_JIS」，格式 profile 只接受 UTF-8"), "numbering")
+    }
+
+    /// UTF-8 in any spelling Word or other producers use is accepted: no
+    /// declaration, `UTF-8` in any case, single quotes, a UTF-8 BOM, and
+    /// whitespace before the declaration (which the tree reader tolerates).
+    func testImportAcceptsUTF8DeclarationSpellings() throws {
+        let base = try baseParts()
+        let styles = String(decoding: try XCTUnwrap(base["word/styles.xml"]), as: UTF8.self)
+        for (label, prefix) in [("none", Data()), ("upper", Data("<?xml version=\"1.0\" encoding=\"UTF-8\"?>".utf8)),
+                                ("lower", Data("<?xml version=\"1.0\" encoding=\"utf-8\"?>".utf8)),
+                                ("single", Data("<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\r\n".utf8)),
+                                ("no-encoding", Data("<?xml version=\"1.0\"?>".utf8)),
+                                ("bom", Data([0xEF, 0xBB, 0xBF]) + Data("<?xml version=\"1.0\" encoding=\"UTF-8\"?>".utf8)),
+                                ("leading-space", Data("\n <?xml version=\"1.0\" encoding=\"UTF-8\"?>".utf8))] {
+            var parts = base
+            parts["word/styles.xml"] = prefix + Data(styles.utf8)
+            XCTAssertNoThrow(try importing(parts), label)
+        }
+    }
+
+    /// Bytes that are not valid UTF-8 are refused instead of being stored
+    /// with U+FFFD replacement characters; so are UTF-16/UTF-32 byte orders
+    /// and NUL bytes. UTF-16 was already refused in 3.10.0 (no charset
+    /// expansion); the message now names the encoding.
+    func testImportRejectsBytesThatAreNotUTF8() throws {
+        let base = try baseParts()
+        let styles = String(decoding: try XCTUnwrap(base["word/styles.xml"]), as: UTF8.self)
+        var shiftJIS = base
+        shiftJIS["word/styles.xml"] = try XCTUnwrap(styles.replacingOccurrences(of: "x:val=\"Title\"", with: "x:val=\"見出し\"").data(using: .shiftJIS))
+        assertImport(shiftJIS, throws: .invalidSnapshot("word/styles.xml 不是合法的 UTF-8（含無法解碼的位元組或 NUL），格式 profile 只接受 UTF-8"), "undeclared Shift_JIS bytes")
+        var nul = base
+        nul["word/styles.xml"] = Data(styles.utf8) + Data([0])
+        assertImport(nul, throws: .invalidSnapshot("word/styles.xml 不是合法的 UTF-8（含無法解碼的位元組或 NUL），格式 profile 只接受 UTF-8"), "NUL")
+        for (label, encoding, bom) in [("be-bom", String.Encoding.utf16BigEndian, [UInt8]([0xFE, 0xFF])), ("le-bom", .utf16LittleEndian, [0xFF, 0xFE]),
+                                       ("be", .utf16BigEndian, []), ("le", .utf16LittleEndian, []), ("utf32le-bom", .utf32LittleEndian, [0xFF, 0xFE, 0, 0])] {
+            var parts = base
+            parts["word/styles.xml"] = Data(bom) + styles.replacingOccurrences(of: "UTF-8", with: "UTF-16").data(using: encoding)!
+            assertImport(parts, throws: .invalidSnapshot("word/styles.xml 是 UTF-16／UTF-32 編碼，格式 profile 只接受 UTF-8"), label)
+        }
+    }
+
+    /// A declaration the gate cannot read is refused rather than guessed.
+    func testImportRejectsUnreadableXMLDeclaration() throws {
+        let base = try baseParts()
+        let styles = String(decoding: try XCTUnwrap(base["word/styles.xml"]), as: UTF8.self)
+        for declaration in ["<?xml version=\"1.0\" encoding=Shift_JIS?>", "<?xml version=\"1.0\" encoding=\"UTF-8\" encoding=\"Shift_JIS\"?>",
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\"", "<?xml version=\"1.0\" encoding=\"UTF-8'?>"] {
+            var parts = base
+            parts["word/styles.xml"] = Data((declaration + styles).utf8)
+            assertImport(parts, throws: .invalidSnapshot("word/styles.xml 的 XML 宣告無法解析"), declaration)
+        }
+    }
+
+    /// A stored snapshot whose payload declares another encoding is refused
+    /// on decode, like the import it claims to come from.
+    func testDecodeRejectsSnapshotPayloadDeclaringNonUTF8Encoding() throws {
+        let profile = try importing(try baseParts())
+        let encoded = try JSONEncoder().encode(profile)
+        XCTAssertNoThrow(try JSONDecoder().decode(DocumentFormattingProfile.self, from: encoded))
+        for key in ["stylesXML", "sectionXML", "themeXML", "fontsXML"] {
+            var json = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            let payload = try XCTUnwrap(json[key] as? String, key)
+            let body = payload.hasPrefix("<?xml") ? String(payload[payload.range(of: "?>")!.upperBound...]) : payload
+            json[key] = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>" + body
+            XCTAssertThrowsError(try JSONDecoder().decode(DocumentFormattingProfile.self, from: JSONSerialization.data(withJSONObject: json)), key) { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("格式快照 \(key) 的 XML 宣告編碼為「ISO-8859-1」，格式 profile 只接受 UTF-8"), key)
+            }
+        }
+    }
+
+    // MARK: - PsychQuant/macdoc#214 DocxReader keeps its behavior (locked)
+
+    /// Decision: the general reader is unchanged. For `word/styles.xml`,
+    /// bytes that are valid UTF-8 are decoded as UTF-8 whatever the XML
+    /// declaration says (the declaration is not consulted); other bytes go
+    /// through the UTF-16 path or are refused (see
+    /// testReaderBOMAndDeclarationMismatchCounterexamples). Only the
+    /// profile import path fails closed.
+    func testReaderDecodesUTF8ValidStylesAsUTF8DespiteNonUTF8Declaration() throws {
+        let source = try directory().appendingPathComponent("source.docx")
+        try DocxWriter.write(WordDocument(), to: source)
+        var parts = try RawPartChannel.readAllParts(from: source)
+        for declared in ["ISO-8859-1", "Shift_JIS"] {
+            parts["word/styles.xml"] = Data("<?xml version=\"1.0\" encoding=\"\(declared)\"?><w:styles xmlns:w=\"\(Self.w)\"><w:style w:type=\"paragraph\" w:styleId=\"X\"><w:name w:val=\"名稱\"/></w:style></w:styles>".utf8)
+            let input = try package(parts)
+            var doc = try DocxReader.read(from: input)
+            defer { doc.close() }
+            XCTAssertEqual(doc.styles.first { $0.id == "X" }?.name, "名稱", declared)
+        }
+    }
+
+    /// Characterization, not endorsement (a follow-up is suggested in
+    /// PsychQuant/macdoc#214): for `word/document.xml` the typed model is
+    /// built by libxml2 (`XMLDocument(data:)`), which honours the
+    /// declaration, while the lossless tree decodes UTF-8. An untouched save
+    /// keeps the bytes; a save after a body edit writes a UTF-8 declaration
+    /// over the original bytes, so what Word shows for untouched text changes
+    /// from the declared decoding to UTF-8.
+    func testReaderDocumentPartTypedTextFollowsDeclarationWhileTreeStaysUTF8() throws {
+        let source = try directory().appendingPathComponent("source.docx")
+        var seed = WordDocument()
+        seed.appendParagraph(Paragraph(text: "PLACEHOLDER"))
+        try DocxWriter.write(seed, to: source)
+        var parts = try RawPartChannel.readAllParts(from: source)
+        let original = String(decoding: try XCTUnwrap(parts["word/document.xml"]), as: UTF8.self)
+        XCTAssertTrue(original.contains("encoding=\"UTF-8\""))
+        let declared = Data(original.replacingOccurrences(of: "encoding=\"UTF-8\"", with: "encoding=\"ISO-8859-1\"")
+            .replacingOccurrences(of: "PLACEHOLDER", with: "名稱").utf8)
+        parts["word/document.xml"] = declared
+        var doc = try DocxReader.read(from: try package(parts))
+        defer { doc.close() }
+        XCTAssertEqual(doc.getText(), String(data: Data("名稱".utf8), encoding: .isoLatin1), "typed text follows the declaration")
+        let treeText = ProfileXML.walk(try XCTUnwrap(doc.xmlTrees["word/document.xml"]).root).filter { $0.kind == .text }.map(\.textContent).joined()
+        XCTAssertEqual(treeText, "名稱", "the tree decodes UTF-8")
+        let untouched = try directory().appendingPathComponent("untouched.docx")
+        try DocxWriter.write(doc, to: untouched)
+        XCTAssertEqual(try RawPartChannel.readAllParts(from: untouched)["word/document.xml"], declared)
+        doc.appendParagraph(Paragraph(text: "edit"))
+        let edited = try directory().appendingPathComponent("edited.docx")
+        try DocxWriter.write(doc, to: edited)
+        let saved = String(decoding: try XCTUnwrap(RawPartChannel.readAllParts(from: edited)["word/document.xml"]), as: UTF8.self)
+        XCTAssertTrue(saved.hasPrefix("<?xml version=\"1.0\" encoding=\"UTF-8\""), String(saved.prefix(80)))
+        XCTAssertTrue(saved.contains("名稱"))
+    }
 }

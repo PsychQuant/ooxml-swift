@@ -167,6 +167,12 @@ public struct DocxReader {
         let documentTree = try XmlTreeReader.parse(documentData)
         document.xmlTrees["word/document.xml"] = documentTree
         let projectedDocumentData = try XmlTreeWriter.serialize(documentTree)
+        // PsychQuant/macdoc#214 (locked, characterization not endorsement:
+        // testReaderDocumentPartTypedTextFollowsDeclarationWhileTreeStaysUTF8):
+        // XMLDocument(data:) honours the XML declaration's `encoding`, while
+        // the tree above decodes UTF-8. For a part declaring e.g. ISO-8859-1
+        // whose bytes are valid UTF-8, typed text and tree text differ, and a
+        // save after an edit writes a UTF-8 declaration over the kept bytes.
         let documentXML = try XMLDocument(data: projectedDocumentData)
 
         // 5a. v0.19.0+ (PsychQuant/che-word-mcp#56): preserve every attribute
@@ -190,6 +196,18 @@ public struct DocxReader {
             // The lossless tree parser expects UTF-8. Decode other XML
             // encodings through the XML parser; retain the archive bytes for
             // untouched saves and a valid UTF-8 tree for typed edits.
+            //
+            // PsychQuant/macdoc#214 (decided, locked by
+            // testReaderDecodesUTF8ValidStylesAsUTF8DespiteNonUTF8Declaration):
+            // bytes that are valid UTF-8 without NUL are decoded as UTF-8 and
+            // the XML declaration's `encoding` is NOT consulted, so a part
+            // declaring ISO-8859-1 or Shift_JIS whose bytes happen to be valid
+            // UTF-8 reads differently here than in Word. The general reader
+            // keeps this behavior (word/document.xml differs; see the note at
+            // its XMLDocument construction); only
+            // DocumentFormattingProfile.importOfficial (and snapshot decode),
+            // which persist what they read, refuse any declaration other than
+            // UTF-8 (ProfileXML.requireUTF8).
             let treeData: Data
             if !stylesData.contains(0), String(data: stylesData, encoding: .utf8) != nil {
                 treeData = stylesData

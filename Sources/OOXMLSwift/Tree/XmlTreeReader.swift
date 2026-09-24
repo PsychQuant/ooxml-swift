@@ -5,7 +5,11 @@
 // to know its source byte range, so this module implements a small
 // recursive-descent parser specifically for the well-formed OOXML subset
 // that Word produces. It is NOT a general-purpose XML parser:
-//   - Assumes input is well-formed UTF-8 (Word always writes UTF-8).
+//   - Assumes input is well-formed UTF-8 (Word always writes UTF-8). The
+//     XML declaration is skipped: its `encoding` is not honoured, and bytes
+//     that are not valid UTF-8 decode with U+FFFD replacement. Callers that
+//     persist what they parse must gate encodings first (PsychQuant/macdoc#214,
+//     `ProfileXML.requireUTF8`).
 //   - Does not resolve external entities or DOCTYPE.
 //   - Supports the XML 1.0 productions actually present in OOXML files:
 //     processing instructions, comments, elements, attributes, character
