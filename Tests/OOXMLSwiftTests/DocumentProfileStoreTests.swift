@@ -392,4 +392,44 @@ final class DocumentProfileStoreTests: XCTestCase {
         XCTAssertEqual(try DocumentProfileStore(configURL: url).resolve(explicit: .official, context: .newDocument)?.kind, .official)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path + ".lock"))
     }
+
+    // MARK: - PsychQuant/macdoc#204 cross-process interoperability
+
+    /// A separate process running an independent implementation of the
+    /// protocol (perl's flock on `<config>.lock`) excludes this writer; the
+    /// writer proceeds once that process exits and releases the lock.
+    func testIndependentProcessHoldingTheLockExcludesTheWriter() throws {
+        let perl = "/usr/bin/perl"
+        guard FileManager.default.isExecutableFile(atPath: perl) else { throw XCTSkip("\(perl) is not available") }
+        let url = try config(#"{"agent":"codex"}"#)
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: perl)
+        child.arguments = ["-e", #"use Fcntl qw(:flock); open(my $f, ">>", $ARGV[0]) or die; flock($f, LOCK_EX) or die; print "locked\n"; $|=1; sleep 3"#,
+                           url.path + ".lock"]
+        let output = Pipe()
+        child.standardOutput = output
+        try child.run()
+        addTeardownBlock { if child.isRunning { child.terminate() } }
+        var announced = Data()
+        while !String(decoding: announced, as: UTF8.self).contains("locked\n") {
+            let chunk = output.fileHandleForReading.availableData
+            if chunk.isEmpty { break }
+            announced.append(chunk)
+        }
+        XCTAssertEqual(String(decoding: announced, as: UTF8.self), "locked\n")
+
+        let store = DocumentProfileStore(configURL: url, lockTimeout: 0.3, lockPollInterval: 0.02)
+        XCTAssertThrowsError(try store.updateDocument { $0["whileHeld"] = true }) { error in
+            XCTAssertEqual(error as? DocumentProfileStoreError, .configLockTimeout(url.path + ".lock"))
+        }
+        XCTAssertTrue(child.isRunning, "the child must still hold the lock when the writer times out")
+        child.waitUntilExit()
+        XCTAssertEqual(child.terminationStatus, 0)
+        try store.updateDocument { $0["afterRelease"] = true }
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let document = try XCTUnwrap(root["document"] as? [String: Any])
+        XCTAssertEqual(root["agent"] as? String, "codex")
+        XCTAssertEqual(document["afterRelease"] as? Bool, true)
+        XCTAssertNil(document["whileHeld"])
+    }
 }
