@@ -751,8 +751,10 @@ final class DocumentFormattingProfileTests: XCTestCase {
     /// Policy point 2 on the IMPORT path. ECMA-376 allows at most one
     /// implicit styles/theme/fontTable relationship from the main part; a
     /// template naming two distinct parts for one Type is malformed, and
-    /// importOfficial fails closed instead of silently reading whichever
-    /// fixed path it hard-codes. Equivalent spellings of one part are fine.
+    /// importOfficial fails closed instead of picking one (before
+    /// PsychQuant/macdoc#213 it read a hard-coded fixed path; it now reads the
+    /// part the relationship names). Equivalent spellings of one part are
+    /// fine.
     func testImportOfficialRejectsDuplicateImplicitRelationshipsWithDistinctTargets() throws {
         for (type, first, second) in [("styles", "styles.xml", "other-styles.xml"),
                                       ("theme", "theme/theme1.xml", "theme/theme2.xml"),
@@ -764,7 +766,11 @@ final class DocumentFormattingProfileTests: XCTestCase {
                 XCTAssertEqual(error as? DocumentFormattingProfileError, .duplicateRelationship(type), "\(first) vs \(second)")
             }
         }
-        let equivalent = relationshipsXML([("styles", "styles.xml"), ("styles", "/word/styles.xml"), ("styles", "./styl%65s.xml")])
+        // The theme and fontTable registrations are needed since
+        // PsychQuant/macdoc#213: without them the template has no theme,
+        // and its styles use theme fonts.
+        let equivalent = relationshipsXML([("styles", "styles.xml"), ("styles", "/word/styles.xml"), ("styles", "./styl%65s.xml"),
+                                           ("theme", "theme/theme1.xml"), ("fontTable", "fontTable.xml")])
         XCTAssertNoThrow(try DocumentFormattingProfile.importOfficial(from: template(extras: ["word/_rels/document.xml.rels": equivalent])))
         XCTAssertThrowsError(try DocumentFormattingProfile.importOfficial(from: template(extras: ["word/_rels/document.xml.rels": "<Relationships"]))) { error in
             XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("malformed XML"))
@@ -1417,9 +1423,11 @@ final class DocumentFormattingProfileTests: XCTestCase {
     // MARK: - PsychQuant/macdoc#196 real templates (MACDOC_TEMPLATE_DIR)
 
     /// Every real template's own main-part relationships pass the duplicate
-    /// guard, and each implicit registration normalizes to the fixed part
-    /// importOfficial reads: the OPC normalization and fail-closed guard do
-    /// not misfire on Word-authored packages. Fixtures are read in place.
+    /// guard, and each implicit registration normalizes to the default part
+    /// the writer publishes; since PsychQuant/macdoc#213 importOfficial reads
+    /// the part `implicitPart` resolves, which on these Word-authored
+    /// packages is that same default part. The OPC normalization and
+    /// fail-closed guard do not misfire. Fixtures are read in place.
     func testRealTemplateRelationshipsPassDuplicateGuardAndResolveToFixedParts() throws {
         for name in [TemplateFixtureGate.baselineTemplateName, TemplateFixtureGate.recFixtureName] {
             let url = try TemplateFixtureGate.requireTemplate(name)
@@ -1429,6 +1437,7 @@ final class DocumentFormattingProfileTests: XCTestCase {
                 let targets = rels.children.filter { $0.attributeValue(prefix: nil, localName: "Type") == "\(Self.officeRel)/\(type)" }
                     .compactMap { $0.attributeValue(prefix: nil, localName: "Target") }
                 XCTAssertEqual(targets.map(ProfileXML.normalizedRelationshipTarget), [part], "\(name): \(type)")
+                XCTAssertEqual(try ProfileXML.implicitPart(of: type, in: rels)?.name, String(part.dropFirst()), "\(name): \(type)")
             }
         }
     }

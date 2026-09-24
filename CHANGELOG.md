@@ -8,6 +8,27 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **格式 profile 匯入：依 relationship 讀 part**（PsychQuant/macdoc#213）。沒有新增或變更
+  `DocumentFormattingProfileError` 的 case，exhaustive `switch` 不受影響；改變的是 associated value 的字串與哪些範本會被
+  拒絕，各項末尾列出。
+  - **styles／theme／fontTable 依 relationship 解析實際 part**（PsychQuant/macdoc#213）。`importOfficial` 不再讀固定路徑，
+    改讀 `word/_rels/document.xml.rels` 裡對應 relationship 指向的 part（沿用 3.10.0 的詞法正規化與同 Type 重複檢查），
+    所以 Target 指向 `word/customStyles.xml` 之類非預設 part 的範本可以匯入，預設路徑上的過期 part 不會被讀到。
+    沒有 styles relationship（含整個 rels part 不存在）丟 `missingRequiredFormatting("word/_rels/document.xml.rels 沒有 styles relationship")`；
+    relationship 指向套件內不存在的 part 丟 `missingRequiredFormatting("<Type> relationship 的 Target「…」指向不存在的 part …")`；
+    `TargetMode="External"` 丟 `invalidSnapshot`。theme 與 fontTable 沒有 relationship 時視為不存在，即使預設路徑上有
+    孤立的 part 也不讀（樣式仍引用 theme 字型時照舊以 `theme used by styles` 拒絕）。numbering 只用來決定是否拒絕、
+    不進快照，所以 relationship 指向的 part 與預設的 `word/numbering.xml` 都檢查，任何一個有編號定義就拒絕；numbering
+    relationship 同樣套用重複、結尾斜線與 External 檢查。主 part 仍固定為 `word/document.xml`（不讀 `_rels/.rels`）。
+    **套用與寫出**：writer 一律把格式 part 發布到預設路徑，並把同 Type 的每一筆 relationship 改指向它（3.10.0 的決策），
+    寫出的套件本身一致；但既有文件的格式狀態由 `DocxReader` 從固定路徑讀入，relationship 指向非預設 part 的文件在套用
+    profile 或 typed style 編輯後，會以預設路徑上的內容（或空白）為準，原本的 part 變成孤立 part。這是一般讀取器的
+    既有限制，本版未改。**相容性**：過去能匯入、現在會被拒絕的範本——沒有 styles relationship；formatting
+    relationship 指向不存在的 part 或 External；theme 只以孤立 part 存在而樣式引用 theme 字型；非預設路徑的 numbering
+    part 有編號定義。relationship 指向非預設 part 的範本，現在讀到的是那個 part，不再是預設路徑上的 part。
+
 ## [3.10.0] - 2026-09-24
 
 ### Changed
