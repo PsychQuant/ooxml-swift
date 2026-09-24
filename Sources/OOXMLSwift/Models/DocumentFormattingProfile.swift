@@ -645,8 +645,39 @@ internal enum ProfileXML {
         for target in targets where normalizedRelationshipTarget(target).hasSuffix("/") {
             throw DocumentFormattingProfileError.invalidRelationshipTarget(target)
         }
-        let names = Set(targets.map(normalizedRelationshipTarget))
+        let names = Set(targets.map { normalizedRelationshipTarget($0) })
         guard names.count == 1, let name = names.first else { throw DocumentFormattingProfileError.duplicateRelationship(type) }
+        return (first.attributeValue(prefix: nil, localName: "Target") ?? "", String(name.dropFirst()))
+    }
+
+    /// PsychQuant/ooxml-swift#173. Resolves the package's main part — the
+    /// Target of `_rels/.rels`'s `officeDocument` relationship — the same
+    /// lexical way `implicitPart` resolves a main-part relationship, except
+    /// Targets are relative to the package root (`/`), not `/word/`:
+    /// `_rels/.rels` is the relationships part of `""` (the package root
+    /// itself), not of `word/document.xml`. `nil` when `packageRels` is
+    /// `nil` (no `_rels/.rels`) or it names no `officeDocument`
+    /// relationship — both legitimate for a caller that wants to fall back
+    /// to the conventional `word/document.xml` rather than fail the read.
+    /// Fails closed the same way `implicitPart` does on an External target,
+    /// a Target lexically ending in `/`, or registrations of the Type that
+    /// resolve to different parts.
+    static func mainPartTarget(in packageRels: XmlNode?) throws -> (target: String, name: String)? {
+        guard let packageRels else { return nil }
+        let registrations = packageRels.children.filter {
+            $0.kind == .element && $0.namespaceURI == relationshipsNS && $0.localName == "Relationship"
+                && $0.attributeValue(prefix: nil, localName: "Type") == officeRelationshipsNS + "officeDocument"
+        }
+        guard let first = registrations.first else { return nil }
+        if registrations.contains(where: { $0.attributeValue(prefix: nil, localName: "TargetMode") == "External" }) {
+            throw DocumentFormattingProfileError.invalidSnapshot("officeDocument relationship 的 TargetMode 為 External，主 part 必須在套件內")
+        }
+        let targets = registrations.map { $0.attributeValue(prefix: nil, localName: "Target") ?? "" }
+        for target in targets where normalizedRelationshipTarget(target, relativeTo: "/").hasSuffix("/") {
+            throw DocumentFormattingProfileError.invalidRelationshipTarget(target)
+        }
+        let names = Set(targets.map { normalizedRelationshipTarget($0, relativeTo: "/") })
+        guard names.count == 1, let name = names.first else { throw DocumentFormattingProfileError.duplicateRelationship("officeDocument") }
         return (first.attributeValue(prefix: nil, localName: "Target") ?? "", String(name.dropFirst()))
     }
 
@@ -666,8 +697,14 @@ internal enum ProfileXML {
     ///   not the part `styles.xml`); empty segments are kept.
     /// - Case is not folded. This is the decided, locked behavior: a
     ///   case-different Target names a different part here.
-    static func normalizedRelationshipTarget(_ target: String) -> String {
-        let path = target.hasPrefix("/") ? target : "/word/" + target
+    ///
+    /// PsychQuant/ooxml-swift#173: `base` is the directory a relative
+    /// Target resolves against, per OPC (the SOURCE part's own directory —
+    /// `/word/` for `word/_rels/document.xml.rels`'s relationships, `/` for
+    /// the package-level `_rels/.rels`). Defaults to `/word/` so every
+    /// existing caller (all main-part-relative resolution) is unaffected.
+    static func normalizedRelationshipTarget(_ target: String, relativeTo base: String = "/word/") -> String {
+        let path = target.hasPrefix("/") ? target : base + target
         var segments: [String] = []
         var endsInDirectory = false
         for raw in path.split(separator: "/", omittingEmptySubsequences: false).dropFirst() {
@@ -744,7 +781,7 @@ internal enum ProfileXML {
             for target in targets where normalizedRelationshipTarget(target).hasSuffix("/") {
                 throw DocumentFormattingProfileError.invalidRelationshipTarget(target)
             }
-            guard Set(targets.map(normalizedRelationshipTarget)).count <= 1 else {
+            guard Set(targets.map { normalizedRelationshipTarget($0) }).count <= 1 else {
                 throw DocumentFormattingProfileError.duplicateRelationship(rel)
             }
         }
