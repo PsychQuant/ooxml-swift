@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.11.0] - 2026-09-24
+
 ### Changed
 
 - **格式 profile 匯入：依 relationship 讀 part、只收 UTF-8、缺少的預設值指名到欄位**（PsychQuant/macdoc#213、
