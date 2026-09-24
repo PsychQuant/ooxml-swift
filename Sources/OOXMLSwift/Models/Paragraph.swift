@@ -391,9 +391,13 @@ public struct ParagraphProperties: Equatable {
     /// documented risk: some readers treat the paragraph-mark `<w:rPr>` as
     /// pPr's terminal content-bearing child.
     ///
-    /// `sectPr` and `pPrChange` are deliberately excluded from raw capture
-    /// (see `DocxReader.recognizedPPrChildNames`) — both already have
-    /// dedicated (if incomplete) handling elsewhere, and naively carrying a
+    /// `sectPr`, `pPrChange`, `pBdr`, and `shd` are deliberately excluded from
+    /// raw capture (see `DocxReader.recognizedPPrChildNames`) — all four
+    /// already have dedicated (if incomplete) handling elsewhere: `pBdr`/`shd`
+    /// have typed fields (`border`/`shading`) and public typed setters this
+    /// reader just doesn't populate from XML yet, so raw-capturing them too
+    /// would risk emitting both a stale raw copy and a fresh typed one side
+    /// by side (Codex round-2 review, HIGH finding #1). Naively carrying a
     /// full `<w:sectPr>` into this slot would misplace a structurally
     /// significant, position-sensitive element.
     public var rawChildren: [RawElement] = []

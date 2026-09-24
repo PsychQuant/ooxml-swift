@@ -46,13 +46,16 @@ public struct DocxReader {
     /// (e.g., add `"sectPr"`), update both sites in lockstep.
     internal static let walkerPreConsumed: Set<String> = ["pPr"]
 
-    /// v3.12.0+ (#168): direct children of `<w:pPr>` that `parseParagraphProperties`
-    /// already extracts into a typed `ParagraphProperties` field. Anything
-    /// else — `<w:kinsoku>`, `<w:snapToGrid>`, `<w:widowControl>`, `<w:wordWrap>`,
-    /// and the rest of CT_PPrBase's long tail — is captured verbatim into
-    /// `ParagraphProperties.rawChildren` instead of being silently dropped.
+    /// v3.12.0+ (#168): direct children of `<w:pPr>` that either
+    /// `parseParagraphProperties` already extracts into a typed
+    /// `ParagraphProperties` field, OR that a typed field/setter exists for
+    /// even though this reader doesn't populate it from XML today. Anything
+    /// else — `<w:kinsoku>`, `<w:snapToGrid>`, `<w:widowControl>`,
+    /// `<w:wordWrap>`, and the rest of CT_PPrBase's long tail — is captured
+    /// verbatim into `ParagraphProperties.rawChildren` instead of being
+    /// silently dropped.
     ///
-    /// `sectPr` and `pPrChange` are excluded from raw capture on purpose:
+    /// Excluded from raw capture on purpose:
     /// - `pPrChange` is consumed separately (see the `pPrChange` handling in
     ///   `parseParagraph`, right after this function returns) into a typed
     ///   `Revision` + `previousProperties`; raw-capturing it too would
@@ -65,14 +68,33 @@ public struct DocxReader {
     ///   `<w:rPr>`), which is the wrong position for `sectPr` per ECMA-376
     ///   §17.3.1.27 CT_PPr (last child, after `rPr`). Left dropped rather
     ///   than preserved-but-misplaced; unchanged from pre-#168 behavior.
+    /// - `pBdr` (border) and `shd` (shading) — Codex round-2 review, HIGH
+    ///   finding #1: `ParagraphProperties.border` / `.shading` are typed
+    ///   fields with public typed setters (`setParagraphBorder(at:border:)`,
+    ///   `setParagraphShading(at:fill:pattern:)`), but THIS READER never
+    ///   populates either field from `<w:pBdr>` / `<w:shd>` — another
+    ///   pre-existing, separately-tracked gap. If raw capture treated these
+    ///   as "unrecognized" while the writer already knows how to emit the
+    ///   typed fields, a paragraph loaded with a `<w:shd>` already present,
+    ///   then given a NEW shading via the typed setter, would emit BOTH the
+    ///   raw-captured old one and the typed new one — two singleton elements
+    ///   where OOXML expects at most one (schema-invalid, and ambiguous to
+    ///   Word about which value applies). Excluding them keeps them silently
+    ///   dropped on an unrelated typed edit, exactly like before #168 — not
+    ///   improved for these two elements, but not corrupted either. Properly
+    ///   fixing this means teaching `parseParagraphProperties` to read
+    ///   `<w:pBdr>` / `<w:shd>` into the existing typed fields (removing them
+    ///   from this set at the same time) — tracked as a follow-up, not done
+    ///   here to keep #168's change surface to the reported symptom class.
     ///
-    /// Grow this set in lockstep with `parseParagraphProperties` whenever a
-    /// new pPr child gains typed extraction — otherwise the newly-typed field
-    /// and `rawChildren` would both carry the same source element.
+    /// Grow this set in lockstep with `parseParagraphProperties` (or with any
+    /// other typed field/setter for a pPr child) whenever a new one gains
+    /// typed extraction or a typed setter — otherwise the typed side and
+    /// `rawChildren` can both carry the same source element.
     internal static let recognizedPPrChildNames: Set<String> = [
         "pStyle", "jc", "spacing", "ind", "numPr",
         "keepNext", "keepLines", "pageBreakBefore",
-        "rPr", "pPrChange", "sectPr",
+        "rPr", "pPrChange", "sectPr", "pBdr", "shd",
     ]
 
     // MARK: - Whitespace overlay context (#59 sub-stack B, v0.19.10+)
