@@ -8,14 +8,37 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
-### Fixed
+### Changed
 
-- **`canonicalWordTree` 只在 root 宣告一次 `xmlns:w`，不再逐節點重複宣告**（PsychQuant/macdoc#195）。
-  `word/styles.xml` 底下的 `<w:style>`／`<w:pPr>`／`<w:rPr>`／`<w:rFonts>` 等每個元素先前都各自帶一份
-  `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"`，而不是只在最外層 `<w:styles>`
-  宣告一次讓子孫繼承；每次開檔（`DocxReader`）都會重跑一次 `canonicalWordTree`，再開檔重新 typed edit 會讓宣告數
-  隨輪數複合成長。修法只改「輸出端已宣告哪些 prefix→URI 綁定」的追蹤，不動既有的別名／未知 namespace 決議邏輯，
-  `DocxReader` 手動把 root 的 namespace 宣告複製到 detached `docDefaults` clone 的既有行為不變（並新增回歸測試鎖定）。
+- **文件格式 profile、設定檔與表格 cell 段落的一批後續修正**（PsychQuant/macdoc#195、PsychQuant/macdoc#196、
+  PsychQuant/macdoc#194、PsychQuant/macdoc#204、PsychQuant/macdoc#156）。
+  - **`canonicalWordTree` 只在 root 宣告一次 `xmlns:w`**（PsychQuant/macdoc#195）。`word/styles.xml` 的每個元素先前都各自
+    帶一份 `xmlns:w` 宣告，每次開檔再 typed edit 會讓宣告數隨輪數複合成長；別名／未知 namespace 的決議邏輯與
+    `DocxReader` 替 detached `docDefaults` clone 補上 root 宣告的既有行為不變。
+  - **OPC relationship Target 改為純詞法正規化，重複 relationship 一律 fail closed**（PsychQuant/macdoc#196）。
+    `styles.xml`、`./styles.xml`、`/word/styles.xml`、`../word/styles.xml` 與 percent-encoded 的非保留字元視為同一個
+    part；`%2F`／`%5C` 屬 segment 內資料不解碼，空 segment 保留，大小寫不摺疊。不再使用會查主機檔案系統的
+    `NSString.standardizingPath`（它把 `/private/tmp` 與 `/tmp` 當成同一個 part）。main part 的 styles／theme／fontTable
+    同一 Type 指向不同 part 時，`importOfficial`、`applyFormattingProfile`（任何變更之前）與 writer（寫任何格式 part
+    之前）都丟新的 `DocumentFormattingProfileError.duplicateRelationship`。`importOfficial` 與快照 decode 也與
+    `DocxReader` 一致拒絕 DOCTYPE。section 快照接受 ECMA-376 的 `sectPr/type` 與 `pgSz/@code`（真實範本
+    `90_template_ja.docx` 的最終 section 兩者都有）。另補上 UTF-16 四種 BOM／位元組序、BOM 與編碼宣告不一致、
+    四軸 `rFonts` 字型中立的回歸矩陣。
+  - **匯入上限、權限與快照維護**（PsychQuant/macdoc#194）。`importOfficial` 的 4 MiB 上限改以實際解壓出的位元組計算
+    （ZIP metadata 謊報大小也擋得住）。`DocumentProfileStore` 的 profiles 目錄為 0700，快照與 `config.json` 一律 0600、
+    不受 umask 影響；快照維持不覆寫既有檔名（含 symlink）。`resolve` 找不到快照檔時丟新的
+    `DocumentProfileStoreError.snapshotFileMissing`。新增 `garbageCollectOfficialSnapshots(dryRun:)`，只列出／刪除未被
+    目前 `officialSnapshot` 參照的 `profiles/official-*.json`。信任邊界為單一使用者的 `~/.config`，不是多租戶環境。
+  - **`config.json` 跨程序鎖**（PsychQuant/macdoc#204）。`DocumentProfileStore` 的寫入（`setDefaultProfile`、
+    `importOfficial`、快照清理）與 pdf-to-latex-swift 的 `AIConfig.save` 採用同一套協定：`<config>.lock`、
+    `flock(LOCK_EX|LOCK_NB)` 每 50 ms 輪詢、5 秒逾時丟新的 `DocumentProfileStoreError.configLockTimeout`，鎖涵蓋整段
+    read → merge → 原子寫入，鎖檔 0600 且永不刪除。兩邊實作必須保持一致。
+  - **表格 cell 段落級定址**（PsychQuant/macdoc#156）。新增 `WordDocument.cellParagraphTexts(tableIndex:row:col:)` 與
+    `updateCellParagraph(tableIndex:row:col:paragraphIndex:text:)`：只改寫 cell 內指定的段落，沿用原第一個 run 的
+    格式，段落 pPr 與同格其他段落不動；座標在任何寫入前檢查。多段落 cell 不再只能整格覆寫或全域取代。
+  - **相容性**：`DocumentFormattingProfileError` 與 `DocumentProfileStoreError` 各新增 case，對它們做 exhaustive
+    `switch` 的呼叫端需要補上；`DocumentProfileStoreError` 改為 `Equatable`。`importOfficial` 現在會拒絕
+    `word/_rels/document.xml.rels` 格式錯誤、含 DOCTYPE 或含重複 implicit relationship 的範本。
 
 ## [3.9.0] - 2026-09-24
 
