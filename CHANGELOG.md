@@ -31,8 +31,11 @@ All notable changes to ooxml-swift will be documented in this file.
   - **格式 profile 路徑只收 UTF-8**（PsychQuant/macdoc#214）。`importOfficial` 讀的每個 part（rels、numbering、styles、
     document、theme、fontTable），以及快照 decode 與套用時的 XML payload，都必須是合法的 UTF-8（可帶 UTF-8 BOM、
     不含 NUL），而且 XML 宣告沒有 `encoding` 或宣告為 `UTF-8`（不分大小寫）。宣告其他編碼（`ISO-8859-1`、
-    `Shift_JIS`、`UTF-16`…）、位元組不是合法 UTF-8、或宣告無法解析時丟 `invalidSnapshot`，訊息指出是哪個 part、
-    宣告了什麼。以前這些位元組一律當成 UTF-8 存進快照（不合法的位元組變成 U+FFFD），與 Word 依宣告解碼看到的文字
+    `Shift_JIS`、`UTF-16`…）、位元組不是合法 UTF-8，或宣告不符合 XML 1.0 的 `XMLDecl` 文法（缺 `version`、名稱不是
+    `version`／`encoding`／`standalone` 或順序不對、重複、pseudo-attribute 之間沒有空白、值不合文法）時丟
+    `invalidSnapshot`，訊息指出是哪個 part、宣告了什麼。宣告不在最前面（在註解或其他 PI 之後）、出現第二個宣告，或寫成
+    `<?XML` 也拒絕——tree reader 會把這些當一般 prolog 略過。宣告前的空白不是 XML 1.0 允許的寫法，但 tree reader 容忍，
+    這裡也容忍並照樣檢查其後的宣告。以前這些位元組一律當成 UTF-8 存進快照（不合法的位元組變成 U+FFFD），與 Word 依宣告解碼看到的文字
     可能不同。UTF-16 維持 3.10.0 的拒絕（不擴充字元集），訊息由 `malformed XML` 改為指名編碼。3.9.0 起匯入寫出的
     快照一律宣告 `UTF-8`，既有快照不受影響。一般的 `DocxReader` 行為不變，現況已用測試鎖住並寫進註解：
     `word/styles.xml` 的位元組只要是合法 UTF-8 就以 UTF-8 解碼、不看宣告；`word/document.xml` 則不一致——typed model

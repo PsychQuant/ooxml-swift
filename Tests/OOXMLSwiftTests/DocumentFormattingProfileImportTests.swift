@@ -224,8 +224,10 @@ final class DocumentFormattingProfileImportTests: XCTestCase {
     }
 
     /// UTF-8 in any spelling Word or other producers use is accepted: no
-    /// declaration, `UTF-8` in any case, single quotes, a UTF-8 BOM, and
-    /// whitespace before the declaration (which the tree reader tolerates).
+    /// declaration, `UTF-8` in any case, single quotes, a UTF-8 BOM. Leading
+    /// whitespace before the declaration is not XML 1.0; it is a non-standard
+    /// tolerance kept because the tree reader accepts it, and the
+    /// declaration after it is still checked.
     func testImportAcceptsUTF8DeclarationSpellings() throws {
         let base = try baseParts()
         let styles = String(decoding: try XCTUnwrap(base["word/styles.xml"]), as: UTF8.self)
@@ -262,20 +264,55 @@ final class DocumentFormattingProfileImportTests: XCTestCase {
         }
     }
 
-    /// A declaration the gate cannot read is refused rather than guessed.
+    /// A declaration outside the XML 1.0 `XMLDecl` grammar is refused rather
+    /// than guessed: the tree reader skips it without validating, so a
+    /// lenient gate would let `Encoding="ISO-8859-1"` or a missing version
+    /// through.
     func testImportRejectsUnreadableXMLDeclaration() throws {
         let base = try baseParts()
         let styles = String(decoding: try XCTUnwrap(base["word/styles.xml"]), as: UTF8.self)
         for declaration in ["<?xml version=\"1.0\" encoding=Shift_JIS?>", "<?xml version=\"1.0\" encoding=\"UTF-8\" encoding=\"Shift_JIS\"?>",
-                            "<?xml version=\"1.0\" encoding=\"UTF-8\"", "<?xml version=\"1.0\" encoding=\"UTF-8'?>"] {
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\"", "<?xml version=\"1.0\" encoding=\"UTF-8'?>",
+                            "<?xml?>", "<?xml encoding=\"UTF-8\"?>", "<?xml version=\"1.0\"encoding=\"UTF-8\"?>",
+                            "<?xml version=\"1.0\" Encoding=\"ISO-8859-1\"?>", "<?xml version=\"1.0\" standalone=\"maybe\"?>",
+                            "<?xml version=\"1.0\" standalone=\"yes\" encoding=\"UTF-8\"?>", "<?xml version=\"2.0\"?>",
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\" version=\"1.0\"?>", "<?xml version=\"1.0\" encoding=\"8BIT\"?>",
+                            "<?xml version=\"1.0\" charset=\"UTF-8\"?>"] {
             var parts = base
             parts["word/styles.xml"] = Data((declaration + styles).utf8)
             assertImport(parts, throws: .invalidSnapshot("word/styles.xml 的 XML 宣告無法解析"), declaration)
         }
     }
 
-    /// A stored snapshot whose payload declares another encoding is refused
-    /// on decode, like the import it claims to come from.
+    /// A declaration anywhere but first — after a comment or another
+    /// processing instruction, a second declaration, or `<?XML` — is not
+    /// well-formed XML. The tree reader skips all of these as ordinary
+    /// prolog items, so the gate refuses them instead of reading "no
+    /// encoding". `<?xml-stylesheet …?>` is an ordinary PI and is accepted.
+    func testImportRejectsMisplacedXMLDeclaration() throws {
+        let base = try baseParts()
+        let styles = String(decoding: try XCTUnwrap(base["word/styles.xml"]), as: UTF8.self)
+        for prolog in ["<!-- comment --><?xml version=\"1.0\" encoding=\"Shift_JIS\"?>",
+                       "<?xml version=\"1.0\"?><?xml version=\"1.0\" encoding=\"Shift_JIS\"?>",
+                       "<?mso-application progid=\"Word.Document\"?>\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                       "<?XML version=\"1.0\" encoding=\"Shift_JIS\"?>",
+                       "<?xml version=\"1.0\"?><!-- c --><?Xml version=\"1.0\"?>"] {
+            var parts = base
+            parts["word/styles.xml"] = Data((prolog + styles).utf8)
+            assertImport(parts, throws: .invalidSnapshot("word/styles.xml 含有位置或大小寫不合法的 XML 宣告"), prolog)
+        }
+        var stylesheet = base
+        stylesheet["word/styles.xml"] = Data(("<?xml version=\"1.0\" encoding=\"UTF-8\"?><?xml-stylesheet type=\"text/xsl\" href=\"x.xsl\"?><!-- ok -->" + styles).utf8)
+        XCTAssertNoThrow(try importing(stylesheet))
+    }
+
+    /// A stored snapshot whose payload declares another encoding, contains a
+    /// NUL or carries an unreadable declaration is refused on decode, like
+    /// the import it claims to come from. Apply re-runs the same check
+    /// (`ProfileXML.checked`), but an invalid profile cannot reach it through
+    /// the public API: the memberwise initializer is private and both
+    /// `importOfficial` and `init(from:)` validate, so decode is where the
+    /// contract is observable.
     func testDecodeRejectsSnapshotPayloadDeclaringNonUTF8Encoding() throws {
         let profile = try importing(try baseParts())
         let encoded = try JSONEncoder().encode(profile)
@@ -287,6 +324,16 @@ final class DocumentFormattingProfileImportTests: XCTestCase {
             json[key] = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>" + body
             XCTAssertThrowsError(try JSONDecoder().decode(DocumentFormattingProfile.self, from: JSONSerialization.data(withJSONObject: json)), key) { error in
                 XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("格式快照 \(key) 的 XML 宣告編碼為「ISO-8859-1」，格式 profile 只接受 UTF-8"), key)
+            }
+            for (label, broken, expected) in [
+                ("NUL", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" + body + "\u{0}", "格式快照 \(key) 不是合法的 UTF-8（含無法解碼的位元組或 NUL），格式 profile 只接受 UTF-8"),
+                ("unreadable", "<?xml version=\"1.0\" Encoding=\"ISO-8859-1\"?>" + body, "格式快照 \(key) 的 XML 宣告無法解析"),
+                ("misplaced", "<!-- c --><?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>" + body, "格式快照 \(key) 含有位置或大小寫不合法的 XML 宣告")
+            ] {
+                json[key] = broken
+                XCTAssertThrowsError(try JSONDecoder().decode(DocumentFormattingProfile.self, from: JSONSerialization.data(withJSONObject: json)), "\(key) \(label)") { error in
+                    XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot(expected), "\(key) \(label)")
+                }
             }
         }
     }

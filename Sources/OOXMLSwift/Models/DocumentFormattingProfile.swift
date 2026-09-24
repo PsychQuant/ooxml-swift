@@ -516,46 +516,97 @@ internal enum ProfileXML {
         }
     }
 
-    /// The `encoding` pseudo-attribute of the XML declaration: after an
-    /// optional UTF-8 BOM and whitespace (as `XmlTreeReader.skipProlog`
-    /// accepts), `<?xml` followed by whitespace or `?`. Pseudo-attributes
-    /// must be `name = "value"` or `'value'`, each at most once, up to `?>`.
+    /// The `encoding` of the XML declaration, checked against the XML 1.0
+    /// `XMLDecl` grammar: `<?xml`, then `version` (`1.` digits), optional
+    /// `encoding` (`EncName`) and optional `standalone` (`yes`/`no`), in that
+    /// order, each preceded by whitespace, quoted with `"` or `'`, up to `?>`.
+    /// Anything else — a missing version, unknown or repeated names, wrong
+    /// order, `Encoding` in another case, no whitespace between
+    /// pseudo-attributes — is refused, since the tree reader skips the
+    /// declaration without validating it. Whitespace before the declaration
+    /// is not XML 1.0 but `XmlTreeReader.skipProlog` tolerates it, so it is
+    /// tolerated here too and the declaration after it is still checked. The
+    /// rest of the prolog (comments and processing instructions the tree
+    /// reader also skips) may not contain another declaration, including one
+    /// spelled `<?XML`: such a part is not well-formed and Word refuses it.
     static func declaredEncoding(_ bytes: [UInt8], part: String) throws -> String? {
         func isSpace(_ byte: UInt8) -> Bool { byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D }
-        func isNameByte(_ byte: UInt8) -> Bool {
+        func isLetter(_ byte: UInt8) -> Bool {
             (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(byte) || (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+        }
+        func isDigit(_ byte: UInt8) -> Bool { (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) }
+        func starts(_ literal: String, at position: Int) -> Bool {
+            let needle = Array(literal.utf8)
+            return position + needle.count <= bytes.count && Array(bytes[position..<position + needle.count]) == needle
+        }
+        func find(_ literal: String, from position: Int) -> Int? {
+            var cursor = position
+            while cursor < bytes.count { if starts(literal, at: cursor) { return cursor }; cursor += 1 }
+            return nil
+        }
+        func validValue(_ name: String, _ value: [UInt8]) -> Bool {
+            switch name {
+            case "version": return value.count > 2 && value.starts(with: Array("1.".utf8)) && value.dropFirst(2).allSatisfy(isDigit)
+            case "encoding":
+                return value.first.map(isLetter) == true && value.allSatisfy {
+                    isLetter($0) || isDigit($0) || $0 == UInt8(ascii: ".") || $0 == UInt8(ascii: "_") || $0 == UInt8(ascii: "-")
+                }
+            default: return value == Array("yes".utf8) || value == Array("no".utf8)
+            }
         }
         let unreadable = DocumentFormattingProfileError.invalidSnapshot("\(part) 的 XML 宣告無法解析")
         var index = bytes.starts(with: [0xEF, 0xBB, 0xBF]) ? 3 : 0
         while index < bytes.count, isSpace(bytes[index]) { index += 1 }
-        let open = Array("<?xml".utf8)
-        guard bytes.count > index + open.count, Array(bytes[index..<index + open.count]) == open,
-              isSpace(bytes[index + open.count]) || bytes[index + open.count] == UInt8(ascii: "?") else { return nil }
-        index += open.count
-        var pseudoAttributes: [String: String] = [:]
-        while true {
-            while index < bytes.count, isSpace(bytes[index]) { index += 1 }
-            guard index < bytes.count else { throw unreadable }
-            if bytes[index] == UInt8(ascii: "?") {
-                guard index + 1 < bytes.count, bytes[index + 1] == UInt8(ascii: ">") else { throw unreadable }
-                return pseudoAttributes["encoding"]
+        var encoding: String?
+        if starts("<?xml", at: index), index + 5 < bytes.count, isSpace(bytes[index + 5]) || bytes[index + 5] == UInt8(ascii: "?") {
+            index += 5
+            let names = ["version", "encoding", "standalone"]
+            var nextAllowed = 0
+            var values: [String: String] = [:]
+            while true {
+                let spaceStart = index
+                while index < bytes.count, isSpace(bytes[index]) { index += 1 }
+                if starts("?>", at: index) { index += 2; break }
+                guard index > spaceStart, index < bytes.count else { throw unreadable }
+                let nameStart = index
+                while index < bytes.count, isLetter(bytes[index]) { index += 1 }
+                let name = String(decoding: bytes[nameStart..<index], as: UTF8.self)
+                guard let position = names.firstIndex(of: name), position >= nextAllowed else { throw unreadable }
+                nextAllowed = position + 1
+                while index < bytes.count, isSpace(bytes[index]) { index += 1 }
+                guard index < bytes.count, bytes[index] == UInt8(ascii: "=") else { throw unreadable }
+                index += 1
+                while index < bytes.count, isSpace(bytes[index]) { index += 1 }
+                guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") || bytes[index] == UInt8(ascii: "'") else { throw unreadable }
+                let quote = bytes[index]
+                index += 1
+                let valueStart = index
+                while index < bytes.count, bytes[index] != quote, bytes[index] != UInt8(ascii: "<"), bytes[index] != UInt8(ascii: ">") { index += 1 }
+                guard index < bytes.count, bytes[index] == quote, validValue(name, Array(bytes[valueStart..<index])) else { throw unreadable }
+                values[name] = String(decoding: bytes[valueStart..<index], as: UTF8.self)
+                index += 1
             }
-            let nameStart = index
-            while index < bytes.count, isNameByte(bytes[index]) { index += 1 }
-            let name = String(decoding: bytes[nameStart..<index], as: UTF8.self)
-            while index < bytes.count, isSpace(bytes[index]) { index += 1 }
-            guard !name.isEmpty, index < bytes.count, bytes[index] == UInt8(ascii: "=") else { throw unreadable }
-            index += 1
-            while index < bytes.count, isSpace(bytes[index]) { index += 1 }
-            guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") || bytes[index] == UInt8(ascii: "'") else { throw unreadable }
-            let quote = bytes[index]
-            index += 1
-            let valueStart = index
-            while index < bytes.count, bytes[index] != quote, bytes[index] != UInt8(ascii: "<"), bytes[index] != UInt8(ascii: ">") { index += 1 }
-            guard index < bytes.count, bytes[index] == quote, pseudoAttributes[name] == nil else { throw unreadable }
-            pseudoAttributes[name] = String(decoding: bytes[valueStart..<index], as: UTF8.self)
-            index += 1
+            guard values["version"] != nil else { throw unreadable }
+            encoding = values["encoding"]
         }
+        while index < bytes.count {
+            while index < bytes.count, isSpace(bytes[index]) { index += 1 }
+            if starts("<!--", at: index) {
+                guard let end = find("-->", from: index + 4) else { break }
+                index = end + 3
+            } else if starts("<?", at: index) {
+                var targetEnd = index + 2
+                while targetEnd < bytes.count, !isSpace(bytes[targetEnd]), bytes[targetEnd] != UInt8(ascii: "?") { targetEnd += 1 }
+                if String(decoding: bytes[(index + 2)..<targetEnd], as: UTF8.self).lowercased() == "xml" {
+                    throw DocumentFormattingProfileError.invalidSnapshot("\(part) 含有位置或大小寫不合法的 XML 宣告")
+                }
+                guard let end = find("?>", from: targetEnd) else { break }
+                index = end + 2
+            } else {
+                break
+            }
+        }
+        return encoding
     }
 
     /// Profile payloads and template formatting parts refuse any DTD, like
