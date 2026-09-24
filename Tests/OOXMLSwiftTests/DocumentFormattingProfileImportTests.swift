@@ -345,4 +345,94 @@ final class DocumentFormattingProfileImportTests: XCTestCase {
         XCTAssertTrue(saved.hasPrefix("<?xml version=\"1.0\" encoding=\"UTF-8\""), String(saved.prefix(80)))
         XCTAssertTrue(saved.contains("名稱"))
     }
+
+    // MARK: - PsychQuant/macdoc#212 actionable completeness errors
+
+    func styles(docDefaults: String) -> Data {
+        Data("<w:styles xmlns:w=\"\(Self.w)\">\(docDefaults)<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"a\"><w:name w:val=\"Normal\"/></w:style></w:styles>".utf8)
+    }
+
+    func themeFreeParts(docDefaults: String) throws -> [String: Data] {
+        var parts = try baseParts()
+        parts["word/styles.xml"] = styles(docDefaults: docDefaults)
+        return parts
+    }
+
+    /// The error names exactly the missing field, and its description tells
+    /// the user how to make the default explicit. Word's implicit defaults
+    /// are never filled in on the user's behalf.
+    func testMissingDocDefaultsFieldsAreNamedPrecisely() throws {
+        let sz = "docDefaults/rPrDefault/rPr/sz", pPr = "docDefaults/pPrDefault"
+        for (docDefaults, expected) in [
+            // 90_template_ja's shape: fonts and language but no size, and an
+            // empty pPrDefault (which is accepted).
+            ("<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Century\"/><w:lang w:val=\"en-US\"/></w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults>", sz),
+            ("<w:docDefaults><w:rPrDefault/><w:pPrDefault/></w:docDefaults>", sz),
+            ("<w:docDefaults><w:pPrDefault><w:pPr/></w:pPrDefault></w:docDefaults>", sz),
+            ("<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val=\"21\"/></w:rPr></w:rPrDefault></w:docDefaults>", pPr),
+            ("<w:docDefaults/>", "\(sz), \(pPr)"),
+            ("", "\(sz), \(pPr)")
+        ] {
+            assertImport(try themeFreeParts(docDefaults: docDefaults), throws: .missingRequiredFormatting(expected), docDefaults)
+        }
+        XCTAssertNoThrow(try importing(try themeFreeParts(docDefaults: "<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val=\"21\"/></w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults>")),
+                         "an explicit size with an empty pPrDefault is complete")
+    }
+
+    /// A size that is present but not a positive integer is invalid data,
+    /// not missing data.
+    func testInvalidDocDefaultsSizeIsReportedAsInvalid() throws {
+        for value in ["0", "-2", "abc", ""] {
+            let parts = try themeFreeParts(docDefaults: "<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val=\"\(value)\"/></w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults>")
+            assertImport(parts, throws: .invalidSnapshot("docDefaults/rPrDefault/rPr/sz 必須是正整數（半點），實際為「\(value)」"), value)
+        }
+        let parts = try themeFreeParts(docDefaults: "<w:docDefaults><w:rPrDefault><w:rPr><w:sz/></w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults>")
+        assertImport(parts, throws: .invalidSnapshot("docDefaults/rPrDefault/rPr/sz 必須是正整數（半點），實際為「」"), "no val")
+    }
+
+    /// The descriptions carry the fix: which dialog, which button, and the
+    /// equivalent XML, for each missing default.
+    func testCompletenessErrorDescriptionsAreActionable() {
+        let size = DocumentFormattingProfileError.missingRequiredFormatting("docDefaults/rPrDefault/rPr/sz").errorDescription ?? ""
+        for fragment in ["docDefaults/rPrDefault/rPr/sz", "預設字級", "隱含", "字型", "設為預設值", "<w:sz w:val="] {
+            XCTAssertTrue(size.contains(fragment), "size description lacks \(fragment): \(size)")
+        }
+        let paragraph = DocumentFormattingProfileError.missingRequiredFormatting("docDefaults/pPrDefault").errorDescription ?? ""
+        for fragment in ["docDefaults/pPrDefault", "段落", "設為預設值", "<w:pPrDefault>"] {
+            XCTAssertTrue(paragraph.contains(fragment), "paragraph description lacks \(fragment): \(paragraph)")
+        }
+        let both = DocumentFormattingProfileError.missingRequiredFormatting("docDefaults/rPrDefault/rPr/sz, docDefaults/pPrDefault").errorDescription ?? ""
+        XCTAssertTrue(both.contains("<w:sz w:val=") && both.contains("<w:pPrDefault>"), both)
+        let numbering = DocumentFormattingProfileError.unsupportedNumbering.errorDescription ?? ""
+        for fragment in ["編號", "abstractNum", "numId", "第一版", "inherit"] {
+            XCTAssertTrue(numbering.contains(fragment), "numbering description lacks \(fragment): \(numbering)")
+        }
+        let other = DocumentFormattingProfileError.missingRequiredFormatting("final body sectPr").errorDescription
+        XCTAssertEqual(other, "格式快照缺少必要資料：final body sectPr", "fields without a known fix keep the plain message")
+    }
+
+    // MARK: - Real templates (MACDOC_TEMPLATE_DIR)
+
+    /// 90_template_ja relies on Word's implicit default font size; its
+    /// empty pPrDefault is accepted. A temp-dir copy that adds only the
+    /// explicit size imports, so the size is the one missing field. The
+    /// source is read in place and never modified.
+    func testRealBaselineTemplateIsMissingOnlyTheExplicitDefaultSize() throws {
+        let url = try TemplateFixtureGate.requireTemplate(TemplateFixtureGate.baselineTemplateName)
+        let before = try Data(contentsOf: url)
+        XCTAssertThrowsError(try DocumentFormattingProfile.importOfficial(from: url)) { error in
+            XCTAssertEqual(error as? DocumentFormattingProfileError, .missingRequiredFormatting("docDefaults/rPrDefault/rPr/sz"))
+            XCTAssertTrue((error as? LocalizedError)?.errorDescription?.contains("設為預設值") == true)
+        }
+        var parts = try RawPartChannel.readAllParts(from: url)
+        var styles = String(decoding: try XCTUnwrap(parts["word/styles.xml"]), as: UTF8.self)
+        let defaults = try XCTUnwrap(styles.range(of: "<w:docDefaults>")?.lowerBound)..<XCTUnwrap(styles.range(of: "</w:docDefaults>")?.upperBound)
+        let explicit = String(styles[defaults]).replacingOccurrences(of: "<w:lang ", with: "<w:sz w:val=\"21\"/><w:lang ")
+        XCTAssertNotEqual(explicit, String(styles[defaults]), "fixture docDefaults shape changed; update this derivation")
+        XCTAssertTrue(explicit.contains("<w:pPrDefault/>"), "the derivation keeps the empty pPrDefault")
+        styles.replaceSubrange(defaults, with: explicit)
+        parts["word/styles.xml"] = Data(styles.utf8)
+        XCTAssertNoThrow(try importing(parts))
+        XCTAssertEqual(try Data(contentsOf: url), before)
+    }
 }

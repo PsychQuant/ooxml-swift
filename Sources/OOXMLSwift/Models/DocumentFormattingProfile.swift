@@ -24,14 +24,41 @@ public enum DocumentFormattingProfileError: Error, Equatable, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .unsupportedVersion(let version): return "不支援的格式快照版本：\(version)"
-        case .missingRequiredFormatting(let field): return "格式快照缺少必要資料：\(field)"
+        case .missingRequiredFormatting(let field):
+            // PsychQuant/macdoc#212: a known missing field carries its fix.
+            let fields = field.components(separatedBy: ", ")
+            let fixes = Self.completenessFixes.filter { fields.contains($0.field) }.map(\.fix)
+            return (["格式快照缺少必要資料：\(field)"] + fixes).joined(separator: "\n")
         case .invalidSnapshot(let reason): return "格式快照無效：\(reason)"
         case .unsupportedFormatting(let field): return "無法安全保留範本格式：\(field)"
-        case .unsupportedNumbering: return "格式快照第一版不支援編號定義或非零 numId"
+        case .unsupportedNumbering:
+            return "範本含有清單編號：numbering part 定義了 abstractNum／num／numPicBullet，或某個樣式以非零 numId 引用編號。"
+                + "格式 profile 第一版不支援編號，整份範本無法匯入（不會只略過編號）。"
+                + "請改用不含清單編號的範本，或改用 inherit（沿用文件本身的格式）。"
         case .invalidRelationshipTarget(let target): return "relationship Target「\(target)」解析後以 / 結尾，不是合法的 OPC part 名稱"
         case .duplicateRelationship(let type): return "文件套件內同一 Type（\(type)）出現多筆 Target 不同的 Relationship，屬於不合法輸入"
         }
     }
+
+    /// PsychQuant/macdoc#212. `missingRequiredFormatting` payloads naming a
+    /// docDefaults field the first profile version requires, with how to
+    /// make it explicit. Word's implicit defaults are never filled in on the
+    /// user's behalf: guessing a size or spacing Word would render
+    /// differently is worse than refusing. A payload lists several fields
+    /// separated by ", ".
+    static let defaultSizeField = "docDefaults/rPrDefault/rPr/sz"
+    static let paragraphDefaultsField = "docDefaults/pPrDefault"
+    static let completenessFixes: [(field: String, fix: String)] = [
+        (defaultSizeField,
+         "範本沒有明確寫出預設字級（styles.xml 的 docDefaults/rPrDefault/rPr/sz）。Word 開啟時會自行套用隱含的預設值，"
+            + "但格式 profile 不代為猜測。修正方式：在 Word 開啟這份範本，於「字型」對話框選好字級後按「設為預設值」"
+            + "（Mac 版為「預設值…」），選擇只套用到這份文件（即範本本身），存檔後重新匯入；"
+            + "或直接在 styles.xml 的 <w:rPrDefault><w:rPr> 內加入 <w:sz w:val=\"21\"/>（單位是半點，21 即 10.5pt）。"),
+        (paragraphDefaultsField,
+         "範本沒有段落預設值（styles.xml 的 docDefaults/pPrDefault）。修正方式：在 Word 開啟這份範本，於「段落」對話框按"
+            + "「設為預設值」（Mac 版為「預設值…」），選擇只套用到這份文件，存檔後重新匯入；"
+            + "或直接在 styles.xml 的 <w:docDefaults> 內加入 <w:pPrDefault><w:pPr/></w:pPrDefault>。")
+    ]
 }
 
 /// A versioned, formatting-only value. No source filename, package paths,
@@ -181,11 +208,26 @@ public struct DocumentFormattingProfile: Codable, Equatable, Sendable {
         }
         let styles = try ProfileXML.checked(stylesXML, root: "styles")
         try ProfileXML.validateStyles(styles)
-        guard let defaults = ProfileXML.child(styles, "docDefaults"),
-              let r = ProfileXML.child(defaults, "rPrDefault").flatMap({ ProfileXML.child($0, "rPr") }),
-              let size = ProfileXML.child(r, "sz").flatMap({ ProfileXML.value($0, "val") }).flatMap(Int.init), size > 0,
-              ProfileXML.child(defaults, "pPrDefault") != nil else {
-            throw DocumentFormattingProfileError.missingRequiredFormatting("docDefaults/rPrDefault/sz and pPrDefault")
+        // PsychQuant/macdoc#212: name exactly the missing docDefaults fields
+        // (all of them, so one fix round is enough); a present but unusable
+        // size is invalid data, not missing data. An empty pPrDefault is
+        // accepted.
+        let defaults = ProfileXML.child(styles, "docDefaults")
+        var missing: [String] = []
+        if let size = defaults.flatMap({ ProfileXML.child($0, "rPrDefault") }).flatMap({ ProfileXML.child($0, "rPr") })
+            .flatMap({ ProfileXML.child($0, "sz") }) {
+            let raw = ProfileXML.value(size, "val") ?? ""
+            guard let halfPoints = Int(raw), halfPoints > 0 else {
+                throw DocumentFormattingProfileError.invalidSnapshot("\(DocumentFormattingProfileError.defaultSizeField) 必須是正整數（半點），實際為「\(ProfileXML.excerpt(raw))」")
+            }
+        } else {
+            missing.append(DocumentFormattingProfileError.defaultSizeField)
+        }
+        if defaults.flatMap({ ProfileXML.child($0, "pPrDefault") }) == nil {
+            missing.append(DocumentFormattingProfileError.paragraphDefaultsField)
+        }
+        guard missing.isEmpty else {
+            throw DocumentFormattingProfileError.missingRequiredFormatting(missing.joined(separator: ", "))
         }
         let section = try ProfileXML.checked(sectionXML, root: "sectPr")
         for (name, attrs) in [("pgSz", ["w", "h"]), ("pgMar", ["top", "right", "bottom", "left", "header", "footer", "gutter"])] {
