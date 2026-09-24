@@ -152,18 +152,24 @@ public struct DocxReader {
 
         // PsychQuant/ooxml-swift#173: which part is the main part, per the
         // package-level `_rels/.rels`'s `officeDocument` relationship.
-        // Absent, ambiguous or malformed `_rels/.rels` (duplicate/External/
-        // trailing-slash) falls back to `word/document.xml` — the same
-        // tolerance the fixed-path behavior already had; a package this
-        // broken is exceedingly rare and not worth failing the whole read
-        // over. Only a CLEAN, unambiguous resolution to something other
-        // than `word/document.xml` is acted on, and deliberately as a loud
-        // refusal rather than a silent partial read: honouring it fully
-        // would mean re-deriving every header/footer/style/rels lookup
-        // below relative to the resolved part's own directory (they are
-        // presently hardcoded to `word/`), which is out of scope here — no
-        // Word-authored `.docx` ever uses a non-default main part, so
-        // failing loud on the rare package that does is safer than
+        // "Falls back to `word/document.xml`" below covers exactly two
+        // cases (Codex R1 LOW-7 — precision, not scope: neither is a
+        // fallback FROM an error): `_rels/.rels` absent, and it present
+        // but naming no `officeDocument` relationship (or one that
+        // resolves ambiguously — duplicate/External/trailing-slash — see
+        // `mainPartTarget`). `relationshipsTree(at:)` itself is a plain
+        // `try`, not `try?`: a genuinely malformed rels part (unparsable
+        // XML, disallowed DTD, unsupported encoding) still fails the read,
+        // as it always has — this reader does not silently swallow a
+        // parse or security error to keep reading. Only a CLEAN,
+        // unambiguous resolution to something other than `word/document.xml`
+        // is acted on, and deliberately as a loud refusal rather than a
+        // silent partial read: honouring it fully would mean re-deriving
+        // every header/footer/style/rels lookup below relative to the
+        // resolved part's own directory (they are presently hardcoded to
+        // `word/`), which is out of scope here — no Word-authored `.docx`
+        // ever uses a non-default main part, so failing loud on the rare
+        // package that does is safer than
         // guessing which of `word/document.xml` or the resolved part
         // reflects the author's intent while headers/footers/hyperlinks
         // silently come up empty either way.
@@ -427,7 +433,13 @@ public struct DocxReader {
             // v0.19.2+ (#56 follow-up F4): preserve `<w:hdr>` root attributes
             // (xmlns:* + mc:Ignorable + vendor) so VML watermark prefixes
             // round-trip beyond the hardcoded 5-namespace template.
-            let rootAttrs = try Self.parseContainerRootAttributes(from: headerData)
+            // PsychQuant/ooxml-swift#171 (Codex R1 MEDIUM-4): parse from the
+            // SAME always-UTF-8-labeled data body text now comes from
+            // (typedModelInputXML), not the raw archive bytes — `XMLParser`
+            // (unlike `XmlTreeReader`) respects a wrong declaration, so
+            // feeding it the ORIGINAL bytes could disagree with the
+            // now-correct body text for a mislabeled-but-valid-UTF-8 header.
+            let rootAttrs = try Self.parseContainerRootAttributes(from: Data(Self.typedModelInputXML(from: headerTree).utf8))
             var header = Header(id: rel.id, originalFileName: rel.target, rootAttributes: rootAttrs)
             header.bodyChildren = bodyChildren
             header.relationships = headerRels  // store ONLY the container's own rels (not merged)
@@ -473,7 +485,8 @@ public struct DocxReader {
                 )
             }
             // v0.19.2+ (#56 follow-up F4): preserve `<w:ftr>` root attributes.
-            let rootAttrs = try Self.parseContainerRootAttributes(from: footerData)
+            // PsychQuant/ooxml-swift#171 (Codex R1 MEDIUM-4): see header parse.
+            let rootAttrs = try Self.parseContainerRootAttributes(from: Data(Self.typedModelInputXML(from: footerTree).utf8))
             var footer = Footer(id: rel.id, originalFileName: rel.target, rootAttributes: rootAttrs)
             footer.bodyChildren = bodyChildren
             footer.relationships = footerRels
@@ -499,7 +512,8 @@ public struct DocxReader {
             var mergedFootnoteRels = RelationshipsCollection()
             mergedFootnoteRels.relationships = footnotesRels.relationships + relationships.relationships
             // v0.19.2+ (#56 follow-up F4): preserve `<w:footnotes>` root attributes.
-            document.footnotes.rootAttributes = try Self.parseContainerRootAttributes(from: footnotesData)
+            // PsychQuant/ooxml-swift#171 (Codex R1 MEDIUM-4): see header parse.
+            document.footnotes.rootAttributes = try Self.parseContainerRootAttributes(from: Data(Self.typedModelInputXML(from: footnotesTree).utf8))
             // v0.19.10+ (#59 sub-stack B): footnotes-part-wide whitespace context.
             // ALL footnote entries share the same overlay because they live in
             // the same XML part — the byte-stream scan covers all `<w:t>` tags
@@ -553,7 +567,8 @@ public struct DocxReader {
             var mergedEndnoteRels = RelationshipsCollection()
             mergedEndnoteRels.relationships = endnotesRels.relationships + relationships.relationships
             // v0.19.2+ (#56 follow-up F4): preserve `<w:endnotes>` root attributes.
-            document.endnotes.rootAttributes = try Self.parseContainerRootAttributes(from: endnotesData)
+            // PsychQuant/ooxml-swift#171 (Codex R1 MEDIUM-4): see header parse.
+            document.endnotes.rootAttributes = try Self.parseContainerRootAttributes(from: Data(Self.typedModelInputXML(from: endnotesTree).utf8))
             // v0.19.10+ (#59 sub-stack B): endnotes-part-wide whitespace context.
             let endnotesWsContext = WhitespaceParseContext(overlay: WhitespaceOverlay(scanning: endnotesTree.sourceBytes))
             try Self.withWhitespaceContext(endnotesWsContext) {
@@ -892,15 +907,31 @@ public struct DocxReader {
     ///   existing, locked behavior (PsychQuant/macdoc#214,
     ///   `testReaderDecodesUTF8ValidStylesAsUTF8DespiteNonUTF8Declaration`):
     ///   a part that IS UTF-8 reads correctly regardless of a wrong label.
+    ///   Known, accepted residual ambiguity inherited from that decision,
+    ///   not introduced here (Codex R1 HIGH-1): a byte pair like `C3 A9`
+    ///   is simultaneously valid UTF-8 (`é`) and a valid TWO-character
+    ///   ISO-8859-1 reading (`Ã©`) — for a part genuinely ISO-8859-1-encoded
+    ///   whose bytes happen to collide this way, this function (like
+    ///   styles.xml before it) decodes as UTF-8, which disagrees with what
+    ///   Word would show from the very first read, not just after an edit.
+    ///   There is no byte-level way to distinguish "mislabeled UTF-8" from
+    ///   "genuinely ISO-8859-1 that happens to collide" without the
+    ///   author's true intent; #171 was scoped to make document.xml agree
+    ///   with styles.xml's already-decided answer, not to re-litigate it.
+    ///   Real Word output is UTF-8 always, so this is a non-issue in
+    ///   practice.
     /// - Otherwise, decoded per the declared `encoding` (read the way
-    ///   `ProfileXML.declaredEncoding` reads it) when it names one of the
-    ///   encodings below, or by UTF-16 BOM/null-pattern sniffing when
-    ///   there is no declaration (Word/tools sometimes omit `encoding=`
-    ///   for UTF-16). Named set: UTF-16 (BE/LE), ISO-8859-1, Shift_JIS —
-    ///   real-world `.docx` document parts are UTF-8, so this covers the
-    ///   legacy encodings this issue was asked to demonstrate rather than
-    ///   attempting every encoding Foundation happens to know; anything
-    ///   else declared is refused, not guessed at.
+    ///   `ProfileXML.declaredEncoding` reads it) when it names ISO-8859-1
+    ///   or Shift_JIS, or by UTF-16 BOM/null-pattern sniffing otherwise —
+    ///   including every genuinely UTF-16-encoded part, whose OWN
+    ///   declaration is unreadable to a byte-level ASCII scanner (see the
+    ///   comment at the `switch` below) — with the declaration re-checked,
+    ///   once readable, against the sniffed byte order. Named set: UTF-16
+    ///   (BE/LE), ISO-8859-1, Shift_JIS — real-world `.docx` document
+    ///   parts are UTF-8, so this covers the legacy encodings this issue
+    ///   was asked to demonstrate rather than attempting every encoding
+    ///   Foundation happens to know; anything else declared is refused,
+    ///   not guessed at.
     /// - A DTD is refused (`rejectDTD`) on the DECODED text — the same
     ///   ASCII-losslessness reason the pre-#171 UTF-16 branch already
     ///   rejected on decoded text rather than raw bytes: a byte-level scan
@@ -913,6 +944,20 @@ public struct DocxReader {
         if !data.contains(0), String(data: data, encoding: .utf8) != nil {
             return data
         }
+        // `ProfileXML.declaredEncoding`'s byte-level scanner assumes one
+        // byte per ASCII character (true for UTF-8, ISO-8859-1, and
+        // Shift_JIS's ASCII-compatible range in the declaration region) —
+        // it CANNOT read a declaration that is itself UTF-16-encoded (2
+        // bytes per character, interleaved with NULs the `<?xml` needle
+        // never matches). Since the guard above already ruled out valid
+        // UTF-8, a `declared` value here reading "iso-8859-1" or
+        // "shift_jis" is trustworthy (those declarations, being
+        // ASCII-compatible, decoded correctly); "utf-16be"/"utf-16le"
+        // never legitimately comes out of this scan for genuinely
+        // UTF-16-encoded bytes — byte order for UTF-16 is decided below,
+        // by BOM/null-pattern, and cross-checked against what the
+        // declaration ACTUALLY says once it becomes ASCII-readable again
+        // (see `decoded` below).
         let declared = ((try? ProfileXML.declaredEncoding([UInt8](data), part: part)) ?? nil)?.lowercased()
         let encoding: String.Encoding
         switch declared {
@@ -920,14 +965,12 @@ public struct DocxReader {
             encoding = .isoLatin1
         case "shift_jis", "shift-jis", "sjis":
             encoding = .shiftJIS
-        case "utf-16be":
-            encoding = .utf16BigEndian
-        case "utf-16le":
-            encoding = .utf16LittleEndian
-        case nil, "utf-16":
-            // No declaration (or one that doesn't say which byte order):
-            // fall back to the BOM/null-pattern sniffing word/styles.xml
-            // already used before this generalization.
+        default:
+            // No declaration, or one the raw-byte scanner couldn't read
+            // (`nil`) — including any UTF-16 case, per the comment above.
+            // XML 1.0 Appendix F: a BOM wins over any declared encoding;
+            // absent one, fall back to the null-byte position
+            // `word/styles.xml` already used before this generalization.
             if data.starts(with: [0xFE, 0xFF]) || data.starts(with: [0, 0x3C]) {
                 encoding = .utf16BigEndian
             } else if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0x3C, 0]) {
@@ -935,8 +978,6 @@ public struct DocxReader {
             } else {
                 throw WordError.invalidDocx("\(part) has an unsupported XML encoding")
             }
-        default:
-            throw WordError.invalidDocx("\(part) has an unsupported XML encoding")
         }
         // UTF-32LE shares UTF-16LE's leading bytes. Its UTF-16
         // interpretation contains NULs (invalid in XML); refuse it before
@@ -947,23 +988,65 @@ public struct DocxReader {
         guard let decoded = String(data: data, encoding: encoding), !decoded.contains("\u{0000}") else {
             throw WordError.invalidDocx("\(part) has an unsupported XML encoding")
         }
-        // DTD-reject on the DECODED text, before any XML parser sees the
-        // ORIGINAL bytes — `decoded` is only used for this pre-check, not
-        // for constructing the result (see below).
+        // DTD-reject on the DECODED text FIRST — before any OTHER encoding
+        // validation, not just before an XML parser: DTD safety is the
+        // outermost gate this reader guarantees regardless of what other
+        // encoding problem a part might also have (matches
+        // testReaderBOMAndDeclarationMismatchCounterexamples's design: a
+        // DTD-bearing payload throws `dtdNotAllowed` even when it ALSO has
+        // a byte-order conflict, never some other error racing it). A
+        // DOCTYPE the original (non-UTF-8) encoding would have hidden from
+        // a raw byte-level scan on the original bytes is ASCII-visible here.
         try Self.rejectDTD(Data(decoded.utf8), part: part)
-        // Let libxml2 re-derive the result from the ORIGINAL bytes, not
-        // from `decoded`: `XMLDocument(xmlString:)` on a string that still
-        // carries the OLD declaration text (e.g. `encoding="UTF-16"`)
-        // fails outright — "Document labelled UTF-16 but has UTF-8
-        // content" — because the native string is necessarily UTF-8/16
-        // internally already, mismatching its own stale label.
-        // `XMLDocument(data:)` decodes the ORIGINAL bytes itself per that
-        // same declaration (matched by construction, since we validated
-        // `encoding` against it above) and produces a correct document;
-        // DTD safety comes from the pre-check above having already run.
-        let encoded = try XMLDocument(data: data, options: .nodeLoadExternalEntitiesNever)
-        encoded.characterEncoding = "UTF-8"
-        return encoded.xmlData
+        // Now that `decoded` is byte-per-character again, the ORIGINAL
+        // declaration (if any) is finally readable as text — this is
+        // where a genuine UTF-16 byte-order conflict is caught: XML 1.0
+        // requires an explicit `encoding="UTF-16BE"`/`"UTF-16LE"` to agree
+        // with the actual byte order; disagreeing is malformed input, not
+        // "BOM wins" (Appendix F's BOM-priority rule is for when there is
+        // NO explicit, readable declaration to contradict).
+        if let inner = ((try? ProfileXML.declaredEncoding(Array(decoded.utf8), part: part)) ?? nil)?.lowercased() {
+            if inner == "utf-16be", encoding != .utf16BigEndian {
+                throw WordError.invalidDocx("\(part) declares UTF-16BE but is encoded little-endian")
+            }
+            if inner == "utf-16le", encoding != .utf16LittleEndian {
+                throw WordError.invalidDocx("\(part) declares UTF-16LE but is encoded big-endian")
+            }
+        }
+        // `decoded` — NOT a round trip through `XMLDocument` — is the
+        // result: constructing `XMLDocument(data:)`/`XMLDocument(xmlString:)`
+        // here to normalize the declaration would strip whitespace-only
+        // `<w:t>` text nodes irrecoverably. Per the pre-existing, verified
+        // finding this codebase already relies on (Issue58_60ContentPreservationTests
+        // `testWhitespaceOnlyTextRunsRoundTripInBody`): Foundation's
+        // `XMLDocument` drops whitespace-only text content regardless of
+        // `xml:space="preserve"` AND regardless of `.nodePreserveWhitespace`.
+        // `WhitespaceOverlay` recovers that loss ELSEWHERE by scanning raw
+        // bytes that never went through a DOM — if this function itself
+        // routed the bytes through one first, there would be nothing left
+        // for the overlay to recover. `String(data:encoding:)` above is a
+        // pure text decode with no DOM involved, so nothing is lost; only
+        // the declaration text needs fixing (see `rewrittenAsUTF8Declaration`).
+        return Data(Self.rewrittenAsUTF8Declaration(decoded).utf8)
+    }
+
+    /// Replaces JUST the `<?xml ... ?>` prolog (if present) with one
+    /// declaring UTF-8, leaving every other byte of `text` — including
+    /// whitespace-only content — untouched. `text` is assumed ASCII-safe
+    /// in its prolog region (guaranteed by XML 1.0: the declaration itself
+    /// must be parseable before an encoding is even known), so a plain
+    /// substring search for the FIRST `<?xml` / `?>` pair is safe and
+    /// cannot match body content (a literal `<` in element content or an
+    /// attribute value would have to be escaped or quoted, never `<?xml`
+    /// verbatim outside the prolog). No declaration present is already
+    /// correct as-is: XML 1.0 without a declared `encoding` defaults to
+    /// UTF-8, which these bytes now are.
+    private static func rewrittenAsUTF8Declaration(_ text: String) -> String {
+        guard let open = text.range(of: "<?xml"),
+              let close = text.range(of: "?>", range: open.upperBound..<text.endIndex) else {
+            return text
+        }
+        return text.replacingCharacters(in: open.lowerBound..<close.upperBound, with: "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
     }
 
     /// A fresh, always-`encoding="UTF-8"`-labeled re-serialization of

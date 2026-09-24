@@ -86,6 +86,64 @@ final class DocxReaderFormattingPartRelationshipTests: XCTestCase {
         XCTAssertTrue(hasMarker, "styles should come from the relationship target (customStyles.xml), not the stale default path")
     }
 
+    /// Codex R1 MEDIUM-3: reading via the relationship isn't enough on its
+    /// own — a typed edit on a document whose styles live at a non-default,
+    /// EXISTING part must still save correctly (not just the earlier
+    /// `old-styles.xml`-style test's case, where the named target doesn't
+    /// physically exist and the write path never even touches the custom
+    /// part). The writer's existing "always publish to the canonical
+    /// default path, repoint every registration" decision (#173, unchanged
+    /// here) means the OUTPUT is expected at `word/styles.xml`, and
+    /// `word/customStyles.xml` becomes an orphan (known limitation,
+    /// documented in the #173 commit) — this test pins down that the EDIT
+    /// itself lands correctly rather than being silently lost or reverted
+    /// to the stale default-path content.
+    func testDocxReaderEditAfterReadingStylesFromNonDefaultPathSavesCorrectly() throws {
+        var parts = try baseParts()
+        let stylesXML = try XCTUnwrap(parts["word/styles.xml"])
+        parts["word/customStyles.xml"] = stylesXML
+        // Leave a STALE, DIFFERENT default-path file so a silent
+        // read-from-default regression would be caught by content, not
+        // just by success/failure.
+        parts["word/styles.xml"] = replacing(stylesXML, "w:styleId=\"Normal\"", with: "w:styleId=\"Normal\" w:staleMarker=\"1\"")
+        var rels = String(decoding: try XCTUnwrap(parts["word/_rels/document.xml.rels"]), as: UTF8.self)
+        rels = rels.replacingOccurrences(of: "Target=\"styles.xml\"", with: "Target=\"customStyles.xml\"")
+        parts["word/_rels/document.xml.rels"] = Data(rels.utf8)
+
+        var doc = try DocxReader.read(from: try package(parts))
+        defer { doc.close() }
+        try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "Edited Normal"))
+        let output = try directory().appendingPathComponent("edited.docx")
+        try DocxWriter.write(doc, to: output)
+
+        var reopened = try DocxReader.read(from: output)
+        defer { reopened.close() }
+        XCTAssertEqual(reopened.styles.first { $0.id == "Normal" }?.name, "Edited Normal", "the edit made against the relationship-resolved content must be the one that gets saved")
+        let hasStaleMarker = ProfileXML.walk(try XCTUnwrap(reopened.xmlTrees["word/styles.xml"]).root).contains {
+            $0.attributes.contains { $0.localName == "staleMarker" }
+        }
+        XCTAssertFalse(hasStaleMarker, "the saved styles must not silently be the stale default-path content")
+    }
+
+    /// Codex R1 MEDIUM-6: an External styles relationship (`TargetMode="External"`,
+    /// disallowed for an in-package formatting part per `ProfileXML.implicitPart`)
+    /// falls back to the default path rather than failing the whole read —
+    /// the same tolerance a duplicate or missing relationship already gets
+    /// (`testDocxReaderEditAfterReadingStylesFromNonDefaultPathSavesCorrectly`
+    /// and the RelationshipsTests suite cover those; this is the third
+    /// `implicitPart`-throwing case `resolvedFormattingPart` catches).
+    func testDocxReaderFallsBackToDefaultStylesPathWhenRelationshipIsExternal() throws {
+        var parts = try baseParts()
+        var rels = String(decoding: try XCTUnwrap(parts["word/_rels/document.xml.rels"]), as: UTF8.self)
+        rels = rels.replacingOccurrences(
+            of: "Target=\"styles.xml\"",
+            with: "Target=\"https://example.com/styles.xml\" TargetMode=\"External\"")
+        parts["word/_rels/document.xml.rels"] = Data(rels.utf8)
+        var doc = try DocxReader.read(from: try package(parts))
+        defer { doc.close() }
+        XCTAssertEqual(doc.styles.first { $0.id == "Normal" }?.name, "Normal", "falls back to the default-path styles.xml instead of failing the read")
+    }
+
     /// `word/fontTable.xml`'s relationship (present by default) is
     /// repointed to a non-default part, and a `theme` relationship —
     /// entirely absent from a freshly-constructed document — is added
@@ -163,3 +221,4 @@ final class DocxReaderFormattingPartRelationshipTests: XCTestCase {
         XCTAssertEqual(doc.getText(), "BODY")
     }
 }
+

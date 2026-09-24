@@ -662,6 +662,19 @@ internal enum ProfileXML {
     /// Fails closed the same way `implicitPart` does on an External target,
     /// a Target lexically ending in `/`, or registrations of the Type that
     /// resolve to different parts.
+    ///
+    /// Scope, not a #173/#171 regression (Codex R1 MEDIUM-5): only matches
+    /// the Transitional relationship Type URI
+    /// (`officeRelationshipsNS + "officeDocument"`) — the same scope
+    /// `implicitPart` already has for styles/theme/fontTable since 3.11.0
+    /// (macdoc#213). Strict OOXML's URI
+    /// (`http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument`)
+    /// is not recognized; a Strict-only package with a non-default main
+    /// part falls back to `word/document.xml` (indistinguishable from "no
+    /// officeDocument relationship") rather than being caught by the
+    /// explicit-refusal path below. Extending Transitional-only resolution
+    /// to Strict is a pre-existing, broader gap spanning `implicitPart`
+    /// too, not something to fix by widening only the main-part half.
     static func mainPartTarget(in packageRels: XmlNode?) throws -> (target: String, name: String)? {
         guard let packageRels else { return nil }
         let registrations = packageRels.children.filter {

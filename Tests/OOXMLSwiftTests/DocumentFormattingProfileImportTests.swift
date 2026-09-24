@@ -488,6 +488,39 @@ final class DocumentFormattingProfileImportTests: XCTestCase {
         XCTAssertEqual(headerText(reopened), "名稱", "header text unchanged by an unrelated body edit")
     }
 
+    /// PsychQuant/ooxml-swift#171 (Codex R1 HIGH-2): a genuine (real
+    /// transcode, not mislabeled-UTF-8) non-UTF-8 part must not lose
+    /// whitespace-only `<w:t xml:space="preserve">` runs. Foundation's
+    /// `XMLDocument` drops those regardless of `xml:space`/
+    /// `.nodePreserveWhitespace` (Issue58_60ContentPreservationTests), so
+    /// `utf8TreeInputData`'s transcode path deliberately never routes
+    /// through one — this pins that down for a genuinely Shift_JIS-encoded
+    /// document.xml specifically (the case that would have silently lost
+    /// the space run if it had).
+    func testReaderDocumentPartPreservesWhitespaceOnlyRunThroughGenuineTranscode() throws {
+        let w = Self.w
+        let documentXML = """
+        <?xml version="1.0" encoding="Shift_JIS"?>
+        <w:document xmlns:w="\(w)"><w:body><w:p>\
+        <w:r><w:t>名稱before</w:t></w:r>\
+        <w:r><w:t xml:space="preserve">     </w:t></w:r>\
+        <w:r><w:t>after</w:t></w:r>\
+        </w:p></w:body></w:document>
+        """
+        let realBytes = try XCTUnwrap(documentXML.data(using: .shiftJIS))
+        let source = try directory().appendingPathComponent("source.docx")
+        try DocxWriter.write(WordDocument(), to: source)
+        var parts = try RawPartChannel.readAllParts(from: source)
+        parts["word/document.xml"] = realBytes
+        var doc = try DocxReader.read(from: try package(parts))
+        defer { doc.close() }
+        guard case .paragraph(let para) = doc.body.children.first else {
+            return XCTFail("expected one paragraph")
+        }
+        XCTAssertEqual(para.runs.count, 3, "expected 3 runs (名稱before / 5-space / after)")
+        XCTAssertEqual(para.runs[1].text, "     ", "the whitespace-only run must survive a genuine Shift_JIS transcode")
+    }
+
     // MARK: - PsychQuant/macdoc#212 actionable completeness errors
 
     func styles(docDefaults: String) -> Data {
