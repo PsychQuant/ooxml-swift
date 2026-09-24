@@ -119,11 +119,26 @@ public enum ReverseExtractor {
     /// unlabeled.
     ///
     /// **Version promise**: adding a new case to this enum is a **MINOR**
-    /// release — additive, and existing exhaustive `switch`es over it
-    /// without `@unknown default:` will fail to build, which is the
-    /// intended signal that a new omission class exists (not a silently
-    /// changed behavior). Renaming or removing an existing case, or changing
-    /// `rawBlockElement`'s associated value shape, is a **MAJOR** release.
+    /// release — additive, not a behavior change. Renaming or removing an
+    /// existing case, or changing `rawBlockElement`'s associated value shape,
+    /// is a **MAJOR** release.
+    ///
+    /// Scoped, precise claim (Codex round-2 review, MEDIUM finding #3 —
+    /// the original wording overstated this as a universal Swift guarantee):
+    /// ooxml-swift ships as an ordinary SwiftPM source dependency, without
+    /// Library Evolution / resilient mode. Under THAT consumption model —
+    /// the only one this package supports today — a consumer's exhaustive
+    /// `switch` without `@unknown default:` genuinely fails to (re)compile
+    /// against a version that added a case, because SwiftPM resolves and
+    /// rebuilds from source. That is NOT a general property of public Swift
+    /// enums: under Library Evolution (binary/ABI-stable distribution, which
+    /// this package does not use), a non-`@frozen` public enum is already
+    /// treated as non-exhaustive by external clients regardless of version,
+    /// and adding a case produces no new build-time signal at all. This enum
+    /// is intentionally left non-`@frozen` — pinning it would fight the
+    /// additive-case evolution this promise describes — so the "fails to
+    /// build" guarantee holds specifically because of how this package is
+    /// distributed, not because of the enum's own attributes.
     public enum OmittedBodyBlockReason: Equatable, Hashable, Sendable {
         case table
         case contentControl

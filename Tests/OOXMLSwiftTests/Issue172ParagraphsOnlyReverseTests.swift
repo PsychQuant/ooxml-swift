@@ -74,15 +74,23 @@ final class Issue172ParagraphsOnlyReverseTests: XCTestCase {
 
         let docxURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue172-\(UUID().uuidString).docx")
-        let archive = try Archive(url: docxURL, accessMode: .create)
-        let base = staging.resolvingSymlinksInPath().path
-        let enumerator = FileManager.default.enumerator(
-            at: staging, includingPropertiesForKeys: [.isDirectoryKey])!
-        for case let fileURL as URL in enumerator {
-            let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-            if isDir { continue }
-            let entry = String(fileURL.resolvingSymlinksInPath().path.dropFirst(base.count + 1))
-            try archive.addEntry(with: entry, fileURL: fileURL, compressionMethod: .deflate)
+        // Codex round-2 review, LOW finding #5: clean up a partial archive on
+        // throw instead of relying on a caller `defer` that never gets
+        // installed because the function never returns a URL in that case.
+        do {
+            let archive = try Archive(url: docxURL, accessMode: .create)
+            let base = staging.resolvingSymlinksInPath().path
+            let enumerator = FileManager.default.enumerator(
+                at: staging, includingPropertiesForKeys: [.isDirectoryKey])!
+            for case let fileURL as URL in enumerator {
+                let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                if isDir { continue }
+                let entry = String(fileURL.resolvingSymlinksInPath().path.dropFirst(base.count + 1))
+                try archive.addEntry(with: entry, fileURL: fileURL, compressionMethod: .deflate)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: docxURL)
+            throw error
         }
         return docxURL
     }
@@ -139,6 +147,14 @@ final class Issue172ParagraphsOnlyReverseTests: XCTestCase {
         return URL(fileURLWithPath: path)
     }
 
+    /// Codex round-2 review, MEDIUM finding #4: reading `standardError` only
+    /// AFTER `waitUntilExit()` can deadlock — if the child fills the pipe
+    /// buffer before exiting, it blocks on the write while this process
+    /// blocks on the wait, and neither side ever unblocks. Drains stderr
+    /// concurrently on its own `Thread` instead (agent-rules.md: never put a
+    /// subprocess's blocking pipe read on `DispatchQueue.global()` — the
+    /// cooperative pool can saturate and deadlock the same way; a plain
+    /// `Thread` has no such pool to exhaust).
     private func runCLIReverse(_ binary: URL, input: URL, output: URL, extraArgs: [String] = []) throws {
         let process = Process()
         process.executableURL = binary
@@ -146,10 +162,23 @@ final class Issue172ParagraphsOnlyReverseTests: XCTestCase {
                              "--paragraphs-only", "--to-mdocx", output.path] + extraArgs
         let stderrPipe = Pipe()
         process.standardError = stderrPipe
+
+        var stderrData = Data()
+        let readComplete = DispatchSemaphore(value: 0)
+        let drainThread = Thread {
+            stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            readComplete.signal()
+        }
+        drainThread.start()
+
         try process.run()
         process.waitUntilExit()
+        // The child's stderr end-of-file (on process exit) is what lets
+        // `readDataToEndOfFile()` return; wait for the drain thread to
+        // actually finish collecting before reading `stderrData`.
+        readComplete.wait()
+
         if process.terminationStatus != 0 {
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             XCTFail("macdoc word reverse exited \(process.terminationStatus): "
                 + String(decoding: stderrData, as: UTF8.self))
         }
