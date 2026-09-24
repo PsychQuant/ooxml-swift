@@ -10,9 +10,9 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ### Changed
 
-- **格式 profile 匯入：依 relationship 讀 part、只收 UTF-8**（PsychQuant/macdoc#213、PsychQuant/macdoc#214）。兩項都
-  沒有新增或變更 `DocumentFormattingProfileError` 的 case，exhaustive `switch` 不受影響；改變的是 associated value 的字串
-  與哪些範本會被拒絕，各項末尾列出。
+- **格式 profile 匯入：依 relationship 讀 part、只收 UTF-8、缺少的預設值指名到欄位**（PsychQuant/macdoc#213、
+  PsychQuant/macdoc#214、PsychQuant/macdoc#212）。三項都沒有新增或變更 `DocumentFormattingProfileError` 的 case，
+  exhaustive `switch` 不受影響；改變的是 associated value 的字串與哪些範本會被拒絕，各項末尾列出。
   - **styles／theme／fontTable 依 relationship 解析實際 part**（PsychQuant/macdoc#213）。`importOfficial` 不再讀固定路徑，
     改讀 `word/_rels/document.xml.rels` 裡對應 relationship 指向的 part（沿用 3.10.0 的詞法正規化與同 Type 重複檢查），
     所以 Target 指向 `word/customStyles.xml` 之類非預設 part 的範本可以匯入，預設路徑上的過期 part 不會被讀到。
@@ -40,6 +40,15 @@ All notable changes to ooxml-swift will be documented in this file.
     宣告改寫成 `UTF-8` 而保留原位元組，Word 看到的未編輯文字因此改變。後者是鎖住的現況，不是認可的行為。
     **相容性**：UTF-16 範本的 `invalidSnapshot` 訊息改變；任一 part 宣告非 UTF-8 編碼或含不合法 UTF-8 位元組的範本，
     過去能匯入，現在會被拒絕。
+  - **缺少的 docDefaults 欄位指名到欄位並附修法**（PsychQuant/macdoc#212）。範本仍須明確寫出預設字級與段落預設值，
+    本 library 不代為補上 Word 的隱含預設值。`missingRequiredFormatting` 的內容由籠統的
+    `docDefaults/rPrDefault/sz and pPrDefault` 改為實際缺少的欄位：`docDefaults/rPrDefault/rPr/sz`、
+    `docDefaults/pPrDefault`，兩者都缺時以 `, ` 串接；空的 `<w:pPrDefault/>` 照舊接受（`90_template_ja.docx` 只缺字級）。
+    `errorDescription` 附上修法：在 Word 的「字型」或「段落」對話框按「設為預設值」並只套用到這份範本後存檔，或直接
+    寫入對應的 XML。字級存在但不是正整數時改丟 `invalidSnapshot`。`unsupportedNumbering` 的說明改為指出觸發條件
+    （numbering 定義或非零 numId）、第一版整份拒絕，以及可改用不含編號的範本或 `inherit`。**相容性**：比對
+    `missingRequiredFormatting("docDefaults/rPrDefault/sz and pPrDefault")` 字串的呼叫端要改比對新的欄位字串；字級無效
+    改丟 `invalidSnapshot`；`unsupportedNumbering` 的 `errorDescription` 文字改變。
 
 ## [3.10.0] - 2026-09-24
 
