@@ -143,6 +143,36 @@ public struct DocxReader {
 
         // 2. 讀取關係檔案 word/_rels/document.xml.rels
         let relationships = try parseRelationships(from: tempDir)
+        // PsychQuant/ooxml-swift#173: the tree form of the same rels part,
+        // for styles/theme/fontTable/numbering relationship resolution
+        // below (`RelationshipsCollection` above is the flattened form
+        // header/footer/hyperlink resolution needs; `ProfileXML.implicitPart`
+        // needs the tree).
+        let mainRelsTree = try relationshipsTree(at: tempDir.appendingPathComponent("word/_rels/document.xml.rels"))
+
+        // PsychQuant/ooxml-swift#173: which part is the main part, per the
+        // package-level `_rels/.rels`'s `officeDocument` relationship.
+        // Absent, ambiguous or malformed `_rels/.rels` (duplicate/External/
+        // trailing-slash) falls back to `word/document.xml` — the same
+        // tolerance the fixed-path behavior already had; a package this
+        // broken is exceedingly rare and not worth failing the whole read
+        // over. Only a CLEAN, unambiguous resolution to something other
+        // than `word/document.xml` is acted on, and deliberately as a loud
+        // refusal rather than a silent partial read: honouring it fully
+        // would mean re-deriving every header/footer/style/rels lookup
+        // below relative to the resolved part's own directory (they are
+        // presently hardcoded to `word/`), which is out of scope here — no
+        // Word-authored `.docx` ever uses a non-default main part, so
+        // failing loud on the rare package that does is safer than
+        // guessing which of `word/document.xml` or the resolved part
+        // reflects the author's intent while headers/footers/hyperlinks
+        // silently come up empty either way.
+        let packageRelsTree = try relationshipsTree(at: tempDir.appendingPathComponent("_rels/.rels"))
+        if let mainPart = (try? ProfileXML.mainPartTarget(in: packageRelsTree)) ?? nil, mainPart.name != "word/document.xml" {
+            throw WordError.parseError(
+                "_rels/.rels 的 officeDocument relationship 解析為「\(mainPart.name)」，不是 word/document.xml；"
+                    + "目前的 reader 不支援非預設位置的主 part（PsychQuant/ooxml-swift#173 已知限制）")
+        }
 
         // 3. 提取圖片資源
         let images = try extractImages(from: tempDir, relationships: relationships)
@@ -189,10 +219,18 @@ public struct DocxReader {
         // the root open tag from raw bytes instead of relying on the DOM.
         document.documentRootAttributes = try Self.parseDocumentRootAttributes(from: projectedDocumentData)
 
-        let stylesURL = tempDir.appendingPathComponent("word/styles.xml")
+        // PsychQuant/ooxml-swift#173: read the part the main part's
+        // `styles` relationship names, not a fixed default path. Falls
+        // back to `word/styles.xml` when there is no such relationship
+        // (or it cannot be resolved unambiguously) — see
+        // `resolvedFormattingPart`. The content still lands under the
+        // canonical `"word/styles.xml"` key below regardless of which
+        // on-disk part it came from.
+        let stylesPath = Self.resolvedFormattingPart(type: "styles", defaultPath: "word/styles.xml", relationships: mainRelsTree, tempDir: tempDir)
+        let stylesURL = tempDir.appendingPathComponent(stylesPath)
         if FileManager.default.fileExists(atPath: stylesURL.path) {
             let stylesData = try Data(contentsOf: stylesURL)
-            try Self.rejectDTD(stylesData, part: "word/styles.xml")
+            try Self.rejectDTD(stylesData, part: stylesPath)
             // The lossless tree parser expects UTF-8. Decode other XML
             // encodings through the XML parser; retain the archive bytes for
             // untouched saves and a valid UTF-8 tree for typed edits.
@@ -218,17 +256,17 @@ public struct DocxReader {
                 } else if stylesData.starts(with: [0xFF, 0xFE]) || stylesData.starts(with: [0x3C, 0]) {
                     encoding = .utf16LittleEndian
                 } else {
-                    throw WordError.invalidDocx("word/styles.xml has an unsupported XML encoding")
+                    throw WordError.invalidDocx("\(stylesPath) has an unsupported XML encoding")
                 }
                 // UTF-32LE shares UTF-16LE's leading bytes. Its UTF-16
                 // interpretation contains NULs (invalid in XML); refuse it
                 // before the parser can auto-detect a different encoding.
                 guard let decoded = String(data: stylesData, encoding: encoding), !decoded.contains("\u{0000}") else {
-                    throw WordError.invalidDocx("word/styles.xml has an unsupported XML encoding")
+                    throw WordError.invalidDocx("\(stylesPath) has an unsupported XML encoding")
                 }
                 // Keep the existing DTD refusal before introducing an XML
                 // decoder; an encoded declaration must not bypass it.
-                try Self.rejectDTD(Data(decoded.utf8), part: "word/styles.xml")
+                try Self.rejectDTD(Data(decoded.utf8), part: stylesPath)
                 let encodedStyles = try XMLDocument(data: stylesData, options: .nodeLoadExternalEntitiesNever)
                 encodedStyles.characterEncoding = "UTF-8"
                 treeData = encodedStyles.xmlData
@@ -254,18 +292,24 @@ public struct DocxReader {
                 guard FileManager.default.fileExists(atPath: url.path) else { return nil }
                 return try Data(contentsOf: url)
             }
+            // PsychQuant/ooxml-swift#173: same relationship resolution as
+            // styles, for theme and fontTable.
+            let themePath = Self.resolvedFormattingPart(type: "theme", defaultPath: "word/theme/theme1.xml", relationships: mainRelsTree, tempDir: tempDir)
+            let fontsPath = Self.resolvedFormattingPart(type: "fontTable", defaultPath: "word/fontTable.xml", relationships: mainRelsTree, tempDir: tempDir)
             document.formattingState = DocumentFormattingState(
                 defaultsXML: defaultsXML,
                 originalStylesXML: originalStylesXML, baselineStyles: document.styles,
-                themeData: try optionalData("word/theme/theme1.xml"), fontsData: try optionalData("word/fontTable.xml"),
+                themeData: try optionalData(themePath), fontsData: try optionalData(fontsPath),
                 explicitlyApplied: false)
         }
 
         // 6. 讀取 numbering.xml（可選，用於清單語義標註）
-        let numberingURL = tempDir.appendingPathComponent("word/numbering.xml")
+        // PsychQuant/ooxml-swift#173: same relationship resolution as styles.
+        let numberingPath = Self.resolvedFormattingPart(type: "numbering", defaultPath: "word/numbering.xml", relationships: mainRelsTree, tempDir: tempDir)
+        let numberingURL = tempDir.appendingPathComponent(numberingPath)
         if FileManager.default.fileExists(atPath: numberingURL.path) {
             let numberingData = try Data(contentsOf: numberingURL)
-            try Self.rejectDTD(numberingData, part: "word/numbering.xml")
+            try Self.rejectDTD(numberingData, part: numberingPath)
             let numberingTree = try XmlTreeReader.parse(numberingData)
             document.xmlTrees["word/numbering.xml"] = numberingTree
             let numberingXML = try XMLDocument(data: try XmlTreeWriter.serialize(numberingTree))
@@ -832,6 +876,54 @@ public struct DocxReader {
     /// 解析關係檔案
     private static func parseRelationships(from tempDir: URL) throws -> RelationshipsCollection {
         return try parseRelationshipsFile(at: tempDir.appendingPathComponent("word/_rels/document.xml.rels"))
+    }
+
+    /// PsychQuant/ooxml-swift#173. The relationships part as an `XmlNode`
+    /// tree, for use with `ProfileXML.implicitPart`/`mainPartTarget` (which
+    /// need the tree, not the flattened `RelationshipsCollection`
+    /// `parseRelationshipsFile` builds for header/footer/hyperlink
+    /// resolution). `nil` when the part does not exist — no relationships
+    /// is legitimate, not malformed.
+    internal static func relationshipsTree(at relsURL: URL) throws -> XmlNode? {
+        guard FileManager.default.fileExists(atPath: relsURL.path) else { return nil }
+        let data = try Data(contentsOf: relsURL)
+        try Self.rejectDTD(data, part: relsURL.lastPathComponent)
+        return try XmlTreeReader.parse(data).root
+    }
+
+    /// PsychQuant/ooxml-swift#173. Which part's bytes to read for
+    /// styles/theme/fontTable/numbering: the main part's own implicit
+    /// relationship when it resolves unambiguously AND the part it names
+    /// actually exists in the package, `defaultPath` otherwise. Shares
+    /// `ProfileXML.implicitPart`'s normalization and duplicate/External/
+    /// trailing-slash checks with `DocumentFormattingProfile.importOfficial`
+    /// (PsychQuant/macdoc#213), so the two agree on where a part lives —
+    /// but stays tolerant where `importOfficial`'s strict template contract
+    /// fails closed: `DocxReader` is the general reader used for arbitrary
+    /// real-world documents, so a relationship that cannot be resolved
+    /// unambiguously (duplicate registrations naming different parts, an
+    /// External target, a target lexically ending in `/`), OR that names a
+    /// part absent from the package (a stale/wrong Target left over from
+    /// hand-editing, e.g. `testTargetRepairRewritesEveryEquivalentRegistration`'s
+    /// fixture — the relationship claims `old-styles.xml` but the real
+    /// content never moved from `word/styles.xml`), falls back to
+    /// `defaultPath` instead of failing the whole document read — the same
+    /// tolerance the pre-#173 fixed-path behavior already had for a
+    /// missing or malformed rels part. This is the one case DocxReader is
+    /// intentionally MORE tolerant than `importOfficial`, which refuses a
+    /// relationship naming a missing part outright (`related(_:required:)`)
+    /// — a general reader recovering silently-broken real documents is a
+    /// different job from a template importer validating a contract.
+    ///
+    /// Only WHICH PART's bytes to read changes. The result is still stored
+    /// under the canonical default path (e.g. `document.xmlTrees["word/styles.xml"]`)
+    /// so nothing else in the reader, the typed model or the writer needs
+    /// to know a part lives somewhere else — matching how
+    /// `DocumentFormattingProfile` is itself path-agnostic.
+    internal static func resolvedFormattingPart(type: String, defaultPath: String, relationships: XmlNode?, tempDir: URL) -> String {
+        guard let resolved = (try? ProfileXML.implicitPart(of: type, in: relationships)) ?? nil else { return defaultPath }
+        guard FileManager.default.fileExists(atPath: tempDir.appendingPathComponent(resolved.name).path) else { return defaultPath }
+        return resolved.name
     }
 
     /// v0.19.5+ (#56 R5-CONT P1 #8): generic per-file rels parser.

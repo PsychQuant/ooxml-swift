@@ -684,7 +684,7 @@ final class DocumentFormattingProfileTests: XCTestCase {
     /// encoded with uppercase hex. So `%2F` never becomes a separator and a
     /// double-encoded `%252F` never collapses onto `%2F`.
     func testRelationshipTargetDecodesOnlyUnreservedEscapes() {
-        let n = ProfileXML.normalizedRelationshipTarget
+        let n: (String) -> String = { ProfileXML.normalizedRelationshipTarget($0) }
         XCTAssertEqual(n("%73tyles.xml"), n("styles.xml"))
         XCTAssertEqual(n("a%7eb.xml"), n("a~b.xml"))
         XCTAssertEqual(n("a%7Eb.xml"), n("a~b.xml"))
@@ -702,7 +702,7 @@ final class DocumentFormattingProfileTests: XCTestCase {
     /// trailing slash. `styles.xml/.` names a directory-like path, not the
     /// part `styles.xml`.
     func testTrailingDotSegmentsKeepTheTrailingSlash() {
-        let n = ProfileXML.normalizedRelationshipTarget
+        let n: (String) -> String = { ProfileXML.normalizedRelationshipTarget($0) }
         XCTAssertEqual(n("styles.xml/."), "/word/styles.xml/")
         XCTAssertEqual(n("styles.xml/x/.."), "/word/styles.xml/")
         XCTAssertEqual(n("styles.xml/"), "/word/styles.xml/")
@@ -1436,7 +1436,7 @@ final class DocumentFormattingProfileTests: XCTestCase {
             for (type, part) in [("styles", "/word/styles.xml"), ("theme", "/word/theme/theme1.xml"), ("fontTable", "/word/fontTable.xml")] {
                 let targets = rels.children.filter { $0.attributeValue(prefix: nil, localName: "Type") == "\(Self.officeRel)/\(type)" }
                     .compactMap { $0.attributeValue(prefix: nil, localName: "Target") }
-                XCTAssertEqual(targets.map(ProfileXML.normalizedRelationshipTarget), [part], "\(name): \(type)")
+                XCTAssertEqual(targets.map { ProfileXML.normalizedRelationshipTarget($0) }, [part], "\(name): \(type)")
                 XCTAssertEqual(try ProfileXML.implicitPart(of: type, in: rels)?.name, String(part.dropFirst()), "\(name): \(type)")
             }
         }
