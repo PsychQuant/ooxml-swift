@@ -31,6 +31,22 @@ All notable changes to ooxml-swift will be documented in this file.
   刻意排除在外（各自已有獨立處理，且直接搬進這個插入點會把位置敏感的元素放錯地方）——中段落分節屬性
   未被 reader 解析成 typed 欄位仍是既有、另外追蹤的缺口，本次不擴大範圍去修。見 `Issue168PPrRawChildrenTests`。
 
+- **`DocxReader` 依 relationship 解析格式 part 與主 part**（PsychQuant/ooxml-swift#173）。styles／theme／fontTable／
+  numbering 不再讀固定路徑，改依 `word/_rels/document.xml.rels` 的 relationship 解析實際 part，共用
+  `importOfficial`（3.11.0）的 `ProfileXML.implicitPart(of:in:)` 正規化與重複／External／結尾斜線檢查，兩條讀取路徑
+  對「哪一個 part 是 styles」終於一致。與 `importOfficial` 的差異：relationship 無法唯一解析、或指向套件內不存在的
+  part 時，回退預設路徑而不是整份文件讀取失敗。解析出的內容仍存進 canonical key，writer「發布到預設路徑、改指
+  relationship」的既有行為不變，因此讀到的內容與寫回的內容是同一份。主 part 依 `_rels/.rels` 的 officeDocument
+  relationship 決定；無法唯一解析時回退 `word/document.xml`。**行為變更**：`_rels/.rels` 明確指向其他主 part
+  時改為拒絕讀取，不再默默讀取可能過期的 `word/document.xml`。
+- **`DocxReader` 對所有 part 一致解碼，typed model 與 tree 得到相同文字**（PsychQuant/ooxml-swift#171）。過去
+  document.xml 的 typed model 依 XML 宣告解碼、tree 一律以 UTF-8 解碼；宣告與位元組不一致時兩者讀出不同文字，
+  編輯後存檔會悄悄改變 Word 看到的**未編輯**文字。現在：位元組本身是合法 UTF-8 就原樣使用（沿用 3.11.0 對
+  styles.xml 鎖住的政策）；否則依宣告真正轉碼（UTF-16 BE／LE、ISO-8859-1、Shift_JIS），其餘編碼拒絕。轉碼以純文字
+  改寫宣告，不經過 XML parser，whitespace-only 的 run 不會遺失。typed model 由同一份轉碼後的 tree 建構，套用範圍
+  涵蓋 document、numbering、settings、headers、footers、footnotes、endnotes、comments、docProps／core 與所有 rels。
+  沒被碰過的 part 仍逐位元組保留。
+
 ## [3.11.0] - 2026-09-24
 
 ### Changed
