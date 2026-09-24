@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.10.0] - 2026-09-24
+
 ### Changed
 
 - **文件格式 profile、設定檔與表格 cell 段落的一批後續修正**（PsychQuant/macdoc#195、PsychQuant/macdoc#196、
