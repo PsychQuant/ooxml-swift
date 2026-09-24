@@ -10,12 +10,14 @@ public enum DocumentProfileStoreError: Error, Equatable, LocalizedError {
     case officialNotImported
     case invalidOfficialSnapshot
     case snapshotFileMissing(String)
+    case configLockTimeout(String)
 
     public var errorDescription: String? {
         switch self {
         case .invalidConfiguration(let reason): return "文件格式設定無效：\(reason)"
         case .officialNotImported: return "尚未匯入 official 格式快照；請先執行 config document import-official。"
         case .invalidOfficialSnapshot: return "official 格式快照的 kind 必須是 official。"
+        case .configLockTimeout(let path): return "無法在時限內取得設定檔鎖（另一個程序持有鎖）：\(path)"
         case .snapshotFileMissing(let path): return "official 格式快照檔不存在：\(path)；請重新執行 config document import-official。"
         }
     }
@@ -34,7 +36,22 @@ public enum DocumentProfileStoreError: Error, Equatable, LocalizedError {
 public struct DocumentProfileStore: Sendable {
     public let configURL: URL
 
-    public init(configURL: URL) { self.configURL = configURL }
+    /// How long a writer waits for the config lock, and how often it polls
+    /// (PsychQuant/macdoc#204). Production uses the protocol defaults; the
+    /// internal initializer exists so tests need not wait five seconds.
+    let lockTimeout: TimeInterval
+    let lockPollInterval: TimeInterval
+
+    public init(configURL: URL) {
+        self.init(configURL: configURL, lockTimeout: ConfigFileLock.defaultTimeout,
+                  lockPollInterval: ConfigFileLock.defaultPollInterval)
+    }
+
+    internal init(configURL: URL, lockTimeout: TimeInterval, lockPollInterval: TimeInterval) {
+        self.configURL = configURL
+        self.lockTimeout = lockTimeout
+        self.lockPollInterval = lockPollInterval
+    }
 
     public static var defaultConfigURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -81,13 +98,17 @@ public struct DocumentProfileStore: Sendable {
         let data = try encoder.encode(profile)
         let relative = "profiles/official-\(UUID().uuidString).json"
         let snapshot = configURL.deletingLastPathComponent().appendingPathComponent(relative)
-        try writeNewSnapshot(data, relativePath: relative)
-        do {
-            try updateDocument { $0["officialSnapshot"] = relative }
-        } catch {
-            // Only our new unreferenced file is eligible for cleanup.
-            try? FileManager.default.removeItem(at: snapshot)
-            throw error
+        // The snapshot and its reference are published under one lock hold,
+        // so garbage collection never sees the new file unreferenced.
+        try withConfigLock {
+            try writeNewSnapshot(data, relativePath: relative)
+            do {
+                try updateDocumentHoldingLock { $0["officialSnapshot"] = relative }
+            } catch {
+                // Only our new unreferenced file is eligible for cleanup.
+                try? FileManager.default.removeItem(at: snapshot)
+                throw error
+            }
         }
     }
 
@@ -110,7 +131,16 @@ public struct DocumentProfileStore: Sendable {
     /// deletes them unless `dryRun`. The referenced snapshot is never
     /// touched; other files, directories and symlinks in `profiles/` are
     /// ignored; an invalid configuration refuses before anything is deleted.
+    /// Runs under the config lock, so a concurrent import's new snapshot is
+    /// either already referenced or not yet written.
     public func garbageCollectOfficialSnapshots(dryRun: Bool) throws -> [String] {
+        guard FileManager.default.fileExists(atPath: configURL.deletingLastPathComponent().path) else {
+            return []
+        }
+        return try withConfigLock { try collectOfficialSnapshotsHoldingLock(dryRun: dryRun) }
+    }
+
+    private func collectOfficialSnapshotsHoldingLock(dryRun: Bool) throws -> [String] {
         let referenced = try settings().officialSnapshot
         let profiles = configURL.deletingLastPathComponent().appendingPathComponent("profiles")
         let names: [String]
@@ -169,7 +199,21 @@ public struct DocumentProfileStore: Sendable {
         return DocumentProfileSettings(defaultProfile: kind, officialSnapshot: snapshot)
     }
 
-    private func updateDocument(_ update: (inout [String: Any]) -> Void) throws {
+    /// Read → merge → atomic write of the `document` object, holding the
+    /// cross-process config lock for the whole cycle (PsychQuant/macdoc#204).
+    internal func updateDocument(_ update: (inout [String: Any]) -> Void) throws {
+        try withConfigLock { try updateDocumentHoldingLock(update) }
+    }
+
+    /// Creates the config directory first — the lock file lives inside it —
+    /// then runs `body` under `ConfigFileLock`.
+    private func withConfigLock<T>(_ body: () throws -> T) throws -> T {
+        try Self.createOwnerOnlyDirectory(configURL.deletingLastPathComponent())
+        return try ConfigFileLock.withLock(forConfigAt: configURL.path, pollInterval: lockPollInterval,
+                                           timeout: lockTimeout, body)
+    }
+
+    private func updateDocumentHoldingLock(_ update: (inout [String: Any]) -> Void) throws {
         var root = try readRoot()
         _ = try settings(in: root)
         var document = root["document"] as? [String: Any] ?? [:]
@@ -239,5 +283,56 @@ public struct DocumentProfileStore: Sendable {
             unlink(temporary.path)
             throw posixError(code, url)
         }
+    }
+}
+
+/// Cross-process advisory lock for `config.json` (PsychQuant/macdoc#204).
+///
+/// The same file has another writer: pdf-to-latex-swift's `AIConfig.save`
+/// (its `ConfigFileLock`) persists AI-CLI/OCR settings into
+/// `~/.config/macdoc/config.json`, while `DocumentProfileStore` persists the
+/// `document` object there. Both read the file, merge their own fields and
+/// atomically replace it; without a shared lock one writer's replacement can
+/// silently discard the other's update.
+///
+/// Protocol — it MUST stay identical in both implementations, or the lock
+/// protects nothing:
+/// - Lock file: `<config path>.lock`, beside the config file. The config
+///   itself is replaced by rename (a new inode), so it cannot be the lock.
+/// - The config directory is created before the lock is taken.
+/// - `open(O_CREAT | O_RDWR | O_CLOEXEC, 0600)`, then `fchmod(fd, 0600)`
+///   because the open mode is only a request under the umask.
+/// - `flock(fd, LOCK_EX | LOCK_NB)` polled every 50 ms; give up with an error
+///   after 5 s.
+/// - Hold the lock across the whole read → merge → atomic write.
+/// - Release with `flock(fd, LOCK_UN)`, then `close(fd)`.
+/// - Never delete the lock file: a recreated one is a different inode, and
+///   writers flocking different inodes exclude nothing.
+enum ConfigFileLock {
+    static let defaultPollInterval: TimeInterval = 0.05
+    static let defaultTimeout: TimeInterval = 5.0
+
+    static func withLock<T>(
+        forConfigAt path: String,
+        pollInterval: TimeInterval = ConfigFileLock.defaultPollInterval,
+        timeout: TimeInterval = ConfigFileLock.defaultTimeout,
+        _ body: () throws -> T
+    ) throws -> T {
+        let lockPath = path + ".lock"
+        let fd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: lockPath])
+        }
+        defer { close(fd) }
+        _ = fchmod(fd, 0o600)
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            if Date() >= deadline { throw DocumentProfileStoreError.configLockTimeout(lockPath) }
+            Thread.sleep(forTimeInterval: pollInterval)
+        }
+        defer { flock(fd, LOCK_UN) }
+
+        return try body()
     }
 }
