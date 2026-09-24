@@ -72,6 +72,11 @@ final class Issue168PPrRawChildrenTests: XCTestCase {
                           "raw pPr children must be emitted before the paragraph-mark <w:rPr>")
     }
 
+    /// Codex round-2 review, MEDIUM finding #2: the original version of this
+    /// test compared only `.map(\.name)`, which would still pass if `toXML()`
+    /// silently dropped every attribute while keeping the element names. This
+    /// version also asserts each raw child's `w:val` attribute survives the
+    /// parse -> emit -> re-parse round trip, not just its element name.
     func testParseThenEmitRoundTripsUnmodeledChildrenVerbatim() throws {
         let paragraph = try parseParagraph(Self.watchedParagraphXML)
         // toXML() emits a bare <w:p> fragment (no xmlns declaration — that's
@@ -84,6 +89,10 @@ final class Issue168PPrRawChildrenTests: XCTestCase {
         XCTAssertEqual(reparsed.properties.rawChildren.map(\.name),
                        ["kinsoku", "snapToGrid", "widowControl", "wordWrap"],
                        "re-parsing the emitted XML must still find all four unmodeled children")
+        for raw in reparsed.properties.rawChildren {
+            XCTAssertTrue(raw.xml.contains("w:val=\"0\""),
+                          "\(raw.name)'s w:val must survive the parse -> emit -> re-parse round trip, not just its element name")
+        }
     }
 
     /// An all-default paragraph (no rawChildren, no other pPr field) must
@@ -118,7 +127,14 @@ final class Issue168PPrRawChildrenTests: XCTestCase {
         </w:body></w:document>
         """
 
-    private func buildFixture() throws -> URL {
+    /// - Parameter documentXML: overrides `Self.documentXML` — used by tests
+    ///   that need a different body shape (e.g. the shading-collision fixture
+    ///   below) without duplicating the ZIP-assembly boilerplate.
+    /// Codex round-2 review, LOW finding #5: cleans up its own partial output
+    /// on throw (archive population failing after the file was created)
+    /// instead of relying on a caller `defer` that never gets installed
+    /// because the function never returns a URL in that case.
+    private func buildFixture(documentXML: String? = nil) throws -> URL {
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue168-staging-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
@@ -145,19 +161,24 @@ final class Issue168PPrRawChildrenTests: XCTestCase {
                 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
             </Relationships>
             """, to: "_rels/.rels")
-        try write(Self.documentXML, to: "word/document.xml")
+        try write(documentXML ?? Self.documentXML, to: "word/document.xml")
 
         let docxURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue168-\(UUID().uuidString).docx")
-        let archive = try Archive(url: docxURL, accessMode: .create)
-        let base = staging.resolvingSymlinksInPath().path
-        let enumerator = FileManager.default.enumerator(
-            at: staging, includingPropertiesForKeys: [.isDirectoryKey])!
-        for case let fileURL as URL in enumerator {
-            let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-            if isDir { continue }
-            let entry = String(fileURL.resolvingSymlinksInPath().path.dropFirst(base.count + 1))
-            try archive.addEntry(with: entry, fileURL: fileURL, compressionMethod: .deflate)
+        do {
+            let archive = try Archive(url: docxURL, accessMode: .create)
+            let base = staging.resolvingSymlinksInPath().path
+            let enumerator = FileManager.default.enumerator(
+                at: staging, includingPropertiesForKeys: [.isDirectoryKey])!
+            for case let fileURL as URL in enumerator {
+                let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                if isDir { continue }
+                let entry = String(fileURL.resolvingSymlinksInPath().path.dropFirst(base.count + 1))
+                try archive.addEntry(with: entry, fileURL: fileURL, compressionMethod: .deflate)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: docxURL)
+            throw error
         }
         return docxURL
     }
@@ -274,33 +295,87 @@ final class Issue168PPrRawChildrenTests: XCTestCase {
                      "the edit itself must actually be present in the saved document")
     }
 
-    /// The strongest form of "unedited paragraph's pPr is byte-for-byte
-    /// unchanged": two INDEPENDENT unrelated edits — one via `updateCell`,
-    /// one via `insertParagraph` — must regenerate byte-identical `<w:pPr>`
-    /// bytes for the untouched watched paragraph. Its typed properties are
-    /// identical in both runs, so a deterministic writer must reproduce the
-    /// same bytes regardless of which unrelated edit triggered the rewrite.
-    func testWatchedParagraphPPrIsByteIdenticalAcrossDifferentUnrelatedEdits() throws {
+    /// A DETERMINISM check, not a preservation check (Codex round-2 review,
+    /// MEDIUM finding #2 — the original doc comment overclaimed this as "the
+    /// strongest form" of byte-for-byte preservation; it is not: a writer
+    /// that dropped the same unmodeled children under BOTH edits would still
+    /// pass this comparison, since `normalizedFingerprint()` compares the two
+    /// OUTPUTS to each other, not either output to the source). What this
+    /// test actually proves: two INDEPENDENT unrelated edits — one via
+    /// `updateCell`, one via `insertParagraph` — regenerate a
+    /// structurally-identical `<w:pPr>` (rsid/prefix/attribute-order noise
+    /// aside, per `normalizedFingerprint()`'s own normalization rules) for
+    /// the untouched watched paragraph. Its typed properties are identical in
+    /// both runs, so a deterministic writer must reproduce the same content
+    /// regardless of which unrelated edit triggered the rewrite. The actual
+    /// presence/value regression guard is `assertWatchedParagraphPPrSurvived`,
+    /// exercised by the three tests above this one.
+    func testWatchedParagraphPPrIsDeterministicAcrossDifferentUnrelatedEdits() throws {
         let fixtureA = try buildFixture()
         defer { try? FileManager.default.removeItem(at: fixtureA) }
         var docA = try DocxReader.read(from: fixtureA)
+        defer { docA.close() }
         try docA.updateCell(tableIndex: 0, row: 0, col: 0, text: "via updateCell")
         let outA = try save(docA)
         defer { try? FileManager.default.removeItem(at: outA) }
-        docA.close()
 
         let fixtureB = try buildFixture()
         defer { try? FileManager.default.removeItem(at: fixtureB) }
         var docB = try DocxReader.read(from: fixtureB)
+        defer { docB.close() }
         docB.insertParagraph(Paragraph(text: "INSERTED"), at: 3)
         let outB = try save(docB)
         defer { try? FileManager.default.removeItem(at: outB) }
-        docB.close()
 
         let pPrA = try XCTUnwrap(pPrNode(in: try extractDocumentXML(from: outA), paragraphContaining: "WATCHED_PARAGRAPH"))
         let pPrB = try XCTUnwrap(pPrNode(in: try extractDocumentXML(from: outB), paragraphContaining: "WATCHED_PARAGRAPH"))
         XCTAssertEqual(pPrA.normalizedFingerprint(), pPrB.normalizedFingerprint(),
-                       "the untouched watched paragraph's <w:pPr> must be identical regardless of which unrelated edit forced the rewrite")
+                       "the untouched watched paragraph's <w:pPr> must be structurally identical regardless of which unrelated edit forced the rewrite")
+    }
+
+    // MARK: - Section B.1: raw capture must not collide with typed setters
+    // (Codex round-2 review, HIGH finding #1)
+    //
+    // `ParagraphProperties` already declares `border` / `shading` fields, and
+    // `setParagraphBorder(at:border:)` / `setParagraphShading(at:fill:pattern:)`
+    // are public typed setters that write them — but `parseParagraphProperties`
+    // has never read `<w:pBdr>` / `<w:shd>` INTO those fields (a pre-existing,
+    // separately-tracked reader gap, not something #168 fixes). If the raw
+    // capture added for #168 treated `pBdr`/`shd` as "unrecognized", a
+    // paragraph loaded with a `<w:shd>` already present, then given a NEW
+    // shading via `setParagraphShading`, would emit BOTH the raw captured
+    // `<w:shd>` and the newly-set typed one — two singleton elements where
+    // OOXML expects at most one. `recognizedPPrChildNames` therefore also
+    // excludes `pBdr`/`shd` from raw capture (same treatment as `sectPr`):
+    // they stay silently dropped on an unrelated typed edit, exactly like
+    // before #168 — not improved for these two elements, but not corrupted
+    // either.
+
+    private static let shadedParagraphDocumentXML = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>\
+        <w:p><w:pPr><w:shd w:val="clear" w:color="auto" w:fill="FFFF00"/></w:pPr><w:r><w:t>Shaded</w:t></w:r></w:p>\
+        <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>\
+        </w:body></w:document>
+        """
+
+    func testSettingShadingOnAParagraphThatAlreadyHasRawShadingDoesNotDuplicateIt() throws {
+        let fixture = try buildFixture(documentXML: Self.shadedParagraphDocumentXML)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        var doc = try DocxReader.read(from: fixture)
+        defer { doc.close() }
+
+        try doc.setParagraphShading(at: 0, fill: "00FF00")
+
+        let outURL = try save(doc)
+        defer { try? FileManager.default.removeItem(at: outURL) }
+        let pPr = try XCTUnwrap(pPrNode(in: try extractDocumentXML(from: outURL), paragraphContaining: "Shaded"))
+        let shdNodes = pPr.children.filter { $0.kind == .element && $0.localName == "shd" }
+        XCTAssertEqual(shdNodes.count, 1,
+                       "exactly one <w:shd> must survive — a raw-captured old one plus a typed new one would both be schema-invalid and ambiguous to Word")
+        if let fill = shdNodes.first?.attributes.first(where: { $0.prefix == "w" && $0.localName == "fill" })?.value {
+            XCTAssertEqual(fill, "00FF00", "the typed override must win, not the stale raw-captured value")
+        }
     }
 
     // MARK: - Section C: real-world template (MACDOC_TEMPLATE_DIR-gated)
