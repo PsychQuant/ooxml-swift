@@ -18,23 +18,44 @@ extension WordDocument {
     /// formatting profiles, or the source archive, in writer precedence order.
     /// This does not import or sanitize caller-owned theme XML.
     public func effectiveThemeData() throws -> Data? {
-        try effectiveFormattingPartData("word/theme/theme1.xml", fallback: formattingState?.themeData)
+        try effectiveFormattingPartData("word/theme/theme1.xml", relationshipType: "theme", fallback: formattingState?.themeData)
     }
 
-    private func effectiveFormattingPartData(_ path: String, fallback: Data?) throws -> Data? {
+    /// - Parameter relationshipType: the implicit relationship Type
+    ///   (`ProfileXML.implicitPart`'s `type`) `path` is the default/canonical
+    ///   path for, e.g. `"theme"` for `"word/theme/theme1.xml"`. Used only by
+    ///   the last-resort fallback below (PsychQuant/ooxml-swift#173).
+    private func effectiveFormattingPartData(_ path: String, relationshipType: String, fallback: Data?) throws -> Data? {
         if let carried = carriedParts[path] { return carried }
         if treeFreshParts.contains(path), let tree = xmlTrees[path] { return try XmlTreeWriter.serialize(tree) }
-        func archived() throws -> Data? {
+        func archived(at fixedPath: String) throws -> Data? {
             guard let archive = archiveTempDir else { return nil }
-            let url = archive.appendingPathComponent(path)
+            let url = archive.appendingPathComponent(fixedPath)
             guard FileManager.default.fileExists(atPath: url.path) else { return nil }
             return try Data(contentsOf: url)
         }
         // Legacy archive edits remain valid for unprofiled documents. For an
         // applied profile, the old archive is not evidence of a newer edit.
-        if formattingState?.explicitlyApplied != true, modifiedParts.contains(path), let data = try archived() { return data }
+        // PsychQuant/ooxml-swift#173: deliberately reads the FIXED default
+        // path, not relationship-resolved — `markPartDirty`'s documented
+        // contract for external consumers (e.g. che-word-mcp editing
+        // theme/fontTable via raw XML manipulation) is that they write to
+        // this conventional default path; resolving via relationship here
+        // would make their edit invisible whenever the source document's
+        // relationship happens to name a different part.
+        if formattingState?.explicitlyApplied != true, modifiedParts.contains(path), let data = try archived(at: path) { return data }
         if let fallback { return fallback }
-        return try archived()
+        // PsychQuant/ooxml-swift#173: last-resort fallback, reached only
+        // when `fallback` is also nil (`formattingState` itself is nil —
+        // no styles.xml was found at read time, so `DocxReader` never
+        // populated `themeData`/`fontsData` either). Resolve via the main
+        // part's own relationships the same way `DocxReader.read` does,
+        // instead of assuming `path` (the canonical default) is where the
+        // archive actually keeps this part.
+        guard let archive = archiveTempDir else { return nil }
+        let relsTree = (try? DocxReader.relationshipsTree(at: archive.appendingPathComponent("word/_rels/document.xml.rels"))) ?? nil
+        let resolvedPath = DocxReader.resolvedFormattingPart(type: relationshipType, defaultPath: path, relationships: relsTree, tempDir: archive)
+        return try archived(at: resolvedPath)
     }
     /// Capture completed authoritative operations before committing the op
     /// transaction. Later typed edits use this baseline instead of the import.
@@ -329,15 +350,15 @@ extension WordDocument {
             staged.append(("word/styles.xml", Data(try ProfileXML.string(root).utf8)))
             parts.append(("word/styles.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml", "styles", "styles.xml"))
         }
-        func currentAncillary(_ path: String, fallback: Data?) throws -> Data? {
+        func currentAncillary(_ path: String, relationshipType: String, fallback: Data?) throws -> Data? {
             guard writesStyles || publication.freshAncillary.contains(path) || publication.carriedAncillary.contains(path) else { return nil }
-            return try effectiveFormattingPartData(path, fallback: fallback)
+            return try effectiveFormattingPartData(path, relationshipType: relationshipType, fallback: fallback)
         }
-        if let fonts = try currentAncillary("word/fontTable.xml", fallback: state?.fontsData) {
+        if let fonts = try currentAncillary("word/fontTable.xml", relationshipType: "fontTable", fallback: state?.fontsData) {
             staged.append(("word/fontTable.xml", fonts))
             parts.append(("word/fontTable.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml", "fontTable", "fontTable.xml"))
         }
-        if let theme = try currentAncillary("word/theme/theme1.xml", fallback: state?.themeData) {
+        if let theme = try currentAncillary("word/theme/theme1.xml", relationshipType: "theme", fallback: state?.themeData) {
             staged.append(("word/theme/theme1.xml", theme))
             parts.append(("word/theme/theme1.xml", "application/vnd.openxmlformats-officedocument.theme+xml", "theme", "theme/theme1.xml"))
         }
