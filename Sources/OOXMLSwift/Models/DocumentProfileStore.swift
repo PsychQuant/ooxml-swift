@@ -343,7 +343,8 @@ public struct DocumentProfileStore: Sendable {
 ///   itself is replaced by rename (a new inode), so it cannot be the lock.
 /// - The config directory is created before the lock is taken.
 /// - `open(O_CREAT | O_RDWR | O_CLOEXEC, 0600)`, then `fchmod(fd, 0600)`
-///   because the open mode is only a request under the umask.
+///   because the open mode is only a request under the umask; a failing
+///   `fchmod` is thrown with its errno before any lock attempt.
 /// - `flock(fd, LOCK_EX | LOCK_NB)` polled every 50 ms; give up with an error
 ///   after 5 s measured on a monotonic clock. Only EWOULDBLOCK/EAGAIN
 ///   (contention) is polled and EINTR retried at once; any other errno is
@@ -361,6 +362,7 @@ enum ConfigFileLock {
         pollInterval: TimeInterval = ConfigFileLock.defaultPollInterval,
         timeout: TimeInterval = ConfigFileLock.defaultTimeout,
         acquire: (Int32, Int32) -> Int32 = { flock($0, $1) },
+        setMode: (Int32, mode_t) -> Int32 = { fchmod($0, $1) },
         _ body: () throws -> T
     ) throws -> T {
         let lockPath = path + ".lock"
@@ -369,7 +371,14 @@ enum ConfigFileLock {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: lockPath])
         }
         defer { close(fd) }
-        _ = fchmod(fd, 0o600)
+        // The open mode is only a request under the umask; fix it to 0600 and
+        // refuse (the deferred close still runs) if that fails.
+        guard setMode(fd, 0o600) == 0 else {
+            let code = errno
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [
+                NSFilePathErrorKey: lockPath,
+                NSLocalizedDescriptionKey: "無法把設定檔鎖設為 0600（errno \(code)）：\(lockPath)"])
+        }
 
         // The budget runs on a monotonic clock: a wall-clock change cannot
         // stretch or cut the wait.

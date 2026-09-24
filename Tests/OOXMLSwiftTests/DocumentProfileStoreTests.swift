@@ -460,6 +460,24 @@ final class DocumentProfileStoreTests: XCTestCase {
         XCTAssertLessThan(Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9, 1, "must not wait out the timeout")
     }
 
+    /// A lock file whose mode cannot be set to 0600 is refused with the
+    /// original errno before any locking or body runs.
+    func testFailedFchmodThrowsWithItsErrnoBeforeLocking() throws {
+        let url = try config()
+        let attempts = Recorder()
+        XCTAssertThrowsError(try ConfigFileLock.withLock(forConfigAt: url.path, pollInterval: 0.01, timeout: 1,
+                                                         acquire: { fd, operation in attempts.record("acquire"); return flock(fd, operation) },
+                                                         setMode: { _, _ in errno = EPERM; return -1 }) {
+            XCTFail("body must not run when the lock file mode cannot be secured")
+        }) { error in
+            let posix = error as NSError
+            XCTAssertEqual(posix.domain, NSPOSIXErrorDomain)
+            XCTAssertEqual(posix.code, Int(EPERM))
+            XCTAssertEqual(posix.userInfo[NSFilePathErrorKey] as? String, url.path + ".lock")
+        }
+        XCTAssertEqual(attempts.recorded, [], "no lock attempt after the mode failure")
+    }
+
     func testInterruptedFlockIsRetriedAndContentionIsPolled() throws {
         let url = try config()
         let calls = Recorder()
