@@ -118,6 +118,10 @@ final class DocumentProfileStoreTests: XCTestCase {
         let fixture = DocumentFormattingProfileTests()
         let template = try fixture.template()
         defer { try? FileManager.default.removeItem(at: template.deletingLastPathComponent()) }
+        // The lock file already exists (as after any earlier write), so the
+        // failure is the config publication itself, after the snapshot was
+        // written — not the lock creation (PsychQuant/macdoc#204).
+        try Data().write(to: URL(fileURLWithPath: url.path + ".lock"))
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
         XCTAssertThrowsError(try DocumentProfileStore(configURL: url).importOfficial(from: template))
@@ -240,5 +244,104 @@ final class DocumentProfileStoreTests: XCTestCase {
             XCTAssertThrowsError(try DocumentProfileStore(configURL: url).garbageCollectOfficialSnapshots(dryRun: dryRun))
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: orphan.path))
+    }
+
+    // MARK: - PsychQuant/macdoc#204 cross-process config lock
+
+    private func holdLock(_ configURL: URL) throws -> Int32 {
+        let fd = open(configURL.path + ".lock", O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), 0, "the test must win the lock first")
+        return fd
+    }
+
+    /// While another descriptor holds LOCK_EX on `<config>.lock`, every
+    /// writer times out with a domain error and leaves the config, the
+    /// profiles directory and the other writer's lock untouched.
+    func testWritersTimeOutWhileAnotherDescriptorHoldsTheLock() throws {
+        let url = try config(#"{"agent":"codex","document":{"custom":"kept"}}"#)
+        let before = try Data(contentsOf: url)
+        let fd = try holdLock(url)
+        defer { flock(fd, LOCK_UN); close(fd) }
+        let store = DocumentProfileStore(configURL: url, lockTimeout: 0.2, lockPollInterval: 0.02)
+        let template = try officialTemplate()
+        let started = Date()
+        let attempts: [(String, () throws -> Void)] = [
+            ("setDefaultProfile", { try store.setDefaultProfile(.official) }),
+            ("importOfficial", { try store.importOfficial(from: template) }),
+            ("garbageCollect", { _ = try store.garbageCollectOfficialSnapshots(dryRun: false) })
+        ]
+        for (name, attempt) in attempts {
+            XCTAssertThrowsError(try attempt(), name) { error in
+                XCTAssertEqual(error as? DocumentProfileStoreError, .configLockTimeout(url.path + ".lock"), name)
+            }
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3, "injected timeout must be honoured")
+        XCTAssertEqual(try Data(contentsOf: url), before)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("profiles").path))
+    }
+
+    func testLockFileIsOwnerOnlyAndNeverDeleted() throws {
+        let previous = umask(0o022)
+        defer { umask(previous) }
+        let url = try config()
+        let store = DocumentProfileStore(configURL: url)
+        try store.setDefaultProfile(.official)
+        let lock = URL(fileURLWithPath: url.path + ".lock")
+        XCTAssertEqual(try permissions(lock), 0o600)
+        try store.setDefaultProfile(.inherit)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lock.path))
+        XCTAssertEqual(try store.settings().defaultProfile, .inherit)
+    }
+
+    /// The config directory is created (0700) before the lock is taken,
+    /// because the lock file lives inside it.
+    func testUpdateSucceedsWhenConfigDirectoryDoesNotExistYet() throws {
+        let root = try config().deletingLastPathComponent()
+        let url = root.appendingPathComponent("first-run/macdoc/config.json")
+        try DocumentProfileStore(configURL: url).setDefaultProfile(.official)
+        XCTAssertEqual(try DocumentProfileStore(configURL: url).settings().defaultProfile, .official)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path + ".lock"))
+        XCTAssertEqual(try permissions(url.deletingLastPathComponent()), 0o700)
+    }
+
+    /// A failing critical section still releases the lock.
+    func testFailedUpdateReleasesTheLock() throws {
+        let url = try config("invalid")
+        XCTAssertThrowsError(try DocumentProfileStore(configURL: url).setDefaultProfile(.official))
+        try Data("{}".utf8).write(to: url)
+        XCTAssertNoThrow(try DocumentProfileStore(configURL: url, lockTimeout: 0.2, lockPollInterval: 0.02).setDefaultProfile(.official))
+    }
+
+    /// Concurrent writers — DocumentProfileStore instances and a writer that
+    /// follows the same protocol for top-level keys, as pdf-to-latex-swift's
+    /// AIConfig.save does — each set distinct keys; none is lost.
+    func testConcurrentWritersEachSettingDistinctKeysAllSurvive() throws {
+        let url = try config("{}")
+        let writers = 8, rounds = 12
+        @Sendable func otherWriter(_ key: String, _ value: Int) throws {
+            try ConfigFileLock.withLock(forConfigAt: url.path) { () throws -> Void in
+                var root = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] ?? [:]
+                root[key] = value
+                try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]).write(to: url, options: .atomic)
+            }
+        }
+        DispatchQueue.concurrentPerform(iterations: writers * 2) { index in
+            let store = DocumentProfileStore(configURL: url)
+            for round in 0..<rounds {
+                do {
+                    if index < writers { try store.updateDocument { $0["writer\(index)-\(round)"] = round } }
+                    else { try otherWriter("other\(index)-\(round)", round) }
+                } catch { XCTFail("writer \(index) round \(round): \(error)") }
+            }
+        }
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let document = try XCTUnwrap(root["document"] as? [String: Any])
+        for index in 0..<(writers * 2) {
+            for round in 0..<rounds {
+                if index < writers { XCTAssertEqual(document["writer\(index)-\(round)"] as? Int, round) }
+                else { XCTAssertEqual(root["other\(index)-\(round)"] as? Int, round) }
+            }
+        }
     }
 }
