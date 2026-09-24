@@ -8,6 +8,15 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`canonicalWordTree` 只在 root 宣告一次 `xmlns:w`，不再逐節點重複宣告**（PsychQuant/macdoc#195）。
+  `word/styles.xml` 底下的 `<w:style>`／`<w:pPr>`／`<w:rPr>`／`<w:rFonts>` 等每個元素先前都各自帶一份
+  `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"`，而不是只在最外層 `<w:styles>`
+  宣告一次讓子孫繼承；每次開檔（`DocxReader`）都會重跑一次 `canonicalWordTree`，再開檔重新 typed edit 會讓宣告數
+  隨輪數複合成長。修法只改「輸出端已宣告哪些 prefix→URI 綁定」的追蹤，不動既有的別名／未知 namespace 決議邏輯，
+  `DocxReader` 手動把 root 的 namespace 宣告複製到 detached `docDefaults` clone 的既有行為不變（並新增回歸測試鎖定）。
+
 ## [3.9.0] - 2026-09-24
 
 ### Added
