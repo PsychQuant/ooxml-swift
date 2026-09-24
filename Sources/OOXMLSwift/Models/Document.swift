@@ -1097,7 +1097,9 @@ public struct WordDocument: Equatable {
     /// 只改寫表格儲存格內第 `paragraphIndex` 個段落的文字（PsychQuant/macdoc#156）。
     ///
     /// 該段落的 runs 換成單一 run，沿用原本第一個 run 的格式（沒有 run 時為
-    /// 無格式 run）；段落本身的 pPr 與同一格其他段落一律不動。所有座標都在
+    /// 無格式 run）；段落本身 typed model 認得的 pPr 與同一格其他段落一律不動。
+    /// typed model 未建模的 pPr 子元素（如 `w:kinsoku`）會在 typed 寫入時從整份
+    /// 文件消失，屬既有限制，見 #168。所有座標都在
     /// 任何寫入之前檢查，錯誤型式與 `updateCell` 相同。tree-backed 的表格
     /// 不接受這種 typed 寫入（寫入會被忽略），因此直接拒絕，不做靜默的空操作。
     public mutating func updateCellParagraph(tableIndex: Int, row: Int, col: Int, paragraphIndex: Int, text: String) throws {

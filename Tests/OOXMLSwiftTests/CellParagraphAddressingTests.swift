@@ -2,9 +2,14 @@ import XCTest
 @testable import OOXMLSwift
 
 /// PsychQuant/macdoc#156: address one paragraph inside a table cell. A
-/// multi-paragraph cell must not collapse, other paragraphs and every
-/// paragraph's pPr stay as they were, and a marker repeated in other rows
-/// is never touched.
+/// multi-paragraph cell must not collapse, sibling paragraphs and the pPr
+/// properties the typed model knows stay as they were, and a marker
+/// repeated in other rows is never touched.
+///
+/// Not covered here: pPr children the typed model does not model (for
+/// example `w:kinsoku`, `w:snapToGrid`). Typed edits re-emit document.xml
+/// from the typed model and drop those children across the whole document
+/// — a pre-existing gap of the typed write path, tracked as #168.
 final class CellParagraphAddressingTests: XCTestCase {
     private func directory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -94,9 +99,11 @@ final class CellParagraphAddressingTests: XCTestCase {
     }
 
     /// DocxReader produces detached cells (no xmlNode): the edit goes
-    /// through the typed model and must survive the writer's re-emission,
-    /// including pPr children the typed model does not know.
-    func testUpdatesOneParagraphOfAReaderProducedCellAndSurvivesSaveAndReload() throws {
+    /// through the typed model, and the known pPr properties (indentation,
+    /// alignment, spacing, keepNext) and the sibling paragraphs survive the
+    /// writer's re-emission and a reload. Unmodeled pPr children are outside
+    /// this test's scope; see #168.
+    func testReaderProducedCellKeepsKnownPPrAndSiblingParagraphsAcrossSaveAndReload() throws {
         let root = try directory()
         let seed = root.appendingPathComponent("seed.docx")
         try DocxWriter.write(formDocument(), to: seed)
