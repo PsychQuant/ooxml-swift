@@ -1564,9 +1564,12 @@ final class DocumentFormattingProfileTests: XCTestCase {
 
     /// BOM / encoding-declaration disagreement never opens a DTD path: every
     /// combination is refused with dtdNotAllowed. Without a DTD, a UTF-16 BOM
-    /// wins over a UTF-8 declaration (XML 1.0 Appendix F), a declaration that
-    /// contradicts the UTF-16 byte order fails closed, and bytes in an
-    /// unsupported charset (real Shift_JIS) are refused before any decoder.
+    /// wins over a UTF-8 declaration (XML 1.0 Appendix F), and a declaration
+    /// that contradicts the UTF-16 byte order fails closed.
+    ///
+    /// PsychQuant/ooxml-swift#171: real Shift_JIS bytes, correctly declared,
+    /// are now decoded per that declaration (`DocxReader.utf8TreeInputData`)
+    /// instead of refused — the named-encoding set this issue asked for.
     func testReaderBOMAndDeclarationMismatchCounterexamples() throws {
         let source = try directory().appendingPathComponent("source.docx")
         try DocxWriter.write(WordDocument(), to: source)
@@ -1604,9 +1607,10 @@ final class DocumentFormattingProfileTests: XCTestCase {
         for (label, declaration, encoding, bom) in combinations[2...3] {
             XCTAssertThrowsError(try read(Data(bom) + styles(declaration, dtd: false).data(using: encoding)!), label)
         }
-        XCTAssertThrowsError(try read(styles("Shift_JIS", dtd: false).data(using: .shiftJIS)!)) { error in
-            guard case WordError.invalidDocx = error else { return XCTFail("unsupported charset reached a decoder: \(error)") }
-        }
+        // PsychQuant/ooxml-swift#171: correctly declared, correctly encoded
+        // Shift_JIS now decodes successfully — no BOM/declaration
+        // disagreement here, so no DTD-path concern either.
+        XCTAssertEqual(try read(styles("Shift_JIS", dtd: false).data(using: .shiftJIS)!), "名稱")
     }
 
     // MARK: - PsychQuant/macdoc#196 font neutrality (namespace-aware)
