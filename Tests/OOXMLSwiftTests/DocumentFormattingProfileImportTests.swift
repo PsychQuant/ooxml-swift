@@ -521,6 +521,31 @@ final class DocumentFormattingProfileImportTests: XCTestCase {
         XCTAssertEqual(para.runs[1].text, "     ", "the whitespace-only run must survive a genuine Shift_JIS transcode")
     }
 
+    /// PsychQuant/ooxml-swift#171 (Codex R3 MEDIUM): `isXMLDeclWhitespace`
+    /// checked a `Character` (an extended grapheme cluster) against the
+    /// individual scalars ` `/`\t`/`\r`/`\n` — a CRLF line break right
+    /// after `<?xml` is ONE `Character` (`"\r\n"`), matching none of
+    /// them, so a declaration like `<?xml\r\nversion="1.0" encoding=
+    /// "Shift_JIS"?>` would have been left unrecognized: the transcode
+    /// would still run (genuinely non-UTF-8 bytes), but the declaration
+    /// would keep saying "Shift_JIS" over now-UTF-8 body bytes — the
+    /// exact inconsistency #171 exists to close.
+    func testUtf8TreeInputDataRewritesDeclarationSplitByCRLF() throws {
+        let w = Self.w
+        let documentXML = "<?xml\r\nversion=\"1.0\" encoding=\"Shift_JIS\"?>\r\n"
+            + "<w:document xmlns:w=\"\(w)\"><w:body><w:p>"
+            + "<w:r><w:t>名稱before</w:t></w:r>"
+            + "<w:r><w:t xml:space=\"preserve\">     </w:t></w:r>"
+            + "<w:r><w:t>after</w:t></w:r>"
+            + "</w:p></w:body></w:document>"
+        let realBytes = try XCTUnwrap(documentXML.data(using: .shiftJIS))
+        let output = try DocxReader.utf8TreeInputData(realBytes, part: "word/document.xml")
+        let outputText = String(decoding: output, as: UTF8.self)
+        XCTAssertTrue(outputText.hasPrefix("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"), String(outputText.prefix(60)))
+        XCTAssertTrue(outputText.contains("名稱before"))
+        XCTAssertTrue(outputText.contains("<w:t xml:space=\"preserve\">     </w:t>"), "the whitespace-only run's raw XML must survive untouched")
+    }
+
     // MARK: - PsychQuant/macdoc#212 actionable completeness errors
 
     func styles(docDefaults: String) -> Data {
