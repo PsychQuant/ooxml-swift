@@ -442,6 +442,38 @@ final class DocumentProfileStoreTests: XCTestCase {
         XCTAssertEqual(missingCalls.recorded.count, 2, "one retry, then the missing snapshot is reported")
     }
 
+    /// Only contention (EWOULDBLOCK/EAGAIN) is polled and EINTR retried; any
+    /// other flock failure is thrown at once with its errno instead of being
+    /// mistaken for contention and waited out.
+    func testNonContentionFlockFailureThrowsImmediatelyWithItsErrno() throws {
+        let url = try config()
+        let started = DispatchTime.now().uptimeNanoseconds
+        XCTAssertThrowsError(try ConfigFileLock.withLock(forConfigAt: url.path, pollInterval: 0.05, timeout: 3,
+                                                         acquire: { _, _ in errno = ENOLCK; return -1 }) {
+            XCTFail("body must not run without the lock")
+        }) { error in
+            let posix = error as NSError
+            XCTAssertEqual(posix.domain, NSPOSIXErrorDomain)
+            XCTAssertEqual(posix.code, Int(ENOLCK))
+            XCTAssertEqual(posix.userInfo[NSFilePathErrorKey] as? String, url.path + ".lock")
+        }
+        XCTAssertLessThan(Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9, 1, "must not wait out the timeout")
+    }
+
+    func testInterruptedFlockIsRetriedAndContentionIsPolled() throws {
+        let url = try config()
+        let calls = Recorder()
+        let results: [Int32] = [EINTR, EWOULDBLOCK, EAGAIN]
+        let value = try ConfigFileLock.withLock(forConfigAt: url.path, pollInterval: 0.01, timeout: 3, acquire: { fd, operation in
+            let attempt = calls.recorded.count
+            calls.record("attempt")
+            if attempt < results.count { errno = results[attempt]; return -1 }
+            return flock(fd, operation)
+        }) { 42 }
+        XCTAssertEqual(value, 42)
+        XCTAssertEqual(calls.recorded.count, 4)
+    }
+
     // MARK: - PsychQuant/macdoc#204 cross-process interoperability
 
     /// A separate process running an independent implementation of the
