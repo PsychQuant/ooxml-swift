@@ -66,12 +66,18 @@ extension WordDocument {
     /// (temp + rename).
     public func writeAuthoringPackage(to url: URL) throws {
         // PsychQuant/macdoc#196: shared pre-write relationship gate, before
-        // any part is written. This writer never rewrites the relationships
-        // itself (only the formatting finalizer does); a synthesized part
-        // registers styles at most once, so there is nothing to validate.
-        try validateRelationshipsBeforeWrite(rewritesRelationships: false) {
-            if let carried = carriedParts["word/_rels/document.xml.rels"] { return carried }
-            return try xmlTrees["word/_rels/document.xml.rels"].map { try XmlTreeWriter.serialize($0) }
+        // any part is written, decided — like DocxWriter — from what this
+        // writer will publish for the relationships part. Carried bytes are
+        // published verbatim (untouched); a live tree is a rewrite exactly
+        // when this session modified it (operations or a typed dirty mark);
+        // a synthesized part registers styles at most once and is not read.
+        let relsPath = "word/_rels/document.xml.rels"
+        let carriedRels = carriedParts[relsPath]
+        try validateRelationshipsBeforeWrite(
+            rewritesRelationships: carriedRels == nil && modifiedParts.contains(relsPath)
+        ) {
+            if let carriedRels { return carriedRels }
+            return try xmlTrees[relsPath].map { try XmlTreeWriter.serialize($0) }
         }
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("mdocx-authoring-\(UUID().uuidString)")
