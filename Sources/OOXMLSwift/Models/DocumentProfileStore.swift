@@ -41,16 +41,21 @@ public struct DocumentProfileStore: Sendable {
     /// internal initializer exists so tests need not wait five seconds.
     let lockTimeout: TimeInterval
     let lockPollInterval: TimeInterval
+    /// Test seam: runs in `resolve` after the snapshot reference is read and
+    /// before the snapshot bytes are, to exercise that window.
+    let afterSnapshotReferenceRead: (@Sendable () -> Void)?
 
     public init(configURL: URL) {
         self.init(configURL: configURL, lockTimeout: ConfigFileLock.defaultTimeout,
                   lockPollInterval: ConfigFileLock.defaultPollInterval)
     }
 
-    internal init(configURL: URL, lockTimeout: TimeInterval, lockPollInterval: TimeInterval) {
+    internal init(configURL: URL, lockTimeout: TimeInterval, lockPollInterval: TimeInterval,
+                  afterSnapshotReferenceRead: (@Sendable () -> Void)? = nil) {
         self.configURL = configURL
         self.lockTimeout = lockTimeout
         self.lockPollInterval = lockPollInterval
+        self.afterSnapshotReferenceRead = afterSnapshotReferenceRead
     }
 
     public static var defaultConfigURL: URL {
@@ -68,10 +73,17 @@ public struct DocumentProfileStore: Sendable {
     ) throws -> DocumentFormattingProfile? {
         if explicit == .inherit { return .inherit }
         if case .existingDocument = context, explicit == nil { return nil }
-        let settings = try settings()
-        let kind = explicit ?? settings.defaultProfile
+        let kind = try explicit ?? settings().defaultProfile
         if kind == .inherit { return .inherit }
-        guard let path = settings.officialSnapshot else { throw DocumentProfileStoreError.officialNotImported }
+        // The reference and the snapshot bytes are read under the config
+        // lock, so an import + garbage collection cannot switch the
+        // reference and delete the snapshot in between (PsychQuant/macdoc#194).
+        return try withSnapshotReadLock { try officialSnapshotHoldingLock() }
+    }
+
+    private func officialSnapshotHoldingLock() throws -> DocumentFormattingProfile {
+        guard let path = try settings().officialSnapshot else { throw DocumentProfileStoreError.officialNotImported }
+        afterSnapshotReferenceRead?()
         let url = configURL.deletingLastPathComponent().appendingPathComponent(path)
         let data: Data
         do { data = try Data(contentsOf: url) }
@@ -203,6 +215,19 @@ public struct DocumentProfileStore: Sendable {
     /// cross-process config lock for the whole cycle (PsychQuant/macdoc#204).
     internal func updateDocument(_ update: (inout [String: Any]) -> Void) throws {
         try withConfigLock { try updateDocumentHoldingLock(update) }
+    }
+
+    /// Takes the config lock for a read without creating anything but the
+    /// lock file. When the lock file does not exist and cannot be created
+    /// (the configuration directory is missing or not writable), no writer
+    /// can create or delete files there either, so the read runs unlocked.
+    private func withSnapshotReadLock<T>(_ body: () throws -> T) throws -> T {
+        let directory = configURL.deletingLastPathComponent().path
+        if !FileManager.default.fileExists(atPath: configURL.path + ".lock"), access(directory, W_OK) != 0 {
+            return try body()
+        }
+        return try ConfigFileLock.withLock(forConfigAt: configURL.path, pollInterval: lockPollInterval,
+                                           timeout: lockTimeout, body)
     }
 
     /// Creates the config directory first — the lock file lives inside it —

@@ -344,4 +344,52 @@ final class DocumentProfileStoreTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - PsychQuant/macdoc#194 resolve vs. garbage collection
+
+    private final class Recorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [String] = []
+        func record(_ item: String) { lock.lock(); items.append(item); lock.unlock() }
+        var recorded: [String] { lock.lock(); defer { lock.unlock() }; return items }
+    }
+
+    /// resolve holds the config lock from reading the snapshot reference
+    /// until the snapshot bytes are read. An import + garbage collection
+    /// attempted inside that window cannot get the lock, so the referenced
+    /// snapshot cannot be switched away from and deleted mid-read.
+    func testResolveHoldsTheLockFromReferenceReadToSnapshotRead() throws {
+        let url = try config()
+        let template = try officialTemplate()
+        try DocumentProfileStore(configURL: url).importOfficial(from: template)
+        let first = try XCTUnwrap(DocumentProfileStore(configURL: url).settings().officialSnapshot)
+        let other = DocumentProfileStore(configURL: url, lockTimeout: 0.2, lockPollInterval: 0.02)
+        let recorder = Recorder()
+        let store = DocumentProfileStore(configURL: url, lockTimeout: 5, lockPollInterval: 0.05, afterSnapshotReferenceRead: {
+            do {
+                try other.importOfficial(from: template)
+                _ = try other.garbageCollectOfficialSnapshots(dryRun: false)
+                recorder.record("import and collection ran")
+            } catch {
+                recorder.record("\(error)")
+            }
+        })
+        XCTAssertEqual(try store.resolve(explicit: .official, context: .newDocument)?.kind, .official)
+        XCTAssertEqual(recorder.recorded, ["\(DocumentProfileStoreError.configLockTimeout(url.path + ".lock"))"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent(first).path))
+        XCTAssertEqual(try DocumentProfileStore(configURL: url).settings().officialSnapshot, first)
+    }
+
+    /// Where no process can create the lock file (a read-only config
+    /// directory) no writer can race either, so resolve reads without it.
+    func testResolveReadsWithoutLockInAReadOnlyConfigDirectory() throws {
+        let url = try config()
+        try DocumentProfileStore(configURL: url).importOfficial(from: officialTemplate())
+        let dir = url.deletingLastPathComponent()
+        try FileManager.default.removeItem(atPath: url.path + ".lock")
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
+        XCTAssertEqual(try DocumentProfileStore(configURL: url).resolve(explicit: .official, context: .newDocument)?.kind, .official)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path + ".lock"))
+    }
 }
