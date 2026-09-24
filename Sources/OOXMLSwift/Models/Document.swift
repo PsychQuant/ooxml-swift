@@ -1037,46 +1037,90 @@ public struct WordDocument: Equatable {
         }
     }
 
-    /// 更新表格儲存格內容
-    public mutating func updateCell(tableIndex: Int, row: Int, col: Int, text: String) throws {
+    /// 驗證表格儲存格座標並回傳該表格在 body.children 的位置與目前的值。
+    /// 所有檢查都在任何寫入之前完成。
+    private func cellLocation(tableIndex: Int, row: Int, col: Int) throws -> (bodyIndex: Int, table: Table) {
         let tableIndices = getTableIndices()
-
         guard tableIndex >= 0 && tableIndex < tableIndices.count else {
             throw WordError.invalidIndex(tableIndex)
         }
+        let bodyIndex = tableIndices[tableIndex]
+        guard case .table(let table) = body.children[bodyIndex] else { throw WordError.invalidIndex(tableIndex) }
+        guard row >= 0 && row < table.rows.count else {
+            throw WordError.invalidIndex(row)
+        }
+        let cellCount = table.rows[row].cells.count
+        guard col >= 0 && col < cellCount else {
+            let gridSpans = table.rows[row].cells.map { $0.properties.gridSpan ?? 1 }
+            let gridCols = gridSpans.reduce(0, +)
+            throw WordError.invalidFormat("Invalid col index \(col) for row \(row): row has \(cellCount) cell(s) (grid columns: \(gridCols), spans: \(gridSpans))")
+        }
+        return (bodyIndex, table)
+    }
 
-        let actualIndex = tableIndices[tableIndex]
-        if case .table(var table) = body.children[actualIndex] {
-            guard row >= 0 && row < table.rows.count else {
-                throw WordError.invalidIndex(row)
-            }
-            let cellCount = table.rows[row].cells.count
-            guard col >= 0 && col < cellCount else {
-                let gridSpans = table.rows[row].cells.map { $0.properties.gridSpan ?? 1 }
-                let gridCols = gridSpans.reduce(0, +)
-                throw WordError.invalidFormat("Invalid col index \(col) for row \(row): row has \(cellCount) cell(s) (grid columns: \(gridCols), spans: \(gridSpans))")
-            }
+    /// 更新表格儲存格內容
+    public mutating func updateCell(tableIndex: Int, row: Int, col: Int, text: String) throws {
+        let location = try cellLocation(tableIndex: tableIndex, row: row, col: col)
+        let actualIndex = location.bodyIndex
+        var table = location.table
 
-            // 只更新文字，保留 cell properties + run properties（粗體、字型等）
-            let cell = table.rows[row].cells[col]
-            if let firstRun = cell.paragraphs.first?.runs.first {
-                // 保留第一個 run 的格式，只替換文字
-                var updatedRun = firstRun
-                updatedRun.text = text
-                var updatedPara = cell.paragraphs[0]
-                updatedPara.runs = [updatedRun]
-                table.rows[row].cells[col].paragraphs = [updatedPara]
-            } else {
-                // 空 cell，直接設文字（保留 cell properties）
-                table.rows[row].cells[col].paragraphs = [Paragraph(text: text)]
-            }
+        // 只更新文字，保留 cell properties + run properties（粗體、字型等）
+        let cell = table.rows[row].cells[col]
+        if let firstRun = cell.paragraphs.first?.runs.first {
+            // 保留第一個 run 的格式，只替換文字
+            var updatedRun = firstRun
+            updatedRun.text = text
+            var updatedPara = cell.paragraphs[0]
+            updatedPara.runs = [updatedRun]
+            table.rows[row].cells[col].paragraphs = [updatedPara]
+        } else {
+            // 空 cell，直接設文字（保留 cell properties）
+            table.rows[row].cells[col].paragraphs = [Paragraph(text: text)]
+        }
 
-            body.children[actualIndex] = .table(table)
+        body.children[actualIndex] = .table(table)
 
-            // 同步更新 body.tables
-            if tableIndex < body.tables.count {
-                body.tables[tableIndex] = table
-            }
+        // 同步更新 body.tables
+        if tableIndex < body.tables.count {
+            body.tables[tableIndex] = table
+        }
+        markTypedDirty("word/document.xml")
+    }
+
+    /// 依段落順序回傳表格儲存格內每個段落的文字（PsychQuant/macdoc#156）。
+    /// 索引即 `updateCellParagraph` 的 `paragraphIndex`。
+    public func cellParagraphTexts(tableIndex: Int, row: Int, col: Int) throws -> [String] {
+        let table = try cellLocation(tableIndex: tableIndex, row: row, col: col).table
+        return table.rows[row].cells[col].paragraphs.map { $0.getText() }
+    }
+
+    /// 只改寫表格儲存格內第 `paragraphIndex` 個段落的文字（PsychQuant/macdoc#156）。
+    ///
+    /// 該段落的 runs 換成單一 run，沿用原本第一個 run 的格式（沒有 run 時為
+    /// 無格式 run）；段落本身的 pPr 與同一格其他段落一律不動。所有座標都在
+    /// 任何寫入之前檢查，錯誤型式與 `updateCell` 相同。tree-backed 的表格
+    /// 不接受這種 typed 寫入（寫入會被忽略），因此直接拒絕，不做靜默的空操作。
+    public mutating func updateCellParagraph(tableIndex: Int, row: Int, col: Int, paragraphIndex: Int, text: String) throws {
+        let location = try cellLocation(tableIndex: tableIndex, row: row, col: col)
+        var table = location.table
+        var cell = table.rows[row].cells[col]
+        let paragraphCount = cell.paragraphs.count
+        guard paragraphIndex >= 0 && paragraphIndex < paragraphCount else {
+            throw WordError.invalidFormat("Invalid paragraph index \(paragraphIndex) for cell (row \(row), col \(col)): cell has \(paragraphCount) paragraph(s)")
+        }
+        guard table.xmlNode == nil, table.rows[row].xmlNode == nil, cell.xmlNode == nil,
+              cell.paragraphs[paragraphIndex].xmlNode == nil else {
+            throw WordError.invalidFormat("Table \(tableIndex) is tree-backed; cell paragraphs cannot be updated through the typed model")
+        }
+        var paragraph = cell.paragraphs[paragraphIndex]
+        var run = paragraph.runs.first ?? Run(text: "")
+        run.text = text
+        paragraph.runs = [run]
+        cell.paragraphs[paragraphIndex] = paragraph
+        table.rows[row].cells[col] = cell
+        body.children[location.bodyIndex] = .table(table)
+        if tableIndex < body.tables.count {
+            body.tables[tableIndex] = table
         }
         markTypedDirty("word/document.xml")
     }
