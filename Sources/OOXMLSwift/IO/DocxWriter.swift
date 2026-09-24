@@ -195,6 +195,22 @@ public struct DocxWriter {
             || dirty.contains("word/_rels/document.xml.rels")
             || hasNewTypedRelationships(document)
 
+        // PsychQuant/macdoc#196: the shared pre-write relationship gate runs
+        // before the first part is written. The relationships this save
+        // starts from are, in the precedence the writes below apply: a
+        // refreshed live tree (written last), else the typed writer's output,
+        // else the archive's own file.
+        let relsPath = "word/_rels/document.xml.rels"
+        let relsTree = document.treeFreshParts.contains(relsPath) && (!overlayMode || dirty.contains(relsPath))
+            ? document.xmlTrees[relsPath] : nil
+        try source.validateRelationshipsBeforeWrite(rewritesRelationships: needsDocumentRels || relsTree != nil) {
+            if let relsTree { return try XmlTreeWriter.serialize(relsTree) }
+            if needsDocumentRels { return Data(try documentRelationshipsXML(document).utf8) }
+            guard let archive = document.archiveTempDir else { return nil }
+            let url = archive.appendingPathComponent(relsPath)
+            return FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
+        }
+
         if needsContentTypes {
             try writeContentTypes(to: tempDir, document: document, overlayMode: overlayMode)
             typedWrittenParts.append(contentsOf: ["[Content_Types].xml"])
@@ -818,6 +834,15 @@ public struct DocxWriter {
     }
 
     private static func writeDocumentRelationships(to baseURL: URL, document: WordDocument) throws {
+        let xml = try documentRelationshipsXML(document)
+        let url = baseURL.appendingPathComponent("word/_rels/document.xml.rels")
+        try xml.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// The `word/_rels/document.xml.rels` the typed writer would emit for
+    /// `document`, computed without writing (the pre-write relationship gate
+    /// validates it before any part is written — PsychQuant/macdoc#196).
+    private static func documentRelationshipsXML(_ document: WordDocument) throws -> String {
         let originalRelsXML: String
         var originalRelsExists = false
         if let archiveTempDir = document.archiveTempDir {
@@ -991,9 +1016,7 @@ public struct DocxWriter {
             // Scratch mode (no source archive): emit fresh rels from typed model only.
             xml = serializeScratchRels(typedRels)
         }
-
-        let url = baseURL.appendingPathComponent("word/_rels/document.xml.rels")
-        try xml.write(to: url, atomically: true, encoding: .utf8)
+        return xml
     }
 
     /// Collect all rels the typed model wants to emit. Used by both overlay
