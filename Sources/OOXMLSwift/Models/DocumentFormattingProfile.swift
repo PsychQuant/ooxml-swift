@@ -412,9 +412,11 @@ internal enum ProfileXML {
     /// filesystem is never consulted, unlike `NSString.standardizingPath`,
     /// which resolves symlinks and strips `/private` and so merges distinct
     /// OPC part names on macOS.
-    /// - Percent-encoded octets are decoded per segment (`styl%65s.xml` is
-    ///   `styles.xml`), except an encoded `/` or `\`: that is data inside a
-    ///   segment (RFC 3986 §2.2), so the segment stays encoded.
+    /// - Only escapes of RFC 3986 unreserved characters (ALPHA, DIGIT, `-`,
+    ///   `.`, `_`, `~`) are decoded (§6.2.2.2): `styl%65s.xml` is
+    ///   `styles.xml`. Every other escape — `%2F`, `%5C`, `%25`, … — stays
+    ///   encoded with uppercase hex (§6.2.2.1), so an encoded `/` is data
+    ///   inside a segment and `%252F` never collapses onto `%2F`.
     /// - `.` and `..` segments are removed (§5.2.4); empty segments are kept.
     /// - Case is not folded. This is the decided, locked behavior: a
     ///   case-different Target names a different part here.
@@ -422,19 +424,55 @@ internal enum ProfileXML {
         let path = target.hasPrefix("/") ? target : "/word/" + target
         var segments: [String] = []
         for raw in path.split(separator: "/", omittingEmptySubsequences: false).dropFirst() {
-            let segment: String
-            if let decoded = raw.removingPercentEncoding, !decoded.contains("/"), !decoded.contains("\\") {
-                segment = decoded
-            } else {
-                segment = String(raw)
-            }
-            switch segment {
+            switch normalizedPercentEncoding(raw) {
             case ".": continue
             case "..": if !segments.isEmpty { segments.removeLast() }
-            default: segments.append(segment)
+            case let segment: segments.append(segment)
             }
         }
         return "/" + segments.joined(separator: "/")
+    }
+
+    /// Decodes `%XX` only when it encodes an unreserved ASCII character and
+    /// rewrites every other well-formed escape with uppercase hex; bytes
+    /// that are not part of a well-formed escape are kept as written.
+    private static func normalizedPercentEncoding(_ segment: Substring) -> String {
+        func hex(_ byte: UInt8) -> UInt8? {
+            switch byte {
+            case UInt8(ascii: "0")...UInt8(ascii: "9"): return byte - UInt8(ascii: "0")
+            case UInt8(ascii: "A")...UInt8(ascii: "F"): return byte - UInt8(ascii: "A") + 10
+            case UInt8(ascii: "a")...UInt8(ascii: "f"): return byte - UInt8(ascii: "a") + 10
+            default: return nil
+            }
+        }
+        func isUnreserved(_ byte: UInt8) -> Bool {
+            switch byte {
+            case UInt8(ascii: "A")...UInt8(ascii: "Z"), UInt8(ascii: "a")...UInt8(ascii: "z"),
+                 UInt8(ascii: "0")...UInt8(ascii: "9"), UInt8(ascii: "-"), UInt8(ascii: "."),
+                 UInt8(ascii: "_"), UInt8(ascii: "~"): return true
+            default: return false
+            }
+        }
+        let bytes = Array(segment.utf8)
+        var output: [UInt8] = []
+        output.reserveCapacity(bytes.count)
+        var index = 0
+        while index < bytes.count {
+            if bytes[index] == UInt8(ascii: "%"), index + 2 < bytes.count,
+               let high = hex(bytes[index + 1]), let low = hex(bytes[index + 2]) {
+                let value = high << 4 | low
+                if isUnreserved(value) {
+                    output.append(value)
+                } else {
+                    output.append(contentsOf: Array(String(format: "%%%02X", value).utf8))
+                }
+                index += 3
+            } else {
+                output.append(bytes[index])
+                index += 1
+            }
+        }
+        return String(decoding: output, as: UTF8.self)
     }
 
     /// PsychQuant/macdoc#196 policy point 2. ECMA-376 allows at most one
