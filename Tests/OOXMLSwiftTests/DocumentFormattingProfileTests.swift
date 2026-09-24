@@ -698,6 +698,56 @@ final class DocumentFormattingProfileTests: XCTestCase {
         XCTAssertEqual(n("100%.xml"), "/word/100%.xml", "a lone percent is left as written")
     }
 
+    /// RFC 3986 §5.2.4: removing a final `.` or `..` segment leaves a
+    /// trailing slash. `styles.xml/.` names a directory-like path, not the
+    /// part `styles.xml`.
+    func testTrailingDotSegmentsKeepTheTrailingSlash() {
+        let n = ProfileXML.normalizedRelationshipTarget
+        XCTAssertEqual(n("styles.xml/."), "/word/styles.xml/")
+        XCTAssertEqual(n("styles.xml/x/.."), "/word/styles.xml/")
+        XCTAssertEqual(n("styles.xml/"), "/word/styles.xml/")
+        XCTAssertEqual(n("/word/."), "/word/")
+        XCTAssertEqual(n("/.."), "/")
+        XCTAssertEqual(n("a/./b.xml"), "/word/a/b.xml")
+        XCTAssertEqual(n("x/../styles.xml"), "/word/styles.xml")
+    }
+
+    /// A styles/theme/fontTable Target that resolves to a path ending in `/`
+    /// is not an OPC part name and is refused on import, apply and write.
+    func testImplicitRelationshipTargetEndingInSlashIsRefusedOnImportApplyAndWrite() throws {
+        for target in ["styles.xml/.", "styles.xml/x/.."] {
+            let rels = relationshipsXML([("styles", target)])
+            XCTAssertThrowsError(try DocumentFormattingProfile.importOfficial(from: template(extras: ["word/_rels/document.xml.rels": rels])), target) { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidRelationshipTarget(target), target)
+            }
+            let profile = try DocumentFormattingProfile.importOfficial(from: template())
+            var doc = WordDocument.emptyAuthoringDocument()
+            try doc.apply(operations: [.carryPart(partPath: "word/_rels/document.xml.rels", xml: rels)])
+            XCTAssertThrowsError(try doc.applyFormattingProfile(profile, context: .existingDocument), target) { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidRelationshipTarget(target), target)
+            }
+            var applied = WordDocument.emptyAuthoringDocument()
+            try applied.applyFormattingProfile(profile, context: .existingDocument)
+            try applied.apply(operations: [.carryPart(partPath: "word/_rels/document.xml.rels", xml: rels)])
+            let output = try directory().appendingPathComponent("slash.docx")
+            XCTAssertThrowsError(try applied.writeAuthoringPackage(to: output), target) { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidRelationshipTarget(target), target)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: output.path), target)
+
+            let (url, _) = try packageWithRelationships { $0.replacingOccurrences(of: "Target=\"styles.xml\"", with: "Target=\"\(target)\"") }
+            var reader = try DocxReader.read(from: url)
+            defer { reader.close() }
+            try reader.updateStyle(id: "Normal", with: StyleUpdate(name: "typed edit"))
+            let archive = try XCTUnwrap(reader.archiveTempDir)
+            let before = try fileSnapshot(of: archive)
+            XCTAssertThrowsError(try DocxWriter.write(reader, to: output), target) { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidRelationshipTarget(target), target)
+            }
+            XCTAssertEqual(try fileSnapshot(of: archive), before, target)
+        }
+    }
+
     /// Policy point 2 on the IMPORT path. ECMA-376 allows at most one
     /// implicit styles/theme/fontTable relationship from the main part; a
     /// template naming two distinct parts for one Type is malformed, and
@@ -1374,7 +1424,7 @@ final class DocumentFormattingProfileTests: XCTestCase {
         for name in [TemplateFixtureGate.baselineTemplateName, TemplateFixtureGate.recFixtureName] {
             let url = try TemplateFixtureGate.requireTemplate(name)
             let rels = try ProfileXML.parse(XCTUnwrap(RawPartChannel.readAllParts(from: url)["word/_rels/document.xml.rels"], name))
-            XCTAssertNoThrow(try ProfileXML.rejectDuplicateImplicitRelationships(in: rels), name)
+            XCTAssertNoThrow(try ProfileXML.validateImplicitRelationships(in: rels), name)
             for (type, part) in [("styles", "/word/styles.xml"), ("theme", "/word/theme/theme1.xml"), ("fontTable", "/word/fontTable.xml")] {
                 let targets = rels.children.filter { $0.attributeValue(prefix: nil, localName: "Type") == "\(Self.officeRel)/\(type)" }
                     .compactMap { $0.attributeValue(prefix: nil, localName: "Target") }
