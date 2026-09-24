@@ -161,6 +161,149 @@ final class DocumentFormattingProfileTests: XCTestCase {
         XCTAssertEqual(try RawPartChannel.readAllParts(from: saved)["word/fontTable.xml"], fonts)
     }
 
+    // MARK: - #195 canonicalWordTree namespace-declaration dedup
+
+    /// `xmlns:w` must appear only on the root of a `canonicalWordTree`
+    /// output; descendants inherit the root's binding through ordinary XML
+    /// scoping instead of each re-declaring it. Regression for #195.
+    func testCanonicalWordTreeDeclaresNamespaceOnlyOnce() throws {
+        let nested = """
+        <x:styles xmlns:x="\(w)">
+          <x:style x:type="paragraph" x:styleId="a">
+            <x:name x:val="Normal"/>
+            <x:pPr>
+              <x:rPr><x:rFonts x:ascii="Aptos"/><x:sz x:val="24"/></x:rPr>
+            </x:pPr>
+          </x:style>
+        </x:styles>
+        """
+        let canonical = ProfileXML.canonicalWordTree(try ProfileXML.parse(nested))
+        let serialized = try ProfileXML.string(canonical)
+        XCTAssertEqual(serialized.components(separatedBy: "xmlns:w=\"\(w)\"").count - 1, 1)
+    }
+
+    /// Same fixture, decoded from UTF-16 the way `DocxReader` decodes
+    /// `word/styles.xml` when it carries a non-UTF-8 encoding declaration.
+    func testCanonicalWordTreeDeclaresNamespaceOnlyOnceForUTF16StylesInput() throws {
+        let root = try directory()
+        let package = root.appendingPathComponent("package")
+        let original = root.appendingPathComponent("original.docx")
+        try DocxWriter.writeData(WordDocument()).write(to: original)
+        var all = try RawPartChannel.readAllParts(from: original)
+        let styles = """
+        <?xml version="1.0" encoding="UTF-16"?>
+        <x:styles xmlns:x="\(w)">
+          <x:docDefaults><x:rPrDefault><x:rPr><x:sz x:val="24"/></x:rPr></x:rPrDefault></x:docDefaults>
+          <x:style x:type="paragraph" x:default="1" x:styleId="Normal">
+            <x:name x:val="Normal"/>
+            <x:pPr><x:rPr><x:rFonts x:ascii="Aptos"/></x:rPr></x:pPr>
+          </x:style>
+        </x:styles>
+        """
+        all["word/styles.xml"] = styles.data(using: .utf16)!
+        for (path, bytes) in all {
+            let url = package.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try bytes.write(to: url)
+        }
+        try ZipHelper.zipToData(package).write(to: original)
+        var doc = try DocxReader.read(from: original)
+        defer { doc.close() }
+        let originalStylesXML = try XCTUnwrap(doc.formattingState?.originalStylesXML)
+        XCTAssertEqual(originalStylesXML.components(separatedBy: "xmlns:w=\"\(w)\"").count - 1, 1)
+    }
+
+    /// Regression lock for `DocxReader`'s manual copy of the canonical
+    /// root's namespace declarations onto the detached `docDefaults` clone
+    /// (`DocxReader.swift` around the `defaultsXML` assignment). Before
+    /// #195's fix this copy was largely redundant, because every node —
+    /// `docDefaults` included — already carried its own `xmlns:w`. After the
+    /// fix, non-root nodes no longer self-declare, so this manual copy is
+    /// the *only* source of `xmlns:w` on the detached, independently
+    /// re-parsed `defaultsXML` string; if it were ever deleted as
+    /// "dead code", `defaultsXML` would become invalid standalone XML.
+    func testDetachedDocDefaultsCloneStillCarriesRootNamespaceDeclarations() throws {
+        let root = try directory()
+        let package = root.appendingPathComponent("package")
+        let original = root.appendingPathComponent("original.docx")
+        try DocxWriter.writeData(WordDocument()).write(to: original)
+        var all = try RawPartChannel.readAllParts(from: original)
+        all["word/styles.xml"] = Data("""
+        <x:styles xmlns:x="\(w)">
+          <x:docDefaults><x:rPrDefault><x:rPr><x:rFonts x:ascii="Aptos"/><x:sz x:val="24"/></x:rPr></x:rPrDefault></x:docDefaults>
+          <x:style x:type="paragraph" x:default="1" x:styleId="Normal"><x:name x:val="Normal"/></x:style>
+        </x:styles>
+        """.utf8)
+        for (path, bytes) in all {
+            let url = package.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try bytes.write(to: url)
+        }
+        try ZipHelper.zipToData(package).write(to: original)
+        var doc = try DocxReader.read(from: original)
+        defer { doc.close() }
+        let defaultsXML = try XCTUnwrap(doc.formattingState?.defaultsXML)
+        // Must be independently parseable — it is later re-parsed on its own
+        // (e.g. in `writeFormattingParts`) and spliced back in as a child.
+        let parsed = try ProfileXML.parse(defaultsXML)
+        XCTAssertEqual(parsed.localName, "docDefaults")
+        XCTAssertEqual(defaultsXML.components(separatedBy: "xmlns:w=\"\(w)\"").count - 1, 1)
+    }
+
+    /// Aliased target prefixes and unknown foreign namespaces must not be
+    /// affected by the dedup — the `w` binding still collapses to one
+    /// declaration while the foreign `custom:`/`urn:shadow` bindings, which
+    /// are distinct URIs, still declare normally.
+    func testCanonicalWordTreeDedupPreservesAliasedAndUnknownNamespaces() throws {
+        let styles = "<x:styles xmlns:x=\"\(w)\" xmlns:custom=\"urn:target-owned\"><x:style x:type=\"paragraph\" x:default=\"1\" x:styleId=\"TargetDefault\"><x:name x:val=\"Default\"/></x:style><x:style x:type=\"paragraph\" x:styleId=\"AliasedTarget\"><x:name x:val=\"Keep target\"/><x:basedOn x:val=\"TargetDefault\"/><custom:preserve custom:setting=\"keep\"/><w:extension xmlns:w=\"urn:shadow\" x:flag=\"kept\"/></x:style></x:styles>"
+        let canonical = ProfileXML.canonicalWordTree(try ProfileXML.parse(styles))
+        let serialized = try ProfileXML.string(canonical)
+        XCTAssertEqual(serialized.components(separatedBy: "xmlns:w=\"\(w)\"").count - 1, 1)
+        XCTAssertTrue(serialized.contains("AliasedTarget"))
+        XCTAssertTrue(serialized.contains("TargetDefault"))
+        XCTAssertTrue(serialized.contains("custom:preserve"))
+        XCTAssertNotNil(ProfileXML.walk(canonical).first { $0.namespaceURI == "urn:shadow" && $0.localName == "extension" })
+    }
+
+    /// A second typed style edit must not grow the number of `xmlns:w`
+    /// declarations in the re-serialized `word/styles.xml` — the durable
+    /// baseline the first edit persisted must already be deduped, and
+    /// `mergeFormattingChanges`'s `deepClone()` of untouched styles must not
+    /// reintroduce per-node declarations. (The count itself need not be 1:
+    /// `state.defaultsXML` is deliberately kept as an independently
+    /// self-declaring standalone document — see `withWordNamespace()` — so
+    /// it still carries its own `xmlns:w` once it is spliced back in as a
+    /// `docDefaults` child; that is a fixed, non-growing part of the count,
+    /// not the per-node bug #195 targets.)
+    func testSecondTypedEditDoesNotGrowNamespaceDeclarationCount() throws {
+        // The growth only compounds on reopen: each `DocxReader.read` reruns
+        // `canonicalWordTree` on whatever `word/styles.xml` currently holds,
+        // so a first typed edit's (pre-fix, per-node) declarations become
+        // the input to the second edit's canonicalization, doubling up.
+        let profile = try DocumentFormattingProfile.importOfficial(from: template())
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.applyFormattingProfile(profile, context: .newDocument)
+        try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "First edit"))
+        let firstURL = try directory().appendingPathComponent("first.docx")
+        try DocxWriter.write(doc, to: firstURL)
+        doc.close()
+        let firstOutput = String(decoding: try XCTUnwrap(try RawPartChannel.readAllParts(from: firstURL)["word/styles.xml"]), as: UTF8.self)
+        let firstCount = firstOutput.components(separatedBy: "xmlns:w=\"\(w)\"").count - 1
+
+        var reopened = try DocxReader.read(from: firstURL)
+        defer { reopened.close() }
+        try reopened.updateStyle(id: "TitleLocal", with: StyleUpdate(name: "Second edit"))
+        let secondURL = try directory().appendingPathComponent("second.docx")
+        try DocxWriter.write(reopened, to: secondURL)
+        let secondOutput = String(decoding: try XCTUnwrap(try RawPartChannel.readAllParts(from: secondURL)["word/styles.xml"]), as: UTF8.self)
+        let secondCount = secondOutput.components(separatedBy: "xmlns:w=\"\(w)\"").count - 1
+
+        XCTAssertEqual(secondCount, firstCount)
+        XCTAssertTrue(firstOutput.contains("First edit"))
+        XCTAssertTrue(secondOutput.contains("First edit"))
+        XCTAssertTrue(secondOutput.contains("Second edit"))
+    }
+
     func directory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
