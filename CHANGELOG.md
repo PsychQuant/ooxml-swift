@@ -8,6 +8,17 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **typed 編輯不再讓未被編輯的段落遺失未建模的 `w:pPr` 子元素**（PsychQuant/ooxml-swift#168，
+  PsychQuant/macdoc#156）。`updateCell`、`updateCellParagraph`、`insertParagraph` 等會觸發
+  `markTypedDirty("word/document.xml")` 的 API，過去會讓 `w:kinsoku`、`w:snapToGrid` 等 typed model
+  未建模的 pPr 子元素從**整份文件**的所有段落上消失，不只是被編輯的那個。`DocxReader.parseParagraphProperties`
+  現在把這類子元素捕捉進新增的 `ParagraphProperties.rawChildren`（沿用 `Run.rawElements` 的「不認得就原樣保留」
+  模式），`toXML()` 在既有 modeled 欄位之後、段落標記 `<w:rPr>` 之前原樣寫回。`w:sectPr`／`w:pPrChange`
+  刻意排除在外（各自已有獨立處理，且直接搬進這個插入點會把位置敏感的元素放錯地方）——中段落分節屬性
+  未被 reader 解析成 typed 欄位仍是既有、另外追蹤的缺口，本次不擴大範圍去修。見 `Issue168PPrRawChildrenTests`。
+
 ## [3.11.0] - 2026-09-24
 
 ### Changed

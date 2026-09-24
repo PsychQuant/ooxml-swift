@@ -364,6 +364,40 @@ public struct ParagraphProperties: Equatable {
     /// loss in NTPU thesis fixture round-trip (16.66% → < 5% target).
     public var markRunProperties: RunProperties?
 
+    /// v3.12.0+ (#168): `<w:pPr>` child elements the typed model has no field
+    /// for — `<w:kinsoku>`, `<w:snapToGrid>`, `<w:widowControl>`,
+    /// `<w:wordWrap>`, and the rest of CT_PPrBase's long tail. Captured
+    /// verbatim by `DocxReader.parseParagraphProperties` (same "if not typed,
+    /// preserve as raw" principle as `Run.rawElements`, v0.14.0+/#52) and
+    /// re-emitted by `toXML()`.
+    ///
+    /// Why this exists: a typed edit through an API like `updateCell` /
+    /// `updateCellParagraph` forces the whole `word/document.xml` to be
+    /// regenerated from the typed model (`markTypedDirty`, see #168) —
+    /// including paragraphs the edit never touched. Before this field, any
+    /// pPr child outside the typed vocabulary silently vanished from EVERY
+    /// paragraph in the document, not just the edited one. This field makes
+    /// the typed model a (mostly) lossless carrier for those children so the
+    /// regeneration no longer drops them.
+    ///
+    /// Emitted after every other modeled pPr child and before
+    /// `markRunProperties`'s `<w:rPr>` — the safest slot available without a
+    /// full CT_PPrBase-order rewrite of this writer: schema order for these
+    /// children is real (e.g. `kinsoku`/`snapToGrid` sit before `spacing`/
+    /// `ind` in ECMA-376 §17.3.1.31), but this writer already emits its
+    /// modeled fields in a fixed, non-canonical order that real Word
+    /// documents open fine with (pre-existing, out of scope here). Emitting
+    /// raw children before `<w:rPr>` — never after — avoids the one
+    /// documented risk: some readers treat the paragraph-mark `<w:rPr>` as
+    /// pPr's terminal content-bearing child.
+    ///
+    /// `sectPr` and `pPrChange` are deliberately excluded from raw capture
+    /// (see `DocxReader.recognizedPPrChildNames`) — both already have
+    /// dedicated (if incomplete) handling elsewhere, and naively carrying a
+    /// full `<w:sectPr>` into this slot would misplace a structurally
+    /// significant, position-sensitive element.
+    public var rawChildren: [RawElement] = []
+
     public init() {}
 
     /// 合併格式（覆蓋非 nil 值）
@@ -380,6 +414,7 @@ public struct ParagraphProperties: Equatable {
         if let border = other.border { self.border = border }
         if let shading = other.shading { self.shading = shading }
         if let markRunProperties = other.markRunProperties { self.markRunProperties = markRunProperties }
+        if !other.rawChildren.isEmpty { self.rawChildren = other.rawChildren }
     }
 }
 
@@ -1190,6 +1225,15 @@ extension ParagraphProperties {
         // 段落底色
         if let shading = shading {
             parts.append(shading.toXML())
+        }
+
+        // v3.12.0+ (#168): pPr children the typed model doesn't recognize
+        // (kinsoku, snapToGrid, widowControl, …), captured verbatim by
+        // `DocxReader.parseParagraphProperties`. Emitted after every modeled
+        // field above and before the paragraph-mark <w:rPr> below — see the
+        // `rawChildren` doc comment for why this slot and not another.
+        for raw in rawChildren {
+            parts.append(raw.xml)
         }
 
         // v0.20.2+ (#65 sub-stack D): paragraph-mark <w:rPr> emitted after
