@@ -78,10 +78,18 @@ public struct DocumentProfileStore: Sendable {
         // The reference and the snapshot bytes are read under the config
         // lock, so an import + garbage collection cannot switch the
         // reference and delete the snapshot in between (PsychQuant/macdoc#194).
-        return try withSnapshotReadLock { try officialSnapshotHoldingLock() }
+        return try withSnapshotReadLock { locked in
+            do {
+                return try readOfficialSnapshot()
+            } catch DocumentProfileStoreError.snapshotFileMissing where !locked {
+                // Unlocked (best-effort) read: the reference may have moved
+                // while the old snapshot was deleted. Re-read it and retry once.
+                return try readOfficialSnapshot()
+            }
+        }
     }
 
-    private func officialSnapshotHoldingLock() throws -> DocumentFormattingProfile {
+    private func readOfficialSnapshot() throws -> DocumentFormattingProfile {
         guard let path = try settings().officialSnapshot else { throw DocumentProfileStoreError.officialNotImported }
         afterSnapshotReferenceRead?()
         let url = configURL.deletingLastPathComponent().appendingPathComponent(path)
@@ -218,16 +226,25 @@ public struct DocumentProfileStore: Sendable {
     }
 
     /// Takes the config lock for a read without creating anything but the
-    /// lock file. When the lock file does not exist and cannot be created
-    /// (the configuration directory is missing or not writable), no writer
-    /// can create or delete files there either, so the read runs unlocked.
-    private func withSnapshotReadLock<T>(_ body: () throws -> T) throws -> T {
+    /// lock file, and tells `body` whether the lock is held.
+    ///
+    /// Exception, best effort only: when the lock file does not exist and
+    /// this process cannot create it (the configuration directory is missing
+    /// or not writable), the read runs unlocked so that read-only
+    /// configuration directories still resolve. This is NOT a race-free
+    /// guarantee. Writability is checked once with access(2); the directory
+    /// can become writable afterwards (a chmod, or another user or process
+    /// with more access), and such a writer can move the reference or delete
+    /// a snapshot during the read. The caller narrows that window by
+    /// re-reading the reference and retrying once when the snapshot it names
+    /// is missing.
+    private func withSnapshotReadLock<T>(_ body: (_ locked: Bool) throws -> T) throws -> T {
         let directory = configURL.deletingLastPathComponent().path
         if !FileManager.default.fileExists(atPath: configURL.path + ".lock"), access(directory, W_OK) != 0 {
-            return try body()
+            return try body(false)
         }
         return try ConfigFileLock.withLock(forConfigAt: configURL.path, pollInterval: lockPollInterval,
-                                           timeout: lockTimeout, body)
+                                           timeout: lockTimeout) { try body(true) }
     }
 
     /// Creates the config directory first — the lock file lives inside it —

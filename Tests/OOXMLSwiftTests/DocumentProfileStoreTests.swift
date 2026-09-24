@@ -393,6 +393,55 @@ final class DocumentProfileStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path + ".lock"))
     }
 
+    /// The unlocked read in a read-only directory is best effort. If the
+    /// referenced snapshot disappears between reading the reference and
+    /// reading the bytes, resolve re-reads the reference once and retries
+    /// once; a snapshot still missing after that is reported.
+    func testUnlockedResolveRetriesOnceWhenTheReferencedSnapshotDisappears() throws {
+        let url = try config()
+        let dir = url.deletingLastPathComponent()
+        let template = try officialTemplate()
+        let writer = DocumentProfileStore(configURL: url)
+        try writer.importOfficial(from: template)
+        let first = try XCTUnwrap(writer.settings().officialSnapshot)
+        try writer.importOfficial(from: template)
+        let second = try XCTUnwrap(writer.settings().officialSnapshot)
+        try writer.updateDocument { $0["officialSnapshot"] = first }
+        try FileManager.default.removeItem(atPath: url.path + ".lock")
+        func setWritable(_ writable: Bool) throws {
+            try FileManager.default.setAttributes([.posixPermissions: writable ? 0o700 : 0o500], ofItemAtPath: dir.path)
+        }
+        defer { try? setWritable(true) }
+        let calls = Recorder()
+        // Simulates a change the unlocked reader cannot exclude: the
+        // reference moves to the second snapshot and the first is deleted.
+        let switching = DocumentProfileStore(configURL: url, lockTimeout: 0.2, lockPollInterval: 0.02, afterSnapshotReferenceRead: {
+            calls.record("read")
+            guard calls.recorded.count == 1 else { return }
+            try? setWritable(true)
+            var root = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]) ?? [:]
+            root["document"] = ["officialSnapshot": second]
+            try? JSONSerialization.data(withJSONObject: root).write(to: url, options: .atomic)
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(first))
+            try? setWritable(false)
+        })
+        try setWritable(false)
+        XCTAssertEqual(try switching.resolve(explicit: .official, context: .newDocument)?.kind, .official)
+        XCTAssertEqual(calls.recorded.count, 2, "exactly one retry")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path + ".lock"))
+
+        let missingCalls = Recorder()
+        try setWritable(true)
+        try JSONSerialization.data(withJSONObject: ["document": ["officialSnapshot": "profiles/official-gone.json"]]).write(to: url, options: .atomic)
+        try setWritable(false)
+        let missing = DocumentProfileStore(configURL: url, lockTimeout: 0.2, lockPollInterval: 0.02,
+                                           afterSnapshotReferenceRead: { missingCalls.record("read") })
+        XCTAssertThrowsError(try missing.resolve(explicit: .official, context: .newDocument)) { error in
+            XCTAssertEqual(error as? DocumentProfileStoreError, .snapshotFileMissing("profiles/official-gone.json"))
+        }
+        XCTAssertEqual(missingCalls.recorded.count, 2, "one retry, then the missing snapshot is reported")
+    }
+
     // MARK: - PsychQuant/macdoc#204 cross-process interoperability
 
     /// A separate process running an independent implementation of the
