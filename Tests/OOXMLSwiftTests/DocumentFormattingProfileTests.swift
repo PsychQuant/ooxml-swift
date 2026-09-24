@@ -4,6 +4,9 @@ import XCTest
 final class DocumentFormattingProfileTests: XCTestCase {
     let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     let a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    static let relNS = "http://schemas.openxmlformats.org/package/2006/relationships"
+    static let typeNS = "http://schemas.openxmlformats.org/package/2006/content-types"
+    static let officeRel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
     func testFreshReducerFormattingSurvivesBothWritersAndLaterTypedEdit() throws {
         for useProfile in [false, true] {
@@ -411,7 +414,10 @@ final class DocumentFormattingProfileTests: XCTestCase {
             "word/theme/theme1.xml": "<a:theme xmlns:a=\"\(a)\" name=\"Office\"><a:themeElements><a:fontScheme name=\"Office\"><a:majorFont><a:latin typeface=\"Aptos Display\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/><a:font script=\"Hant\" typeface=\"新細明體\"/></a:majorFont><a:minorFont><a:latin typeface=\"Aptos\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/><a:font script=\"Hant\" typeface=\"新細明體\"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>",
             "word/fontTable.xml": "<w:fonts xmlns:w=\"\(w)\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:font w:name=\"Aptos\"><w:embedRegular r:id=\"rIdSecret\"/></w:font></w:fonts>",
             "word/vbaProject.bin": "PRIVATE MACRO", "docProps/core.xml": "PRIVATE AUTHOR",
-            "word/_rels/document.xml.rels": "PRIVATE EXTERNAL LINK"
+            // Well-formed (import validates it for duplicate implicit
+            // relationships, PsychQuant/macdoc#196) and still carrying a
+            // private external link that must never reach the snapshot.
+            "word/_rels/document.xml.rels": "<Relationships xmlns=\"\(Self.relNS)\"><Relationship Id=\"rIdLink\" Type=\"\(Self.officeRel)/hyperlink\" Target=\"https://PRIVATE-EXTERNAL-LINK.example\" TargetMode=\"External\"/><Relationship Id=\"rIdStyles\" Type=\"\(Self.officeRel)/styles\" Target=\"styles.xml\"/><Relationship Id=\"rIdTheme\" Type=\"\(Self.officeRel)/theme\" Target=\"theme/theme1.xml\"/><Relationship Id=\"rIdFonts\" Type=\"\(Self.officeRel)/fontTable\" Target=\"fontTable.xml\"/></Relationships>"
         ]
         parts.merge(extras) { _, new in new }
         for (path, text) in parts {
@@ -514,9 +520,15 @@ final class DocumentFormattingProfileTests: XCTestCase {
             for output in [try parts(doc), try parts(doc, authoring: true)] {
                 let styles = try ProfileXML.parse(output["word/styles.xml"]!)
                 let normal = try XCTUnwrap(styles.children.first { ProfileXML.value($0, "styleId") == "Normal" })
-                XCTAssertEqual(ProfileXML.walk(normal).first { $0.localName == "rFonts" }.flatMap { ProfileXML.value($0, "ascii") }, "Calibri")
+                let rFonts = try XCTUnwrap(ProfileXML.walk(normal).first { $0.localName == "rFonts" }, explicitMode)
+                // PsychQuant/macdoc#196: every explicit mode sets all four
+                // axes to the caller's value, so all four must survive, not
+                // just ascii.
+                for axis in ["ascii", "hAnsi", "eastAsia", "cs"] {
+                    XCTAssertEqual(ProfileXML.value(rFonts, axis), "Calibri", "\(explicitMode)/\(axis)")
+                }
                 let heading = try XCTUnwrap(styles.children.first { ProfileXML.value($0, "styleId") == "Heading1" })
-                XCTAssertFalse(ProfileXML.walk(heading).contains { $0.localName == "rFonts" })
+                XCTAssertFalse(ProfileXML.walk(heading).contains { $0.localName == "rFonts" }, explicitMode)
             }
         }
     }
@@ -572,17 +584,20 @@ final class DocumentFormattingProfileTests: XCTestCase {
         }
     }
 
+    // PsychQuant/macdoc#196 extends the matrix with explicit BOM rows in both
+    // byte orders and a UTF-8 styles part without docDefaults.
     func testTypedUTF16StylesEditPreservesUnknownMarkupAndMetadata() throws {
-        for (encoding, aliased, hasDefaults) in [(String.Encoding.utf16, false, true), (.utf16BigEndian, true, true), (.utf16LittleEndian, false, false)] {
+        for (encoding, bom, aliased, hasDefaults) in [(String.Encoding.utf16, [UInt8](), false, true), (.utf16BigEndian, [], true, true), (.utf16LittleEndian, [], false, false),
+                                                      (.utf16BigEndian, [0xFE, 0xFF], false, true), (.utf16LittleEndian, [0xFF, 0xFE], true, false), (.utf8, [], false, false)] {
         let url = try directory().appendingPathComponent("utf16.docx")
         try DocxWriter.writeData(WordDocument()).write(to: url)
         var source = try RawPartChannel.readAllParts(from: url)
         var styles = String(decoding: source["word/styles.xml"]!, as: UTF8.self)
-            .replacingOccurrences(of: "UTF-8", with: "UTF-16")
+            .replacingOccurrences(of: "UTF-8", with: encoding == .utf8 ? "UTF-8" : "UTF-16")
             .replacingOccurrences(of: "</w:styles>", with: "<w:style w:type=\"paragraph\" w:styleId=\"Target\"><w:name w:val=\"保留樣式\"/><w:aliases w:val=\"目標別名\"/><x:keep xmlns:x=\"urn:target\" x:value=\"保真\"/></w:style></w:styles>")
         if !hasDefaults { styles = styles.replacingOccurrences(of: "<w:docDefaults>[\\s\\S]*?</w:docDefaults>", with: "", options: .regularExpression) }
         let encoded = aliased ? styles.replacingOccurrences(of: "w:", with: "z:").replacingOccurrences(of: "xmlns:w=", with: "xmlns:z=") : styles
-        source["word/styles.xml"] = encoded.data(using: encoding)!
+        source["word/styles.xml"] = Data(bom) + encoded.data(using: encoding)!
         try writePackage(source, to: url)
         var doc = try DocxReader.read(from: url)
         defer { doc.close() }
@@ -630,6 +645,155 @@ final class DocumentFormattingProfileTests: XCTestCase {
         XCTAssertEqual(relationship.attributeValue(prefix: nil, localName: "Target"), "styles.xml")
     }
 
+    // MARK: - PsychQuant/macdoc#196 OPC relationship boundary
+
+    /// `word/_rels/document.xml.rels` built from (Type suffix, Target) pairs.
+    func relationshipsXML(_ entries: [(type: String, target: String)]) -> String {
+        let body = entries.enumerated().map { index, entry in
+            "<Relationship Id=\"rel\(index)\" Type=\"\(Self.officeRel)/\(entry.type)\" Target=\"\(entry.target)\"/>"
+        }.joined()
+        return "<Relationships xmlns=\"\(Self.relNS)\">\(body)</Relationships>"
+    }
+
+    /// Policy point 1: spec-equivalent Target spellings (dot segments, the
+    /// absolute `/word/` form, percent-encoded unreserved characters) resolve
+    /// against the main part to one part name. The comparison is purely
+    /// lexical: a percent-encoded `/` is data inside a segment (RFC 3986
+    /// §2.2), an empty segment is not collapsed, case is not folded (locked
+    /// current behavior), and the host filesystem is never consulted —
+    /// `NSString.standardizingPath` resolves symlinks and strips `/private`,
+    /// which turns distinct OPC part names into one on macOS.
+    func testRelationshipTargetNormalizationIsPureLexicalOPC() {
+        for target in ["styles.xml", "./styles.xml", "/word/styles.xml", "/word/./styles.xml", "../word/styles.xml",
+                       "styl%65s.xml", "%73tyles.xml", "/word/%73tyles.xml", "%2E/styles.xml"] {
+            XCTAssertEqual(ProfileXML.normalizedRelationshipTarget(target), "/word/styles.xml", target)
+        }
+        for target in ["Styles.xml", "STYLES.XML", "%2Fword%2Fstyles.xml", "..%2Fword%2Fstyles.xml", "/word//styles.xml",
+                       "old-styles.xml", "/private/word/styles.xml"] {
+            XCTAssertNotEqual(ProfileXML.normalizedRelationshipTarget(target), "/word/styles.xml", target)
+        }
+        XCTAssertEqual(ProfileXML.normalizedRelationshipTarget("/tmp/.."), "/")
+        XCTAssertEqual(ProfileXML.normalizedRelationshipTarget("/private/tmp"), "/private/tmp")
+        XCTAssertNotEqual(ProfileXML.normalizedRelationshipTarget("/private/etc/hosts"),
+                          ProfileXML.normalizedRelationshipTarget("/etc/hosts"))
+    }
+
+    /// Policy point 2 on the IMPORT path. ECMA-376 allows at most one
+    /// implicit styles/theme/fontTable relationship from the main part; a
+    /// template naming two distinct parts for one Type is malformed, and
+    /// importOfficial fails closed instead of silently reading whichever
+    /// fixed path it hard-codes. Equivalent spellings of one part are fine.
+    func testImportOfficialRejectsDuplicateImplicitRelationshipsWithDistinctTargets() throws {
+        for (type, first, second) in [("styles", "styles.xml", "other-styles.xml"),
+                                      ("theme", "theme/theme1.xml", "theme/theme2.xml"),
+                                      ("fontTable", "fontTable.xml", "fontTable2.xml"),
+                                      ("styles", "styles.xml", "%2Fword%2Fstyles.xml"),
+                                      ("styles", "/private/tmp", "/tmp")] {
+            let rels = relationshipsXML([(type, first), ("settings", "settings.xml"), (type, second)])
+            XCTAssertThrowsError(try DocumentFormattingProfile.importOfficial(from: template(extras: ["word/_rels/document.xml.rels": rels])), "\(first) vs \(second)") { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .duplicateRelationship(type), "\(first) vs \(second)")
+            }
+        }
+        let equivalent = relationshipsXML([("styles", "styles.xml"), ("styles", "/word/styles.xml"), ("styles", "./styl%65s.xml")])
+        XCTAssertNoThrow(try DocumentFormattingProfile.importOfficial(from: template(extras: ["word/_rels/document.xml.rels": equivalent])))
+        XCTAssertThrowsError(try DocumentFormattingProfile.importOfficial(from: template(extras: ["word/_rels/document.xml.rels": "<Relationships"]))) { error in
+            XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("malformed XML"))
+        }
+    }
+
+    /// Policy point 2 on the APPLY path: the target document's own
+    /// relationships are checked before the profile touches anything, so a
+    /// rejected apply leaves the value exactly as it was.
+    func testApplyRejectsDuplicateImplicitRelationshipsBeforeMutation() throws {
+        let profile = try DocumentFormattingProfile.importOfficial(from: template())
+        for type in ["styles", "theme", "fontTable"] {
+            var doc = WordDocument.emptyAuthoringDocument()
+            try doc.apply(operations: [.carryPart(partPath: "word/_rels/document.xml.rels",
+                                                  xml: relationshipsXML([(type, "first-\(type).xml"), (type, "second-\(type).xml")]))])
+            let before = try parts(doc, authoring: true)
+            XCTAssertThrowsError(try doc.applyFormattingProfile(profile, context: .existingDocument), type) { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .duplicateRelationship(type), type)
+            }
+            XCTAssertNil(doc.formattingState, type)
+            XCTAssertEqual(try parts(doc, authoring: true), before, type)
+        }
+    }
+
+    /// Policy point 2 on the WRITE path: relationships that become
+    /// duplicated after the profile was applied (a later carry) are caught
+    /// before any formatting part is published, and no output appears.
+    func testDuplicateImplicitRelationshipsCarriedAfterApplyFailClosedAtWrite() throws {
+        let profile = try DocumentFormattingProfile.importOfficial(from: template())
+        for type in ["styles", "theme", "fontTable"] {
+            var doc = WordDocument.emptyAuthoringDocument()
+            try doc.applyFormattingProfile(profile, context: .existingDocument)
+            try doc.apply(operations: [
+                .carryPart(partPath: "[Content_Types].xml", xml: "<Types xmlns=\"\(Self.typeNS)\"><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>"),
+                .carryPart(partPath: "word/_rels/document.xml.rels", xml: relationshipsXML([(type, "first-\(type).xml"), (type, "second-\(type).xml")]))
+            ])
+            let output = try directory().appendingPathComponent("out-\(type).docx")
+            XCTAssertThrowsError(try doc.writeAuthoringPackage(to: output), type) { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .duplicateRelationship(type), type)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: output.path), type)
+        }
+    }
+
+    /// The same write-path guard through the plain writer on a genuinely
+    /// round-tripped archive (no profile applied; an ordinary typed style
+    /// edit is what triggers the formatting finalizer).
+    func testDuplicateImplicitRelationshipFailsClosedThroughPlainWriterOnRoundTrippedPackage() throws {
+        let url = try directory().appendingPathComponent("plain.docx")
+        try DocxWriter.writeData(WordDocument()).write(to: url)
+        var original = try RawPartChannel.readAllParts(from: url)
+        let existingRels = String(decoding: original["word/_rels/document.xml.rels"]!, as: UTF8.self)
+        original["word/_rels/document.xml.rels"] = Data(existingRels.replacingOccurrences(
+            of: "</Relationships>",
+            with: "<Relationship Id=\"rIdDuplicateStyles\" Type=\"\(Self.officeRel)/styles\" Target=\"other-styles.xml\"/></Relationships>").utf8)
+        try writePackage(original, to: url)
+        var doc = try DocxReader.read(from: url)
+        defer { doc.close() }
+        try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "Triggers a styles write"))
+        let output = try directory().appendingPathComponent("out.docx")
+        XCTAssertThrowsError(try DocxWriter.write(doc, to: output)) { error in
+            XCTAssertEqual(error as? DocumentFormattingProfileError, .duplicateRelationship("styles"))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+    }
+
+    /// Two registrations of one Type that merely spell the same part
+    /// differently are not the policy-point-2 violation on apply or write.
+    func testDuplicateImplicitRelationshipWithEquivalentTargetsIsAccepted() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.apply(operations: [
+            .carryPart(partPath: "[Content_Types].xml", xml: "<Types xmlns=\"\(Self.typeNS)\"><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>"),
+            .carryPart(partPath: "word/_rels/document.xml.rels", xml: relationshipsXML([("styles", "styles.xml"), ("styles", "/word/styles.xml"), ("styles", "../word/%73tyles.xml")]))
+        ])
+        try doc.applyFormattingProfile(DocumentFormattingProfile.importOfficial(from: template()), context: .existingDocument)
+        XCTAssertNoThrow(try doc.writeAuthoringPackage(to: directory().appendingPathComponent("out.docx")))
+    }
+
+    /// Policy point 1, the other side: spellings that are NOT equivalent
+    /// under the lexical comparison — a case-different name (case is not
+    /// folded; locked current behavior), a percent-encoded `/`, an empty
+    /// segment — name a different part, so the single registration is
+    /// repaired to the canonical Target exactly like `old-styles.xml` above.
+    func testNonEquivalentRelationshipTargetSpellingsAreRepaired() throws {
+        let profile = try DocumentFormattingProfile.importOfficial(from: template())
+        for target in ["Styles.xml", "%2Fword%2Fstyles.xml", "/word//styles.xml"] {
+            var doc = WordDocument.emptyAuthoringDocument()
+            try doc.apply(operations: [
+                .carryPart(partPath: "[Content_Types].xml", xml: "<Types xmlns=\"\(Self.typeNS)\"><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>"),
+                .carryPart(partPath: "word/_rels/document.xml.rels", xml: "<Relationships xmlns=\"\(Self.relNS)\" xmlns:x=\"urn:metadata\"><Relationship Id=\"ownedStyleID\" Type=\"\(Self.officeRel)/styles\" Target=\"\(target)\" x:keep=\"rel-owner\"/></Relationships>")
+            ])
+            try doc.applyFormattingProfile(profile, context: .existingDocument)
+            let rels = try ProfileXML.parse(try parts(doc, authoring: true)["word/_rels/document.xml.rels"]!)
+            let relationship = try XCTUnwrap(rels.children.first { $0.attributeValue(prefix: nil, localName: "Id") == "ownedStyleID" }, target)
+            XCTAssertEqual(relationship.attributeValue(prefix: "x", localName: "keep"), "rel-owner", target)
+            XCTAssertEqual(relationship.attributeValue(prefix: nil, localName: "Target"), "styles.xml", target)
+        }
+    }
+
     func testOfficialWithoutThemePreservesCarriedTargetTheme() throws {
         let imported = try DocumentFormattingProfile.importOfficial(from: template())
         var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(imported)) as? [String: Any])
@@ -646,8 +810,13 @@ final class DocumentFormattingProfileTests: XCTestCase {
         }
     }
 
+    // PsychQuant/macdoc#196 policy point 1 regression matrix: every spelling
+    // here is spec-equivalent to the registered `word/styles.xml`, so an
+    // ordinary style edit must leave both metadata parts byte-identical.
+    // Non-equivalent spellings are covered by
+    // testNonEquivalentRelationshipTargetSpellingsAreRepaired.
     func testUnprofiledStyleEditDoesNotRewriteRegisteredMetadata() throws {
-        for target in ["styles.xml", "/word/styles.xml"] {
+        for target in ["styles.xml", "/word/styles.xml", "./styles.xml", "/word/./styles.xml", "../word/styles.xml", "styl%65s.xml", "%73tyles.xml"] {
         let url = try directory().appendingPathComponent("plain.docx")
         try DocxWriter.writeData(WordDocument()).write(to: url)
         var original = try RawPartChannel.readAllParts(from: url)
@@ -658,7 +827,7 @@ final class DocumentFormattingProfileTests: XCTestCase {
         try doc.updateStyle(id: "Normal", with: StyleUpdate(name: "Ordinary edit"))
         try DocxWriter.write(doc, to: url)
         let saved = try RawPartChannel.readAllParts(from: url)
-        for path in ["[Content_Types].xml", "word/_rels/document.xml.rels"] { XCTAssertEqual(saved[path], original[path], path) }
+        for path in ["[Content_Types].xml", "word/_rels/document.xml.rels"] { XCTAssertEqual(saved[path], original[path], "\(path) (target spelling: \(target))") }
         }
     }
 
@@ -920,5 +1089,257 @@ final class DocumentFormattingProfileTests: XCTestCase {
         XCTAssertEqual(doc.sectionProperties.pageMargins.left, 1800)
         XCTAssertTrue(try parts(doc)["word/styles.xml"]!.contains("w:eastAsia=\"DFKai-SB\""))
         XCTAssertEqual(try Data(contentsOf: url), before)
+    }
+
+    // MARK: - PsychQuant/macdoc#196 section vocabulary
+
+    /// ECMA-376 §17.6.22 `sectPr/type` and §17.6.13 `pgSz/@code` are
+    /// ordinary, spec-valid section formatting (Word writes both, e.g. a
+    /// continuous final section on A4 paper code 9). Without them in the
+    /// allowlist, importOfficial rejects the whole template with
+    /// unsupportedFormatting("sectPr/type") / ("pgSz/code"). They survive
+    /// import, decode and apply into the target's final section, in schema
+    /// order (type before pgSz).
+    func testSectionTypeAndPaperCodeSurviveImportDecodeAndApply() throws {
+        let section = "<x:sectPr><x:type x:val=\"continuous\"/><x:pgSz x:w=\"11906\" x:h=\"16838\" x:code=\"9\"/><x:pgMar x:top=\"1134\" x:right=\"907\" x:bottom=\"1134\" x:left=\"907\" x:header=\"851\" x:footer=\"992\" x:gutter=\"0\"/></x:sectPr>"
+        let imported = try DocumentFormattingProfile.importOfficial(from: template(section: section))
+        let profile = try JSONDecoder().decode(DocumentFormattingProfile.self, from: JSONEncoder().encode(imported))
+        let snapshot = try ProfileXML.parse(try XCTUnwrap(profile.sectionXML))
+        XCTAssertEqual(ProfileXML.child(snapshot, "type").flatMap { ProfileXML.value($0, "val") }, "continuous")
+        XCTAssertEqual(ProfileXML.child(snapshot, "pgSz").flatMap { ProfileXML.value($0, "code") }, "9")
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.applyFormattingProfile(profile, context: .newDocument)
+        for output in [try parts(doc), try parts(doc, authoring: true)] {
+            let body = try XCTUnwrap(ProfileXML.child(ProfileXML.parse(output["word/document.xml"]!), "body"))
+            let final = try XCTUnwrap(body.children.last { $0.localName == "sectPr" })
+            XCTAssertEqual(ProfileXML.child(final, "type").flatMap { ProfileXML.value($0, "val") }, "continuous")
+            XCTAssertEqual(ProfileXML.child(final, "pgSz").flatMap { ProfileXML.value($0, "code") }, "9")
+            XCTAssertLessThan(try XCTUnwrap(final.children.firstIndex { $0.localName == "type" }),
+                              try XCTUnwrap(final.children.firstIndex { $0.localName == "pgSz" }))
+        }
+    }
+
+    // MARK: - PsychQuant/macdoc#196 real templates (MACDOC_TEMPLATE_DIR)
+
+    /// Every real template's own main-part relationships pass the duplicate
+    /// guard, and each implicit registration normalizes to the fixed part
+    /// importOfficial reads: the OPC normalization and fail-closed guard do
+    /// not misfire on Word-authored packages. Fixtures are read in place.
+    func testRealTemplateRelationshipsPassDuplicateGuardAndResolveToFixedParts() throws {
+        for name in [TemplateFixtureGate.baselineTemplateName, TemplateFixtureGate.recFixtureName] {
+            let url = try TemplateFixtureGate.requireTemplate(name)
+            let rels = try ProfileXML.parse(XCTUnwrap(RawPartChannel.readAllParts(from: url)["word/_rels/document.xml.rels"], name))
+            XCTAssertNoThrow(try ProfileXML.rejectDuplicateImplicitRelationships(in: rels), name)
+            for (type, part) in [("styles", "/word/styles.xml"), ("theme", "/word/theme/theme1.xml"), ("fontTable", "/word/fontTable.xml")] {
+                let targets = rels.children.filter { $0.attributeValue(prefix: nil, localName: "Type") == "\(Self.officeRel)/\(type)" }
+                    .compactMap { $0.attributeValue(prefix: nil, localName: "Target") }
+                XCTAssertEqual(targets.map(ProfileXML.normalizedRelationshipTarget), [part], "\(name): \(type)")
+            }
+        }
+    }
+
+    /// importOfficial's outcome on each unmodified real template is pinned.
+    /// Neither is rejected by the relationship guard; both stop at
+    /// pre-existing first-version completeness rules this issue does not
+    /// change: 90_template_ja declares no docDefaults font size and an empty
+    /// pPrDefault (it relies on Word's implicit defaults), and the REC form
+    /// defines numbering (abstractNum/num; styles reference numId 1 and 2),
+    /// which the first profile version explicitly does not support.
+    func testImportOfficialOutcomeOnRealTemplatesIsPinned() throws {
+        for (name, expected) in [(TemplateFixtureGate.baselineTemplateName, DocumentFormattingProfileError.missingRequiredFormatting("docDefaults/rPrDefault/sz and pPrDefault")),
+                                 (TemplateFixtureGate.recFixtureName, .unsupportedNumbering)] {
+            let url = try TemplateFixtureGate.requireTemplate(name)
+            let before = try Data(contentsOf: url)
+            XCTAssertThrowsError(try DocumentFormattingProfile.importOfficial(from: url), name) { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, expected, name)
+            }
+            XCTAssertEqual(try Data(contentsOf: url), before, name)
+        }
+    }
+
+    /// The real baseline template is why `sectPr/type` and `pgSz/@code` are
+    /// allowlisted: its final section is `<w:type w:val="continuous"/>` +
+    /// `<w:pgSz … w:code="9"/>` + two columns. A temp-dir copy that only adds
+    /// the explicit docDefaults the completeness rule asks for imports
+    /// successfully through the real package's relationships, keeps those
+    /// values, and applies + writes end to end. The source is untouched.
+    func testRealBaselineTemplateWithExplicitDefaultsImportsWithSectionTypeAndPaperCode() throws {
+        let url = try TemplateFixtureGate.requireTemplate(TemplateFixtureGate.baselineTemplateName)
+        let before = try Data(contentsOf: url)
+        var archive = try RawPartChannel.readAllParts(from: url)
+        var styles = String(decoding: try XCTUnwrap(archive["word/styles.xml"]), as: UTF8.self)
+        let defaults = try XCTUnwrap(styles.range(of: "<w:docDefaults>")?.lowerBound)..<XCTUnwrap(styles.range(of: "</w:docDefaults>")?.upperBound)
+        let explicit = String(styles[defaults])
+            .replacingOccurrences(of: "<w:lang ", with: "<w:sz w:val=\"21\"/><w:lang ")
+            .replacingOccurrences(of: "<w:pPrDefault/>", with: "<w:pPrDefault><w:pPr/></w:pPrDefault>")
+        XCTAssertNotEqual(explicit, String(styles[defaults]), "fixture docDefaults shape changed; update this derivation")
+        styles.replaceSubrange(defaults, with: explicit)
+        archive["word/styles.xml"] = Data(styles.utf8)
+        let derived = try directory().appendingPathComponent("derived.docx")
+        try writePackage(archive, to: derived)
+        let profile = try DocumentFormattingProfile.importOfficial(from: derived)
+        let section = try ProfileXML.parse(try XCTUnwrap(profile.sectionXML))
+        XCTAssertEqual(ProfileXML.child(section, "type").flatMap { ProfileXML.value($0, "val") }, "continuous")
+        XCTAssertEqual(ProfileXML.child(section, "pgSz").flatMap { ProfileXML.value($0, "code") }, "9")
+        XCTAssertEqual(ProfileXML.child(section, "cols").flatMap { ProfileXML.value($0, "num") }, "2")
+        var doc = WordDocument.emptyAuthoringDocument()
+        try doc.applyFormattingProfile(profile, context: .newDocument)
+        let output = try directory().appendingPathComponent("applied.docx")
+        try doc.writeAuthoringPackage(to: output)
+        XCTAssertTrue(String(decoding: try XCTUnwrap(RawPartChannel.readAllParts(from: output)["word/document.xml"]), as: UTF8.self).contains("w:code=\"9\""))
+        XCTAssertEqual(try Data(contentsOf: url), before)
+    }
+
+    // MARK: - PsychQuant/macdoc#196 encoding matrix
+
+    /// Unsupported-by-profile encodings stay rejected rather than decoded:
+    /// importOfficial accepts UTF-8 (with or without BOM) and fails closed on
+    /// UTF-16 in every byte order (no charset expansion), and — like the
+    /// reader — refuses a DTD even when no entity is referenced, on import
+    /// and on snapshot decode alike.
+    func testImportAndDecodeEncodingAndDTDMatrix() throws {
+        let styles = "<?xml version=\"1.0\" encoding=\"%@\"?><x:styles xmlns:x=\"\(w)\"><x:docDefaults><x:rPrDefault><x:rPr><x:sz x:val=\"24\"/></x:rPr></x:rPrDefault><x:pPrDefault><x:pPr/></x:pPrDefault></x:docDefaults><x:style x:type=\"paragraph\" x:default=\"1\" x:styleId=\"a\"><x:name x:val=\"內文\"/></x:style></x:styles>"
+        let base = try RawPartChannel.readAllParts(from: template())
+        func importing(_ bytes: Data) throws -> DocumentFormattingProfile {
+            var archive = base
+            archive["word/styles.xml"] = bytes
+            let url = try directory().appendingPathComponent("encoded.dotm")
+            try writePackage(archive, to: url)
+            return try DocumentFormattingProfile.importOfficial(from: url)
+        }
+        let utf8 = String(format: styles, "UTF-8")
+        XCTAssertNoThrow(try importing(Data(utf8.utf8)))
+        XCTAssertNoThrow(try importing(Data([0xEF, 0xBB, 0xBF]) + Data(utf8.utf8)))
+        let utf16 = String(format: styles, "UTF-16")
+        for (label, encoding, bom) in [("be-bom", String.Encoding.utf16BigEndian, [UInt8]([0xFE, 0xFF])), ("le-bom", .utf16LittleEndian, [0xFF, 0xFE]),
+                                       ("be", .utf16BigEndian, []), ("le", .utf16LittleEndian, [])] {
+            XCTAssertThrowsError(try importing(Data(bom) + utf16.data(using: encoding)!), label) { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("malformed XML"), label)
+            }
+        }
+        let doctype = "<!DOCTYPE x:styles [<!ENTITY unused \"EXPANDED\">]>"
+        for dtd in [doctype, "<!doctype x:styles>"] {
+            let bytes = Data(utf8.replacingOccurrences(of: "?><x:styles", with: "?>\(dtd)<x:styles").utf8)
+            XCTAssertThrowsError(try importing(bytes), dtd) { error in
+                XCTAssertEqual(error as? DocumentFormattingProfileError, .invalidSnapshot("DTD not allowed"), dtd)
+            }
+        }
+        let profile = try importing(Data(utf8.utf8))
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(profile)) as? [String: Any])
+        json["stylesXML"] = doctype + profile.stylesXML!
+        XCTAssertThrowsError(try JSONDecoder().decode(DocumentFormattingProfile.self, from: JSONSerialization.data(withJSONObject: json)))
+    }
+
+    /// A save that does not edit styles keeps UTF-16 styles bytes exactly,
+    /// in every byte order with and without BOM — including a save that
+    /// edits only body text.
+    func testUneditedSaveKeepsUTF16StylesBytesInEveryByteOrder() throws {
+        let source = try directory().appendingPathComponent("source.docx")
+        try DocxWriter.writeData(WordDocument()).write(to: source)
+        let original = try RawPartChannel.readAllParts(from: source)
+        let styles = String(decoding: original["word/styles.xml"]!, as: UTF8.self).replacingOccurrences(of: "UTF-8", with: "UTF-16")
+        for (label, encoding, bom) in [("be-bom", String.Encoding.utf16BigEndian, [UInt8]([0xFE, 0xFF])), ("le-bom", .utf16LittleEndian, [0xFF, 0xFE]),
+                                       ("be", .utf16BigEndian, []), ("le", .utf16LittleEndian, [])] {
+            var archive = original
+            let bytes = Data(bom) + styles.data(using: encoding)!
+            archive["word/styles.xml"] = bytes
+            let input = try directory().appendingPathComponent("\(label).docx")
+            try writePackage(archive, to: input)
+            for editsBody in [false, true] {
+                var doc = try DocxReader.read(from: input)
+                defer { doc.close() }
+                if editsBody { doc.appendParagraph(Paragraph(text: "body only")) }
+                let output = try directory().appendingPathComponent("saved.docx")
+                try DocxWriter.write(doc, to: output)
+                XCTAssertEqual(try RawPartChannel.readAllParts(from: output)["word/styles.xml"], bytes, "\(label) editsBody=\(editsBody)")
+            }
+        }
+    }
+
+    /// BOM / encoding-declaration disagreement never opens a DTD path: every
+    /// combination is refused with dtdNotAllowed. Without a DTD, a UTF-16 BOM
+    /// wins over a UTF-8 declaration (XML 1.0 Appendix F), a declaration that
+    /// contradicts the UTF-16 byte order fails closed, and bytes in an
+    /// unsupported charset (real Shift_JIS) are refused before any decoder.
+    func testReaderBOMAndDeclarationMismatchCounterexamples() throws {
+        let source = try directory().appendingPathComponent("source.docx")
+        try DocxWriter.write(WordDocument(), to: source)
+        let original = try RawPartChannel.readAllParts(from: source)
+        func styles(_ declaration: String, dtd: Bool) -> String {
+            "<?xml version=\"1.0\" encoding=\"\(declaration)\"?>" + (dtd ? "<!DOCTYPE w:styles [<!ENTITY probe \"EXPANDED\">]>" : "")
+                + "<w:styles xmlns:w=\"\(w)\"><w:style w:type=\"paragraph\" w:styleId=\"X\"><w:name w:val=\"\(dtd ? "&probe;" : "名稱")\"/></w:style></w:styles>"
+        }
+        func read(_ bytes: Data) throws -> String? {
+            var archive = original
+            archive["word/styles.xml"] = bytes
+            let input = try directory().appendingPathComponent("mismatch.docx")
+            try writePackage(archive, to: input)
+            var doc = try DocxReader.read(from: input)
+            defer { doc.close() }
+            return doc.styles.first { $0.id == "X" }?.name
+        }
+        let combinations: [(String, String, String.Encoding, [UInt8])] = [
+            ("utf16le-bom/utf8-decl", "UTF-8", .utf16LittleEndian, [0xFF, 0xFE]),
+            ("utf16be-bom/utf8-decl", "UTF-8", .utf16BigEndian, [0xFE, 0xFF]),
+            ("utf16be-bom/utf16le-decl", "UTF-16LE", .utf16BigEndian, [0xFE, 0xFF]),
+            ("utf16le/utf16be-decl", "UTF-16BE", .utf16LittleEndian, []),
+            ("utf8-bom/utf16-decl", "UTF-16", .utf8, [0xEF, 0xBB, 0xBF]),
+            ("utf8/utf16-decl", "UTF-16", .utf8, []),
+            ("utf8/latin1-decl", "ISO-8859-1", .utf8, [])
+        ]
+        for (label, declaration, encoding, bom) in combinations {
+            XCTAssertThrowsError(try read(Data(bom) + styles(declaration, dtd: true).data(using: encoding)!), label) { error in
+                XCTAssertEqual(error as? XMLHardeningError, .dtdNotAllowed(part: "word/styles.xml"), label)
+            }
+        }
+        for (label, declaration, encoding, bom) in combinations.prefix(2) {
+            XCTAssertEqual(try read(Data(bom) + styles(declaration, dtd: false).data(using: encoding)!), "名稱", label)
+        }
+        for (label, declaration, encoding, bom) in combinations[2...3] {
+            XCTAssertThrowsError(try read(Data(bom) + styles(declaration, dtd: false).data(using: encoding)!), label)
+        }
+        XCTAssertThrowsError(try read(styles("Shift_JIS", dtd: false).data(using: .shiftJIS)!)) { error in
+            guard case WordError.invalidDocx = error else { return XCTFail("unsupported charset reached a decoder: \(error)") }
+        }
+    }
+
+    // MARK: - PsychQuant/macdoc#196 font neutrality (namespace-aware)
+
+    /// Inherit for a new document removes generator fonts on all four
+    /// rFonts axes and keeps every caller-set axis exactly, judged by
+    /// provenance — never by style ID or by the font value:
+    /// - untouched factory styles and a whole-value copy of one (the copy
+    ///   keeps the factory's provenance) end with no font axis at all;
+    /// - a caller that sets only the eastAsia axis keeps exactly that axis;
+    /// - a caller-built style reusing a factory ID and factory font keeps it;
+    /// - docDefaults carries no rFonts.
+    func testInheritFontNeutralityAcrossAllFourAxesByProvenance() throws {
+        let axes = ["ascii", "hAnsi", "eastAsia", "cs", "asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"]
+        var doc = WordDocument.emptyAuthoringDocument()
+        var copy = try XCTUnwrap(doc.styles.first { $0.id == "Heading2" })
+        copy.id = "CopiedHeading"
+        copy.name = "Copied heading"
+        doc.styles.append(copy)
+        let normal = try XCTUnwrap(doc.styles.firstIndex { $0.id == "Normal" })
+        doc.styles[normal].runProperties?.rFonts = RFontsProperties(eastAsia: "標楷體")
+        let heading1 = try XCTUnwrap(doc.styles.firstIndex { $0.id == "Heading1" })
+        doc.styles[heading1] = Style(id: "Heading1", name: "heading 1", type: .paragraph, basedOn: "Normal",
+                                     runProperties: RunProperties(fontName: "Calibri Light"))
+        let factoryIDs = Set(doc.styles.map(\.id)).subtracting(["Normal", "Heading1"])
+        try doc.applyFormattingProfile(.inherit, context: .newDocument)
+        for output in [try parts(doc), try parts(doc, authoring: true)] {
+            let styles = try ProfileXML.parse(output["word/styles.xml"]!)
+            func fonts(_ id: String) -> [String: String] {
+                guard let style = styles.children.first(where: { ProfileXML.value($0, "styleId") == id }),
+                      let rFonts = ProfileXML.walk(style).first(where: { $0.namespaceURI == w && $0.localName == "rFonts" }) else { return [:] }
+                return Dictionary(uniqueKeysWithValues: axes.compactMap { axis in ProfileXML.value(rFonts, axis).map { (axis, $0) } })
+            }
+            for id in factoryIDs.sorted() { XCTAssertEqual(fonts(id), [:], id) }
+            XCTAssertEqual(fonts("CopiedHeading"), [:])
+            XCTAssertEqual(fonts("Normal"), ["eastAsia": "標楷體"])
+            XCTAssertEqual(fonts("Heading1"), ["ascii": "Calibri Light", "hAnsi": "Calibri Light", "eastAsia": "Calibri Light", "cs": "Calibri Light"])
+            let defaults = try XCTUnwrap(ProfileXML.child(styles, "docDefaults"))
+            XCTAssertFalse(ProfileXML.walk(defaults).contains { $0.namespaceURI == w && $0.localName == "rFonts" })
+        }
     }
 }

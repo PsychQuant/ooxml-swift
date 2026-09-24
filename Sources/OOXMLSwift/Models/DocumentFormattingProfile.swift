@@ -10,6 +10,11 @@ public enum DocumentFormattingProfileError: Error, Equatable, LocalizedError {
     case invalidSnapshot(String)
     case unsupportedFormatting(String)
     case unsupportedNumbering
+    /// Two main-part relationships of one implicit Type (styles, theme or
+    /// fontTable) resolve to different parts: a malformed package, refused
+    /// on import, apply and write before anything is written
+    /// (PsychQuant/macdoc#196). The payload is the relationship Type suffix.
+    case duplicateRelationship(String)
 
     public var errorDescription: String? {
         switch self {
@@ -18,6 +23,7 @@ public enum DocumentFormattingProfileError: Error, Equatable, LocalizedError {
         case .invalidSnapshot(let reason): return "格式快照無效：\(reason)"
         case .unsupportedFormatting(let field): return "無法安全保留範本格式：\(field)"
         case .unsupportedNumbering: return "格式快照第一版不支援編號定義或非零 numId"
+        case .duplicateRelationship(let type): return "文件套件內同一 Type（\(type)）出現多筆 Target 不同的 Relationship，屬於不合法輸入"
         }
     }
 }
@@ -77,7 +83,13 @@ public struct DocumentFormattingProfile: Codable, Equatable, Sendable {
             }
             var bytes = Data()
             _ = try archive.extract(entry) { bytes.append($0) }
-            return try ProfileXML.parse(bytes)
+            return try ProfileXML.parseRejectingDTD(bytes)
+        }
+        // PsychQuant/macdoc#196: formatting parts are read from fixed paths,
+        // so a template whose relationships name two different parts for
+        // one implicit Type is refused rather than half-honoured.
+        if let relationships = try read("word/_rels/document.xml.rels") {
+            try ProfileXML.rejectDuplicateImplicitRelationships(in: relationships)
         }
         if let numbering = try read("word/numbering.xml") {
             guard numbering.namespaceURI == ProfileXML.w, numbering.localName == "numbering" else {
@@ -181,7 +193,7 @@ internal enum ProfileXML {
         "tabs": [], "tab": ["val", "leader", "pos"], "numPr": [], "numId": ["val"], "ilvl": ["val"],
         "pBdr": [], "bdr": ["val", "sz", "space", "color", "themeColor", "themeTint", "themeShade", "shadow", "frame"],
         "shd": ["val", "color", "fill", "themeColor", "themeFill", "themeTint", "themeShade", "themeFillTint", "themeFillShade"],
-        "sectPr": [], "pgSz": ["w", "h", "orient"], "pgMar": ["top", "right", "bottom", "left", "header", "footer", "gutter"],
+        "sectPr": [], "type": ["val"], "pgSz": ["w", "h", "code", "orient"], "pgMar": ["top", "right", "bottom", "left", "header", "footer", "gutter"],
         "cols": ["num", "space", "equalWidth", "sep"], "docGrid": ["type", "linePitch", "charSpace"],
         "fonts": [], "font": ["name"], "altName": ["val"], "charset": ["val"], "family": ["val"], "pitch": ["val"],
         "panose1": ["val"], "sig": ["usb0", "usb1", "usb2", "usb3", "csb0", "csb1"],
@@ -197,7 +209,7 @@ internal enum ProfileXML {
         "rPr": Set("rFonts sz szCs b bCs i iCs caps smallCaps strike dstrike outline shadow emboss imprint noProof snapToGrid vanish webHidden color highlight u vertAlign spacing w kern position lang rtl cs eastAsianLayout bdr shd".split(separator: " ").map(String.init)),
         "pPr": Set("keepNext keepLines pageBreakBefore widowControl suppressLineNumbers suppressAutoHyphens contextualSpacing bidi adjustRightInd autoSpaceDE autoSpaceDN kinsoku wordWrap overflowPunct topLinePunct mirrorIndents jc outlineLvl textAlignment textboxTightWrap ind tabs numPr pBdr shd spacing snapToGrid".split(separator: " ").map(String.init)),
         "tabs": ["tab"], "numPr": ["numId", "ilvl"], "pBdr": ["top", "bottom", "left", "right", "between", "bar"],
-        "sectPr": ["pgSz", "pgMar", "cols", "docGrid"], "fonts": ["font"],
+        "sectPr": ["type", "pgSz", "pgMar", "cols", "docGrid"], "fonts": ["font"],
         "font": ["altName", "charset", "family", "pitch", "panose1", "sig"],
         "tblPr": ["tblInd", "tblCellMar"], "tblCellMar": ["top", "bottom", "left", "right"]
     ]
@@ -367,7 +379,66 @@ internal enum ProfileXML {
         result.attributes.insert(XmlAttribute(prefix: "xmlns", localName: ns == w ? "w" : "a", value: ns), at: 0)
         return result
     }
-    static func checked(_ xml: String, root: String) throws -> XmlNode { try clean(parse(xml), root: root, strict: true) }
+    static func checked(_ xml: String, root: String) throws -> XmlNode { try clean(parseRejectingDTD(Data(xml.utf8)), root: root, strict: true) }
+
+    /// Profile payloads and template formatting parts refuse any DTD, like
+    /// DocxReader does for the parts it reads; the snapshot parser would
+    /// otherwise skip it silently (PsychQuant/macdoc#196).
+    static func parseRejectingDTD(_ data: Data) throws -> XmlNode {
+        do { try DocxReader.rejectDTD(data, part: "formatting snapshot") }
+        catch { throw DocumentFormattingProfileError.invalidSnapshot("DTD not allowed") }
+        return try parse(data)
+    }
+
+    static let relationshipsNS = "http://schemas.openxmlformats.org/package/2006/relationships"
+    static let implicitRelationshipTypes = ["styles", "theme", "fontTable"]
+
+    /// PsychQuant/macdoc#196 policy point 1. Resolves a main-part
+    /// relationship Target against `/word/document.xml` (RFC 3986 §5.2) to
+    /// the part name used for equivalence. Purely lexical — the host
+    /// filesystem is never consulted, unlike `NSString.standardizingPath`,
+    /// which resolves symlinks and strips `/private` and so merges distinct
+    /// OPC part names on macOS.
+    /// - Percent-encoded octets are decoded per segment (`styl%65s.xml` is
+    ///   `styles.xml`), except an encoded `/` or `\`: that is data inside a
+    ///   segment (RFC 3986 §2.2), so the segment stays encoded.
+    /// - `.` and `..` segments are removed (§5.2.4); empty segments are kept.
+    /// - Case is not folded. This is the decided, locked behavior: a
+    ///   case-different Target names a different part here.
+    static func normalizedRelationshipTarget(_ target: String) -> String {
+        let path = target.hasPrefix("/") ? target : "/word/" + target
+        var segments: [String] = []
+        for raw in path.split(separator: "/", omittingEmptySubsequences: false).dropFirst() {
+            let segment: String
+            if let decoded = raw.removingPercentEncoding, !decoded.contains("/"), !decoded.contains("\\") {
+                segment = decoded
+            } else {
+                segment = String(raw)
+            }
+            switch segment {
+            case ".": continue
+            case "..": if !segments.isEmpty { segments.removeLast() }
+            default: segments.append(segment)
+            }
+        }
+        return "/" + segments.joined(separator: "/")
+    }
+
+    /// PsychQuant/macdoc#196 policy point 2. ECMA-376 allows at most one
+    /// implicit styles/theme/fontTable relationship from the main document
+    /// part. Registrations of one Type that resolve to different parts make
+    /// the package malformed: fail closed instead of letting a `.first`
+    /// lookup pick one. Equivalent spellings of one part are not a violation.
+    static func rejectDuplicateImplicitRelationships(in rels: XmlNode) throws {
+        for rel in implicitRelationshipTypes {
+            let relationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/" + rel
+            let targets = rels.children.filter {
+                $0.kind == .element && $0.namespaceURI == relationshipsNS && $0.localName == "Relationship"
+                    && $0.attributeValue(prefix: nil, localName: "Type") == relationshipType
+            }.map { normalizedRelationshipTarget($0.attributeValue(prefix: nil, localName: "Target") ?? "") }
+            guard Set(targets).count <= 1 else { throw DocumentFormattingProfileError.duplicateRelationship(rel) }
+        }
+    }
 
     static func validateStyles(_ root: XmlNode) throws {
         let styles = root.children.filter { $0.localName == "style" }

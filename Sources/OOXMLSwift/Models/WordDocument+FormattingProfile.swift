@@ -68,6 +68,11 @@ extension WordDocument {
                                                 context: DocumentFormattingContext) throws {
         try profile.validate()
         if profile.kind == .inherit, context == .existingDocument { return }
+        // PsychQuant/macdoc#196: refuse a malformed target package before
+        // anything is mutated; the writer re-checks the final relationships.
+        if let relationships = try mainRelationshipsData() {
+            try ProfileXML.rejectDuplicateImplicitRelationships(in: ProfileXML.parse(relationships))
+        }
         var next = self
         next.xmlTrees = xmlTrees.mapValues { $0.deepCopy() }
         next.operationReplayBase = nil
@@ -242,6 +247,13 @@ extension WordDocument {
         // untouched replay metadata must remain byte-preserved.
         let carriedAncillary = Set(carriedParts.keys).intersection(modifiedParts).intersection(["word/theme/theme1.xml", "word/fontTable.xml"])
         guard writesStyles || !freshAncillary.isEmpty || !carriedAncillary.isEmpty else { return }
+        // PsychQuant/macdoc#196: validate the package's final relationships
+        // before any formatting part is written; the same tree is updated
+        // below.
+        let relNS = ProfileXML.relationshipsNS
+        let relsURL = directory.appendingPathComponent("word/_rels/document.xml.rels")
+        let rels = try ProfileXML.parse(Data(contentsOf: relsURL))
+        try ProfileXML.rejectDuplicateImplicitRelationships(in: rels)
         func write(_ bytes: Data, _ path: String) throws {
             let url = directory.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -285,10 +297,7 @@ extension WordDocument {
             parts.append(("word/theme/theme1.xml", "application/vnd.openxmlformats-officedocument.theme+xml", "theme", "theme/theme1.xml"))
         }
         let typesURL = directory.appendingPathComponent("[Content_Types].xml")
-        let relsURL = directory.appendingPathComponent("word/_rels/document.xml.rels")
         let types = try ProfileXML.parse(Data(contentsOf: typesURL))
-        let rels = try ProfileXML.parse(Data(contentsOf: relsURL))
-        let relNS = "http://schemas.openxmlformats.org/package/2006/relationships"
         let typeNS = "http://schemas.openxmlformats.org/package/2006/content-types"
         var ids = Set(rels.children.compactMap { $0.attributeValue(prefix: nil, localName: "Id") })
         var typesChanged = false, relsChanged = false
@@ -312,8 +321,7 @@ extension WordDocument {
             let previous = rels.children.first { $0.namespaceURI == relNS && $0.attributeValue(prefix: nil, localName: "Type") == relationshipType }
             if let previous {
                 let target = previous.attributeValue(prefix: nil, localName: "Target") ?? ""
-                let resolvedTarget = NSString(string: target.hasPrefix("/") ? target : "/word/" + target).standardizingPath
-                if resolvedTarget != "/" + part.path {
+                if ProfileXML.normalizedRelationshipTarget(target) != "/" + part.path {
                     setAttribute(previous, "Target", part.target)
                     relsChanged = true
                 }
@@ -333,6 +341,18 @@ extension WordDocument {
         }
         if typesChanged { try write(Data(ProfileXML.string(types).utf8), "[Content_Types].xml") }
         if relsChanged { try write(Data(ProfileXML.string(rels).utf8), "word/_rels/document.xml.rels") }
+    }
+
+    /// The main-part relationships this document would publish, in writer
+    /// precedence order: an explicit carry, a live tree, then the archive.
+    private func mainRelationshipsData() throws -> Data? {
+        let path = "word/_rels/document.xml.rels"
+        if let carried = carriedParts[path] { return carried }
+        if let tree = xmlTrees[path] { return try XmlTreeWriter.serialize(tree) }
+        guard let archive = archiveTempDir else { return nil }
+        let url = archive.appendingPathComponent(path)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try Data(contentsOf: url)
     }
 
     /// Apply only typed changes to the preserved style. A rename must not
