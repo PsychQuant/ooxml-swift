@@ -8,6 +8,18 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`ReverseExtractor.paragraphsOnly(url:slots:)`**（PsychQuant/ooxml-swift#172）。docx → paragraphs-only
+  `.mdocx.swift` 腳本（段落文字 + `pStyle`，其餘 body-level 內容一律省略）的單一函式庫實作，取代 macdoc CLI
+  `word reverse --paragraphs-only` 與 che-word-mcp `export_script(paragraphs_only: true)` 兩份各自維護、
+  依 #227 說明是逐行照抄的實作。回傳腳本文字與被略過的區塊清單，略過原因是新增的封閉 enum
+  `ReverseExtractor.OmittedBodyBlockReason`（`table` / `contentControl` / `bookmarkMarker` /
+  `rawBlockElement(name:)`，逐一對應 `BodyChild` 除 `.paragraph` 外的四個 case，無 `default` 分支）——
+  新增 case 為 minor release，改名或移除既有 case、或改變 `rawBlockElement` 的 payload 形狀為 major
+  release。不讀 oplog sidecar（呼叫端各自決定 sidecar 優先權，行為不變）。輸出對 macdoc 0.11.0 CLI 逐位元組相同
+  （見 `Issue172ParagraphsOnlyReverseTests`，含 `--slot` 情境）。
+
 ### Fixed
 
 - **typed 編輯不再讓未被編輯的段落遺失未建模的 `w:pPr` 子元素**（PsychQuant/ooxml-swift#168，
