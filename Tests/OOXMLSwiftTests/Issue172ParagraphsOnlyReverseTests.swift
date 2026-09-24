@@ -155,6 +155,18 @@ final class Issue172ParagraphsOnlyReverseTests: XCTestCase {
     /// subprocess's blocking pipe read on `DispatchQueue.global()` — the
     /// cooperative pool can saturate and deadlock the same way; a plain
     /// `Thread` has no such pool to exhaust).
+    ///
+    /// Codex round-3 review, MEDIUM finding #1: the drain thread used to
+    /// start BEFORE `process.run()`. If launch itself threw (bad executable
+    /// format, binary removed between the executable check and launch, …),
+    /// nothing ever closed the pipe's write end or joined the thread, so the
+    /// drain closure's blocking read could dangle. `process.run()` now
+    /// happens first — if it throws, the drain thread was never started, so
+    /// there is nothing to clean up. Starting the thread just after a
+    /// successful launch (before `waitUntilExit()`) keeps the same
+    /// deadlock-avoidance property: the child can fill the pipe buffer during
+    /// that short window without blocking, because the reader is already
+    /// running.
     private func runCLIReverse(_ binary: URL, input: URL, output: URL, extraArgs: [String] = []) throws {
         let process = Process()
         process.executableURL = binary
@@ -162,6 +174,8 @@ final class Issue172ParagraphsOnlyReverseTests: XCTestCase {
                              "--paragraphs-only", "--to-mdocx", output.path] + extraArgs
         let stderrPipe = Pipe()
         process.standardError = stderrPipe
+
+        try process.run()
 
         var stderrData = Data()
         let readComplete = DispatchSemaphore(value: 0)
@@ -171,7 +185,6 @@ final class Issue172ParagraphsOnlyReverseTests: XCTestCase {
         }
         drainThread.start()
 
-        try process.run()
         process.waitUntilExit()
         // The child's stderr end-of-file (on process exit) is what lets
         // `readDataToEndOfFile()` return; wait for the drain thread to

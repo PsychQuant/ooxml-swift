@@ -83,9 +83,15 @@ public struct DocxReader {
     ///   dropped on an unrelated typed edit, exactly like before #168 — not
     ///   improved for these two elements, but not corrupted either. Properly
     ///   fixing this means teaching `parseParagraphProperties` to read
-    ///   `<w:pBdr>` / `<w:shd>` into the existing typed fields (removing them
-    ///   from this set at the same time) — tracked as a follow-up, not done
-    ///   here to keep #168's change surface to the reported symptom class.
+    ///   `<w:pBdr>` / `<w:shd>` into the existing typed fields — `pBdr` and
+    ///   `shd` MUST stay in this set once that lands, exactly like `pStyle`
+    ///   and `jc` already do, precisely BECAUSE they would then be typed-
+    ///   extracted (Codex round-3 review, LOW finding #1 — an earlier
+    ///   version of this comment said the opposite: "removing them from this
+    ///   set", which would reintroduce this same duplicate-emission bug the
+    ///   moment the typed parse landed, just without needing a setter call
+    ///   first). Tracked as a follow-up, not done here to keep #168's change
+    ///   surface to the reported symptom class.
     ///
     /// Grow this set in lockstep with `parseParagraphProperties` (or with any
     /// other typed field/setter for a pPr child) whenever a new one gains
