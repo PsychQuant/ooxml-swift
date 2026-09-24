@@ -77,17 +77,23 @@ public struct DocumentFormattingProfile: Codable, Equatable, Sendable {
     /// both the declared and the actually inflated size.
     static let maxFormattingPartBytes = 4 * 1024 * 1024
 
-    /// Read only the fixed formatting parts directly from ZIP, never extract
-    /// archive-controlled paths. Unsupported numbering fails explicitly.
+    /// Reads only the formatting parts the main part's relationships name,
+    /// directly from the ZIP in memory; archive-controlled paths are never
+    /// extracted to disk. Unsupported numbering fails explicitly.
+    ///
+    /// PsychQuant/macdoc#213: styles, theme and fontTable are the parts the
+    /// implicit relationships of `word/_rels/document.xml.rels` resolve to
+    /// (the lexical OPC rules of `normalizedRelationshipTarget`), not fixed
+    /// paths. No styles relationship, or a relationship whose part is
+    /// absent, is refused; theme and fontTable without a relationship are
+    /// absent, even if an orphan part sits at the default path. The main
+    /// part itself is still `word/document.xml`.
     public static func importOfficial(from templateURL: URL) throws -> Self {
         let archive = try Archive(url: templateURL, accessMode: .read)
-        func read(_ path: String, required: Bool = false) throws -> XmlNode? {
+        func read(_ path: String) throws -> XmlNode? {
             let matches = archive.filter { $0.path == path && $0.type == .file }
             guard matches.count <= 1 else { throw DocumentFormattingProfileError.invalidSnapshot("duplicate part") }
-            guard let entry = matches.first else {
-                if required { throw DocumentFormattingProfileError.missingRequiredFormatting(path) }
-                return nil
-            }
+            guard let entry = matches.first else { return nil }
             // The declared size is only a cheap precheck: a deflated entry
             // inflates for as long as its compressed stream lasts, whatever
             // the metadata says, so the cap is enforced on the actual bytes
@@ -104,13 +110,32 @@ public struct DocumentFormattingProfile: Codable, Equatable, Sendable {
             }
             return try ProfileXML.parseRejectingDTD(bytes)
         }
-        // PsychQuant/macdoc#196: formatting parts are read from fixed paths,
-        // so a template whose relationships name two different parts for
-        // one implicit Type is refused rather than half-honoured.
-        if let relationships = try read("word/_rels/document.xml.rels") {
-            try ProfileXML.validateImplicitRelationships(in: relationships)
+        // PsychQuant/macdoc#196: a template whose relationships name two
+        // different parts for one implicit Type is refused rather than
+        // half-honoured.
+        let relationships = try read(ProfileXML.mainRelationshipsPart)
+        if let relationships { try ProfileXML.validateImplicitRelationships(in: relationships) }
+        func related(_ type: String, required: Bool) throws -> XmlNode? {
+            guard let part = try ProfileXML.implicitPart(of: type, in: relationships) else {
+                if required {
+                    throw DocumentFormattingProfileError.missingRequiredFormatting("\(ProfileXML.mainRelationshipsPart) 沒有 \(type) relationship")
+                }
+                return nil
+            }
+            guard let node = try read(part.name) else {
+                throw DocumentFormattingProfileError.missingRequiredFormatting(
+                    "\(type) relationship 的 Target「\(ProfileXML.excerpt(part.target, limit: 200))」指向不存在的 part \(ProfileXML.excerpt(part.name, limit: 200))")
+            }
+            return node
         }
-        if let numbering = try read("word/numbering.xml") {
+        // Numbering is only a refusal check; nothing of it is stored. The
+        // related part and the default path are both checked, so the wider
+        // check can refuse more templates but never changes a snapshot.
+        var numberingParts = [try related("numbering", required: false)]
+        if try ProfileXML.implicitPart(of: "numbering", in: relationships)?.name != ProfileXML.defaultNumberingPart {
+            numberingParts.append(try read(ProfileXML.defaultNumberingPart))
+        }
+        for numbering in numberingParts.compactMap({ $0 }) {
             guard numbering.namespaceURI == ProfileXML.w, numbering.localName == "numbering" else {
                 throw DocumentFormattingProfileError.invalidSnapshot("numbering root")
             }
@@ -118,9 +143,11 @@ public struct DocumentFormattingProfile: Codable, Equatable, Sendable {
                 throw DocumentFormattingProfileError.unsupportedNumbering
             }
         }
-        let rawStyles = try read("word/styles.xml", required: true)!
+        let rawStyles = try related("styles", required: true)!
         let styles = try ProfileXML.clean(rawStyles, root: "styles")
-        let document = try read("word/document.xml", required: true)!
+        guard let document = try read("word/document.xml") else {
+            throw DocumentFormattingProfileError.missingRequiredFormatting("word/document.xml")
+        }
         guard document.namespaceURI == ProfileXML.w, document.localName == "document",
               let body = ProfileXML.child(document, "body"),
               let section = body.children.last(where: { $0.kind == .element }),
@@ -128,8 +155,8 @@ public struct DocumentFormattingProfile: Codable, Equatable, Sendable {
             throw DocumentFormattingProfileError.missingRequiredFormatting("final body sectPr")
         }
         let safeSection = try ProfileXML.clean(section, root: "sectPr", inherited: ProfileXML.namespaceScope(document))
-        let theme = try read("word/theme/theme1.xml").map { try ProfileXML.clean($0, root: "theme") }
-        let fonts = try read("word/fontTable.xml").map { try ProfileXML.clean($0, root: "fonts") }
+        let theme = try related("theme", required: false).map { try ProfileXML.clean($0, root: "theme") }
+        let fonts = try related("fontTable", required: false).map { try ProfileXML.clean($0, root: "fonts") }
         let value = Self(kind: .official, stylesXML: try ProfileXML.string(styles),
                          sectionXML: try ProfileXML.string(safeSection),
                          themeXML: try theme.map(ProfileXML.string), fontsXML: try fonts.map(ProfileXML.string))
@@ -400,6 +427,11 @@ internal enum ProfileXML {
     }
     static func checked(_ xml: String, root: String) throws -> XmlNode { try clean(parseRejectingDTD(Data(xml.utf8)), root: root, strict: true) }
 
+    /// At most `limit` characters of template-controlled text for a message.
+    static func excerpt(_ text: String, limit: Int = 40) -> String {
+        text.count > limit ? String(text.prefix(limit)) + "…" : text
+    }
+
     /// Profile payloads and template formatting parts refuse any DTD, like
     /// DocxReader does for the parts it reads; the snapshot parser would
     /// otherwise skip it silently (PsychQuant/macdoc#196).
@@ -410,7 +442,36 @@ internal enum ProfileXML {
     }
 
     static let relationshipsNS = "http://schemas.openxmlformats.org/package/2006/relationships"
+    static let officeRelationshipsNS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
     static let implicitRelationshipTypes = ["styles", "theme", "fontTable"]
+    static let mainRelationshipsPart = "word/_rels/document.xml.rels"
+    static let defaultNumberingPart = "word/numbering.xml"
+
+    /// PsychQuant/macdoc#213. The ZIP item name (no leading `/`) of the part
+    /// the main part's implicit relationship of `type` names, with the
+    /// Target as written; nil when there is no such relationship (or no
+    /// relationships part). Resolution is the lexical OPC normalization
+    /// used by the duplicate check. Fails closed on an External target, a
+    /// Target that resolves to a path ending in `/`, and registrations of
+    /// one Type that name different parts.
+    static func implicitPart(of type: String, in rels: XmlNode?) throws -> (target: String, name: String)? {
+        guard let rels else { return nil }
+        let registrations = rels.children.filter {
+            $0.kind == .element && $0.namespaceURI == relationshipsNS && $0.localName == "Relationship"
+                && $0.attributeValue(prefix: nil, localName: "Type") == officeRelationshipsNS + type
+        }
+        guard let first = registrations.first else { return nil }
+        if registrations.contains(where: { $0.attributeValue(prefix: nil, localName: "TargetMode") == "External" }) {
+            throw DocumentFormattingProfileError.invalidSnapshot("\(type) relationship 的 TargetMode 為 External，格式 part 必須在套件內")
+        }
+        let targets = registrations.map { $0.attributeValue(prefix: nil, localName: "Target") ?? "" }
+        for target in targets where normalizedRelationshipTarget(target).hasSuffix("/") {
+            throw DocumentFormattingProfileError.invalidRelationshipTarget(target)
+        }
+        let names = Set(targets.map(normalizedRelationshipTarget))
+        guard names.count == 1, let name = names.first else { throw DocumentFormattingProfileError.duplicateRelationship(type) }
+        return (first.attributeValue(prefix: nil, localName: "Target") ?? "", String(name.dropFirst()))
+    }
 
     /// PsychQuant/macdoc#196 policy point 1. Resolves a main-part
     /// relationship Target against `/word/document.xml` (RFC 3986 §5.2) to

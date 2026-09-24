@@ -283,6 +283,17 @@ extension WordDocument {
     /// allowing later typed or reducer style edits to take precedence.
     /// Every byte is staged first; the final relationship set is validated
     /// before any part is written.
+    ///
+    /// Part paths (PsychQuant/macdoc#213): formatting parts are always
+    /// published at `word/styles.xml`, `word/theme/theme1.xml` and
+    /// `word/fontTable.xml`, and every registration of the Type is repointed
+    /// there, so the written package is self-consistent. Unlike
+    /// `DocumentFormattingProfile.importOfficial`, which resolves template
+    /// parts through the relationships, an existing document's formatting
+    /// state comes from `DocxReader`'s fixed paths: when its relationships
+    /// name a non-default part, that part is not what this writer merges
+    /// with, and after the repoint it is left as an orphan. Known
+    /// limitation of the general reader, not changed here.
     internal func writeFormattingParts(to directory: URL) throws {
         let state = formattingState
         let publication = formattingPublication
