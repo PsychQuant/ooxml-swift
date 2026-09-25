@@ -2110,7 +2110,8 @@ public struct DocxReader {
         // v3.13.0+ (#176): 段落框線與網底。過去從未讀進 typed 欄位，任何
         // typed 重新序列化都讓整份文件的框線與網底消失。typed 模型表達不了
         // 來源的全部內容，所以同時保存來源原文；`ParagraphProperties.toXML()`
-        // 在值仍等於投影時原樣輸出原文（見 `sourceBorder`）。
+        // 在讀取後沒被指派過時原樣輸出原文（見 `sourceBorder`）。順序不可對調：
+        // `border`／`shading` 的 `didSet` 會清掉原文，所以先指派投影、再設原文。
         if let pBdr = element.elements(forName: "w:pBdr").first {
             let projection = parseParagraphBorder(from: pBdr)
             props.border = projection
