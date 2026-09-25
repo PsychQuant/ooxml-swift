@@ -86,8 +86,11 @@ final class Issue168PPrRawChildrenTests: XCTestCase {
             of: "<w:p>",
             with: "<w:p xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">")
         let reparsed = try parseParagraph(emitted)
+        // #175：toXML() 現在依 CT_PPr schema 順序輸出（widowControl 6、kinsoku 13、
+        // wordWrap 14、snapToGrid 21），不再照來源 fixture 的非 schema 順序；
+        // 這裡要驗的是「四個都還在」，順序改以 schema 順序為準。
         XCTAssertEqual(reparsed.properties.rawChildren.map(\.name),
-                       ["kinsoku", "snapToGrid", "widowControl", "wordWrap"],
+                       ["widowControl", "kinsoku", "wordWrap", "snapToGrid"],
                        "re-parsing the emitted XML must still find all four unmodeled children")
         for raw in reparsed.properties.rawChildren {
             XCTAssertTrue(raw.xml.contains("w:val=\"0\""),
