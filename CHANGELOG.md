@@ -34,6 +34,16 @@ All notable changes to ooxml-swift will be documented in this file.
   **行為改變**：讀進來的段落 `border`／`shading` 不再永遠是 nil；讀出 typed 值、改一個欄位再寫回
   （read-modify-write）會走 typed 輸出，typed 表達不了的屬性在這條路上不保留。見 `PPrBorderShadingReadTests`。
 
+### Tests
+
+- **線性時間測試改以規模比例斷言，不再對絕對秒數斷言**（PsychQuant/ooxml-swift#174）。
+  `testCharacterReferenceCauseIsNamedForQuotedAndSpacedSpellingsAndStaysLinear` 的 `< 5.0 s` 在機器負載高時
+  （6.8 s、7.86 s、12.96 s）與改動無關地失敗。新增 `XCTAssertScalesLinearly`（`Tests/.../Helpers/ScalingAssertion.swift`）：
+  輸入在 n 與 4n 各建一次（不計時）、交錯各量 5 次，斷言中位數耗時比 < 8（線性約 4、平方約 16），4n 的中位數
+  低於 50 ms 時不判比值（排程雜訊主導）。另外 7 處「其實是在宣稱線性」的秒數上限一併改成比例；一處「不得等到
+  逾時」改成計數（`acquire` 只被呼叫一次）；兩處本質上是牆鐘時間的上限（實體展開炸彈的防 hang、鎖逾時）保留並
+  註明理由、放寬到仍能區分兩種結果的值。以暫時注入的平方時間版本實測過抓得到回歸（比值 16.8 與 14.7）。
+
 ## [3.12.0] - 2026-09-25
 
 ### Added

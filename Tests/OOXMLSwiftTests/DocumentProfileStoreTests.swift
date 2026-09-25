@@ -276,7 +276,12 @@ final class DocumentProfileStoreTests: XCTestCase {
                 XCTAssertEqual(error as? DocumentProfileStoreError, .configLockTimeout(url.path + ".lock"), name)
             }
         }
-        XCTAssertLessThan(Date().timeIntervalSince(started), 3, "injected timeout must be honoured")
+        // #174: an absolute bound on purpose — a lock timeout IS wall-clock
+        // time, so there is nothing to scale or count. Three attempts at the
+        // injected 0.2 s take ~0.6 s; ignoring it would cost 3 × the 5 s
+        // default = 15 s. 10 s separates the two with room for a loaded
+        // machine (the former 3 s bound left only 5× headroom over 0.6 s).
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "injected timeout must be honoured")
         XCTAssertEqual(try Data(contentsOf: url), before)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("profiles").path))
     }
@@ -447,9 +452,9 @@ final class DocumentProfileStoreTests: XCTestCase {
     /// mistaken for contention and waited out.
     func testNonContentionFlockFailureThrowsImmediatelyWithItsErrno() throws {
         let url = try config()
-        let started = DispatchTime.now().uptimeNanoseconds
+        let attempts = Recorder()
         XCTAssertThrowsError(try ConfigFileLock.withLock(forConfigAt: url.path, pollInterval: 0.05, timeout: 3,
-                                                         acquire: { _, _ in errno = ENOLCK; return -1 }) {
+                                                         acquire: { _, _ in attempts.record("acquire"); errno = ENOLCK; return -1 }) {
             XCTFail("body must not run without the lock")
         }) { error in
             let posix = error as NSError
@@ -457,7 +462,9 @@ final class DocumentProfileStoreTests: XCTestCase {
             XCTAssertEqual(posix.code, Int(ENOLCK))
             XCTAssertEqual(posix.userInfo[NSFilePathErrorKey] as? String, url.path + ".lock")
         }
-        XCTAssertLessThan(Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9, 1, "must not wait out the timeout")
+        // #174: a count instead of "< 1 s" — polling until the 3 s timeout at
+        // 0.05 s would call `acquire` ~60 times; failing at once calls it once.
+        XCTAssertEqual(attempts.recorded, ["acquire"], "must not wait out the timeout")
     }
 
     /// A lock file whose mode cannot be set to 0600 is refused with the
