@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.12.0] - 2026-09-25
+
 ### Added
 
 - **`ReverseExtractor.paragraphsOnly(url:slots:)`**（PsychQuant/ooxml-swift#172）。docx → paragraphs-only
