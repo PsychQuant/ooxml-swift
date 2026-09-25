@@ -95,6 +95,21 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     /// rewritten by `mutate` — read back through `DocxReader` first, so the
     /// shape is one the reader accepts.
     private func writerRefusal(mutatingRels mutate: (URL) throws -> Void, file: StaticString = #filePath, line: UInt = #line) throws -> String {
+        let damaged = try damagedDocument(mutatingRels: mutate); defer { damaged.close() }
+        return refusalMessage(of: damaged, file: file, line: line)
+    }
+
+    /// The package `writerRefusal` refuses, built and read back but not yet
+    /// written — so a timing assertion (#174) can measure the refusal alone,
+    /// without the write/zip/read setup that scales with the input too.
+    private final class DamagedDocument {
+        var document: WordDocument
+        let url: URL
+        init(document: WordDocument, url: URL) { self.document = document; self.url = url }
+        func close() { document.close(); try? FileManager.default.removeItem(at: url) }
+    }
+
+    private func damagedDocument(mutatingRels mutate: (URL) throws -> Void) throws -> DamagedDocument {
         var doc = WordDocument()
         doc.body.children.append(.paragraph(Paragraph(runs: [Run(text: "x")])))
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("i139-\(UUID().uuidString).docx")
@@ -102,10 +117,18 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let dir = try ZipHelper.unzip(url); defer { ZipHelper.cleanup(dir) }
         try mutate(dir.appendingPathComponent("word/_rels/document.xml.rels"))
         let damaged = FileManager.default.temporaryDirectory.appendingPathComponent("i139-shape-\(UUID().uuidString).docx")
-        try ZipHelper.zip(dir, to: damaged); defer { try? FileManager.default.removeItem(at: damaged) }
-        var read = try DocxReader.read(from: damaged); defer { read.close() }
+        try ZipHelper.zip(dir, to: damaged)
+        do {
+            return DamagedDocument(document: try DocxReader.read(from: damaged), url: damaged)
+        } catch {
+            try? FileManager.default.removeItem(at: damaged)
+            throw error
+        }
+    }
+
+    private func refusalMessage(of damaged: DamagedDocument, file: StaticString = #filePath, line: UInt = #line) -> String {
         var thrown: Error?
-        XCTAssertThrowsError(try DocxWriter.writeData(read), file: file, line: line) { thrown = $0 }
+        XCTAssertThrowsError(try DocxWriter.writeData(damaged.document), file: file, line: line) { thrown = $0 }
         return (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
     }
 
@@ -169,25 +192,31 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     // MARK: - #138 · comments and CDATA are structure, and scanning is linear
 
     func testPathologicalCommentPayloadsFinishImmediatelyAndClaimNoOrphan() throws {
-        let n = 20_000
-        let payloads: [String: String] = [
-            "unterminated openers":  String(repeating: "<!--", count: n),
-            "balanced wrong order":  String(repeating: "-->", count: n) + String(repeating: "<!--", count: n),
-            "nested then newline":   String(repeating: "<!--", count: n) + "\n-->",
+        let payloads: [(String, (Int) -> String)] = [
+            ("unterminated openers", { n in String(repeating: "<!--", count: n) }),
+            ("balanced wrong order", { n in String(repeating: "-->", count: n) + String(repeating: "<!--", count: n) }),
+            ("nested then newline",  { n in String(repeating: "<!--", count: n) + "\n-->" }),
         ]
-        for (label, payload) in payloads {
-            let data = try package(
+        func packageData(_ payload: String) throws -> Data {
+            try package(
                 document: body(),
                 docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
                 extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#,
                         "word/charts/_rels/chart1.xml.rels": rels(payload)])
-            let started = Date()
-            let report = try PackageInspector.imageConsistencyReport(of: data)
-            XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
-                              "\(label): pre-3.7.0 this took 35–60 s on a 2 KB package")
+        }
+        for (label, payload) in payloads {
+            let report = try PackageInspector.imageConsistencyReport(of: try packageData(payload(20_000)))
             // Whatever the parser makes of the payload, it must not invent a
             // chart-part orphan out of a part it could not read.
             XCTAssertFalse(report.orphanImageRelationshipRefs.contains { $0.part.hasPrefix("word/charts/") }, label)
+            // #174: linear, asserted as a scale ratio rather than "< 1.0 s".
+            // Pre-3.7.0 this took 35–60 s at 20 000 (the 4n size here) on a
+            // 2 KB package — a quadratic regression is seconds, far above the
+            // noise floor, at both sizes.
+            try XCTAssertScalesLinearly(label, baseSize: 5_000,
+                                        prepare: { try packageData(payload($0)) }) {
+                _ = try PackageInspector.imageConsistencyReport(of: $0)
+            }
         }
     }
 
@@ -196,23 +225,33 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // into libxml2's error recovery — `--` inside a comment. 4.6 KB of
         // package, 82 s. These are refused by the linear pre-check instead.
         let n = 800_000
-        let payloads: [String: String] = [
-            "nested openers, newline, one close": String(repeating: "<!--", count: n) + "\n-->",
-            "one comment full of --":             "<!--" + String(repeating: "--", count: n) + "\n-->",
-            "unterminated CDATA":                 "<![CDATA[" + String(repeating: "x", count: n),
+        let payloads: [(String, (Int) -> String)] = [
+            ("nested openers, newline, one close", { n in String(repeating: "<!--", count: n) + "\n-->" }),
+            ("one comment full of --",             { n in "<!--" + String(repeating: "--", count: n) + "\n-->" }),
+            ("unterminated CDATA",                 { n in "<![CDATA[" + String(repeating: "x", count: n) }),
         ]
+        func packageData(_ payload: String) throws -> Data {
+            try package(document: body(referencing: "rId4"),
+                        docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
+                        extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#, "word/charts/_rels/chart1.xml.rels": rels(payload)])
+        }
         for (label, payload) in payloads {
-            let started = Date()
-            XCTAssertNotNil(PackageInspector.linearPrecheckFailure(Data(payload.utf8)), label)
-            XCTAssertLessThan(Date().timeIntervalSince(started), 0.5, label)
-            let data = try package(document: body(referencing: "rId4"),
-                                   docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
-                                   extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#, "word/charts/_rels/chart1.xml.rels": rels(payload)])
-            let t0 = Date()
-            let report = try PackageInspector.imageConsistencyReport(of: data)
-            XCTAssertLessThan(Date().timeIntervalSince(t0), 1.0, label)
+            XCTAssertNotNil(PackageInspector.linearPrecheckFailure(Data(payload(n).utf8)), label)
+            let report = try PackageInspector.imageConsistencyReport(of: try packageData(payload(n)))
             XCTAssertEqual(report.unparsableParts, ["word/charts/_rels/chart1.xml.rels"], label)
             XCTAssertFalse(report.isConsistent, label)
+            // #174: both steps linear, asserted as scale ratios rather than
+            // "< 0.5 s" / "< 1.0 s". libxml2's quadratic recovery took 82 s on
+            // a 4.6 KB package; at 200 000 → 800 000 a regression that reached
+            // it would be minutes, far above the noise floor.
+            try XCTAssertScalesLinearly("\(label) · precheck", baseSize: n / 4,
+                                        prepare: { Data(payload($0).utf8) }) {
+                XCTAssertNotNil(PackageInspector.linearPrecheckFailure($0))
+            }
+            try XCTAssertScalesLinearly("\(label) · report", baseSize: n / 4,
+                                        prepare: { try packageData(payload($0)) }) {
+                _ = try PackageInspector.imageConsistencyReport(of: $0)
+            }
         }
         // …and a benign comment of the same size is parsed normally.
         let benign = "<!-- " + String(repeating: "x", count: n) + " -->"
@@ -353,7 +392,14 @@ final class Issue137to139InspectorParserTests: XCTestCase {
                                                                      "word/_rels/header1.xml.rels": dtd + rels("<!-- &e9; -->")])
         let started = Date()
         let report = try PackageInspector.imageConsistencyReport(of: data)
-        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
+        // #174: an absolute bound on purpose — a hang guard, not a complexity
+        // claim. There is no input size to scale: the bomb is one fixed
+        // document whose expansion (&e9; = 10^10 characters) could never
+        // finish, so any non-expanding path is milliseconds and any expanding
+        // one is minutes or an out-of-memory. 30 s separates the two on any
+        // machine at any load (the former 1.0 s bound did not have to be tight
+        // to discriminate, and tightness only bought load flakiness).
+        XCTAssertLessThan(Date().timeIntervalSince(started), 30)
         XCTAssertEqual(report.unparsableParts, ["word/_rels/header1.xml.rels"])
     }
 
@@ -600,10 +646,16 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // verify R2 security N1: depth × xmlns is quadratic in libxml2; the
         // reader already stops at 1024 (XmlTreeReader.maxElementDepth).
         let limit = PackageInspector.maxElementDepth
-        let deep = "<r>" + String(repeating: "<a xmlns:x=\"urn:x\">", count: limit + 1) + String(repeating: "</a>", count: limit + 1) + "</r>"
-        let started = Date()
-        XCTAssertNotNil(PackageInspector.linearPrecheckFailure(Data(deep.utf8)))
-        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
+        func deep(_ depth: Int) -> Data {
+            Data(("<r>" + String(repeating: "<a xmlns:x=\"urn:x\">", count: depth) + String(repeating: "</a>", count: depth) + "</r>").utf8)
+        }
+        XCTAssertNotNil(PackageInspector.linearPrecheckFailure(deep(limit + 1)))
+        // #174: a scale ratio instead of "< 0.5 s". Handing an over-deep input
+        // to libxml2 is quadratic in depth × xmlns; the precheck must refuse
+        // it in (at most) one linear pass however far past the limit it goes.
+        try XCTAssertScalesLinearly(baseSize: limit + 1, prepare: deep) {
+            XCTAssertNotNil(PackageInspector.linearPrecheckFailure($0))
+        }
         let ok = "<r>" + String(repeating: "<a>", count: limit - 1) + String(repeating: "</a>", count: limit - 1) + "</r>"
         XCTAssertNil(PackageInspector.linearPrecheckFailure(Data(ok.utf8)))
         XCTAssertNil(PackageInspector.linearPrecheckFailure(Data("<r><a/><a/><a/></r>".utf8)), "self-closing tags do not nest")
@@ -615,7 +667,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let selfClosingAt = "<r>" + String(repeating: "<a>", count: limit - 2) + "<b/>" + String(repeating: "</a>", count: limit - 2) + "</r>"
         XCTAssertNil(PackageInspector.linearPrecheckFailure(Data(selfClosingAt.utf8)))
         XCTAssertNoThrow(try XmlTreeReader.parse(Data(selfClosingAt.utf8)), "the reader accepts the same depth")
-        XCTAssertThrowsError(try XmlTreeReader.parse(Data(deep.utf8)))
+        XCTAssertThrowsError(try XmlTreeReader.parse(deep(limit + 1)))
         XCTAssertNoThrow(try XmlTreeReader.parse(Data(ok.utf8)))
     }
 
@@ -1027,11 +1079,17 @@ final class Issue137to139InspectorParserTests: XCTestCase {
 
     func testStructureNotesStayBoundedOnManyDistinctPrefixedElements() throws {
         // verify R5 logic L1: dedup by kind, not by an ever-growing list.
-        let many = (1...20000).map { #"<p:e\#($0) xmlns:p="urn:p"/>"# }.joined()
-        let relsXML = #"<Relationships xmlns="\#(pkgNS)">"# + many + "</Relationships>"
-        let started = Date()
-        let scan = PackageInspector.scanRels(Data(relsXML.utf8), part: "p")
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2.0)
+        func relsData(_ n: Int) -> Data {
+            let many = (1...n).map { #"<p:e\#($0) xmlns:p="urn:p"/>"# }.joined()
+            return Data((#"<Relationships xmlns="\#(pkgNS)">"# + many + "</Relationships>").utf8)
+        }
+        let scan = PackageInspector.scanRels(relsData(20000), part: "p")
+        // #174: a scale ratio instead of "< 2.0 s" — deduplicating against an
+        // ever-growing list is the quadratic this guards against; the count
+        // assertion below is the load-insensitive half of the same claim.
+        try XCTAssertScalesLinearly(baseSize: 5_000, prepare: relsData) {
+            _ = PackageInspector.scanRels($0, part: "p")
+        }
         XCTAssertEqual(scan.structure.count, 1)
         XCTAssertTrue(scan.structure[0].hasPrefix("a namespace-prefixed <p:e1>"), scan.structure[0])
     }
@@ -1127,16 +1185,35 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             try xml.replacingOccurrences(of: "</Relationships>", with: "<Relationship Id = 'rId&#57;' Type='\(theme)' Target='theme/theme1.xml'/></Relationships>").write(to: url, atomically: true, encoding: .utf8)
         })
         XCTAssertTrue(message.contains("rId9: written with a character or entity reference (`rId&#57;` in the file)"), message)
-        // `rId&#49;<n>` decodes to `rId1<n>`: 20 000 distinct ids, every one spelled with a reference.
-        let many = (1...20000).map { #"<Relationship Id="rId&#49;\#($0)" Type="\#(theme)" Target="theme/t\#($0).xml"/>"# }.joined()
-        let started = Date()
-        let big = try writerRefusal(mutatingRels: { url in
-            let xml = try String(contentsOf: url, encoding: .utf8)
-            try xml.replacingOccurrences(of: "</Relationships>", with: many + "</Relationships>").write(to: url, atomically: true, encoding: .utf8)
-        })
-        XCTAssertLessThan(Date().timeIntervalSince(started), 5.0, "one pass, not one pass per id")
+        // `rId&#49;<n>` decodes to `rId1<n>`: n distinct ids, every one spelled with a reference.
+        func damaged(_ n: Int) throws -> DamagedDocument {
+            let many = (1...n).map { #"<Relationship Id="rId&#49;\#($0)" Type="\#(theme)" Target="theme/t\#($0).xml"/>"# }.joined()
+            return try damagedDocument(mutatingRels: { url in
+                let xml = try String(contentsOf: url, encoding: .utf8)
+                try xml.replacingOccurrences(of: "</Relationships>", with: many + "</Relationships>").write(to: url, atomically: true, encoding: .utf8)
+            })
+        }
+        var prepared: [Int: DamagedDocument] = [:]
+        defer { prepared.values.forEach { $0.close() } }
+        func document(_ n: Int) throws -> DamagedDocument {
+            if let cached = prepared[n] { return cached }
+            let built = try damaged(n)
+            prepared[n] = built
+            return built
+        }
+        let big = refusalMessage(of: try document(8000))
         XCTAssertTrue(big.contains("…and"), "the message is capped: \(big.count) characters — \(big)")
         XCTAssertLessThan(big.count, 8000, "the message is capped")
+        // #174: "one pass, not one pass per id" as a scale ratio, not "< 5.0 s"
+        // (that bound failed at 6.8 s and 7.86 s under load with the code
+        // unchanged). Only the refusal is timed — building, zipping and
+        // reading the package scale with n too and would dilute the ratio.
+        // One extra pass over the text per id makes 2 000 → 8 000 about 14×
+        // (measured, see the #174 report); linear is about 4×.
+        try XCTAssertScalesLinearly("one pass, not one pass per id", baseSize: 2_000,
+                                    prepare: document) {
+            _ = refusalMessage(of: $0)
+        }
     }
 
     func testAnyModelDuplicateMeansTheDocumentIsNotCalledWellFormed() throws {
@@ -1167,16 +1244,32 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             ("single quotes", { n in "'rId\(n)'" }),
         ]
         for (label, spell) in spellings {
-            let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-                + (0..<3200).map { "<Relationship Id=\(spell($0)) Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/\($0)\" TargetMode=\"External\"/>" }.joined()
-                + "</Relationships>"
-            let start = Date()
-            let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
-            let elapsed = Date().timeIntervalSince(start)
+            func damaged(_ n: Int) throws -> DamagedDocument {
+                let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                    + (0..<n).map { "<Relationship Id=\(spell($0)) Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/\($0)\" TargetMode=\"External\"/>" }.joined()
+                    + "</Relationships>"
+                return try damagedDocument { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
+            }
+            var prepared: [Int: DamagedDocument] = [:]
+            defer { prepared.values.forEach { $0.close() } }
+            func document(_ n: Int) throws -> DamagedDocument {
+                if let cached = prepared[n] { return cached }
+                let built = try damaged(n)
+                prepared[n] = built
+                return built
+            }
+            let message = refusalMessage(of: try document(3200))
             XCTAssertTrue(message.contains("does not match"), "\(label): \(message.prefix(200))")
                 XCTAssertTrue(message.range(of: #"…and [0-9]+ more"#, options: .regularExpression) != nil, "\(label): capped at 20 causes: \(message.suffix(160))")
                 XCTAssertLessThan(message.count, 6000, "\(label): capped message, got \(message.count) characters")
-            XCTAssertLessThan(elapsed, 10, "\(label): 3200 mismatched ids must be refused in linear time (took \(elapsed) s; the bound is load-insensitive — the R6 snapshot took 60+ s here; linearity itself is the release probe in the CHANGELOG)")
+            // #174: linearity as a scale ratio, not "< 10 s". The R6 snapshot
+            // was 400 → 1.0 s, 800 → 3.9 s, 1600 → 202 s — past quadratic, so
+            // 800 → 3200 would not come close to the ratio bound (it would
+            // barely finish). Only the refusal is timed.
+            try XCTAssertScalesLinearly("\(label): mismatched ids refused in linear time",
+                                        baseSize: 800, prepare: document) {
+                _ = refusalMessage(of: $0)
+            }
         }
     }
 
@@ -1217,19 +1310,31 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // (`data-Id` sits after `Id` here because the text scan's own attribute
         // regex — #142 — takes the first `\bId="` in a tag; that looseness is
         // #142's, and the message must not compound it by naming a reference.)
-        var relationships = (0..<3000).map { i -> String in
-            let zeros = String(repeating: "0", count: i % 50)
-            let spell = "rId9".unicodeScalars.map { "&#\(zeros)\($0.value);" }.joined() + "&#\(String(repeating: "0", count: i / 50 + 1))59;"
-            return "<Relationship Id=\"rIdA\(i)\" data-Id=\"\(spell)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/\(i)\" TargetMode=\"External\"/>"
+        func damaged(_ n: Int) throws -> DamagedDocument {
+            var relationships = (0..<n).map { i -> String in
+                let zeros = String(repeating: "0", count: i % 50)
+                let spell = "rId9".unicodeScalars.map { "&#\(zeros)\($0.value);" }.joined() + "&#\(String(repeating: "0", count: i / 50 + 1))59;"
+                return "<Relationship Id=\"rIdA\(i)\" data-Id=\"\(spell)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/\(i)\" TargetMode=\"External\"/>"
+            }
+            relationships.append("<Relationship Id='rId9' Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/9\" TargetMode=\"External\"/>")
+            let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" + relationships.joined() + "</Relationships>"
+            return try damagedDocument { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
         }
-        relationships.append("<Relationship Id='rId9' Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/9\" TargetMode=\"External\"/>")
-        let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" + relationships.joined() + "</Relationships>"
-        let start = Date()
-        let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
-        let elapsed = Date().timeIntervalSince(start)
+        var prepared: [Int: DamagedDocument] = [:]
+        defer { prepared.values.forEach { $0.close() } }
+        func document(_ n: Int) throws -> DamagedDocument {
+            if let cached = prepared[n] { return cached }
+            let built = try damaged(n)
+            prepared[n] = built
+            return built
+        }
+        let message = refusalMessage(of: try document(3000))
         XCTAssertTrue(message.contains("rId9: single-quoted attribute values"), message.suffix(300).description)
         XCTAssertFalse(message.contains("reference"), "the data-Id spellings are not causes: \(message.suffix(300))")
-        XCTAssertLessThan(elapsed, 10, "took \(elapsed) s (load-insensitive bound; quadratic would be minutes)")
+        // #174: "quadratic would be minutes" as a scale ratio, not "< 10 s".
+        try XCTAssertScalesLinearly("data-Id spellings stay linear", baseSize: 750, prepare: document) {
+            _ = refusalMessage(of: $0)
+        }
         XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: #"<x foo.Id="rId&#57;" data-Id="rId&#57;"/><Relationship r:Id="rId&#57;" Id="rId&#57;"/>"#), ["rId9": ["rId&#57;"]])
     }
 
