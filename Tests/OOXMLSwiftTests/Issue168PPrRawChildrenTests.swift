@@ -353,6 +353,10 @@ final class Issue168PPrRawChildrenTests: XCTestCase {
     // they stay silently dropped on an unrelated typed edit, exactly like
     // before #168 — not improved for these two elements, but not corrupted
     // either.
+    //
+    // 更新（#176）：`pBdr`/`shd` 現在讀進 typed 欄位（未被改動時原樣輸出來源
+    // 原文），不再於無關的 typed 編輯時消失；它們仍留在排除集合裡，這個測試
+    // 繼續守「setter 之後只有一份」。完整回歸見 `PPrBorderShadingReadTests`。
 
     private static let shadedParagraphDocumentXML = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
