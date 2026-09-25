@@ -2137,13 +2137,39 @@ public struct DocxReader {
         // vocabulary above (`<w:kinsoku>`, `<w:snapToGrid>`, `<w:widowControl>`,
         // …) instead of silently dropping them — see `recognizedPPrChildNames`
         // and `ParagraphProperties.rawChildren` for the full rationale.
+        //
+        // v3.13.0+ (#175):
+        // - 只有 qualified name 是 `w:<名稱>` 的才可能是上面 typed 解析吃掉的
+        //   元素（typed 解析以 `w:` 前綴查詢）。`w14:jc` 這種擴充命名空間的同名
+        //   元素過去只比 localName，被當成已建模而丟掉；現在一律 raw 保留。
+        // - 同時記下每個 raw 子元素在來源中的錨點（前一個 schema 已知兄弟），
+        //   供 `ParagraphProperties.toXML()` 把表外元素放回原本的相對位置。
+        // - 以 `.nodeCompactEmptyElement` 序列化，空元素維持 `<w:kinsoku/>`
+        //   這種自閉合寫法（Word 的寫法），不被 Foundation 展開成
+        //   `<w:kinsoku></w:kinsoku>`。
+        var anchors: [RawChildSourceAnchor] = []
+        var lastKnownSibling: String? = nil
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement,
-                  let localName = childElement.localName,
-                  !Self.recognizedPPrChildNames.contains(localName) else {
+                  let localName = childElement.localName else {
                 continue
             }
-            props.rawChildren.append(RawElement(name: localName, xml: childElement.xmlString))
+            let isWordprocessingML = childElement.name == "w:\(localName)"
+            let isSchemaKnown = isWordprocessingML
+                && ParagraphProperties.canonicalPPrPosition[localName] != nil
+            if isWordprocessingML, Self.recognizedPPrChildNames.contains(localName) {
+                if isSchemaKnown { lastKnownSibling = localName }
+                continue
+            }
+            let xml = childElement.xmlString(options: .nodeCompactEmptyElement)
+            props.rawChildren.append(RawElement(name: localName, xml: xml))
+            anchors.append(RawChildSourceAnchor(xml: xml, anchor: lastKnownSibling))
+            if isSchemaKnown { lastKnownSibling = localName }
+        }
+        if props.rawChildren.contains(where: {
+            ParagraphProperties.schemaLocalName(ofRawXML: $0.xml) == nil
+        }) {
+            props.rawChildSourceAnchors = anchors
         }
 
         return props
