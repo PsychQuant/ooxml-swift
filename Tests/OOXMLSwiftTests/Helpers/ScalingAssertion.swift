@@ -3,16 +3,34 @@
 //
 // 過去的寫法是 `XCTAssertLessThan(Date().timeIntervalSince(started), 5.0)`：
 // 機器負載一高（load average 900 時同一個測試量到 7.86 s），就和演算法複雜度
-// 無關地失敗。這裡改成在 n 與 factor·n 兩個規模上交錯各量 `repeats` 次，取
-// 中位數的比值：負載對兩個規模的影響大致相同，比值因此穩定；真正的平方時間
-// 回歸仍會讓比值遠超過門檻。
+// 無關地失敗。這裡改成在 n 與 factor·n 兩個規模上交錯各量 `repeats` 次，
+// 比較兩個規模的最小耗時：負載不改變演算法的成長率，真正的平方時間回歸仍會
+// 讓比值遠超過門檻。
 //
 // 門檻（factor = 4 時為 8）取線性比值 4 與平方比值 16 的幾何中點：兩側各留
 // 兩倍餘裕。factor = 2（線性 2、平方 4、門檻約 3）兩側只有 1.3–1.5 倍餘裕，
 // 所以預設用 4。固定成本（建 package、壓縮、讀檔）會把兩種比值都往 1 拉，
 // 所以輸入在 `prepare` 裡建好、不計時，只量真正宣稱線性的那一段；呼叫端還要
 // 挑「平方項在回歸時必然主導」的規模（每個呼叫點旁寫了依據）。
+//
+// 獨立審查後的修正（revooxmlc HIGH-1）：第一版量牆鐘時間、取中位數，在 16 個
+// 並行 xctest 行程、load 45–58 下 720 次比例斷言誤報 5 次——n 端樣本只有
+// 15–20 ms，排程搶占與執行時間成正比，4n 端吸收的干擾較多，比值被系統性地往
+// 上推。現在：
+// - 量**本執行緒的 CPU 時間**（`CLOCK_THREAD_CPUTIME_ID`）：被搶占、等待
+//   排程的時間不算進去。被量的工作必須在呼叫執行緒上同步完成——目前的呼叫點
+//   （`PackageInspector`、`DocxWriter`、`DocxReader`）都沒有派工到其他執行緒
+//   （grep 過 `DispatchQueue`／`concurrentPerform`／`Task`／`Process`）；若將來
+//   改成並行，thread CPU 時間會少算，這裡要改用 `CLOCK_PROCESS_CPUTIME_ID`。
+//   選 thread 而非 process：兩者在 16 個並行行程、load 73–110 下都是 0 誤報
+//   （各 384 次量測），但 process CPU 時間會把同一行程內其他執行緒也算進去——
+//   實測同一段工作在同行程有 3 條忙碌執行緒時，process CPU 10.46 s、thread CPU
+//   2.51 s（安靜時 2.23 s／2.26 s）。Swift Testing 會在同一行程內並行跑測試。
+// - 統計量用**最小值**：干擾只會讓一次量測變長，不會變短，最小值最接近工作
+//   本身的成本（P/E 核心、快取冷熱都一樣）。
+// - 會被判定的呼叫點把 n 加大到小端約 100 ms，讓計時解析度與殘餘雜訊相對可忽略。
 
+import Darwin
 import Foundation
 import XCTest
 
@@ -21,37 +39,38 @@ enum ScalingProbe {
     struct Measurement {
         let baseSize: Int
         let factor: Int
+        /// 本執行緒 CPU 時間（秒）——判定用。
         let small: [TimeInterval]
         let large: [TimeInterval]
+        /// 同一次量測的牆鐘時間（秒）——只印在摘要裡供診斷，不參與判定。
+        let smallWall: [TimeInterval]
+        let largeWall: [TimeInterval]
 
-        var smallMedian: TimeInterval { Self.median(small) }
-        var largeMedian: TimeInterval { Self.median(large) }
-        var ratio: Double { largeMedian / max(smallMedian, .leastNonzeroMagnitude) }
+        var smallMin: TimeInterval { small.min() ?? 0 }
+        var largeMin: TimeInterval { large.min() ?? 0 }
+        var ratio: Double { largeMin / max(smallMin, .leastNonzeroMagnitude) }
 
         var summary: String {
             let fmt = { (xs: [TimeInterval]) in xs.map { String(format: "%.4f", $0) }.joined(separator: ", ") }
-            return "n=\(baseSize): [\(fmt(small))] s; \(factor)n=\(baseSize * factor): [\(fmt(large))] s; "
-                + String(format: "median ratio %.2f", ratio)
-        }
-
-        static func median(_ xs: [TimeInterval]) -> TimeInterval {
-            let sorted = xs.sorted()
-            guard !sorted.isEmpty else { return 0 }
-            let mid = sorted.count / 2
-            return sorted.count % 2 == 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+            return "thread CPU n=\(baseSize): [\(fmt(small))] s; \(factor)n=\(baseSize * factor): [\(fmt(large))] s; "
+                + String(format: "min ratio %.2f", ratio)
+                + " (wall: [\(fmt(smallWall))] / [\(fmt(largeWall))] s)"
         }
     }
 
-    /// 單調時鐘（不受系統時間調整影響）量一次 `body` 的耗時。
-    static func time(_ body: () throws -> Void) rethrows -> TimeInterval {
-        let start = DispatchTime.now().uptimeNanoseconds
+    /// 量一次 `body`：回傳（本執行緒 CPU 時間, 牆鐘時間），單位秒。
+    static func time(_ body: () throws -> Void) rethrows -> (cpu: TimeInterval, wall: TimeInterval) {
+        let cpu0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+        let wall0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         try body()
-        return Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
+        let cpu1 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+        let wall1 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        return (Double(cpu1 - cpu0) / 1e9, Double(wall1 - wall0) / 1e9)
     }
 
     /// 兩個規模的輸入各 `prepare` 一次（不計時），先在 n 暖身一次（regex 編譯、
     /// lazy static 等一次性成本不算進量測），再以 n、factor·n 交錯量測，每輪
-    /// 交換先後順序抵消負載漂移。
+    /// 交換先後順序。
     static func measure<Input>(baseSize: Int, factor: Int, repeats: Int,
                                prepare: (Int) throws -> Input,
                                teardown: (Input) -> Void,
@@ -61,7 +80,8 @@ enum ScalingProbe {
         let largeInput = try prepare(baseSize * factor)
         defer { teardown(largeInput) }
         try work(smallInput)
-        var small: [TimeInterval] = [], large: [TimeInterval] = []
+        var small: [(cpu: TimeInterval, wall: TimeInterval)] = []
+        var large: [(cpu: TimeInterval, wall: TimeInterval)] = []
         for round in 0..<repeats {
             if round % 2 == 0 {
                 small.append(try time { try work(smallInput) })
@@ -71,16 +91,20 @@ enum ScalingProbe {
                 small.append(try time { try work(smallInput) })
             }
         }
-        return Measurement(baseSize: baseSize, factor: factor, small: small, large: large)
+        return Measurement(baseSize: baseSize, factor: factor,
+                           small: small.map(\.cpu), large: large.map(\.cpu),
+                           smallWall: small.map(\.wall), largeWall: large.map(\.wall))
     }
 }
 
-/// 斷言 `work` 對輸入規模近似線性：factor·n 與 n 的中位數耗時比低於 `maxRatio`。
+/// 斷言 `work` 對輸入規模近似線性：factor·n 與 n 的最小 CPU 耗時比低於 `maxRatio`。
 ///
-/// `noiseFloor`：factor·n 的中位數低於這個秒數時不判比值——那個量級的量測被
-/// 排程雜訊主導（一次 10 ms 的搶占就足以讓 1 ms 對 4 ms 的比值翻倍），也代表
-/// 在這組規模下沒有可觀察的超線性成本。呼叫端選的規模必須讓平方時間的回歸
-/// 遠高於這個下限。
+/// `noiseFloor`：factor·n 的最小 CPU 耗時低於這個秒數時不判比值——代表在這組
+/// 規模下根本沒有可量到的規模相關成本（例如 `PackageInspector` 的病態 payload：
+/// 線性版本主要是固定的解壓成本，4n 也只有十幾毫秒）。這類呼叫點刻意不加大 n：
+/// 它們防的是 35–82 s 級的回歸，回歸時兩端都是秒級、一定會被判定；把 n 加大到
+/// 線性時也超過下限，只會讓回歸變成數小時的 hang。會在正常執行中被判定的呼叫點，
+/// n 端應在 100 ms 量級。
 func XCTAssertScalesLinearly<Input>(
     _ label: @autoclosure () -> String = "",
     baseSize: Int,
@@ -98,11 +122,12 @@ func XCTAssertScalesLinearly<Input>(
         baseSize: baseSize, factor: factor, repeats: repeats,
         prepare: prepare, teardown: teardown, work)
     let prefix = label().isEmpty ? "" : label() + ": "
-    print("[ScalingProbe] \(prefix)\(measurement.summary)")
-    guard measurement.largeMedian >= noiseFloor else { return }
+    let judged = measurement.largeMin >= noiseFloor
+    print("[ScalingProbe] \(prefix)\(measurement.summary)\(judged ? "" : " — below noise floor, not judged")")
+    guard judged else { return }
     XCTAssertLessThan(
         measurement.ratio, maxRatio,
-        "\(prefix)growing the input \(factor)× must grow the time about \(factor)× (linear), "
+        "\(prefix)growing the input \(factor)× must grow the CPU time about \(factor)× (linear), "
             + "not \(factor * factor)× (quadratic) — \(measurement.summary)",
         file: file, line: line)
 }
