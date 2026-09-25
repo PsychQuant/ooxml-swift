@@ -38,8 +38,17 @@ All notable changes to ooxml-swift will be documented in this file.
   不會把「整個遺失」換成「部分遺失」。兩者仍留在 raw 捕捉的排除集合，setter 之後只有
   一份。投影規則：來源有元素就是非 nil；邊的 `w:val` 對不上 enum 則該邊不投影；缺席的 `color` → "auto"、
   `space` → 0、`sz` → 0，`w:shd` 缺 `fill` → "auto"、`val` 對不上 enum → `pattern` 為 nil。
-  **行為改變**：讀進來的段落 `border`／`shading` 不再永遠是 nil；讀出 typed 值、改一個欄位再寫回
-  （read-modify-write）會走 typed 輸出，typed 表達不了的屬性在這條路上不保留。見 `PPrBorderShadingReadTests`。
+  **行為改變**（下游可見）：
+  - 讀進來的段落 `border`／`shading` 不再永遠是 nil；讀出 typed 值、改一個欄位再寫回（read-modify-write）會走
+    typed 輸出，typed 表達不了的屬性在這條路上不保留。
+  - **`ParagraphProperties` 的 `==` 語意改變**：它現在包含 internal 的來源原文（`sourceBorder`／`sourceShading`，
+    以及 #175 的表外子元素錨點），所以讀進來、帶框線／網底（或表外子元素）的段落，與呼叫端自組、typed 值相同的
+    段落不再 `==`；`Paragraph` 的 `==` 因為比較 `properties` 也跟著改變。讀進來的段落彼此比較、以及經
+    輸出再讀回的比較仍然相等。以 `==` 判斷「格式是否相同」的下游程式要注意（本 repo 與 che-word-mcp、
+    md-to-word、html-to-word 已盤點，沒有受影響的用法）。
+  - word-to-md-swift 的 `MetadataCollector`（`hasBorder`／`hasShading`）現在會為讀進來的文件輸出段落框線與網底
+    metadata（以前永遠沒有）；只有投影不了的邊（例如只有 `bar`）的 pBdr 會輸出全空的 `ParagraphBorderMeta`。
+  見 `PPrBorderShadingReadTests`。
 
 ### Tests
 
