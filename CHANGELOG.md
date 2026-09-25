@@ -29,8 +29,10 @@ All notable changes to ooxml-swift will be documented in this file.
   `markTypedDirty("word/document.xml")` 的 typed 編輯都讓**整份文件**的段落框線與網底消失（樣式的 pPr 同理）。
   現在讀進 `ParagraphProperties.border` / `.shading`。typed 模型表達不了來源的全部內容（沒有 theme 色、
   themeTint／Shade、shadow、frame、`bar` 邊，`ParagraphBorderType`／`ShadingPattern` 只涵蓋少數值），所以
-  同時保存來源原文：值仍等於讀取當下的投影時原樣輸出原文（每個屬性都在），被 setter 或直接指派改過才走 typed
-  輸出，設成 nil 就不輸出——不會把「整個遺失」換成「部分遺失」。兩者仍留在 raw 捕捉的排除集合，setter 之後只有
+  同時保存來源原文：讀取後**沒被指派過**就原樣輸出原文（每個屬性都在）；任何指派（setter、直接指派、
+  `merge(with:)` 取用呼叫端自組的值）都清掉原文、改走 typed 輸出——即使新值剛好等於有損的投影（例如來源
+  `pct10` 投影成 `pattern: nil`，`setParagraphShading` 省略 pattern 時仍會輸出 `clear`）；設成 nil 就不輸出。
+  不會把「整個遺失」換成「部分遺失」。兩者仍留在 raw 捕捉的排除集合，setter 之後只有
   一份。投影規則：來源有元素就是非 nil；邊的 `w:val` 對不上 enum 則該邊不投影；缺席的 `color` → "auto"、
   `space` → 0、`sz` → 0，`w:shd` 缺 `fill` → "auto"、`val` 對不上 enum → `pattern` 為 nil。
   **行為改變**：讀進來的段落 `border`／`shading` 不再永遠是 nil；讀出 typed 值、改一個欄位再寫回
