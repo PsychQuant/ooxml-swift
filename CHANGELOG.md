@@ -46,10 +46,13 @@ All notable changes to ooxml-swift will be documented in this file.
 - **線性時間測試改以規模比例斷言，不再對絕對秒數斷言**（PsychQuant/ooxml-swift#174）。
   `testCharacterReferenceCauseIsNamedForQuotedAndSpacedSpellingsAndStaysLinear` 的 `< 5.0 s` 在機器負載高時
   （6.8 s、7.86 s、12.96 s）與改動無關地失敗。新增 `XCTAssertScalesLinearly`（`Tests/.../Helpers/ScalingAssertion.swift`）：
-  輸入在 n 與 4n 各建一次（不計時）、交錯各量 5 次，斷言中位數耗時比 < 8（線性約 4、平方約 16），4n 的中位數
-  低於 50 ms 時不判比值（排程雜訊主導）。另外 7 處「其實是在宣稱線性」的秒數上限一併改成比例；一處「不得等到
-  逾時」改成計數（`acquire` 只被呼叫一次）；兩處本質上是牆鐘時間的上限（實體展開炸彈的防 hang、鎖逾時）保留並
-  註明理由、放寬到仍能區分兩種結果的值。以暫時注入的平方時間版本實測過抓得到回歸（比值 16.8 與 14.7）。
+  輸入在 n 與 4n 各建一次（不計時）、交錯各量 5 次，量**本執行緒的 CPU 時間**（`CLOCK_THREAD_CPUTIME_ID`，
+  被搶占與等待排程的時間不算）、取**最小值**（干擾只會讓時間變長），斷言比值 < 8（線性約 4、平方約 16）；4n 的
+  最小值低於 50 ms 時不判比值。會被判定的呼叫點 n 端約 100 ms。另外 7 處「其實是在宣稱線性」的秒數上限一併改成
+  比例，writer 拒絕之外另補一個讀取端（`DocxReader.read`）的比例斷言；一處「不得等到逾時」改成計數（`acquire`
+  只被呼叫一次）；一處依賴 3 秒時間窗的跨行程鎖測試改成握手（子行程持鎖直到 stdin 關閉）；兩處本質上是牆鐘時間
+  的上限（實體展開炸彈的防 hang、鎖逾時）保留並註明理由、放寬到仍能區分兩種結果的值。以暫時注入的平方時間版本
+  實測過抓得到回歸。（第一版量牆鐘時間、取中位數，獨立審查在並行負載下量到誤報，已改。）
 
 ## [3.12.0] - 2026-09-25
 
