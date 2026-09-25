@@ -235,6 +235,77 @@ final class PPrSchemaOrderTests: XCTestCase {
         XCTAssertEqual(names, ["w:pStyle", "w14:jc", "w:kinsoku"])
     }
 
+    // MARK: - Section B.1: recorded anchors follow the element, not its index
+    // (revooxmlc LOW-1)
+    //
+    // 第一版把讀取時的錨點按 `rawChildren` 索引對齊：呼叫端增刪 `rawChildren`
+    // 之後，表外元素會對到別人的錨點或失去錨點（跳到 pPr 最前面）。現在以元素
+    // 身分（XML 相等、依序取第一筆未用過的紀錄）對應。
+
+    /// 刪掉錨點本身（raw 的 kinsoku）：`w15:collapsed` 仍停在 kinsoku 的位置
+    /// （pStyle 之後、jc 之前），不跳到最前面。
+    func testRemovingTheAnchorRawSiblingDoesNotMoveARecordedUnknown() throws {
+        var props = try parseParagraph("""
+            <w:p \(Self.namespaces)><w:pPr><w:pStyle w:val="A"/><w:kinsoku w:val="0"/>\
+            <w15:collapsed w:val="1"/><w:jc w:val="left"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>
+            """).properties
+        props.rawChildren.removeAll { $0.name == "kinsoku" }
+        XCTAssertEqual(try childNames(ofPPrInner: props.toXML()), ["w:pStyle", "w15:collapsed", "w:jc"])
+    }
+
+    /// 在 `rawChildren` 前面插入一個元素：已記錄的錨點不因索引位移而錯配。
+    func testInsertingARawChildDoesNotShiftRecordedAnchors() throws {
+        var props = try parseParagraph("""
+            <w:p \(Self.namespaces)><w:pPr><w:pStyle w:val="A"/><w:spacing w:after="0"/>\
+            <w15:collapsed w:val="1"/><w:jc w:val="left"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>
+            """).properties
+        props.rawChildren.insert(raw("widowControl"), at: 0)
+        XCTAssertEqual(try childNames(ofPPrInner: props.toXML()),
+                       ["w:pStyle", "w:widowControl", "w:spacing", "w15:collapsed", "w:jc"])
+    }
+
+    /// 兩個 XML 完全相同的表外元素各有自己的錨點：依序對應，不互相頂替。
+    func testIdenticalUnknownsKeepTheirOwnAnchorsInOrder() throws {
+        var props = try parseParagraph("""
+            <w:p \(Self.namespaces)><w:pPr><w:pStyle w:val="A"/><w15:x/>\
+            <w:jc w:val="left"/><w15:x/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>
+            """).properties
+        props.rawChildren.insert(raw("kinsoku"), at: 0)
+        XCTAssertEqual(try childNames(ofPPrInner: props.toXML()),
+                       ["w:pStyle", "w15:x", "w:kinsoku", "w:jc", "w15:x"])
+    }
+
+    /// 讀進來的 `mc:AlternateContent`（包著 `w:snapToGrid`），錨點 kinsoku 被刪掉
+    /// 後仍停在原位；不會跑到 pStyle 前面（經 MCE 處理後 snapToGrid 在 pStyle
+    /// 前面就違反 schema 順序）。
+    func testRecordedAlternateContentKeepsItsSlotWhenItsAnchorIsRemoved() throws {
+        var props = try parseParagraph("""
+            <w:p \(Self.namespaces)><w:pPr><w:pStyle w:val="A"/><w:kinsoku w:val="0"/>\
+            <mc:AlternateContent><mc:Choice Requires="w14"><w:snapToGrid w:val="0"/></mc:Choice>\
+            <mc:Fallback><w:snapToGrid w:val="0"/></mc:Fallback></mc:AlternateContent>\
+            <w:jc w:val="left"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>
+            """).properties
+        props.rawChildren.removeAll { $0.name == "kinsoku" }
+        XCTAssertEqual(try childNames(ofPPrInner: props.toXML()), ["w:pStyle", "mc:AlternateContent", "w:jc"])
+    }
+
+    /// 呼叫端自組、沒有來源錨點的 `mc:AlternateContent`：放在它包著的 schema
+    /// 元素的位置（這裡是 snapToGrid：kinsoku 之後、spacing 之前），經 MCE 處理
+    /// 後仍是合法順序；不是 fallback 的「最前面」。
+    func testCallerBuiltAlternateContentTakesTheSlotOfTheElementItWraps() throws {
+        var props = ParagraphProperties()
+        props.style = "A"
+        props.spacing = Spacing(after: 0)
+        props.rawChildren = [
+            RawElement(name: "AlternateContent", xml: "<mc:AlternateContent><mc:Choice Requires=\"w14\">"
+                + "<w:snapToGrid w:val=\"0\"/></mc:Choice><mc:Fallback><w:snapToGrid w:val=\"0\"/></mc:Fallback>"
+                + "</mc:AlternateContent>"),
+            raw("kinsoku"),
+        ]
+        XCTAssertEqual(try childNames(ofPPrInner: props.toXML()),
+                       ["w:pStyle", "w:kinsoku", "mc:AlternateContent", "w:spacing"])
+    }
+
     // MARK: - Section C: CT_PBdr child order
 
     /// `<w:pBdr>` 的子元素順序是 top, left, bottom, right, between, bar

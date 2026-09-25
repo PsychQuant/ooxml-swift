@@ -414,12 +414,11 @@ public struct ParagraphProperties: Equatable {
     /// 之後另外輸出。
     public var rawChildren: [RawElement] = []
 
-    /// v3.13.0+ (#175)：讀取時記下的 `rawChildren` 來源錨點，與 `rawChildren`
-    /// 逐索引對齊。只在至少有一個表外（非 `w:` schema）raw 子元素時才填，
-    /// 讓只含 schema 已知 raw 子元素的段落與呼叫端自組的段落仍然 `==`。
-    /// 每筆同時記下該 raw 子元素的 XML；輸出時只有 `rawChildren[i].xml`
-    /// 仍等於記錄的 XML 才採用這個錨點（呼叫端改動 `rawChildren` 後，被動到的
-    /// 元素自動改用 fallback 規則，不會套到錯的錨點）。
+    /// v3.13.0+ (#175)：讀取時為每個表外（非 `w:` schema）raw 子元素記下的來源
+    /// 錨點，依來源順序。輸出時以**元素身分**對應——XML 相等、依序取第一筆
+    /// 還沒用過的紀錄——而不是按 `rawChildren` 的索引，所以呼叫端增刪
+    /// `rawChildren` 不會讓別的元素對到錯的錨點（revooxmlc LOW-1）。沒有表外
+    /// 子元素的段落不記，讓它與呼叫端自組的段落仍然 `==`。
     internal var rawChildSourceAnchors: [RawChildSourceAnchor] = []
 
     public init() {}
@@ -1208,15 +1207,18 @@ extension ParagraphProperties {
     /// （qualified name 不是 `w:<表內名稱>`：擴充命名空間、`mc:AlternateContent`、
     /// 或 `w14:jc` 這種與表內同名但不同命名空間的元素）一律依「錨定」規則放：
     ///
-    /// 1. 錨點 = 它之前最近的一個 schema 已知子元素的名稱。讀進來的段落取
-    ///    **來源 `<w:pPr>`** 中的前一個已知兄弟（typed 或 raw 都算，見
-    ///    `rawChildSourceAnchors`）；呼叫端自組、或已被改動的 raw 子元素取
-    ///    **`rawChildren` 陣列**中它之前最近的 schema 已知 raw 子元素。
-    /// 2. 有錨點 → 緊接在錨點的 schema 位置之後（同一位置的已知元素之後、
-    ///    下一個 schema 位置之前）。錨點是「位置」不是元素：錨點元素之後被
-    ///    typed 編輯移除，未知元素仍停在那個位置。
-    /// 3. 沒有錨點 → pPr 最前面（`pStyle` 之前）。
-    /// 4. 同一錨點的多個未知元素維持 `rawChildren` 中的先後。
+    /// 1. 讀進來的表外元素（有 `rawChildSourceAnchors` 紀錄，以元素身分對應）：
+    ///    錨點 = **來源 `<w:pPr>`** 中它之前最近的 schema 已知兄弟（typed 或 raw
+    ///    都算）。緊接在錨點的 schema 位置之後（同一位置的已知元素之後、下一個
+    ///    schema 位置之前）；來源中它之前沒有已知兄弟 → pPr 最前面。錨點是
+    ///    「位置」不是元素：錨點元素之後被 typed 編輯或從 `rawChildren` 移除，
+    ///    表外元素仍停在那個位置；在 `rawChildren` 其他地方增刪元素也不影響它。
+    /// 2. 沒有紀錄（呼叫端自組或新加入）的 `mc:AlternateContent`：放在它的
+    ///    `mc:Choice`／`mc:Fallback` 第一個 `w:` 子元素的 schema 位置——經 MCE
+    ///    處理、換成該分支內容後仍是合法順序（分支只包一種元素時）。
+    /// 3. 其他沒有紀錄的表外元素：錨定在 **`rawChildren` 陣列**中它之前最近的
+    ///    schema 已知 raw 子元素之後；前面沒有 → pPr 最前面。
+    /// 4. 同一位置的多個表外元素維持 `rawChildren` 中的先後。
     ///
     /// `sectPr` 與 `pPrChange` 由 `Paragraph` 的 pPr 包裝層在本函式輸出之後
     /// 輸出（`CT_PPr` 最後兩個位置），錨定在它們之後的未知元素因此會落在
@@ -1244,6 +1246,21 @@ extension ParagraphProperties {
               qualified.hasPrefix("w:") else { return nil }
         let local = String(qualified.dropFirst(2))
         return canonicalPPrPosition[local] == nil ? nil : local
+    }
+
+    /// `mc:AlternateContent`（任何前綴）的 `mc:Choice`／`mc:Fallback` 第一個直接
+    /// 子元素若是 `w:<CT_PPr 元素>`，回傳其中最小的 schema 位置；否則 nil。
+    /// 只看每個分支的第一個子元素：`<w:rPr><w:snapToGrid/></w:rPr>` 這種巢狀
+    /// 內容裡的 `snapToGrid` 是 rPr 的子元素，不能拿來定位。
+    private static func wrappedSchemaPosition(ofAlternateContent xml: String) -> Int? {
+        guard let qualified = rawQualifiedName(xml),
+              qualified.split(separator: ":").last == "AlternateContent" else { return nil }
+        let pattern = #"<[A-Za-z_][\w.-]*:(?:Choice|Fallback)\b[^>]*>\s*<w:([A-Za-z]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let ns = xml as NSString
+        return regex.matches(in: xml, range: NSRange(location: 0, length: ns.length))
+            .compactMap { canonicalPPrPosition[ns.substring(with: $0.range(at: 1))] }
+            .min()
     }
 
     private static func rawQualifiedName(_ xml: String) -> String? {
@@ -1364,20 +1381,27 @@ extension ParagraphProperties {
         // doesn't recognize (kinsoku, snapToGrid, widowControl, …), captured
         // verbatim by `DocxReader.parseParagraphProperties`, each slotted by
         // element name; 表外元素依 `canonicalPPrPosition` 說明的錨定規則放置。
-        var fallbackAnchor: String? = nil
-        for (index, raw) in rawChildren.enumerated() {
+        var unusedRecords = rawChildSourceAnchors
+        var precedingKnown: String? = nil
+        for raw in rawChildren {
             if let local = Self.schemaLocalName(ofRawXML: raw.xml) {
                 slots.append((Self.canonicalPPrPosition[local]!, 0, slots.count, raw.xml))
-                fallbackAnchor = local
+                precedingKnown = local
                 continue
             }
-            let recorded = rawChildSourceAnchors.indices.contains(index)
-                && rawChildSourceAnchors[index].xml == raw.xml
-                ? rawChildSourceAnchors[index] : nil
-            let anchor = recorded.map(\.anchor) ?? fallbackAnchor
-            let position = anchor.flatMap { Self.canonicalPPrPosition[$0] }
-                ?? Self.leadingPosition
-            slots.append((position, 1, slots.count, raw.xml))
+            func position(after anchor: String?) -> Int {
+                anchor.flatMap { Self.canonicalPPrPosition[$0] } ?? Self.leadingPosition
+            }
+            if let record = unusedRecords.firstIndex(where: { $0.xml == raw.xml }) {
+                // 規則 1：讀進來的表外元素，以元素身分對應來源錨點。
+                slots.append((position(after: unusedRecords.remove(at: record).anchor), 1, slots.count, raw.xml))
+            } else if let wrapped = Self.wrappedSchemaPosition(ofAlternateContent: raw.xml) {
+                // 規則 2：沒有紀錄的 mc:AlternateContent 佔它包著的元素的位置。
+                slots.append((wrapped, 0, slots.count, raw.xml))
+            } else {
+                // 規則 3：沒有紀錄的其他表外元素，錨定在陣列中前一個已知元素。
+                slots.append((position(after: precedingKnown), 1, slots.count, raw.xml))
+            }
         }
 
         slots.sort {

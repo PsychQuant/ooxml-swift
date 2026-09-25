@@ -17,8 +17,11 @@ All notable changes to ooxml-swift will be documented in this file.
   核對）；來源本來是 schema 順序、且每個 typed 元素的屬性都在 typed 模型表達範圍內的段落，typed 重新序列化後
   pPr 逐位元組等於來源（typed 元素本身丟屬性的既有缺口——例如 `w:ind` 的 `w:firstLineChars`、`w:spacing` 的
   `w:beforeLines`——不在本次範圍）。表外子元素（`w14:`／`w15:` 擴充、
-  `mc:AlternateContent`、與 schema 同名但不同命名空間的 `w14:jc`）一律緊接在來源中前一個 schema 已知兄弟之後，
-  沒有前一個就放最前；呼叫端自組的 `rawChildren` 則以陣列中的前一個 schema 已知元素為錨。同時：
+  `mc:AlternateContent`、與 schema 同名但不同命名空間的 `w14:jc`）的規則：讀進來的，以元素身分（XML 相等、依序
+  對應）找回讀取時記下的錨點，緊接在來源中前一個 schema 已知兄弟的位置之後、沒有前一個就放最前——呼叫端之後增刪
+  `rawChildren` 或移除錨點元素都不會讓它移動；沒有讀取紀錄的（呼叫端自組或新加入）`mc:AlternateContent` 佔它
+  `mc:Choice`／`mc:Fallback` 第一個 `w:` 子元素的位置（經 MCE 處理後仍是合法順序），其他則以 `rawChildren`
+  陣列中的前一個 schema 已知元素為錨、沒有就放最前。同時：
   `ParagraphBorder.toXML()` 改依 `CT_PBdr` 順序（top, left, bottom, right, between）；reader 的 raw 捕捉改以
   qualified name 判斷是否為已建模元素（`w14:jc` 過去被當成 `w:jc` 丟掉）、並以自閉合寫法保存空元素。
   **輸出位元組會改變**：typed 重新序列化的 pPr 子元素順序不同（語意不變）。`Issue168PPrRawChildrenTests`
