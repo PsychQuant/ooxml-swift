@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.13.0] - 2026-09-25
+
 ### Fixed
 
 - **`w:pPr` 子元素依 ECMA-376 `CT_PPr` schema 順序輸出**（PsychQuant/ooxml-swift#175）。`ParagraphProperties.toXML()`
@@ -40,7 +42,7 @@ All notable changes to ooxml-swift will be documented in this file.
   `space` → 0、`sz` → 0，`w:shd` 缺 `fill` → "auto"、`val` 對不上 enum → `pattern` 為 nil。
   **行為改變**（下游可見）：
   - 讀進來的段落 `border`／`shading` 不再永遠是 nil；讀出 typed 值、改一個欄位再寫回（read-modify-write）會走
-    typed 輸出，typed 表達不了的屬性在這條路上不保留。
+    typed 輸出，typed 表達不了的屬性在這條路上不保留（讓 typed 模型能表達這些屬性，追蹤於 PsychQuant/ooxml-swift#179）。
   - **`ParagraphProperties` 的 `==` 語意改變**：它現在包含 internal 的來源原文（`sourceBorder`／`sourceShading`，
     以及 #175 的表外子元素錨點），所以讀進來、帶框線／網底（或表外子元素）的段落，與呼叫端自組、typed 值相同的
     段落不再 `==`；`Paragraph` 的 `==` 因為比較 `properties` 也跟著改變。讀進來的段落彼此比較、以及經
