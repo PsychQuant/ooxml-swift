@@ -436,14 +436,16 @@ extension ParagraphBorder {
 
         // v0.19.5+ (#56 R5 P0 #3): caller-controlled border colors routed
         // through escapeXMLAttribute (MCP `set_paragraph_border`).
+        // v3.13.0+ (#175): ECMA-376 `CT_PBdr` 順序是 top, left, bottom, right,
+        // between, bar（修正前 bottom 排在 left 之前）。
         if let top = top {
             xml += "<w:top w:val=\"\(top.type.rawValue)\" w:sz=\"\(top.size)\" w:space=\"\(top.space)\" w:color=\"\(escapeXMLAttribute(top.color))\"/>"
         }
-        if let bottom = bottom {
-            xml += "<w:bottom w:val=\"\(bottom.type.rawValue)\" w:sz=\"\(bottom.size)\" w:space=\"\(bottom.space)\" w:color=\"\(escapeXMLAttribute(bottom.color))\"/>"
-        }
         if let left = left {
             xml += "<w:left w:val=\"\(left.type.rawValue)\" w:sz=\"\(left.size)\" w:space=\"\(left.space)\" w:color=\"\(escapeXMLAttribute(left.color))\"/>"
+        }
+        if let bottom = bottom {
+            xml += "<w:bottom w:val=\"\(bottom.type.rawValue)\" w:sz=\"\(bottom.size)\" w:space=\"\(bottom.space)\" w:color=\"\(escapeXMLAttribute(bottom.color))\"/>"
         }
         if let right = right {
             xml += "<w:right w:val=\"\(right.type.rawValue)\" w:sz=\"\(right.size)\" w:space=\"\(right.space)\" w:color=\"\(escapeXMLAttribute(right.color))\"/>"

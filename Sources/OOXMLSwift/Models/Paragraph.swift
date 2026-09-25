@@ -380,27 +380,28 @@ public struct ParagraphProperties: Equatable {
     /// the typed model a (mostly) lossless carrier for those children so the
     /// regeneration no longer drops them.
     ///
-    /// Emitted after every other modeled pPr child and before
-    /// `markRunProperties`'s `<w:rPr>` — the safest slot available without a
-    /// full CT_PPrBase-order rewrite of this writer: schema order for these
-    /// children is real (e.g. `kinsoku`/`snapToGrid` sit before `spacing`/
-    /// `ind` in ECMA-376 §17.3.1.31), but this writer already emits its
-    /// modeled fields in a fixed, non-canonical order that real Word
-    /// documents open fine with (pre-existing, out of scope here). Emitting
-    /// raw children before `<w:rPr>` — never after — avoids the one
-    /// documented risk: some readers treat the paragraph-mark `<w:rPr>` as
-    /// pPr's terminal content-bearing child.
+    /// v3.13.0+ (#175)：`toXML()` 依元素名稱把每個 raw 子元素排進 ECMA-376
+    /// `CT_PPr` 的 schema 位置（`canonicalPPrPosition`），與 typed 欄位交錯，
+    /// 不再一律擠在 typed 欄位之後、`<w:rPr>` 之前。只有 qualified name 是
+    /// `w:<schema 元素名>` 的才算 schema 已知；擴充命名空間（`w14:`、`w15:`…）
+    /// 與 `mc:AlternateContent` 等表外元素走「錨定」規則，見
+    /// `canonicalPPrPosition` 的說明。
     ///
     /// `sectPr`, `pPrChange`, `pBdr`, and `shd` are deliberately excluded from
-    /// raw capture (see `DocxReader.recognizedPPrChildNames`) — all four
-    /// already have dedicated (if incomplete) handling elsewhere: `pBdr`/`shd`
-    /// have typed fields (`border`/`shading`) and public typed setters this
-    /// reader just doesn't populate from XML yet, so raw-capturing them too
-    /// would risk emitting both a stale raw copy and a fresh typed one side
-    /// by side (Codex round-2 review, HIGH finding #1). Naively carrying a
-    /// full `<w:sectPr>` into this slot would misplace a structurally
-    /// significant, position-sensitive element.
+    /// raw capture (see `DocxReader.recognizedPPrChildNames`)：`pBdr`/`shd`
+    /// 有 typed 欄位 `border`/`shading` 與 public setter，raw 再捕捉一次會在
+    /// 呼叫 setter 後輸出兩份（Codex round-2 review, HIGH finding #1）；
+    /// `sectPr`/`pPrChange` 由 `Paragraph` 的 pPr 包裝層在 `toXML()` 的輸出
+    /// 之後另外輸出。
     public var rawChildren: [RawElement] = []
+
+    /// v3.13.0+ (#175)：讀取時記下的 `rawChildren` 來源錨點，與 `rawChildren`
+    /// 逐索引對齊。只在至少有一個表外（非 `w:` schema）raw 子元素時才填，
+    /// 讓只含 schema 已知 raw 子元素的段落與呼叫端自組的段落仍然 `==`。
+    /// 每筆同時記下該 raw 子元素的 XML；輸出時只有 `rawChildren[i].xml`
+    /// 仍等於記錄的 XML 才採用這個錨點（呼叫端改動 `rawChildren` 後，被動到的
+    /// 元素自動改用 fallback 規則，不會套到錯的錨點）。
+    internal var rawChildSourceAnchors: [RawChildSourceAnchor] = []
 
     public init() {}
 
@@ -418,8 +419,19 @@ public struct ParagraphProperties: Equatable {
         if let border = other.border { self.border = border }
         if let shading = other.shading { self.shading = shading }
         if let markRunProperties = other.markRunProperties { self.markRunProperties = markRunProperties }
-        if !other.rawChildren.isEmpty { self.rawChildren = other.rawChildren }
+        if !other.rawChildren.isEmpty {
+            self.rawChildren = other.rawChildren
+            self.rawChildSourceAnchors = other.rawChildSourceAnchors
+        }
     }
+}
+
+/// v3.13.0+ (#175)：一個 `rawChildren` 元素在來源 `<w:pPr>` 中的錨點——
+/// 它之前最近的一個 schema 已知子元素（`w:<CT_PPr 元素名>`）的 local name；
+/// `nil` 代表來源中它之前沒有任何 schema 已知子元素。
+internal struct RawChildSourceAnchor: Equatable {
+    let xml: String
+    let anchor: String?
 }
 
 // MARK: - Supporting Types
@@ -1148,26 +1160,107 @@ extension Paragraph {
 }
 
 extension ParagraphProperties {
+    /// v3.13.0+ (#175)：ECMA-376 `CT_PPr` 子元素的 schema 位置，key 是 `w:`
+    /// 命名空間下的 local name。順序抄自 ISO/IEC 29500-4:2016 transitional
+    /// `wml.xsd` 的 `CT_PPrBase` sequence（33 個）加上 `CT_PPr` extension 的
+    /// `rPr`, `sectPr`, `pPrChange`，並與 python-docx `CT_PPr._tag_seq` 核對過。
+    /// `PPrSchemaOrderTests.schemaSequence` 以字面常數獨立寫了一份，表抄錯會被
+    /// 測試抓到。
+    ///
+    /// `toXML()` 以這張表排序 typed 欄位與 `rawChildren`。表外的 raw 子元素
+    /// （qualified name 不是 `w:<表內名稱>`：擴充命名空間、`mc:AlternateContent`、
+    /// 或 `w14:jc` 這種與表內同名但不同命名空間的元素）一律依「錨定」規則放：
+    ///
+    /// 1. 錨點 = 它之前最近的一個 schema 已知子元素的名稱。讀進來的段落取
+    ///    **來源 `<w:pPr>`** 中的前一個已知兄弟（typed 或 raw 都算，見
+    ///    `rawChildSourceAnchors`）；呼叫端自組、或已被改動的 raw 子元素取
+    ///    **`rawChildren` 陣列**中它之前最近的 schema 已知 raw 子元素。
+    /// 2. 有錨點 → 緊接在錨點的 schema 位置之後（同一位置的已知元素之後、
+    ///    下一個 schema 位置之前）。錨點是「位置」不是元素：錨點元素之後被
+    ///    typed 編輯移除，未知元素仍停在那個位置。
+    /// 3. 沒有錨點 → pPr 最前面（`pStyle` 之前）。
+    /// 4. 同一錨點的多個未知元素維持 `rawChildren` 中的先後。
+    ///
+    /// `sectPr` 與 `pPrChange` 由 `Paragraph` 的 pPr 包裝層在本函式輸出之後
+    /// 輸出（`CT_PPr` 最後兩個位置），錨定在它們之後的未知元素因此會落在
+    /// `rPr` 之後、`sectPr` 之前。
+    internal static let canonicalPPrPosition: [String: Int] = [
+        "pStyle": 1, "keepNext": 2, "keepLines": 3, "pageBreakBefore": 4,
+        "framePr": 5, "widowControl": 6, "numPr": 7, "suppressLineNumbers": 8,
+        "pBdr": 9, "shd": 10, "tabs": 11, "suppressAutoHyphens": 12,
+        "kinsoku": 13, "wordWrap": 14, "overflowPunct": 15, "topLinePunct": 16,
+        "autoSpaceDE": 17, "autoSpaceDN": 18, "bidi": 19, "adjustRightInd": 20,
+        "snapToGrid": 21, "spacing": 22, "ind": 23, "contextualSpacing": 24,
+        "mirrorIndents": 25, "suppressOverlap": 26, "jc": 27, "textDirection": 28,
+        "textAlignment": 29, "textboxTightWrap": 30, "outlineLvl": 31, "divId": 32,
+        "cnfStyle": 33, "rPr": 34, "sectPr": 35, "pPrChange": 36,
+    ]
+
+    /// 錨點不存在（規則 3）時的位置：早於所有 schema 位置。
+    private static let leadingPosition = 0
+
+    /// raw XML 開頭元素的 schema local name；qualified name 不是 `w:<表內名稱>`
+    /// 時回傳 nil（= 表外元素）。與 `DocxReader` 一致以 `w:` 前綴認定
+    /// WordprocessingML 命名空間——reader 的 typed 解析本來就只認 `w:` 前綴。
+    internal static func schemaLocalName(ofRawXML xml: String) -> String? {
+        guard let qualified = rawQualifiedName(xml),
+              qualified.hasPrefix("w:") else { return nil }
+        let local = String(qualified.dropFirst(2))
+        return canonicalPPrPosition[local] == nil ? nil : local
+    }
+
+    private static func rawQualifiedName(_ xml: String) -> String? {
+        let trimmed = xml.drop { $0.isWhitespace }
+        guard trimmed.first == "<" else { return nil }
+        let name = trimmed.dropFirst().prefix { !$0.isWhitespace && $0 != "/" && $0 != ">" }
+        guard let first = name.first, first != "!", first != "?" else { return nil }
+        return String(name)
+    }
+
     /// 轉換為 OOXML XML 字串
+    ///
+    /// v3.13.0+ (#175)：所有子元素依 `canonicalPPrPosition` 的 `CT_PPr` schema
+    /// 順序輸出——typed 欄位與 `rawChildren` 放進同一條排序管線，表外 raw 子元素
+    /// 依錨定規則放置。修正前的固定順序是 pStyle → numPr → jc → spacing → ind →
+    /// keepNext → keepLines → pageBreakBefore → pBdr → shd → rawChildren → rPr。
     public func toXML() -> String {
-        var parts: [String] = []
+        // (position, tier, sequence, xml)：tier 0 = schema 已知元素，tier 1 =
+        // 錨定在該位置之後的表外元素；sequence 保持同位置內的加入順序。
+        var slots: [(position: Int, tier: Int, sequence: Int, xml: String)] = []
+        func add(_ name: String, _ xml: String) {
+            slots.append((Self.canonicalPPrPosition[name]!, 0, slots.count, xml))
+        }
 
         // 樣式
         if let style = style {
-            parts.append("<w:pStyle w:val=\"\(escapeXMLAttribute(style))\"/>")
+            add("pStyle", "<w:pStyle w:val=\"\(escapeXMLAttribute(style))\"/>")
+        }
+
+        // 分頁控制
+        if keepNext {
+            add("keepNext", "<w:keepNext/>")
+        }
+        if keepLines {
+            add("keepLines", "<w:keepLines/>")
+        }
+        if pageBreakBefore {
+            add("pageBreakBefore", "<w:pageBreakBefore/>")
         }
 
         // 編號
         if let numbering = numbering {
-            parts.append("<w:numPr>")
-            parts.append("<w:ilvl w:val=\"\(numbering.level)\"/>")
-            parts.append("<w:numId w:val=\"\(numbering.numId)\"/>")
-            parts.append("</w:numPr>")
+            add("numPr", "<w:numPr><w:ilvl w:val=\"\(numbering.level)\"/>"
+                + "<w:numId w:val=\"\(numbering.numId)\"/></w:numPr>")
         }
 
-        // 對齊
-        if let alignment = alignment {
-            parts.append("<w:jc w:val=\"\(alignment.rawValue)\"/>")
+        // 段落邊框
+        if let border = border {
+            add("pBdr", border.toXML())
+        }
+
+        // 段落底色
+        if let shading = shading {
+            add("shd", shading.toXML())
         }
 
         // 間距
@@ -1186,7 +1279,7 @@ extension ParagraphProperties {
                 attrs.append("w:lineRule=\"\(lineRule.rawValue)\"")
             }
             if !attrs.isEmpty {
-                parts.append("<w:spacing \(attrs.joined(separator: " "))/>" )
+                add("spacing", "<w:spacing \(attrs.joined(separator: " "))/>")
             }
         }
 
@@ -1206,45 +1299,17 @@ extension ParagraphProperties {
                 attrs.append("w:hanging=\"\(hanging)\"")
             }
             if !attrs.isEmpty {
-                parts.append("<w:ind \(attrs.joined(separator: " "))/>" )
+                add("ind", "<w:ind \(attrs.joined(separator: " "))/>")
             }
         }
 
-        // 分頁控制
-        if keepNext {
-            parts.append("<w:keepNext/>")
-        }
-        if keepLines {
-            parts.append("<w:keepLines/>")
-        }
-        if pageBreakBefore {
-            parts.append("<w:pageBreakBefore/>")
+        // 對齊
+        if let alignment = alignment {
+            add("jc", "<w:jc w:val=\"\(alignment.rawValue)\"/>")
         }
 
-        // 段落邊框
-        if let border = border {
-            parts.append(border.toXML())
-        }
-
-        // 段落底色
-        if let shading = shading {
-            parts.append(shading.toXML())
-        }
-
-        // v3.12.0+ (#168): pPr children the typed model doesn't recognize
-        // (kinsoku, snapToGrid, widowControl, …), captured verbatim by
-        // `DocxReader.parseParagraphProperties`. Emitted after every modeled
-        // field above and before the paragraph-mark <w:rPr> below — see the
-        // `rawChildren` doc comment for why this slot and not another.
-        for raw in rawChildren {
-            parts.append(raw.xml)
-        }
-
-        // v0.20.2+ (#65 sub-stack D): paragraph-mark <w:rPr> emitted after
-        // typed pPr children (pStyle, jc, spacing, ind, numPr, keep*, border,
-        // shading) and before closing </w:pPr>. ECMA-376 §17.3.1.27 places
-        // <w:rPr> near the end of CT_PPrBase children; Word tolerates this
-        // position. RunProperties.toXML() returns the inner content (rStyle,
+        // v0.20.2+ (#65 sub-stack D): paragraph-mark <w:rPr> (CT_PPr 的 rPr
+        // 位置). RunProperties.toXML() returns the inner content (rStyle,
         // b, rFonts, lang, rawChildren, etc.) without the outer wrapper, so
         // we wrap with <w:rPr>...</w:rPr> here. Skip emission when nil OR
         // when the inner content is empty — matches the "no synthetic empty
@@ -1252,10 +1317,33 @@ extension ParagraphProperties {
         if let markProps = markRunProperties {
             let inner = markProps.toXML()
             if !inner.isEmpty {
-                parts.append("<w:rPr>\(inner)</w:rPr>")
+                add("rPr", "<w:rPr>\(inner)</w:rPr>")
             }
         }
 
-        return parts.joined()
+        // v3.12.0+ (#168) / v3.13.0+ (#175): pPr children the typed model
+        // doesn't recognize (kinsoku, snapToGrid, widowControl, …), captured
+        // verbatim by `DocxReader.parseParagraphProperties`, each slotted by
+        // element name; 表外元素依 `canonicalPPrPosition` 說明的錨定規則放置。
+        var fallbackAnchor: String? = nil
+        for (index, raw) in rawChildren.enumerated() {
+            if let local = Self.schemaLocalName(ofRawXML: raw.xml) {
+                slots.append((Self.canonicalPPrPosition[local]!, 0, slots.count, raw.xml))
+                fallbackAnchor = local
+                continue
+            }
+            let recorded = rawChildSourceAnchors.indices.contains(index)
+                && rawChildSourceAnchors[index].xml == raw.xml
+                ? rawChildSourceAnchors[index] : nil
+            let anchor = recorded.map(\.anchor) ?? fallbackAnchor
+            let position = anchor.flatMap { Self.canonicalPPrPosition[$0] }
+                ?? Self.leadingPosition
+            slots.append((position, 1, slots.count, raw.xml))
+        }
+
+        slots.sort {
+            ($0.position, $0.tier, $0.sequence) < ($1.position, $1.tier, $1.sequence)
+        }
+        return slots.map(\.xml).joined()
     }
 }

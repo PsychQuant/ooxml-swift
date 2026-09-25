@@ -8,6 +8,20 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`w:pPr` 子元素依 ECMA-376 `CT_PPr` schema 順序輸出**（PsychQuant/ooxml-swift#175）。`ParagraphProperties.toXML()`
+  過去以固定、非 schema 的順序輸出（pStyle → numPr → jc → spacing → ind → keepNext → … → rawChildren → rPr），
+  `jc` 寫在 `spacing`／`ind` 之前、#168 的 `rawChildren` 一律擠在 typed 欄位之後。現在 typed 欄位與 `rawChildren`
+  依元素名稱排進同一張 `CT_PPr` 位置表（ISO/IEC 29500-4 transitional `wml.xsd`，與 python-docx `CT_PPr._tag_seq`
+  核對）；來源本來是 schema 順序的段落，typed 重新序列化後 pPr 逐位元組等於來源。表外子元素（`w14:`／`w15:` 擴充、
+  `mc:AlternateContent`、與 schema 同名但不同命名空間的 `w14:jc`）一律緊接在來源中前一個 schema 已知兄弟之後，
+  沒有前一個就放最前；呼叫端自組的 `rawChildren` 則以陣列中的前一個 schema 已知元素為錨。同時：
+  `ParagraphBorder.toXML()` 改依 `CT_PBdr` 順序（top, left, bottom, right, between）；reader 的 raw 捕捉改以
+  qualified name 判斷是否為已建模元素（`w14:jc` 過去被當成 `w:jc` 丟掉）、並以自閉合寫法保存空元素。
+  **輸出位元組會改變**：typed 重新序列化的 pPr 子元素順序不同（語意不變）。`Issue168PPrRawChildrenTests`
+  一處期望值隨之由來源順序改為 schema 順序。見 `PPrSchemaOrderTests`。
+
 ## [3.12.0] - 2026-09-25
 
 ### Added
