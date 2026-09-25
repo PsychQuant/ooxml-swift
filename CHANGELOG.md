@@ -62,6 +62,10 @@ All notable changes to ooxml-swift will be documented in this file.
   只被呼叫一次）；一處依賴 3 秒時間窗的跨行程鎖測試改成握手（子行程持鎖直到 stdin 關閉）；兩處本質上是牆鐘時間
   的上限（實體展開炸彈的防 hang、鎖逾時）保留並註明理由、放寬到仍能區分兩種結果的值。以暫時注入的平方時間版本
   實測過抓得到回歸。（第一版量牆鐘時間、取中位數，獨立審查在並行負載下量到誤報，已改。）
+  thread CPU 看不到被派到其他執行緒的工作，所以斷言同時記錄 process CPU：被量的工作若跑到其他執行緒
+  （process CPU 超過 thread CPU 的 1.5 倍），直接失敗並說明原因，不用少算的 thread CPU 判定而默默通過。
+  第二輪審查把一段平方時間的工作搬到 `DispatchQueue.global()` 上執行，舊版 thread CPU 比值 4.46、照樣通過；
+  現在以「process/thread CPU 79.83」失敗。正常執行時比值是 1.00–1.01。
 
 ## [3.12.0] - 2026-09-25
 
