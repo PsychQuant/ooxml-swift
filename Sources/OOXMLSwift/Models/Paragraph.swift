@@ -352,6 +352,16 @@ public struct ParagraphProperties: Equatable {
     public var border: ParagraphBorder?        // 段落邊框
     public var shading: ParagraphShading?      // 段落底色
 
+    /// v3.13.0+ (#176)：讀取時的來源 `<w:pBdr>` / `<w:shd>` 原文與當下的
+    /// typed 投影。typed 模型表達不了來源的全部內容（`ParagraphBorderStyle`
+    /// 沒有 themeColor/themeTint/themeShade/shadow/frame，`ParagraphBorder`
+    /// 沒有 `bar` 邊，`ParagraphBorderType` / `ShadingPattern` 只涵蓋少數
+    /// `ST_Border` / `ST_Shd` 值，`CellShading` 沒有 theme* 屬性），所以
+    /// `toXML()` 在 `border` / `shading` 仍等於投影時原樣輸出來源原文；被 setter
+    /// 或直接指派改過（`!=` 投影）才走 typed 輸出；設成 nil 就不輸出。
+    internal var sourceBorder: SourcePreservedPPrChild<ParagraphBorder>?
+    internal var sourceShading: SourcePreservedPPrChild<ParagraphShading>?
+
     /// v0.20.2+ (#65 sub-stack D): paragraph-mark RunProperties — the
     /// `<w:rPr>` direct child of `<w:pPr>` that controls pilcrow ¶ glyph
     /// formatting (font, size, color, language, kerning) per ECMA-376
@@ -389,8 +399,8 @@ public struct ParagraphProperties: Equatable {
     ///
     /// `sectPr`, `pPrChange`, `pBdr`, and `shd` are deliberately excluded from
     /// raw capture (see `DocxReader.recognizedPPrChildNames`)：`pBdr`/`shd`
-    /// 有 typed 欄位 `border`/`shading` 與 public setter，raw 再捕捉一次會在
-    /// 呼叫 setter 後輸出兩份（Codex round-2 review, HIGH finding #1）；
+    /// 自 v3.13.0（#176）起讀進 typed 欄位 `border`/`shading`（未被改動時原樣
+    /// 輸出來源原文，見 `sourceBorder`），raw 再捕捉一次會輸出兩份；
     /// `sectPr`/`pPrChange` 由 `Paragraph` 的 pPr 包裝層在 `toXML()` 的輸出
     /// 之後另外輸出。
     public var rawChildren: [RawElement] = []
@@ -416,8 +426,16 @@ public struct ParagraphProperties: Equatable {
         if other.keepLines { self.keepLines = true }
         if other.pageBreakBefore { self.pageBreakBefore = true }
         if let sectionBreak = other.sectionBreak { self.sectionBreak = sectionBreak }
-        if let border = other.border { self.border = border }
-        if let shading = other.shading { self.shading = shading }
+        // #176：來源原文跟著值走；`other` 沒有來源原文時保留自己的——只有在
+        // 值仍等於該原文的投影時才會被採用，所以不會輸出與 typed 值不符的內容。
+        if let border = other.border {
+            self.border = border
+            self.sourceBorder = other.sourceBorder ?? self.sourceBorder
+        }
+        if let shading = other.shading {
+            self.shading = shading
+            self.sourceShading = other.sourceShading ?? self.sourceShading
+        }
         if let markRunProperties = other.markRunProperties { self.markRunProperties = markRunProperties }
         if !other.rawChildren.isEmpty {
             self.rawChildren = other.rawChildren
@@ -432,6 +450,14 @@ public struct ParagraphProperties: Equatable {
 internal struct RawChildSourceAnchor: Equatable {
     let xml: String
     let anchor: String?
+}
+
+/// v3.13.0+ (#176)：一個由 typed 欄位承載、但 typed 模型表達不了全部內容的
+/// pPr 子元素——來源原文（`.nodeCompactEmptyElement` 序列化）與讀取當下的
+/// typed 投影。
+internal struct SourcePreservedPPrChild<Projection: Equatable>: Equatable {
+    let xml: String
+    let projection: Projection
 }
 
 // MARK: - Supporting Types
@@ -1253,14 +1279,15 @@ extension ParagraphProperties {
                 + "<w:numId w:val=\"\(numbering.numId)\"/></w:numPr>")
         }
 
-        // 段落邊框
+        // 段落邊框 / 段落底色。v3.13.0+ (#176)：值仍等於讀取當下的投影 → 原樣
+        // 輸出來源原文（theme 色、bar 邊、enum 外的 val 一個都不少）；否則 typed。
         if let border = border {
-            add("pBdr", border.toXML())
+            add("pBdr", sourceBorder.flatMap { $0.projection == border ? $0.xml : nil }
+                ?? border.toXML())
         }
-
-        // 段落底色
         if let shading = shading {
-            add("shd", shading.toXML())
+            add("shd", sourceShading.flatMap { $0.projection == shading ? $0.xml : nil }
+                ?? shading.toXML())
         }
 
         // 間距
