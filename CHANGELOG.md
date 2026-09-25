@@ -14,7 +14,9 @@ All notable changes to ooxml-swift will be documented in this file.
   過去以固定、非 schema 的順序輸出（pStyle → numPr → jc → spacing → ind → keepNext → … → rawChildren → rPr），
   `jc` 寫在 `spacing`／`ind` 之前、#168 的 `rawChildren` 一律擠在 typed 欄位之後。現在 typed 欄位與 `rawChildren`
   依元素名稱排進同一張 `CT_PPr` 位置表（ISO/IEC 29500-4 transitional `wml.xsd`，與 python-docx `CT_PPr._tag_seq`
-  核對）；來源本來是 schema 順序的段落，typed 重新序列化後 pPr 逐位元組等於來源。表外子元素（`w14:`／`w15:` 擴充、
+  核對）；來源本來是 schema 順序、且每個 typed 元素的屬性都在 typed 模型表達範圍內的段落，typed 重新序列化後
+  pPr 逐位元組等於來源（typed 元素本身丟屬性的既有缺口——例如 `w:ind` 的 `w:firstLineChars`、`w:spacing` 的
+  `w:beforeLines`——不在本次範圍）。表外子元素（`w14:`／`w15:` 擴充、
   `mc:AlternateContent`、與 schema 同名但不同命名空間的 `w14:jc`）一律緊接在來源中前一個 schema 已知兄弟之後，
   沒有前一個就放最前；呼叫端自組的 `rawChildren` 則以陣列中的前一個 schema 已知元素為錨。同時：
   `ParagraphBorder.toXML()` 改依 `CT_PBdr` 順序（top, left, bottom, right, between）；reader 的 raw 捕捉改以
