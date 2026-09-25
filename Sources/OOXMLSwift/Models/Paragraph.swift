@@ -349,16 +349,25 @@ public struct ParagraphProperties: Equatable {
     public var keepLines: Bool = false         // 段落不分頁
     public var pageBreakBefore: Bool = false   // 段落前分頁
     public var sectionBreak: SectionBreakType? // 分節符類型
-    public var border: ParagraphBorder?        // 段落邊框
-    public var shading: ParagraphShading?      // 段落底色
+    /// 段落邊框。v3.13.0+ (#176)：任何指派（setter、直接指派、`border?.top?.color
+    /// = …` 這類經由 optional chaining 的修改）都會清掉 `sourceBorder`——之後一律
+    /// typed 輸出，即使新值剛好等於讀取時的有損投影（revooxmlc MEDIUM-1）。
+    public var border: ParagraphBorder? {        // 段落邊框
+        didSet { sourceBorder = nil }
+    }
+    /// 段落底色。指派語意同 `border`（清掉 `sourceShading`）。
+    public var shading: ParagraphShading? {      // 段落底色
+        didSet { sourceShading = nil }
+    }
 
-    /// v3.13.0+ (#176)：讀取時的來源 `<w:pBdr>` / `<w:shd>` 原文與當下的
-    /// typed 投影。typed 模型表達不了來源的全部內容（`ParagraphBorderStyle`
-    /// 沒有 themeColor/themeTint/themeShade/shadow/frame，`ParagraphBorder`
-    /// 沒有 `bar` 邊，`ParagraphBorderType` / `ShadingPattern` 只涵蓋少數
-    /// `ST_Border` / `ST_Shd` 值，`CellShading` 沒有 theme* 屬性），所以
-    /// `toXML()` 在 `border` / `shading` 仍等於投影時原樣輸出來源原文；被 setter
-    /// 或直接指派改過（`!=` 投影）才走 typed 輸出；設成 nil 就不輸出。
+    /// v3.13.0+ (#176)：讀取時的來源 `<w:pBdr>` / `<w:shd>` 原文。typed 模型表達
+    /// 不了來源的全部內容（`ParagraphBorderStyle` 沒有 themeColor/themeTint/
+    /// themeShade/shadow/frame，`ParagraphBorder` 沒有 `bar` 邊，
+    /// `ParagraphBorderType` / `ShadingPattern` 只涵蓋少數 `ST_Border` / `ST_Shd`
+    /// 值，`CellShading` 沒有 theme* 屬性），所以只要 `border` / `shading` 在讀取
+    /// 之後**沒有被指派過**，`toXML()` 就原樣輸出這份原文；被指派過（`didSet`
+    /// 清掉原文）就走 typed 輸出；設成 nil 就不輸出。reader 必須先指派 typed
+    /// 投影、再設原文（順序反過來原文會被自己的指派清掉）。
     internal var sourceBorder: SourcePreservedPPrChild<ParagraphBorder>?
     internal var sourceShading: SourcePreservedPPrChild<ParagraphShading>?
 
@@ -426,15 +435,17 @@ public struct ParagraphProperties: Equatable {
         if other.keepLines { self.keepLines = true }
         if other.pageBreakBefore { self.pageBreakBefore = true }
         if let sectionBreak = other.sectionBreak { self.sectionBreak = sectionBreak }
-        // #176：來源原文跟著值走；`other` 沒有來源原文時保留自己的——只有在
-        // 值仍等於該原文的投影時才會被採用，所以不會輸出與 typed 值不符的內容。
+        // #176：取用 `other` 的值是一次指派（`didSet` 清掉自己的來源原文），
+        // 來源原文跟著值走：`other` 是讀進來、沒被指派過的，就帶著它的原文；
+        // `other` 是呼叫端自組的（沒有原文），就是 typed 輸出——即使值剛好等於
+        // 自己的投影（revooxmlc MEDIUM-1）。
         if let border = other.border {
             self.border = border
-            self.sourceBorder = other.sourceBorder ?? self.sourceBorder
+            self.sourceBorder = other.sourceBorder
         }
         if let shading = other.shading {
             self.shading = shading
-            self.sourceShading = other.sourceShading ?? self.sourceShading
+            self.sourceShading = other.sourceShading
         }
         if let markRunProperties = other.markRunProperties { self.markRunProperties = markRunProperties }
         if !other.rawChildren.isEmpty {
@@ -1279,8 +1290,9 @@ extension ParagraphProperties {
                 + "<w:numId w:val=\"\(numbering.numId)\"/></w:numPr>")
         }
 
-        // 段落邊框 / 段落底色。v3.13.0+ (#176)：值仍等於讀取當下的投影 → 原樣
-        // 輸出來源原文（theme 色、bar 邊、enum 外的 val 一個都不少）；否則 typed。
+        // 段落邊框 / 段落底色。v3.13.0+ (#176)：讀取後沒被指派過（來源原文還在）
+        // → 原樣輸出原文（theme 色、bar 邊、enum 外的 val 一個都不少）；否則 typed。
+        // 投影相等的檢查是防呆：`didSet` 已保證有原文時值就是讀取當下的投影。
         if let border = border {
             add("pBdr", sourceBorder.flatMap { $0.projection == border ? $0.xml : nil }
                 ?? border.toXML())

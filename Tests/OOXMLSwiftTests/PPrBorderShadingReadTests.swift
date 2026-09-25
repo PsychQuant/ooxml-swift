@@ -276,6 +276,82 @@ final class PPrBorderShadingReadTests: XCTestCase {
         XCTAssertFalse(xml.contains("<w:shd"), xml)
     }
 
+    // MARK: - Section C: any assignment is an edit (revooxmlc MEDIUM-1)
+    //
+    // 第一版以「值 == 讀取投影」判定「沒改過」：明確呼叫 setter、傳入剛好等於
+    // 有損投影的值時，會被當成沒改、輸出來源原文——setter 回報成功卻沒套用。
+    // 現在任何指派都清掉來源原文。
+
+    /// 來源 `pct10` 投影成 `pattern: nil`；`setParagraphShading` 省略 pattern
+    /// （che-word-mcp `set_paragraph_shading` 的預設）時 typed 值剛好等於投影，
+    /// 仍必須輸出 typed 的 `clear`——與新文件上同一個呼叫的結果相同。
+    func testShadingSetterWithValueEqualToTheLossyProjectionStillApplies() throws {
+        let url = try buildDocx(body: "<w:p><w:pPr><w:shd w:val=\"pct10\" w:fill=\"FFFF00\"/></w:pPr>"
+            + "<w:r><w:t>SHADED</w:t></w:r></w:p>")
+        defer { try? FileManager.default.removeItem(at: url) }
+        var doc = try DocxReader.read(from: url)
+        defer { doc.close() }
+        XCTAssertEqual(try XCTUnwrap(doc.getParagraphs().first).properties.shading,
+                       CellShading(fill: "FFFF00", color: nil, pattern: nil),
+                       "precondition: the call below sets exactly the read-time projection")
+
+        try doc.setParagraphShading(at: 0, fill: "FFFF00")
+
+        let shds = try pPr(in: try saveAndExtractDocumentXML(doc), paragraphText: "SHADED").elements(forName: "w:shd")
+        XCTAssertEqual(shds.count, 1)
+        XCTAssertEqual(attributes(try XCTUnwrap(shds.first)), ["w:val": "clear", "w:fill": "FFFF00"])
+    }
+
+    /// 來源 top 是投影不了的 `thinThickSmallGap`、bottom 可投影；`setParagraphBorder`
+    /// 只給 bottom（剛好等於投影）——setter 是整個替換，top 不能留下來。
+    func testBorderSetterReplacesTheWholeBorderEvenWhenItEqualsTheProjection() throws {
+        let url = try buildDocx(body: "<w:p><w:pPr><w:pBdr>"
+            + "<w:top w:val=\"thinThickSmallGap\" w:sz=\"12\" w:space=\"1\" w:color=\"FF0000\"/>"
+            + "<w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/>"
+            + "</w:pBdr></w:pPr><w:r><w:t>BOXED</w:t></w:r></w:p>")
+        defer { try? FileManager.default.removeItem(at: url) }
+        var doc = try DocxReader.read(from: url)
+        defer { doc.close() }
+        let bottomOnly = ParagraphBorder(bottom: ParagraphBorderStyle(type: .single, color: "000000", size: 4, space: 1))
+        XCTAssertEqual(try XCTUnwrap(doc.getParagraphs().first).properties.border, bottomOnly,
+                       "precondition: the call below sets exactly the read-time projection")
+
+        try doc.setParagraphBorder(at: 0, border: bottomOnly)
+
+        let pBdr = try XCTUnwrap(try pPr(in: try saveAndExtractDocumentXML(doc), paragraphText: "BOXED")
+            .elements(forName: "w:pBdr").first)
+        XCTAssertEqual(childAttributes(pBdr).map(\.0), ["w:bottom"], "the source top must not survive a replacing setter")
+    }
+
+    /// 只有投影不了的 `bar` 邊：投影是空的 `ParagraphBorder()`；傳空 border 給
+    /// setter（MCP `sides: []`）必須真的清掉 bar。
+    func testSettingAnEmptyBorderClearsASourceWithOnlyUnprojectableSides() throws {
+        let url = try buildDocx(body: "<w:p><w:pPr><w:pBdr><w:bar w:val=\"single\" w:sz=\"4\"/></w:pBdr></w:pPr>"
+            + "<w:r><w:t>BAR</w:t></w:r></w:p>")
+        defer { try? FileManager.default.removeItem(at: url) }
+        var doc = try DocxReader.read(from: url)
+        defer { doc.close() }
+
+        try doc.setParagraphBorder(at: 0, border: ParagraphBorder())
+
+        let pPrElement = try pPr(in: try saveAndExtractDocumentXML(doc), paragraphText: "BAR")
+        XCTAssertEqual(pPrElement.elements(forName: "w:pBdr").flatMap { childAttributes($0) }.count, 0,
+                       "the source bar must be gone: \(pPrElement.xmlString)")
+    }
+
+    /// `merge(with:)` 併入呼叫端自組、值剛好等於投影的 shading：那是一次指派，
+    /// 走 typed；來源的 `pct10`／theme 屬性不能復活。
+    func testMergingACallerBuiltValueEqualToTheProjectionIsTypedOutput() throws {
+        var props = try parseParagraph(Self.borderedParagraph).properties
+        var change = ParagraphProperties()
+        change.shading = props.shading
+        props.merge(with: change)
+        let xml = props.toXML()
+        XCTAssertFalse(xml.contains("pct10"), xml)
+        XCTAssertFalse(xml.contains("themeFill"), xml)
+        XCTAssertTrue(xml.contains(Self.sourcePBdr), "the untouched border still round-trips verbatim: \(xml)")
+    }
+
     /// 樣式的 `<w:pPr>` 走同一個 `parseParagraphProperties`：styles.xml 被 typed
     /// 重新產生時（`addStyle` 等），既有樣式的框線與網底也要原樣保留。
     func testStyleParagraphPropertiesKeepBorderAndShadingVerbatim() throws {
