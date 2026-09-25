@@ -21,7 +21,13 @@
 //   排程的時間不算進去。被量的工作必須在呼叫執行緒上同步完成——目前的呼叫點
 //   （`PackageInspector`、`DocxWriter`、`DocxReader`）都沒有派工到其他執行緒
 //   （grep 過 `DispatchQueue`／`concurrentPerform`／`Task`／`Process`）；若將來
-//   改成並行，thread CPU 時間會少算，這裡要改用 `CLOCK_PROCESS_CPUTIME_ID`。
+//   改成並行，thread CPU 時間會少算。這個前提**由程式強制**，不只寫在註解裡：
+//   每次量測也記錄 process CPU，工作若跑到其他執行緒（process CPU 超過 thread
+//   CPU 的 `offThreadLimit` 倍），斷言直接失敗並說明原因，而不是用少算的 thread
+//   CPU 判定、默默通過。第二輪審查（revooxmld 的注入 C）證實了這個盲點：把一段
+//   平方時間的工作搬到 `DispatchQueue.global()` 上執行，thread CPU 比值 4.46、
+//   測試照樣通過，牆鐘比值卻是 10–16、process CPU 441 s 對 thread CPU 5.8 s。
+//   正常執行時兩者比值是 1.000（16 個並行 xctest 行程、load 186–212 實測）。
 //   選 thread 而非 process：兩者在 16 個並行行程、load 73–110 下都是 0 誤報
 //   （各 384 次量測），但 process CPU 時間會把同一行程內其他執行緒也算進去——
 //   實測同一段工作在同行程有 3 條忙碌執行緒時，process CPU 10.46 s、thread CPU
@@ -45,27 +51,42 @@ enum ScalingProbe {
         /// 同一次量測的牆鐘時間（秒）——只印在摘要裡供診斷，不參與判定。
         let smallWall: [TimeInterval]
         let largeWall: [TimeInterval]
+        /// 同一次量測的行程 CPU 時間（秒）——只用來偵測工作是否跑到其他執行緒。
+        let smallProcess: [TimeInterval]
+        let largeProcess: [TimeInterval]
 
         var smallMin: TimeInterval { small.min() ?? 0 }
         var largeMin: TimeInterval { large.min() ?? 0 }
         var ratio: Double { largeMin / max(smallMin, .leastNonzeroMagnitude) }
+        /// 行程 CPU 總和 ÷ 本執行緒 CPU 總和。工作全在呼叫執行緒上時是 1。
+        var offThreadFactor: Double {
+            let process = (smallProcess + largeProcess).reduce(0, +)
+            let thread = (small + large).reduce(0, +)
+            return process / max(thread, .leastNonzeroMagnitude)
+        }
+        var largeProcessMin: TimeInterval { largeProcess.min() ?? 0 }
 
         var summary: String {
             let fmt = { (xs: [TimeInterval]) in xs.map { String(format: "%.4f", $0) }.joined(separator: ", ") }
             return "thread CPU n=\(baseSize): [\(fmt(small))] s; \(factor)n=\(baseSize * factor): [\(fmt(large))] s; "
                 + String(format: "min ratio %.2f", ratio)
-                + " (wall: [\(fmt(smallWall))] / [\(fmt(largeWall))] s)"
+                + " (wall: [\(fmt(smallWall))] / [\(fmt(largeWall))] s; "
+                + String(format: "process/thread CPU %.2f)", offThreadFactor)
         }
     }
 
-    /// 量一次 `body`：回傳（本執行緒 CPU 時間, 牆鐘時間），單位秒。
-    static func time(_ body: () throws -> Void) rethrows -> (cpu: TimeInterval, wall: TimeInterval) {
+    /// 量一次 `body`：回傳（本執行緒 CPU 時間, 牆鐘時間, 行程 CPU 時間），單位秒。
+    static func time(_ body: () throws -> Void) rethrows
+        -> (cpu: TimeInterval, wall: TimeInterval, process: TimeInterval) {
+        let process0 = clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID)
         let cpu0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
         let wall0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         try body()
         let cpu1 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
         let wall1 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        return (Double(cpu1 - cpu0) / 1e9, Double(wall1 - wall0) / 1e9)
+        let process1 = clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID)
+        return (Double(cpu1 - cpu0) / 1e9, Double(wall1 - wall0) / 1e9,
+                Double(process1 - process0) / 1e9)
     }
 
     /// 兩個規模的輸入各 `prepare` 一次（不計時），先在 n 暖身一次（regex 編譯、
@@ -80,8 +101,8 @@ enum ScalingProbe {
         let largeInput = try prepare(baseSize * factor)
         defer { teardown(largeInput) }
         try work(smallInput)
-        var small: [(cpu: TimeInterval, wall: TimeInterval)] = []
-        var large: [(cpu: TimeInterval, wall: TimeInterval)] = []
+        var small: [(cpu: TimeInterval, wall: TimeInterval, process: TimeInterval)] = []
+        var large: [(cpu: TimeInterval, wall: TimeInterval, process: TimeInterval)] = []
         for round in 0..<repeats {
             if round % 2 == 0 {
                 small.append(try time { try work(smallInput) })
@@ -93,7 +114,8 @@ enum ScalingProbe {
         }
         return Measurement(baseSize: baseSize, factor: factor,
                            small: small.map(\.cpu), large: large.map(\.cpu),
-                           smallWall: small.map(\.wall), largeWall: large.map(\.wall))
+                           smallWall: small.map(\.wall), largeWall: large.map(\.wall),
+                           smallProcess: small.map(\.process), largeProcess: large.map(\.process))
     }
 }
 
@@ -112,6 +134,7 @@ func XCTAssertScalesLinearly<Input>(
     repeats: Int = 5,
     maxRatio: Double = 8,
     noiseFloor: TimeInterval = 0.05,
+    offThreadLimit: Double = 1.5,
     file: StaticString = #filePath,
     line: UInt = #line,
     prepare: (Int) throws -> Input,
@@ -122,6 +145,18 @@ func XCTAssertScalesLinearly<Input>(
         baseSize: baseSize, factor: factor, repeats: repeats,
         prepare: prepare, teardown: teardown, work)
     let prefix = label().isEmpty ? "" : label() + ": "
+    // 先檢查工作是否留在呼叫執行緒上，再看雜訊下限：工作搬到其他執行緒時，
+    // thread CPU 會變小，甚至低於下限而被當成「不判定」——那正是要擋的盲點。
+    if measurement.largeProcessMin >= noiseFloor && measurement.offThreadFactor > offThreadLimit {
+        XCTFail(
+            "\(prefix)the measured work ran off the calling thread "
+                + String(format: "(process/thread CPU %.2f > %.2f)", measurement.offThreadFactor, offThreadLimit)
+                + ", so thread CPU time no longer measures it and cannot tell linear from quadratic. "
+                + "Keep the measured work synchronous on the calling thread, or measure it with "
+                + "process CPU time in a process where nothing else runs — \(measurement.summary)",
+            file: file, line: line)
+        return
+    }
     let judged = measurement.largeMin >= noiseFloor
     print("[ScalingProbe] \(prefix)\(measurement.summary)\(judged ? "" : " — below noise floor, not judged")")
     guard judged else { return }
