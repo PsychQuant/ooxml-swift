@@ -46,10 +46,10 @@ public struct DocxReader {
     /// (e.g., add `"sectPr"`), update both sites in lockstep.
     internal static let walkerPreConsumed: Set<String> = ["pPr"]
 
-    /// v3.12.0+ (#168): direct children of `<w:pPr>` that either
-    /// `parseParagraphProperties` already extracts into a typed
-    /// `ParagraphProperties` field, OR that a typed field/setter exists for
-    /// even though this reader doesn't populate it from XML today. Anything
+    /// v3.12.0+ (#168): direct children of `<w:pPr>` (qualified `w:` names —
+    /// v3.13.0+, #175) that `parseParagraphProperties` extracts into a typed
+    /// `ParagraphProperties` field, or that `Paragraph` emits itself
+    /// (`sectPr`, `pPrChange`). Anything
     /// else — `<w:kinsoku>`, `<w:snapToGrid>`, `<w:widowControl>`,
     /// `<w:wordWrap>`, and the rest of CT_PPrBase's long tail — is captured
     /// verbatim into `ParagraphProperties.rawChildren` instead of being
@@ -62,36 +62,22 @@ public struct DocxReader {
     ///   duplicate it in the writer's output (once from that revision path,
     ///   once verbatim from `rawChildren`).
     /// - `sectPr` (mid-body section break) is not parsed by this reader at
-    ///   all today — a pre-existing, separately-tracked gap. Raw-capturing it
-    ///   here would place a structurally significant, position-sensitive
-    ///   element in `rawChildren`'s emit slot (before the paragraph-mark
-    ///   `<w:rPr>`), which is the wrong position for `sectPr` per ECMA-376
-    ///   §17.3.1.27 CT_PPr (last child, after `rPr`). Left dropped rather
-    ///   than preserved-but-misplaced; unchanged from pre-#168 behavior.
-    /// - `pBdr` (border) and `shd` (shading) — Codex round-2 review, HIGH
-    ///   finding #1: `ParagraphProperties.border` / `.shading` are typed
-    ///   fields with public typed setters (`setParagraphBorder(at:border:)`,
-    ///   `setParagraphShading(at:fill:pattern:)`), but THIS READER never
-    ///   populates either field from `<w:pBdr>` / `<w:shd>` — another
-    ///   pre-existing, separately-tracked gap. If raw capture treated these
-    ///   as "unrecognized" while the writer already knows how to emit the
-    ///   typed fields, a paragraph loaded with a `<w:shd>` already present,
-    ///   then given a NEW shading via the typed setter, would emit BOTH the
-    ///   raw-captured old one and the typed new one — two singleton elements
-    ///   where OOXML expects at most one (schema-invalid, and ambiguous to
-    ///   Word about which value applies). Excluding them keeps them silently
-    ///   dropped on an unrelated typed edit, exactly like before #168 — not
-    ///   improved for these two elements, but not corrupted either. Properly
-    ///   fixing this means teaching `parseParagraphProperties` to read
-    ///   `<w:pBdr>` / `<w:shd>` into the existing typed fields — `pBdr` and
-    ///   `shd` MUST stay in this set once that lands, exactly like `pStyle`
-    ///   and `jc` already do, precisely BECAUSE they would then be typed-
-    ///   extracted (Codex round-3 review, LOW finding #1 — an earlier
-    ///   version of this comment said the opposite: "removing them from this
-    ///   set", which would reintroduce this same duplicate-emission bug the
-    ///   moment the typed parse landed, just without needing a setter call
-    ///   first). Tracked as a follow-up, not done here to keep #168's change
-    ///   surface to the reported symptom class.
+    ///   all today — a pre-existing, separately-tracked gap. `Paragraph`
+    ///   emits its own `<w:sectPr>` (from `sectionBreak`) after
+    ///   `ParagraphProperties.toXML()`, so a raw-captured copy would risk two
+    ///   `<w:sectPr>` in one `<w:pPr>`; a structurally significant section
+    ///   break also deserves a typed model rather than a raw blob. Left
+    ///   dropped; unchanged from pre-#168 behavior.
+    /// - `pBdr` (border) and `shd` (shading) — v3.13.0+ (#176): typed-
+    ///   extracted into `ParagraphProperties.border` / `.shading` (plus the
+    ///   verbatim source element in `sourceBorder` / `sourceShading`, emitted
+    ///   while the typed value still equals its read-time projection). They
+    ///   MUST stay in this set, exactly like `pStyle` and `jc`: raw-capturing
+    ///   them as well would emit a second `<w:pBdr>` / `<w:shd>` next to the
+    ///   typed one (Codex round-2 review of #168, HIGH finding #1; round-3,
+    ///   LOW finding #1). Before #176 they were in this set but NOT
+    ///   typed-extracted, so every typed re-serialization silently dropped
+    ///   every paragraph's borders and shading.
     ///
     /// Grow this set in lockstep with `parseParagraphProperties` (or with any
     /// other typed field/setter for a pPr child) whenever a new one gains
@@ -2121,6 +2107,23 @@ public struct DocxReader {
             props.pageBreakBefore = true
         }
 
+        // v3.13.0+ (#176): 段落框線與網底。過去從未讀進 typed 欄位，任何
+        // typed 重新序列化都讓整份文件的框線與網底消失。typed 模型表達不了
+        // 來源的全部內容，所以同時保存來源原文；`ParagraphProperties.toXML()`
+        // 在值仍等於投影時原樣輸出原文（見 `sourceBorder`）。
+        if let pBdr = element.elements(forName: "w:pBdr").first {
+            let projection = parseParagraphBorder(from: pBdr)
+            props.border = projection
+            props.sourceBorder = SourcePreservedPPrChild(
+                xml: pBdr.xmlString(options: .nodeCompactEmptyElement), projection: projection)
+        }
+        if let shd = element.elements(forName: "w:shd").first {
+            let projection = parseParagraphShading(from: shd)
+            props.shading = projection
+            props.sourceShading = SourcePreservedPPrChild(
+                xml: shd.xmlString(options: .nodeCompactEmptyElement), projection: projection)
+        }
+
         // v0.20.2+ (#65 sub-stack D): paragraph-mark <w:rPr> direct child of
         // <w:pPr> per ECMA-376 §17.3.1.27 CT_PPrBase. Schema is identical to
         // run-level CT_RPr — reuse `parseRunProperties` verbatim so all
@@ -2173,6 +2176,40 @@ public struct DocxReader {
         }
 
         return props
+    }
+
+    /// v3.13.0+ (#176): `<w:pBdr>` 的 typed 投影。來源有這個元素就回傳非 nil 的
+    /// `ParagraphBorder`（即使沒有任何一邊表達得了），讓 `border = nil` 能表達
+    /// 「刪除」。一個邊只有在 `w:val` 對得上 `ParagraphBorderType` 時才投影；
+    /// 缺席的屬性取 schema 預設值（`color` = "auto"、`space` = 0），`sz` 在
+    /// schema 沒有預設值，缺席時投影成 0。`bar` 邊與 theme*／shadow／frame
+    /// 屬性沒有 typed 欄位——它們靠 `sourceBorder` 原文保留。
+    private static func parseParagraphBorder(from element: XMLElement) -> ParagraphBorder {
+        func side(_ name: String) -> ParagraphBorderStyle? {
+            guard let side = element.elements(forName: "w:\(name)").first,
+                  let val = side.attribute(forName: "w:val")?.stringValue,
+                  let type = ParagraphBorderType(rawValue: val) else { return nil }
+            return ParagraphBorderStyle(
+                type: type,
+                color: side.attribute(forName: "w:color")?.stringValue ?? "auto",
+                size: side.attribute(forName: "w:sz")?.stringValue.flatMap { Int($0) } ?? 0,
+                space: side.attribute(forName: "w:space")?.stringValue.flatMap { Int($0) } ?? 0)
+        }
+        return ParagraphBorder(top: side("top"), bottom: side("bottom"),
+                               left: side("left"), right: side("right"),
+                               between: side("between"))
+    }
+
+    /// v3.13.0+ (#176): `<w:shd>` 的 typed 投影。`fill` 缺席時投影成 "auto"
+    /// （`CellShading.fill` 非 optional，而「來源有 shd」必須對應非 nil 的值）；
+    /// `w:val` 對不上 `ShadingPattern` 時 `pattern` 為 nil。theme* 屬性與
+    /// enum 外的 val 靠 `sourceShading` 原文保留。
+    private static func parseParagraphShading(from element: XMLElement) -> ParagraphShading {
+        CellShading(
+            fill: element.attribute(forName: "w:fill")?.stringValue ?? "auto",
+            color: element.attribute(forName: "w:color")?.stringValue,
+            pattern: element.attribute(forName: "w:val")?.stringValue
+                .flatMap(ShadingPattern.init(rawValue:)))
     }
 
     // MARK: - Container Parsing Helpers (Part C of ooxml-swift#1)
