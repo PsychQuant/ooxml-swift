@@ -510,10 +510,17 @@ final class DocumentProfileStoreTests: XCTestCase {
         let url = try config(#"{"agent":"codex"}"#)
         let child = Process()
         child.executableURL = URL(fileURLWithPath: perl)
-        child.arguments = ["-e", #"use Fcntl qw(:flock); open(my $f, ">>", $ARGV[0]) or die; flock($f, LOCK_EX) or die; print "locked\n"; $|=1; sleep 3"#,
+        // #174 (revooxmlc LOW-2): the child holds the lock until the test closes
+        // its stdin, not for a fixed `sleep 3` — a loaded machine could spend
+        // that window before the writer's 0.3 s timeout even starts, and the
+        // `child.isRunning` assertion below would then fail for a reason that
+        // has nothing to do with locking. A handshake has no time window.
+        child.arguments = ["-e", #"use Fcntl qw(:flock); open(my $f, ">>", $ARGV[0]) or die; flock($f, LOCK_EX) or die; $|=1; print "locked\n"; my $release = <STDIN>;"#,
                            url.path + ".lock"]
         let output = Pipe()
+        let input = Pipe()
         child.standardOutput = output
+        child.standardInput = input
         try child.run()
         addTeardownBlock { if child.isRunning { child.terminate() } }
         var announced = Data()
@@ -529,6 +536,7 @@ final class DocumentProfileStoreTests: XCTestCase {
             XCTAssertEqual(error as? DocumentProfileStoreError, .configLockTimeout(url.path + ".lock"))
         }
         XCTAssertTrue(child.isRunning, "the child must still hold the lock when the writer times out")
+        try input.fileHandleForWriting.close()   // EOF on the child's stdin: release the lock and exit
         child.waitUntilExit()
         XCTAssertEqual(child.terminationStatus, 0)
         try store.updateDocument { $0["afterRelease"] = true }

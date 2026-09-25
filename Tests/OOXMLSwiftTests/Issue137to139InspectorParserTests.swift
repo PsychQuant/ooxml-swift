@@ -1087,7 +1087,12 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // #174: a scale ratio instead of "< 2.0 s" — deduplicating against an
         // ever-growing list is the quadratic this guards against; the count
         // assertion below is the load-insensitive half of the same claim.
-        try XCTAssertScalesLinearly(baseSize: 5_000, prepare: relsData) {
+        // n = 30 000 keeps the small end around 0.1 s of CPU time. XMLParser
+        // itself is slightly superlinear on many distinct prefix declarations:
+        // 30 000 → 120 000 measures about 5.3× (CPU time, reproducible; plain
+        // unprefixed elements scale 4.1×), 1.5× below the bound. A quadratic
+        // dedup measured 16.1×.
+        try XCTAssertScalesLinearly(baseSize: 30_000, prepare: relsData) {
             _ = PackageInspector.scanRels($0, part: "p")
         }
         XCTAssertEqual(scan.structure.count, 1)
@@ -1201,18 +1206,28 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             prepared[n] = built
             return built
         }
-        let big = refusalMessage(of: try document(8000))
+        let big = refusalMessage(of: try document(12_000))
         XCTAssertTrue(big.contains("…and"), "the message is capped: \(big.count) characters — \(big)")
         XCTAssertLessThan(big.count, 8000, "the message is capped")
         // #174: "one pass, not one pass per id" as a scale ratio, not "< 5.0 s"
         // (that bound failed at 6.8 s and 7.86 s under load with the code
-        // unchanged). Only the refusal is timed — building, zipping and
-        // reading the package scale with n too and would dilute the ratio.
-        // One extra pass over the text per id makes 2 000 → 8 000 about 14×
-        // (measured, see the #174 report); linear is about 4×.
-        try XCTAssertScalesLinearly("one pass, not one pass per id", baseSize: 2_000,
+        // unchanged). The refusal is timed on its own: building and zipping
+        // the package scale with n too and would dilute the ratio. One extra
+        // pass over the text per id makes the ratio about 16× (measured, see
+        // the #174 report); linear is about 4×. n = 3 000 keeps the small end
+        // around 0.1 s of CPU time.
+        try XCTAssertScalesLinearly("one pass, not one pass per id", baseSize: 3_000,
                                     prepare: document) {
             _ = refusalMessage(of: $0)
+        }
+        // The pre-#174 bound also covered reading the damaged package back —
+        // `DocxReader.read` of n relationships, every id a character reference.
+        // Kept under a scale ratio of its own so splitting the timed region
+        // does not leave the read unguarded (revooxmlc LOW-2).
+        try XCTAssertScalesLinearly("reading n referenced ids", baseSize: 3_000,
+                                    prepare: document) {
+            var read = try DocxReader.read(from: $0.url)
+            read.close()
         }
     }
 
@@ -1239,11 +1254,13 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // DA measured); the cause pass is one scan, capped at 20, and nothing is
         // computed past the cap. Two spellings: all character references (the
         // single-pass map answers) and single quotes (the per-id regex path).
-        let spellings: [(String, (Int) -> String)] = [
-            ("character references", { n in "\"" + "rId\(n)".unicodeScalars.map { "&#\($0.value);" }.joined() + "\"" }),
-            ("single quotes", { n in "'rId\(n)'" }),
+        // `baseSize` per spelling keeps the small end around 0.1 s of CPU time
+        // (the single-quote path is about 2.5× cheaper per id).
+        let spellings: [(String, Int, (Int) -> String)] = [
+            ("character references", 2_000, { n in "\"" + "rId\(n)".unicodeScalars.map { "&#\($0.value);" }.joined() + "\"" }),
+            ("single quotes", 5_000, { n in "'rId\(n)'" }),
         ]
-        for (label, spell) in spellings {
+        for (label, baseSize, spell) in spellings {
             func damaged(_ n: Int) throws -> DamagedDocument {
                 let relsXML = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
                     + (0..<n).map { "<Relationship Id=\(spell($0)) Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/\($0)\" TargetMode=\"External\"/>" }.joined()
@@ -1258,16 +1275,16 @@ final class Issue137to139InspectorParserTests: XCTestCase {
                 prepared[n] = built
                 return built
             }
-            let message = refusalMessage(of: try document(3200))
+            let message = refusalMessage(of: try document(4 * baseSize))
             XCTAssertTrue(message.contains("does not match"), "\(label): \(message.prefix(200))")
                 XCTAssertTrue(message.range(of: #"…and [0-9]+ more"#, options: .regularExpression) != nil, "\(label): capped at 20 causes: \(message.suffix(160))")
                 XCTAssertLessThan(message.count, 6000, "\(label): capped message, got \(message.count) characters")
             // #174: linearity as a scale ratio, not "< 10 s". The R6 snapshot
-            // was 400 → 1.0 s, 800 → 3.9 s, 1600 → 202 s — past quadratic, so
-            // 800 → 3200 would not come close to the ratio bound (it would
-            // barely finish). Only the refusal is timed.
+            // was 400 → 1.0 s, 800 → 3.9 s, 1600 → 202 s — past quadratic, far
+            // beyond the ratio bound (it would take very long to finish, as the
+            // former absolute bound did). Only the refusal is timed.
             try XCTAssertScalesLinearly("\(label): mismatched ids refused in linear time",
-                                        baseSize: 800, prepare: document) {
+                                        baseSize: baseSize, prepare: document) {
                 _ = refusalMessage(of: $0)
             }
         }
@@ -1328,11 +1345,12 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             prepared[n] = built
             return built
         }
-        let message = refusalMessage(of: try document(3000))
+        let message = refusalMessage(of: try document(6_000))
         XCTAssertTrue(message.contains("rId9: single-quoted attribute values"), message.suffix(300).description)
         XCTAssertFalse(message.contains("reference"), "the data-Id spellings are not causes: \(message.suffix(300))")
         // #174: "quadratic would be minutes" as a scale ratio, not "< 10 s".
-        try XCTAssertScalesLinearly("data-Id spellings stay linear", baseSize: 750, prepare: document) {
+        // n = 1 500 keeps the small end around 0.1 s of CPU time.
+        try XCTAssertScalesLinearly("data-Id spellings stay linear", baseSize: 1_500, prepare: document) {
             _ = refusalMessage(of: $0)
         }
         XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: #"<x foo.Id="rId&#57;" data-Id="rId&#57;"/><Relationship r:Id="rId&#57;" Id="rId&#57;"/>"#), ["rId9": ["rId&#57;"]])
