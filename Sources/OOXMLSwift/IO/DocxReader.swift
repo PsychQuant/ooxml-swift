@@ -3222,10 +3222,29 @@ public struct DocxReader {
             // the outer rPr (which would cause double emission via Revision +
             // raw replay).
         ]
-        // v1.0 task 6.3: unrecognized <w:rPr> children are no longer captured
-        // onto the typed model (rawChildren removed) — the tree preserves
-        // them, and dirty parts refreshed by the reducer serialize the tree.
-        _ = recognizedRprChildren
+        // v1.0 task 6.3 removed rawChildren capture here on the premise that
+        // the tree-backed reducer path would keep unknown content alive
+        // structurally. #164 found that the legacy direct-typed mutation
+        // surface (`updateParagraph`, `replaceText`, che-word-mcp's
+        // `format_text`) is not tree-fresh, so `DocxWriter` re-derives
+        // `word/document.xml` from this typed model whenever it — or any
+        // OTHER part of the same document — is dirty, silently dropping
+        // every run's unmodeled `<w:rPr>` children. Reinstated: capture any
+        // direct child not in `recognizedRprChildren` verbatim so
+        // `RunProperties.toXML()` can re-emit it at its canonical position.
+        var collectedRawChildren: [RawElement] = []
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement,
+                  let localName = childElement.localName,
+                  !recognizedRprChildren.contains(localName) else {
+                continue
+            }
+            collectedRawChildren.append(
+                RawElement(name: localName, xml: childElement.xmlString(options: .nodeCompactEmptyElement)))
+        }
+        if !collectedRawChildren.isEmpty {
+            props.rawChildren = collectedRawChildren
+        }
         return props
     }
 
