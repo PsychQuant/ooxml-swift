@@ -8,6 +8,33 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **表格編輯後存檔，未觸及的列/格會靜默丟格式**（PsychQuant/che-word-mcp#185、PsychQuant/che-word-mcp#224）。
+  `DocxWriter` 只要文件裡任何一個 typed 編輯把 `word/document.xml` 標記 dirty，就會用 typed model
+  重新序列化**整份**文件；typed model 對某些既有 XML 讀不進來或沒有欄位可放的內容，因此從**所有**
+  未觸及的表格一起消失，不只是被編輯的那一格——這正是三張 issue 都描述的「零編輯 round-trip 沒事、
+  一編輯就全域遭殃」的共同放大機制：
+  - **垂直合併續格 `<w:vMerge/>`（無 `w:val`）讀不進來**（che-word-mcp#185）。OOXML 允許省略 `w:val`
+    表示 continuation（ECMA-376 §17.4.85），是 Word／python-docx 產生續格最常見的寫法，但
+    `DocxReader.parseTableCellProperties` 原本要求 `w:val` 存在才設定 `verticalMerge`，讀不到就當
+    `nil`，整份重寫時把續格從所有列一起剝掉。現在讀入時把無 `w:val` 的 `<w:vMerge/>` 視為
+    `.continue`；寫出時 `.continue` 一律輸出裸 `<w:vMerge/>`（不帶 `w:val`），貼近真實文件的來源
+    字節，`.restart` 維持既有的顯式 `w:val="restart"`。
+  - **`update_cell` 對空段落（無 run）的 cell 丟掉既有 `pPr`**（che-word-mcp#224a）。官方表單裡待填寫
+    的欄位常是「無 run 但仍帶 `pPr`」的段落（樣式、精確行距、對齊、東亞字型預設），`updateCell` 原本
+    直接用 `Paragraph(text:)` 建一個全新段落蓋掉整個 `paragraphs` 陣列，連 `pPr` 一起丟棄。現在比照
+    `updateCellParagraph`（che-word-mcp#194）已驗證的做法：就地改既有段落的 `.runs`，`.properties` 原樣保留。
+  - **表格列屬性 `<w:trPr>` 沒有 `jc` 欄位、`heightRule` 為 `nil` 時被無中生有補上 `w:hRule="auto"`**
+    （che-word-mcp#224b）。`TableRowProperties` 原本沒有欄位能放列級水平對齊（`<w:trPr><w:jc>`），讀寫
+    兩端都直接漏掉；`TableRow.toXML()` 把「來源沒有 `w:hRule`」跟「明確要 auto」混為一談，任何原本沒寫
+    `w:hRule` 的 `<w:trHeight>` 存檔後都會被加上該屬性。現在補上 `justification: Alignment?`（讀寫皆
+    支援，沿用 `TableProperties.alignment` 已在用的列舉），且 `heightRule == nil` 時不再輸出 `w:hRule`
+    （OOXML 對該屬性的規格預設值本來就是 `auto`，語意不變）。順手修：稽核 `CT_TrPrBase` 時發現
+    `<w:hidden/>` 跟既有 `isHeader`／`cantSplit` 同形狀（純布林旗標），一併補上；`cnfStyle`、`divId`、
+    `gridBefore`／`gridAfter`、`wBefore`／`wAfter`、`tblCellSpacing`、`ins`／`del`／`trPrChange` 等其餘
+    `CT_TrPrBase` 子元素仍是已知缺口，留待未來處理。
+
 ## [3.13.0] - 2026-09-25
 
 ### Fixed
