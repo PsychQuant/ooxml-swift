@@ -30,14 +30,11 @@ final class V1BenchmarkTests: XCTestCase {
     /// document mitigation.
     func testTreeMemoryCostOnLargeDocument() throws {
         try requireBenchmarks()
-        let candidates = [
-            "/Users/che/Downloads/20260505v.docx",   // 1.6 MB real-world
-            "/Users/che/Downloads/ETST.docx",        // 0.9 MB fallback
-        ]
-        guard let path = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-            throw XCTSkip("no large local fixture available")
-        }
-        let url = URL(fileURLWithPath: path)
+        // #162 — resolved through the shared MACDOC_TEMPLATE_DIR gate
+        // instead of a hard-coded host path; still "largest real-world
+        // fixture available, else a smaller one" (20260505v.docx is 1.6 MB,
+        // ETST.docx is a 0.9 MB fallback).
+        let url = try TemplateFixtureGate.requireFirstAvailable(TemplateFixtureGate.benchmarkFixtureNames)
 
         let before = residentMB
         var doc = try DocxReader.read(from: url, wireTreeBackedViews: true)
@@ -111,12 +108,11 @@ extension V1BenchmarkTests {
     /// XmlTreeParser in isolation.
     func testTreeMemoryAttribution() throws {
         try requireBenchmarks()
-        let path = "/Users/che/Downloads/20260505v.docx"
-        guard FileManager.default.fileExists(atPath: path) else {
-            throw XCTSkip("fixture missing")
-        }
+        // #162 — resolved through the shared MACDOC_TEMPLATE_DIR gate
+        // instead of a hard-coded host path.
+        let url = try TemplateFixtureGate.requireTemplate(TemplateFixtureGate.benchmarkFixtureNames[0])
         // Extract document.xml bytes only.
-        var doc = try DocxReader.read(from: URL(fileURLWithPath: path))
+        var doc = try DocxReader.read(from: url)
         guard let tree = doc.xmlTrees["word/document.xml"] else {
             doc.close(); throw XCTSkip("no document tree")
         }
