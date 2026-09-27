@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.15.0] - 2026-09-27
+
 ### Added
 
 - **測試防呆：來源不得再出現 host-absolute fixture 路徑**（#162）。新增守門測試掃描
