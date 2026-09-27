@@ -645,44 +645,65 @@ extension Paragraph {
         return "<w:p \(attrs.joined(separator: " "))>"
     }
 
-    /// Legacy emit path used by API-built paragraphs (no source-loaded markers).
-    /// Mirrors v3.12.0 behavior: bookmarks / commentRanges / runs / SDTs /
-    /// hyperlinks / footnoteRefs / endnoteRefs / bookmark-end in fixed order.
-    fileprivate func toXMLLegacy() -> String {
-        var xml = openingPTag()
-
-        // Paragraph Properties
+    /// The `<w:pPr>…</w:pPr>` block (or empty string when `needsPPr` is
+    /// false — "drop empty `<w:pPr>` on emit": OOXML treats absence
+    /// equivalently to `<w:pPr/>`). Shared verbatim by `toXMLLegacy()` and
+    /// `toXMLSortedByPosition()` — both paths had the exact same logic
+    /// duplicated inline (confirmed byte-identical during the
+    /// PsychQuant/ooxml-swift#195 R2 investigation). This invariant is
+    /// asserted by `Issue4PPrRegressionGuardTests
+    /// .testEmptyPPrSelfClosingProducesNoUnrecognizedAndDropsEmptyBlock`. If
+    /// you extend the `needsPPr` condition (e.g. `|| isCustomDirectFormatting`),
+    /// update this one site + the test docstring.
+    ///
+    /// `@inline(never)`: PsychQuant/ooxml-swift#195 R2 — extracted (along
+    /// with the other `toXMLSortedByPosition()` helpers below) specifically
+    /// to shrink that function's `-Onone` (debug) stack frame, which
+    /// measured large enough to overflow a 512KB thread stack (the
+    /// approximate size of Swift's cooperative-pool worker threads, where
+    /// che-word-mcp's document saves actually run) after only 3 levels of
+    /// table nesting. `-Onone` never inlines regardless, but an optimizing
+    /// (release) build's single-call-site inliner could still fold a small
+    /// `private` helper back into its one caller and undo the split;
+    /// `@inline(never)` keeps this a real, separate stack frame in both
+    /// build configurations. See `Table.maxSerializationDepth`'s doc
+    /// comment and the R2 section of the fix report for the measurements.
+    @inline(never)
+    private func pPrBlockXML() -> String {
         let propsXML = properties.toXML()
         let formatChangeRevision: Revision? = {
             guard let id = paragraphFormatChangeRevisionId else { return nil }
             return revisions.first { $0.id == id }
         }()
-        // `needsPPr` gate implements "drop empty <w:pPr> on emit" — an
-        // all-default paragraph emits nothing for pPr (OOXML treats absence ≡
-        // <w:pPr/>). This invariant is asserted by Issue4PPrRegressionGuardTests
-        // .testEmptyPPrSelfClosingProducesNoUnrecognizedAndDropsEmptyBlock; the
-        // sorted-by-position emit path at L502 mirrors this gate. If you extend
-        // either condition, update both sites + the test docstring to match.
         let needsPPr = !propsXML.isEmpty
             || properties.sectionBreak != nil
             || formatChangeRevision != nil
-        if needsPPr {
-            xml += "<w:pPr>\(propsXML)"
+        guard needsPPr else { return "" }
 
-            // 分節符放在段落屬性中
-            if let sectionBreak = properties.sectionBreak {
-                xml += "<w:sectPr><w:type w:val=\"\(sectionBreak.rawValue)\"/></w:sectPr>"
-            }
+        var xml = "<w:pPr>\(propsXML)"
 
-            // v0.18.0+ (che-word-mcp#45): pPrChange tracks paragraph format change
-            if let revision = formatChangeRevision, let prev = previousProperties {
-                xml += revision.toOpeningXML()
-                xml += "<w:pPr>\(prev.toXML())</w:pPr>"
-                xml += revision.toClosingXML()
-            }
-
-            xml += "</w:pPr>"
+        // 分節符放在段落屬性中
+        if let sectionBreak = properties.sectionBreak {
+            xml += "<w:sectPr><w:type w:val=\"\(sectionBreak.rawValue)\"/></w:sectPr>"
         }
+
+        // v0.18.0+ (che-word-mcp#45): pPrChange tracks paragraph format change
+        if let revision = formatChangeRevision, let prev = previousProperties {
+            xml += revision.toOpeningXML()
+            xml += "<w:pPr>\(prev.toXML())</w:pPr>"
+            xml += revision.toClosingXML()
+        }
+
+        xml += "</w:pPr>"
+        return xml
+    }
+
+    /// Legacy emit path used by API-built paragraphs (no source-loaded markers).
+    /// Mirrors v3.12.0 behavior: bookmarks / commentRanges / runs / SDTs /
+    /// hyperlinks / footnoteRefs / endnoteRefs / bookmark-end in fixed order.
+    fileprivate func toXMLLegacy() -> String {
+        var xml = openingPTag()
+        xml += pPrBlockXML()
 
         // 分頁符
         if hasPageBreak {
@@ -787,41 +808,28 @@ extension Paragraph {
     ///   of the legacy collections) keep byte-equivalent round-trip.
     fileprivate func toXMLSortedByPosition() -> String {
         var xml = openingPTag()
+        xml += pPrBlockXML()
+        xml += sortByPositionPreContentXML()
+        xml += Self.emitSortedPositionedEntries(
+            sortByPositionEntries(), paragraphRevisions: revisions)
+        xml += sortByPositionPostContentXML()
+        xml += "</w:p>"
+        return xml
+    }
 
-        // Paragraph Properties (mirrors legacy path).
-        let propsXML = properties.toXML()
-        let formatChangeRevision: Revision? = {
-            guard let id = paragraphFormatChangeRevisionId else { return nil }
-            return revisions.first { $0.id == id }
-        }()
-        // `needsPPr` gate — sorted-by-position counterpart of L371 (legacy emit
-        // path). Same drop-empty-pPr invariant locked in by
-        // Issue4PPrRegressionGuardTests
-        // .testEmptyPPrSelfClosingProducesNoUnrecognizedAndDropsEmptyBlock. Keep
-        // both sites in sync; if you add a new condition (e.g.,
-        // `|| isCustomDirectFormatting`), update both + the test docstring.
-        let needsPPr = !propsXML.isEmpty
-            || properties.sectionBreak != nil
-            || formatChangeRevision != nil
-        if needsPPr {
-            xml += "<w:pPr>\(propsXML)"
-            if let sectionBreak = properties.sectionBreak {
-                xml += "<w:sectPr><w:type w:val=\"\(sectionBreak.rawValue)\"/></w:sectPr>"
-            }
-            if let revision = formatChangeRevision, let prev = previousProperties {
-                xml += revision.toOpeningXML()
-                xml += "<w:pPr>\(prev.toXML())</w:pPr>"
-                xml += revision.toClosingXML()
-            }
-            xml += "</w:pPr>"
-        }
-
-        // v0.19.3+ (#56 round 2 P0-5): legacy pre-content collections. Mirrors
-        // legacy `toXMLLegacy` ordering. Skipped per-collection when the
-        // positioned variant is populated to avoid double-emit — Reader keeps
-        // `bookmarks` populated for backward-compat reads while also populating
-        // `bookmarkMarkers`, so emitting both would duplicate every source
-        // bookmark on round-trip.
+    /// v0.19.3+ (#56 round 2 P0-5): legacy pre-content collections. Mirrors
+    /// legacy `toXMLLegacy` ordering. Skipped per-collection when the
+    /// positioned variant is populated to avoid double-emit — Reader keeps
+    /// `bookmarks` populated for backward-compat reads while also populating
+    /// `bookmarkMarkers`, so emitting both would duplicate every source
+    /// bookmark on round-trip.
+    ///
+    /// `@inline(never)`: PsychQuant/ooxml-swift#195 R2 frame-splitting — see
+    /// `pPrBlockXML()`'s doc comment for why this whole family of helpers is
+    /// split out of `toXMLSortedByPosition()`.
+    @inline(never)
+    private func sortByPositionPreContentXML() -> String {
+        var xml = ""
         if hasPageBreak {
             xml += "<w:r><w:br w:type=\"page\"/></w:r>"
         }
@@ -841,14 +849,28 @@ extension Paragraph {
         for commentId in commentIds where !commentIdsCoveredByMarkers.contains(commentId) {
             xml += "<w:commentRangeStart w:id=\"\(commentId)\"/>"
         }
+        return xml
+    }
 
-        // Build (position, payload) pairs from every position-indexed collection.
-        // v0.19.2+ (#56 F3): runs are kept as `.run(Run)` rather than pre-emitted
-        // strings so the post-sort pass can group consecutive same-revisionId
-        // runs and wrap them in <w:ins>/<w:del>/<w:moveFrom>/<w:moveTo>. Without
-        // this grouping, source-loaded paragraphs with revision tracking would
-        // emit individual <w:r>...</w:r> with no enclosing revision wrapper —
-        // i.e., revision history silently wiped on round-trip.
+    /// Build the (position, payload) pairs from every position-indexed
+    /// collection, then stable-sort by position.
+    ///
+    /// v0.19.2+ (#56 F3): runs are kept as `.run(Run)` rather than pre-emitted
+    /// strings so the post-sort pass can group consecutive same-revisionId
+    /// runs and wrap them in <w:ins>/<w:del>/<w:moveFrom>/<w:moveTo>. Without
+    /// this grouping, source-loaded paragraphs with revision tracking would
+    /// emit individual <w:r>...</w:r> with no enclosing revision wrapper —
+    /// i.e., revision history silently wiped on round-trip.
+    ///
+    /// `@inline(never)`: PsychQuant/ooxml-swift#195 R2 frame-splitting — see
+    /// `pPrBlockXML()`'s doc comment. This is the biggest single contributor:
+    /// 13 separate loops each declaring their own iteration variable used to
+    /// live in ONE `-Onone` stack frame; splitting them into their own frame
+    /// (freed the moment this function returns, before the caller does any
+    /// more work) is where most of the measured stack-size reduction in the
+    /// R2 investigation came from.
+    @inline(never)
+    private func sortByPositionEntries() -> [(position: Int, entry: PositionedEntry)] {
         var positioned: [(position: Int, entry: PositionedEntry)] = []
 
         // v0.19.5+ (#56 R5-CONT P0 #6): runs / hyperlinks / fieldSimples /
@@ -916,10 +938,23 @@ extension Paragraph {
 
         // Stable sort by position. Equal positions retain insertion order.
         positioned.sort { $0.position < $1.position }
+        return positioned
+    }
 
-        // Walk the sorted list. Whenever consecutive entries are `.run(_)`
-        // sharing the same `revisionId`, emit them inside a single revision
-        // wrapper. `.xml(_)` entries flush as-is.
+    /// Walk the sorted list. Whenever consecutive entries are `.run(_)`
+    /// sharing the same `revisionId`, emit them inside a single revision
+    /// wrapper. `.xml(_)` entries flush as-is.
+    ///
+    /// `static` (no `self`): only needs the sorted entries and the
+    /// paragraph's `revisions` list, both passed in explicitly.
+    /// `@inline(never)`: PsychQuant/ooxml-swift#195 R2 frame-splitting — see
+    /// `pPrBlockXML()`'s doc comment.
+    @inline(never)
+    private static func emitSortedPositionedEntries(
+        _ positioned: [(position: Int, entry: PositionedEntry)],
+        paragraphRevisions revisions: [Revision]
+    ) -> String {
+        var xml = ""
         var i = 0
         while i < positioned.count {
             switch positioned[i].entry {
@@ -955,13 +990,20 @@ extension Paragraph {
                 i = j
             }
         }
+        return xml
+    }
 
-        // v0.19.3+ (#56 round 2 P0-4 + P0-5): legacy post-content collections.
-        // Mirrors `toXMLLegacy` ordering so any caller that mutated the legacy
-        // single-list collections on a sort-routed paragraph still gets their
-        // children emitted. For source-loaded paragraphs these collections are
-        // empty (parser populates the positioned variants instead).
-        //
+    /// v0.19.3+ (#56 round 2 P0-4 + P0-5): legacy post-content collections.
+    /// Mirrors `toXMLLegacy` ordering so any caller that mutated the legacy
+    /// single-list collections on a sort-routed paragraph still gets their
+    /// children emitted. For source-loaded paragraphs these collections are
+    /// empty (parser populates the positioned variants instead).
+    ///
+    /// `@inline(never)`: PsychQuant/ooxml-swift#195 R2 frame-splitting — see
+    /// `pPrBlockXML()`'s doc comment.
+    @inline(never)
+    private func sortByPositionPostContentXML() -> String {
+        var xml = ""
         // v0.19.4+ (#56 R3-NEW-2): only emit position-0 contentControls here
         // (API-built). Position>0 controls were already emitted in the sorted
         // list above at their source position; emitting them again would
@@ -1021,7 +1063,11 @@ extension Paragraph {
         // generated by CommentRangeMarker — so the per-id check is critical:
         // skipping a covered id avoids double-emit of end markers AND prevents
         // duplicating an inline reference run that the source-loaded paragraph
-        // already carries (parsed as a Run with rawElements).
+        // already carries (parsed as a Run with rawElements). Recomputed here
+        // (cheap — a Set built from `commentRangeMarkers`, typically tiny)
+        // rather than threaded through from `sortByPositionPreContentXML()`,
+        // so each helper stays self-contained.
+        let commentIdsCoveredByMarkers = Set(commentRangeMarkers.map { $0.id })
         for commentId in commentIds where !commentIdsCoveredByMarkers.contains(commentId) {
             xml += "<w:commentRangeEnd w:id=\"\(commentId)\"/>"
             xml += "<w:r><w:commentReference w:id=\"\(commentId)\"/></w:r>"
@@ -1037,8 +1083,6 @@ extension Paragraph {
                 xml += bookmark.toBookmarkEndXML()
             }
         }
-
-        xml += "</w:p>"
         return xml
     }
 

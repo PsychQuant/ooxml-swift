@@ -356,4 +356,193 @@ final class Issue195TwoLevelNestedTableCrashTests: XCTestCase {
             XCTAssertTrue(xml.contains("L\(i)"), "missing L\(i) — got: \(xml)")
         }
     }
+
+    // MARK: - R2: cooperative-pool-sized (512KB) thread regression tests
+    //
+    // R1's fix (a depth guard) did not address the coordinator's actual
+    // reproduction: che-word-mcp's real crash comes from `update_cell` (not
+    // `insert_paragraph`) on a table whose cell already has source-loaded
+    // (position-marked) paragraph content, saved from a thread with a
+    // small (~512KB) stack — Swift concurrency's cooperative-pool worker
+    // threads, not the 8MB main thread R1's measurements used. At that
+    // stack size, just 3 levels of real nesting overflowed the stack
+    // BEFORE any of R1's depth guard logic even mattered (528-544KB
+    // threshold vs 512KB available). These tests pin the ACTUAL repro
+    // shape (`updateCell` on a table read normally, full
+    // `DocxWriter.write`, an explicit small thread stack) so a future
+    // regression in the `toXMLSortedByPosition` / `TableCell.toXML`
+    // frame-splitting fixes below shows up as a real crash, not just a
+    // slow test.
+
+    /// Runs `body` on a `Thread` with the given stack size (rounded down
+    /// to a page-aligned value `Thread.stackSize` accepts) and asserts it
+    /// completes within `timeout` seconds — a crash inside `body` kills
+    /// the whole test PROCESS (matching the debug-build `EXC_BAD_ACCESS`
+    /// this issue is about), which `swift test` reports as the test
+    /// executable exiting with an unexpected signal, not a normal
+    /// assertion failure. There is no in-process way to catch that and
+    /// convert it into a soft `XCTFail` — the crash IS the evidence.
+    private func runOnStackConstrainedThread(
+        stackKB: Int, timeout: TimeInterval = 30, _ body: @escaping () throws -> Void
+    ) throws {
+        let sem = DispatchSemaphore(value: 0)
+        var caught: Error?
+        let thread = Thread {
+            do { try body() } catch { caught = error }
+            sem.signal()
+        }
+        thread.stackSize = stackKB * 1024
+        thread.start()
+        let waitResult = sem.wait(timeout: .now() + timeout)
+        XCTAssertEqual(waitResult, .success, "stack=\(stackKB)KB: timed out (hang)")
+        if let caught { throw caught }
+    }
+
+    /// The coordinator's confirmed repro, reproduced directly: read the
+    /// issue's own 3-level fixture, `update_cell`-equivalent
+    /// (`Document.updateCell`) on the OUTER cell only — nothing about the
+    /// nested tables is touched — then save on a thread sized like Swift
+    /// concurrency's cooperative pool. Before the R2 fix this crashed
+    /// (SIGBUS) at the assumed production stack size (512KB); the R1
+    /// depth-20 guard alone did nothing for this case since only 3 real
+    /// levels of recursion are involved.
+    func testUpdateCellOuterCellSmallStackSaveDoesNotCrash() throws {
+        let url = try buildFixture(documentXML: Self.documentXMLTemplate)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        var doc = try DocxReader.read(from: url)
+        defer { doc.close() }
+        try doc.updateCell(tableIndex: 0, row: 0, col: 0, text: "updated-outer-cell")
+
+        guard case .table(let table) = doc.body.children[1] else {
+            XCTFail("expected table at body.children[1]")
+            return
+        }
+        XCTAssertTrue(
+            table.rows[0].cells[0].paragraphs[0].hasSourcePositionedChildren,
+            "sanity check: the updated cell's paragraph must route through " +
+            "toXMLSortedByPosition() for this test to exercise the real repro")
+
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue195-r2-out-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        try runOnStackConstrainedThread(stackKB: 512) {
+            try DocxWriter.write(doc, to: outURL)
+        }
+
+        let xml = try extractDocumentXML(from: outURL)
+        let text = String(data: xml, encoding: .utf8)!
+        XCTAssertTrue(text.contains("updated-outer-cell"))
+        XCTAssertTrue(text.contains("Middle1"))
+        XCTAssertTrue(text.contains("Innermost"))
+    }
+
+    /// Builds a document with `levels` levels of table-in-single-cell
+    /// nesting (each cell one row/one col), a real paragraph of text at
+    /// each level. Mirrors what `updateCell` needs: normal parsed
+    /// paragraphs (not API-built), so every run gets a source `position`
+    /// (`DocxReader`'s `childPosition` starts at 1) and every cell
+    /// paragraph routes through `Paragraph.toXMLSortedByPosition()`.
+    private func makeNLevelNestedTableXML(levels: Int) -> String {
+        var open = ""
+        var close = ""
+        for i in 0..<levels {
+            open += "<w:tbl><w:tblGrid><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w=\"2000\" w:type=\"dxa\"/></w:tcPr>"
+            open += "<w:p><w:r><w:t>L\(i)</w:t></w:r></w:p>"
+            close = "<w:p/></w:tc></w:tr></w:tbl>" + close
+        }
+        return """
+            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>\
+            <w:p><w:r><w:t>Unrelated</w:t></w:r></w:p>\
+            \(open)<w:p><w:r><w:t>Leaf</w:t></w:r></w:p>\(close)\
+            <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>\
+            </w:body></w:document>
+            """
+    }
+
+    /// Five levels of nesting — `DocxReader.parseTable`'s own
+    /// `MAX_TABLE_NEST_DEPTH` ceiling, i.e. the deepest a document can
+    /// ever legitimately arrive through the standard reader — `updateCell`
+    /// on the outer cell, full `DocxWriter.write` on a 512KB-stack thread.
+    /// Measured threshold before this passed: ~536KB (R1 only); ~212KB
+    /// after the R2 frame-splitting fixes — comfortable margin under the
+    /// assumed 512KB production stack.
+    func testFiveLevelNestingUpdateCellSmallStackSaveDoesNotCrash() throws {
+        let xml = makeNLevelNestedTableXML(levels: 5)
+        let url = try buildFixture(documentXML: xml)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        var doc = try DocxReader.read(from: url)
+        defer { doc.close() }
+        try doc.updateCell(tableIndex: 0, row: 0, col: 0, text: "updated-outer-cell")
+
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue195-r2n5-out-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        try runOnStackConstrainedThread(stackKB: 512) {
+            try DocxWriter.write(doc, to: outURL)
+        }
+
+        let xmlOut = try extractDocumentXML(from: outURL)
+        let text = String(data: xmlOut, encoding: .utf8)!
+        XCTAssertTrue(text.contains("updated-outer-cell"))
+        XCTAssertTrue(text.contains("Leaf"))
+        XCTAssertEqual(text.components(separatedBy: "<w:tbl>").count - 1, 5)
+    }
+
+    /// API-constructed variant, bypassing `DocxReader.parseTable`'s
+    /// `MAX_TABLE_NEST_DEPTH = 5` entirely (same technique as
+    /// `testAPIConstructedExcessiveDepthDoesNotCrashAndTruncates`) to reach
+    /// exactly `Table.maxSerializationDepth` (10) — the deepest a
+    /// pathological, API-constructed or tree-mutated document can still
+    /// reach before the R2-recalibrated guard truncates it. Each level's
+    /// cell paragraph gets a `Run` with `position = 1` set explicitly —
+    /// this is what forces `Paragraph.toXML()` onto the expensive
+    /// `toXMLSortedByPosition()` path (`hasSourcePositionedChildren` checks
+    /// `run.position ?? 0 > 0`); an API-built paragraph otherwise defaults
+    /// to `position == 0` and takes the cheaper `toXMLLegacy()` path,
+    /// understating the worst case. Measured threshold: ~292KB — comfortable
+    /// (>40%) margin under the assumed 512KB production stack. See
+    /// `Table.maxSerializationDepth`'s doc comment for the full
+    /// depth-vs-threshold table.
+    func testAPIConstructedGuardBoundaryDepthSmallStackSaveDoesNotCrash() throws {
+        let levels = Table.maxSerializationDepth
+
+        func positionedParagraph(_ text: String) -> Paragraph {
+            var run = Run(text: text)
+            run.position = 1
+            return Paragraph(runs: [run])
+        }
+
+        var innermost = Table(rows: [TableRow(cells: [
+            TableCell(paragraphs: [positionedParagraph("leaf")])
+        ])])
+        for i in 0..<levels {
+            var cell = TableCell(paragraphs: [positionedParagraph("L\(i)")])
+            cell.nestedTables = [innermost]
+            innermost = Table(rows: [TableRow(cells: [cell])])
+        }
+
+        var doc = WordDocument()
+        doc.body.children = [.paragraph(positionedParagraph("Unrelated")), .table(innermost)]
+
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue195-r2api-out-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        try runOnStackConstrainedThread(stackKB: 512) {
+            try DocxWriter.write(doc, to: outURL)
+        }
+
+        let xml = try extractDocumentXML(from: outURL)
+        let text = String(data: xml, encoding: .utf8)!
+        // All `levels + 1` tables (the leaf plus every wrapper) must
+        // survive un-truncated: `levels == maxSerializationDepth` sits
+        // exactly at the guard boundary, not past it.
+        XCTAssertEqual(text.components(separatedBy: "<w:tbl>").count - 1, levels + 1)
+        XCTAssertTrue(text.contains("leaf"))
+    }
 }
