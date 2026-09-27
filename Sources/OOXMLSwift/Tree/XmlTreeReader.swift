@@ -34,6 +34,45 @@ public enum XmlTreeReaderError: Error, Equatable {
     case nestingTooDeep(limit: Int, at: Int)
 }
 
+extension XmlTreeReaderError: LocalizedError {
+    /// PsychQuant/ooxml-swift#146: none of `DocxReader`'s ~12 call sites of
+    /// `XmlTreeReader.parse` catch this error, so it reaches the top-level
+    /// caller exactly as thrown — every one of them, not only rels parts.
+    /// Without this, `String(describing:)` on a case with an associated
+    /// value renders as e.g. `unexpectedEOF(at: 248)`: a byte offset with no
+    /// explanation of what the parser expected there. This does not change
+    /// the error's TYPE (still `XmlTreeReaderError`, still `Equatable`, so
+    /// existing case-based assertions are unaffected) — it only gives it
+    /// something to say when a caller asks `localizedDescription` /
+    /// `errorDescription` for one, matching the guarantee every other
+    /// error type in this package (`WordError`, `XMLHardeningError`, …)
+    /// already makes.
+    public var errorDescription: String? {
+        switch self {
+        case .emptyInput:
+            return "the XML part is empty"
+        case .unexpectedEOF(let at):
+            return "the XML part ended before a tag or attribute was closed (byte offset \(at))"
+        case .unexpectedCharacter(let char, let at):
+            return "unexpected character '\(char)' where a tag or attribute was expected (byte offset \(at))"
+        case .malformedAttribute(let at):
+            return "malformed attribute — expected `name=\"value\"` with matching quotes (byte offset \(at))"
+        case .malformedTag(let at):
+            return "malformed tag (byte offset \(at))"
+        case .mismatchedClosingTag(let expected, let found, let at):
+            return "closing tag </\(found)> does not match the open tag <\(expected)> (byte offset \(at))"
+        case .invalidEntityReference(let reference, let at):
+            return "invalid entity reference &\(reference); (byte offset \(at))"
+        case .invalidNumericReference(let reference, let at):
+            return "numeric character reference &#\(reference); does not resolve to a valid XML character (byte offset \(at))"
+        case .unexpectedTrailingContent(let at):
+            return "unexpected content after the document's root element (byte offset \(at))"
+        case .nestingTooDeep(let limit, let at):
+            return "element nesting exceeds the \(limit)-level limit (byte offset \(at))"
+        }
+    }
+}
+
 /// Parses a UTF-8 XML document into a lossless `XmlTree`.
 public enum XmlTreeReader {
 
