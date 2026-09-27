@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.14.0] - 2026-09-27
+
 ### Fixed
 
 - **表格編輯後存檔，未觸及的列/格會靜默丟格式**（PsychQuant/che-word-mcp#185、PsychQuant/che-word-mcp#224）。
@@ -25,7 +27,7 @@ All notable changes to ooxml-swift will be documented in this file.
   - **`update_cell` 對空段落（無 run）的 cell 丟掉既有 `pPr`**（che-word-mcp#224a）。官方表單裡待填寫
     的欄位常是「無 run 但仍帶 `pPr`」的段落（樣式、精確行距、對齊、東亞字型預設），`updateCell` 原本
     直接用 `Paragraph(text:)` 建一個全新段落蓋掉整個 `paragraphs` 陣列，連 `pPr` 一起丟棄。現在比照
-    `updateCellParagraph`（che-word-mcp#194）已驗證的做法：就地改既有段落的 `.runs`，`.properties` 原樣保留。
+    `updateCellParagraph`（che-word-mcp#194）已驗證的做法：就地改既有段落的 `.runs`，`.properties` 原樣保留。已知限制：多段落儲存格經 `updateCell` 仍只保留第一段（v3.13.0 就存在，追蹤於 PsychQuant/ooxml-swift#182）。
   - **表格列屬性 `<w:trPr>` 沒有 `jc` 欄位、`heightRule` 為 `nil` 時被無中生有補上 `w:hRule="auto"`**
     （che-word-mcp#224b）。`TableRowProperties` 原本沒有欄位能放列級水平對齊（`<w:trPr><w:jc>`），讀寫
     兩端都直接漏掉；`TableRow.toXML()` 把「來源沒有 `w:hRule`」跟「明確要 auto」混為一談，任何原本沒寫
