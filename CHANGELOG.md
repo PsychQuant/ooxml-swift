@@ -124,6 +124,37 @@ All notable changes to ooxml-swift will be documented in this file.
   的其他欄位（italic/underline/fontSizeHalfPoints/color）若非 `nil` 會明確拋錯而非靜默忽略，
   留給未來擴充。`value: false` 會寫出明確的 `<w:b w:val="0"/>` 關閉值而非移除元素
   （對齊 PsychQuant/ooxml-swift#161 的期望行為）。
+- **`ElementID.derivedFragmentID(fromOpID:index:)`**（PsychQuant/macdoc#232 R2）：對抗式審查
+  抓到 `setRunFormatInRange` 切分 run 時，切出的每個片段都透過 `deepClone()` 原封不動複製了
+  來源 run 的 `libraryUUID`，導致同一個 ElementID 同時命中多個片段——任何後續操作（同一批次、
+  undo 歷史、或單純重複引用先前記下的 Run ID）若仍以切分前的 ID 定址，會靜默命中錯誤片段
+  （見下方 Fixed）。現在切分後**只有第一個片段**（依文件順序）保留原 run 的 ElementID，其餘
+  片段透過這支新的公開 API、以該次操作的 `opID` 決定性地衍生新 ID（`index: 1` 對應範圍起點
+  需要的新片段，`index: 2` 對應範圍終點需要的新片段），保證同一份 op-log 重播兩次會得到完全
+  相同的 ID（符合 reducer 的 pure-function／replay-determinism 契約）。呼叫端可用這支 API
+  取得新片段的 ID。
+### Fixed
+- **`setRunFormatInRange` 切分 run 時，所有切出的片段共用同一個 ElementID**（PsychQuant/macdoc#232
+  R2，對抗式審查 CRITICAL-1）：任一片段後續被其他操作（同批次、undo/redo、或呼叫端記下的舊
+  Run ID）定址時會靜默改到錯的片段，且完全沒有錯誤或警告——`findNode` 對 `lib:` 前綴的
+  ElementID 有意跳過自身的 ambiguity 偵測（信任 `lib:` ID 天生唯一），這個假設被新程式碼打破
+  卻沒被抓到。詳見上方 Added 的 `ElementID.derivedFragmentID` 說明。
+- **同一個 run 內若有多個 `<w:t>`（例如中間夾 `<w:tab/>`／`<w:br/>`）會造成文字重複**
+  （PsychQuant/macdoc#232 R2，對抗式審查 CRITICAL-2）：`splitRunNode` 原本只找第一個
+  `<w:t>` 並只改寫它，run 內其餘 `<w:t>`（例如同一個 run 內 `"AB"<w:tab/>"CD"` 的第二個
+  `"CD"`）在切出的兩份 clone 上都原封不動留著，實際產生的三個片段是 `["CD", "ABCD", "CD"]`——
+  「CD」憑空重複了兩次，這是真正的內容毀損，不只是格式套用範圍不精準（先前的殘留風險描述
+  低估了嚴重度，已一併更正）。現在這種「複雜 run」（非剛好一個 `<w:t>` 內容子元素）整個被排除
+  在可搜尋文字之外，且視為邊界——文字不會被拆開、也不會被跟鄰居黏成假相鄰，只有明確拒絕
+  （`malformedOp`，reason 點名「mixed content」）。
+- **比對範圍可跨越 `<w:ins>`／`<w:del>`／`<w:hyperlink>`／`<w:sdt>` 等非直接 `<w:r>` 子節點，
+  造成假相鄰**（PsychQuant/macdoc#232 R2，對抗式審查 HIGH-3）：這些容器包住的 `<w:r>` 都不是
+  段落的直接子節點，原本的掃描邏輯只看直接子節點，會讓容器前後的文字被當成緊鄰（例如
+  「foo」＋追蹤插入「XXX」＋「bar」會被拼成「foobar」成功比對，中間的追蹤插入完全被跳過）。
+  現在段落的直接子節點被分組成「連續的一般 `<w:r>` 片段」，任何非 `<w:r>` 子節點都會斷開
+  分組、兩側文字不再視為相鄰；範圍需要碰到或跨越這類容器時明確拒絕，reason 指名是哪一種
+  容器（`<w:ins>`／`<w:hyperlink>`／`<w:sdt>` 等）。`<w:del>` 內的文字額外確保完全不出現在
+  任何（含診斷用的）扁平化文字中。
 - **`ReducerError` 補上 `LocalizedError`**（PsychQuant/macdoc#232）：`ReducerError.localizedDescription`
   原本沒有自訂 `errorDescription`，會被橋接成通用的 NSError 訊息（如「The operation couldn't be
   completed. (OOXMLSwift.ReducerError error 1.)」），把 `.malformedOp` 的 `reason` 字串整段吃掉。
