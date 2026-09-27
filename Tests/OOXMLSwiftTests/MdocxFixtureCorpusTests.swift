@@ -107,6 +107,72 @@ final class MdocxFixtureCorpusTests: XCTestCase {
             .appendingPathComponent("mdocx")
     }
 
+    // MARK: - #111 macdoc version-skew guard unit coverage
+
+    /// Fast, in-process coverage for the version-parsing/comparison logic
+    /// behind `requireMacdocAtLeast` — does not shell out, so it runs in
+    /// milliseconds regardless of whether `macdoc` is installed.
+    func testParseSemverExtractsMajorMinorPatchFromVersionOutput() {
+        XCTAssertEqual(Self.parseSemver("macdoc 0.13.1").map { "\($0.major).\($0.minor).\($0.patch)" }, "0.13.1")
+        XCTAssertEqual(Self.parseSemver("0.13").map { "\($0.major).\($0.minor).\($0.patch)" }, "0.13.0")
+        XCTAssertNil(Self.parseSemver("not a version"), "output with no dotted numeric token must not parse")
+    }
+
+    /// `requireMacdocAtLeast` must throw `XCTSkip` (not a hard failure) when
+    /// the installed `macdoc` is below the requested floor.
+    func testRequireMacdocAtLeastSkipsLoudlyWhenFloorNotMet() throws {
+        guard Self.isMacdocOnPath() else {
+            throw XCTSkip("this check needs a real `macdoc` on PATH to exercise the below-floor path")
+        }
+        do {
+            try Self.requireMacdocAtLeast((major: 999, minor: 0, patch: 0))
+            XCTFail("expected XCTSkip for an unmet version floor")
+        } catch is XCTSkip {
+            // Expected — see testVersionFloorSkipMessageNamesFloorAndFoundVersion
+            // for coverage of the message content (XCTSkip's own
+            // representation is opaque, so the message text itself is
+            // pinned via the pure builder function instead).
+        } catch {
+            XCTFail("expected XCTSkip, got \(error)")
+        }
+    }
+
+    /// Pins the exact "needs macdoc ≥ X, found Y" message #111 asked for —
+    /// the skip message must name both the required floor and the version
+    /// actually found, distinct from a bare "command failed".
+    func testVersionFloorSkipMessageNamesFloorAndFoundVersion() {
+        let message = Self.versionFloorSkipMessage(
+            floor: (major: 1, minor: 2, patch: 3),
+            found: (major: 0, minor: 9, patch: 0),
+            rawVersionOutput: "macdoc 0.9.0"
+        )
+        XCTAssertTrue(message.contains("1.2.3"), "message must name the required floor; got: \(message)")
+        XCTAssertTrue(message.contains("0.9.0"), "message must name the version found; got: \(message)")
+    }
+
+    /// Confirms `minimumMacdocVersion` is not a floor nobody on a real dev
+    /// machine can pass: on a machine with `macdoc` installed, requiring
+    /// exactly the configured floor must succeed silently (no throw).
+    /// Machines without `macdoc` skip rather than fail, matching #111's
+    /// "skip loudly when absent" requirement.
+    func testRequireMacdocAtLeastPassesForConfiguredFloorWhenMacdocPresent() throws {
+        guard Self.isMacdocOnPath() else {
+            throw XCTSkip("`macdoc` not on PATH — nothing to assert about the configured floor here")
+        }
+        // Deliberately NOT `try Self.requireMacdocAtLeast(...)` directly: an
+        // off-by-one at the exact floor (e.g. `>` instead of `>=`) would make
+        // this throw `XCTSkip`, and XCTest reports a test that throws
+        // XCTSkip as "skipped" — indistinguishable at a glance from this
+        // guard's own legitimate skip above. Catching explicitly turns that
+        // regression into a hard, visible XCTFail instead.
+        do {
+            try Self.requireMacdocAtLeast(Self.minimumMacdocVersion)
+        } catch {
+            XCTFail("requireMacdocAtLeast must accept the exact configured floor "
+                + "(\(Self.minimumMacdocVersion)) on a machine that has it installed; threw: \(error)")
+        }
+    }
+
     // MARK: - Top-level test entry
 
     /// Single XCTest method that runs all parameterized fixtures via
@@ -158,6 +224,14 @@ final class MdocxFixtureCorpusTests: XCTestCase {
                     }
                 } catch let error as FixtureFailure {
                     XCTFail(error.message)
+                } catch let skip as XCTSkip {
+                    // #111 — a missing/too-old `macdoc` binary means this ONE
+                    // fixture's reverse-CLI assertion can't run; the other
+                    // fixtures (which don't need `macdoc` at all) still ran
+                    // normally above. Report it as a loud, named skip instead
+                    // of XCTFail so a clean checkout without `macdoc` reads
+                    // as "skipped, here's why" rather than "broken".
+                    print("[mdocx-fixture-corpus] SKIP fixture \(dirName): \(skip)")
                 } catch {
                     XCTFail(Self.formatFailure(
                         fixtureDir: dirName,
@@ -646,12 +720,19 @@ final class MdocxFixtureCorpusTests: XCTestCase {
             let reversedSource: String
             do {
                 reversedSource = try runMacdocWordReverse(docxBytes: normalizedOutput)
+            } catch let skip as XCTSkip {
+                // #111 — a missing/too-old `macdoc` is not this fixture's fault
+                // and must not be reported as a hard failure. Propagate the
+                // skip untouched (the top-level `testAllFixtures` catch
+                // block prints it as a named skip rather than XCTFail-ing).
+                throw skip
             } catch {
+                let versionNote = (try? Self.macdocVersionOutput()) ?? "macdoc --version unavailable"
                 throw FixtureFailure(formatFailure(
                     fixtureDir: fixtureDir.lastPathComponent,
                     phase: .phaseB,
                     assertion: "reverse-CLI execution",
-                    details: "`macdoc word reverse` failed: \(error)"
+                    details: "`macdoc word reverse` failed (macdoc version: \(versionNote)): \(error)"
                 ))
             }
             if updateGoldens {
@@ -800,7 +881,18 @@ final class MdocxFixtureCorpusTests: XCTestCase {
 
     /// Invoke `macdoc word reverse` against a docx and return the reversed
     /// `.mdocx.swift` source (Requirement 15).
+    ///
+    /// #111 — this fixture's verdict is otherwise a function of whichever
+    /// `macdoc` happens to be on `PATH`, at whatever version that machine
+    /// happens to have installed: a stale binary reads as a source
+    /// regression, and CI without `macdoc` reports "command not found"
+    /// instead of a clean skip. `requireMacdocAtLeast` makes the dependency
+    /// legible: absent or below `minimumMacdocVersion` → loud `XCTSkip`
+    /// naming what's missing; present and current → the version is echoed
+    /// into any downstream failure message via `macdocVersionOutput()`.
     private static func runMacdocWordReverse(docxBytes: Data) throws -> String {
+        try requireMacdocAtLeast(minimumMacdocVersion)
+
         let workDir = makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: workDir) }
         let docxURL = workDir.appendingPathComponent("input.docx")
@@ -815,6 +907,80 @@ final class MdocxFixtureCorpusTests: XCTestCase {
             ]
         )
         return try String(contentsOf: outURL, encoding: .utf8)
+    }
+
+    /// Minimum `macdoc` CLI version this fixture corpus's reverse-CLI
+    /// assertion (Requirement 15, `<slug>.expected-source.mdocx.swift`)
+    /// requires. This floor documents "the oldest emitter behaviour the
+    /// current golden encodes" — bump it in the same change that refreshes
+    /// a `.expected-source.mdocx.swift` golden for a new emitter behaviour,
+    /// so a stale local `macdoc` fails loud ("needs macdoc ≥ X, found Y")
+    /// instead of producing a diff nobody can act on.
+    ///
+    /// Set to the version installed and exercised while writing this gate
+    /// (2026-09-27, `macdoc --version` → `0.13.1`) — the newest version known
+    /// to produce a byte-comparable reverse source against the current
+    /// goldens in this repository.
+    private static let minimumMacdocVersion = (major: 0, minor: 13, patch: 1)
+
+    /// `true` when a `macdoc` executable resolves on `PATH` at all (`which`),
+    /// independent of whether it meets `minimumMacdocVersion`.
+    private static func isMacdocOnPath() -> Bool {
+        (try? runProcess(executable: "/usr/bin/env", arguments: ["which", "macdoc"])) != nil
+    }
+
+    /// Raw `macdoc --version` stdout, trimmed. Throws if `macdoc` is not on
+    /// `PATH` or exits non-zero.
+    private static func macdocVersionOutput() throws -> String {
+        try runProcess(executable: "/usr/bin/env", arguments: ["macdoc", "--version"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Extracts the first `major.minor[.patch]` token from free-form version
+    /// output (e.g. "macdoc 0.13.1" or "0.13.1"). Returns `nil` when no such
+    /// token is present.
+    private static func parseSemver(_ versionOutput: String) -> (major: Int, minor: Int, patch: Int)? {
+        guard let token = versionOutput.split(separator: " ").first(where: { component in
+            component.contains(".") && component.allSatisfy { $0.isNumber || $0 == "." }
+        }) else { return nil }
+        let parts = token.split(separator: ".").compactMap { Int($0) }
+        guard parts.count >= 2 else { return nil }
+        return (parts[0], parts[1], parts.count > 2 ? parts[2] : 0)
+    }
+
+    /// Pure message builder for the "found below floor" `XCTSkip`, factored
+    /// out so it's unit-testable without needing to inspect a thrown
+    /// `XCTSkip`'s (opaque) internal representation.
+    private static func versionFloorSkipMessage(
+        floor: (major: Int, minor: Int, patch: Int),
+        found: (major: Int, minor: Int, patch: Int),
+        rawVersionOutput: String
+    ) -> String {
+        "reverse-CLI fixtures need macdoc ≥ \(floor.major).\(floor.minor).\(floor.patch), "
+            + "found \(found.major).\(found.minor).\(found.patch) (\"\(rawVersionOutput)\")"
+    }
+
+    /// Throws a loud, named `XCTSkip` when `macdoc` is absent from `PATH` or
+    /// below `floor`; returns normally (no-op) when it meets the floor.
+    private static func requireMacdocAtLeast(
+        _ floor: (major: Int, minor: Int, patch: Int)
+    ) throws {
+        guard isMacdocOnPath() else {
+            throw XCTSkip(
+                "`macdoc` not found on PATH — reverse-CLI fixtures (Requirement 15) need a "
+                    + "local macdoc build; see PsychQuant/macdoc")
+        }
+        let versionOutput = try macdocVersionOutput()
+        guard let version = parseSemver(versionOutput) else {
+            throw XCTSkip(
+                "could not parse `macdoc --version` output (\"\(versionOutput)\") — "
+                    + "skipping reverse-CLI fixtures rather than guessing")
+        }
+        let meetsFloor = (version.major, version.minor, version.patch)
+            >= (floor.major, floor.minor, floor.patch)
+        guard meetsFloor else {
+            throw XCTSkip(versionFloorSkipMessage(floor: floor, found: version, rawVersionOutput: versionOutput))
+        }
     }
 
     /// Run a subprocess and throw if its exit status is non-zero.
