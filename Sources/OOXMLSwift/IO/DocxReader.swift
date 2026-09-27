@@ -924,7 +924,18 @@ public struct DocxReader {
                     // with U+FFFD replacement characters.
                     document.xmlTrees[partPath] = try XmlTreeReader.parse(Self.utf8TreeInputData(partData, part: partPath))
                 } catch {
-                    document.xmlTreeLoadFailures[partPath] = String(describing: error)
+                    // R2 (PsychQuant/ooxml-swift#150): `xmlTreeLoadFailures`
+                    // is a `public` property — `String(describing: error)`
+                    // bypasses `LocalizedError.errorDescription` entirely
+                    // (it renders an enum's raw case + associated values via
+                    // reflection, e.g. `invalidEntityReference(reference:
+                    // "<2,000,000 characters>", at: 5)`), so it kept leaking
+                    // unbounded attacker-controlled text even after
+                    // `XmlTreeReaderError`/`XMLHardeningError` gained escaped
+                    // `errorDescription`s. `.localizedDescription` routes
+                    // through that (falling back to Swift's generic message
+                    // for anything that doesn't conform to `LocalizedError`).
+                    document.xmlTreeLoadFailures[partPath] = error.localizedDescription
                 }
             }
         }
