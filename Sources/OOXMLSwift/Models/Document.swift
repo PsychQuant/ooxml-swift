@@ -1074,8 +1074,16 @@ public struct WordDocument: Equatable {
             updatedPara.runs = [updatedRun]
             table.rows[row].cells[col].paragraphs = [updatedPara]
         } else {
-            // 空 cell，直接設文字（保留 cell properties）
-            table.rows[row].cells[col].paragraphs = [Paragraph(text: text)]
+            // che-word-mcp#224(a)：目標段落沒有任何 run（官方表單裡待填寫
+            // 欄位的常態），但段落本身可能仍帶 pPr（樣式、行距、東亞字型
+            // 預設）。舊實作直接用 `Paragraph(text:)` 蓋掉整個段落陣列，
+            // 連同既有 pPr 一起丟棄。比照 `updateCellParagraph`（che-word-mcp#194）已
+            // 驗證過的做法：就地改既有段落的 `.runs`，`.properties` 原樣
+            // 保留。`cell.paragraphs` 理論上不會是空陣列（DocxReader 保證
+            // 每個 cell 至少一段），但仍以 `Paragraph()` 兜底避免崩潰。
+            var updatedPara = cell.paragraphs.first ?? Paragraph()
+            updatedPara.runs = [Run(text: text)]
+            table.rows[row].cells[col].paragraphs = [updatedPara]
         }
 
         body.children[actualIndex] = .table(table)
