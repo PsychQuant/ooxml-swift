@@ -9,7 +9,7 @@ import XCTest
 /// Root cause lived in `DocxReader.parseTableCellProperties`: the guard
 /// chain required `w:val` to be present before recording `verticalMerge` at
 /// all, so a bare `<w:vMerge/>` (the common continuation form OOXML allows
-/// per ECMA-376 §17.4.85 — absence of `w:val` means "continue") was read as
+/// per ECMA-376 Part 1's `w:vMerge` definition — absence of `w:val` means "continue") was read as
 /// `nil`. Because `DocxWriter` re-serializes the *entire* `document.xml`
 /// from the typed model as soon as any table mutation marks the part dirty,
 /// that "read as nil" silently deleted the continuation from every row in

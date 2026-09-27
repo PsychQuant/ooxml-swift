@@ -245,7 +245,7 @@ public struct TableRowProperties: Equatable {
     public var cantSplit: Bool = false     // 禁止跨頁分割
 
     /// che-word-mcp#224(b): row-level horizontal justification
-    /// (`<w:trPr><w:jc>`, ECMA-376 §17.4.36 CT_TrPrBase). Distinct from a
+    /// (`<w:trPr><w:jc>`, ECMA-376 Part 1 `CT_TrPrBase`). Distinct from a
     /// cell's own content alignment — this controls where an
     /// under-page-width row sits relative to the margins. The model had no
     /// field for this at all, so every save silently dropped it, not just
@@ -255,8 +255,8 @@ public struct TableRowProperties: Equatable {
     /// table-level `<w:tblPr><w:jc>` sibling, for consistency.
     public var justification: Alignment?
 
-    /// che-word-mcp#224(b) follow-up: `<w:trPr><w:hidden/>` (ECMA-376
-    /// §17.4.36) — the same bare-boolean shape as `isHeader`/`cantSplit`
+    /// che-word-mcp#224(b) follow-up: `<w:trPr><w:hidden/>` (ECMA-376 Part 1
+    /// `CT_TrPrBase`) — the same bare-boolean shape as `isHeader`/`cantSplit`
     /// above. Found while auditing `<w:trPr>`'s other children for the same
     /// kind of gap; low-risk enough to fix in the same pass.
     public var hidden: Bool = false
@@ -1233,7 +1233,7 @@ extension TableRow {
                 // che-word-mcp#224(b): `heightRule == nil` now omits
                 // `w:hRule` entirely instead of manufacturing
                 // `w:hRule="auto"`. OOXML's own default for the attribute
-                // is already "auto" (ECMA-376 §17.4.88), so this changes
+                // is already "auto" (ECMA-376 Part 1's `w:trHeight` definition), so this changes
                 // no document's rendered behavior — it only stops a save
                 // from adding an attribute that was never in the source to
                 // every row a mutation didn't otherwise touch. An
@@ -1328,7 +1328,7 @@ extension TableCellProperties {
         // che-word-mcp#185: `.continue` writes back as the bare
         // self-closing form (no `w:val`) rather than `w:val="continue"`.
         // OOXML treats the two as identical (absence of `w:val` implies
-        // "continue" per ECMA-376 §17.4.85), and the bare form is what
+        // "continue" per ECMA-376 Part 1's `w:vMerge` definition), and the bare form is what
         // real documents already carry — emitting it unchanged keeps a
         // save from producing a byte diff on every continuation cell the
         // edit never touched. `.restart` has no implied default and must

@@ -3819,7 +3819,7 @@ public struct DocxReader {
         // 垂直合併
         //
         // che-word-mcp#185: `<w:vMerge/>` with no `w:val` is valid OOXML
-        // (ECMA-376 §17.4.85) and the common continuation form emitted by
+        // (ECMA-376 Part 1's `w:vMerge` definition) and the common continuation form emitted by
         // Word / python-docx — absence of `w:val` means "continue". The
         // previous guard chain required `w:val` to exist before recording
         // anything, so a bare continuation cell read as `verticalMerge ==
