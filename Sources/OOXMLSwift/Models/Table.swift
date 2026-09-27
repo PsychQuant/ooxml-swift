@@ -784,8 +784,61 @@ public struct TableConditionalStyle: Equatable {
 // MARK: - XML 生成
 
 extension Table {
+    /// PsychQuant/ooxml-swift#195: hostile/pathological-input guard for
+    /// nested-table serialization, mirroring the two depth guards that
+    /// already exist on the READ side of this exact codebase —
+    /// `DocxReader.MAX_TABLE_NEST_DEPTH` (5, enforced by
+    /// `DocxReader.parseTable`) and `XmlTreeReader.Parser.maxElementDepth`
+    /// (1024, added specifically to fix an earlier "unbounded recursion was
+    /// an uncatchable stack overflow" finding in the raw-XML tree reader).
+    ///
+    /// The WRITE side (`Table.toXML()` → `TableRow.toXML()` →
+    /// `TableCell.toXML()` → nested `Table.toXML()` …) had no equivalent
+    /// bound at all: a table built purely through the public struct API
+    /// (`TableCell.nestedTables` has no depth validation whatsoever — it is
+    /// a plain array setter) or reached via a tree-mutation path that
+    /// bypasses `DocxReader.parseTable`'s check (e.g. a live `XmlNode` tree
+    /// edited directly, then re-typed via `resyncBodyFromDocumentTree()`,
+    /// which constructs `Table(xmlNode:)` values with no depth check either)
+    /// could recurse arbitrarily deep and exhaust the call stack —
+    /// EXC_BAD_ACCESS in debug, or a very long, low-CPU stall in release
+    /// while a huge string keeps growing one nested `<w:tbl>` at a time
+    /// before the crash finally surfaces.
+    ///
+    /// 20 gives headroom over the reader's own practical ceiling (5) while
+    /// staying well clear of the stack cost measured empirically for THIS
+    /// call chain: `TableProperties.toXML`'s slot-computation machinery
+    /// (`extendedTablePropertiesXML()`, invoked once per table level) makes
+    /// each level unusually expensive — a debug build of
+    /// `testAPIConstructedExcessiveDepthDoesNotCrashAndTruncates` measured
+    /// an EXC_BAD_ACCESS crash around depth ~62-64 on a full 8MB thread
+    /// stack (`ulimit -s` default) BEFORE this guard existed, i.e. roughly
+    /// 40x more stack per recursion level than a typical small Swift
+    /// function. A production process with a smaller stack (containerized
+    /// services commonly run with 512KB-1MB thread stacks) would hit that
+    /// ceiling far sooner. 20 keeps a >3x safety margin under the measured
+    /// crash point even on the generous 8MB stack this was measured on.
+    /// Every legitimately nested document this library can currently
+    /// produce or read serializes exactly as before (see
+    /// `Issue195TwoLevelNestedTableCrashTests` for round-trip coverage up
+    /// to 3 levels); only genuinely pathological depth is affected, and it
+    /// now degrades by truncating the excess nesting instead of crashing
+    /// the whole process (and, with it, every other open document's
+    /// unsaved edits — che-word-mcp's session model holds multiple open
+    /// documents in one process).
+    static let maxSerializationDepth = 20
+
     /// 轉換為 OOXML XML 字串
     public func toXML() -> String {
+        toXML(depth: 0)
+    }
+
+    /// Depth-tracked implementation. `depth` is 0 for a body-level table, 1
+    /// for a table nested one level inside a cell, and so on — mirrors
+    /// `DocxReader.parseTable(..., depth:)`'s counting convention. Not
+    /// public: depth-tracking is an internal recursion-safety detail, not
+    /// part of the table's XML-generation contract.
+    func toXML(depth: Int) -> String {
         var xml = "<w:tbl>"
 
         // Table Properties (extended in v0.17.0+ to inject tblInd / explicit
@@ -804,7 +857,7 @@ extension Table {
 
         // Rows
         for row in rows {
-            xml += row.toXML()
+            xml += row.toXML(depth: depth)
         }
 
         xml += "</w:tbl>"
@@ -1251,6 +1304,12 @@ extension Border {
 
 extension TableRow {
     public func toXML() -> String {
+        toXML(depth: 0)
+    }
+
+    /// See `Table.toXML(depth:)` — same depth-tracking contract
+    /// (PsychQuant/ooxml-swift#195).
+    func toXML(depth: Int) -> String {
         var xml = "<w:tr>"
 
         // Row Properties
@@ -1295,7 +1354,7 @@ extension TableRow {
 
         // Cells
         for cell in cells {
-            xml += cell.toXML()
+            xml += cell.toXML(depth: depth)
         }
 
         xml += "</w:tr>"
@@ -1305,6 +1364,14 @@ extension TableRow {
 
 extension TableCell {
     public func toXML() -> String {
+        toXML(depth: 0)
+    }
+
+    /// See `Table.toXML(depth:)` — same depth-tracking contract
+    /// (PsychQuant/ooxml-swift#195). `depth` here is the depth of THIS
+    /// cell's OWN enclosing table (0 = body-level); nested tables recurse
+    /// with `depth + 1`.
+    func toXML(depth: Int) -> String {
         var xml = "<w:tc>"
 
         // Cell Properties
@@ -1350,9 +1417,20 @@ extension TableCell {
             }
         }
 
-        // v0.17.0+ (#49): nested tables emit as siblings of paragraphs
+        // v0.17.0+ (#49): nested tables emit as siblings of paragraphs.
+        // PsychQuant/ooxml-swift#195: tables reached here can come from a
+        // path that never went through `DocxReader.parseTable`'s
+        // `MAX_TABLE_NEST_DEPTH` check (a table built purely via the public
+        // struct API, or re-typed from a live `XmlNode` tree by
+        // `resyncBodyFromDocumentTree()`), so this recursion has no upstream
+        // depth guarantee of its own. Stop descending past
+        // `Table.maxSerializationDepth` — dropping the excess nesting is a
+        // far better failure mode than an uncontrolled stack overflow that
+        // crashes (or hangs) the whole process, taking every other open
+        // document's unsaved edits down with it.
         for nested in nestedTables {
-            xml += nested.toXML()
+            guard depth + 1 <= Table.maxSerializationDepth else { continue }
+            xml += nested.toXML(depth: depth + 1)
         }
 
         // OOXML requires the cell to end with a paragraph after a nested table
