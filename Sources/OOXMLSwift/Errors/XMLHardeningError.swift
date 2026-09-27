@@ -40,9 +40,20 @@ public enum XMLHardeningError: Error, LocalizedError, Equatable {
         case let .dtdNotAllowed(part):
             return "DTD declarations are not permitted in OOXML input (part: \(part))."
         case let .invalidAttributeName(name, context):
-            return "Invalid XML attribute name '\(name)' in \(context); names must match XML 1.0 NameChar production."
+            // R2 (PsychQuant/ooxml-swift#150): `name` is attacker-controlled
+            // and unbounded — the NameChar regex this rejects on has no
+            // length limit, and neither `splitAttributes`'s "read until `=`"
+            // loop nor `Foundation.XMLParser`'s own attribute dictionary
+            // (the production path via `parseContainerRootAttributes`) caps
+            // how long an attribute name can be before this is thrown.
+            // Routed through the same escaping/length cap as every other
+            // piece of attacker-controlled text that reaches a message.
+            return "Invalid XML attribute name '\(ZipHelper.displayName(name))' in \(context); names must match XML 1.0 NameChar production."
         case let .attributeValueTooLarge(name, byteSize, cap):
-            return "XML attribute '\(name)' value exceeds size cap: \(byteSize) bytes > \(cap) bytes."
+            // `name` here is unbounded for the same reason (a NameChar
+            // sequence of any length can precede an oversized value); the
+            // VALUE itself is deliberately never embedded, only its size.
+            return "XML attribute '\(ZipHelper.displayName(name))' value exceeds size cap: \(byteSize) bytes > \(cap) bytes."
         }
     }
 }
