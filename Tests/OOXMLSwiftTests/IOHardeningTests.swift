@@ -149,6 +149,31 @@ final class IOHardeningTests: XCTestCase {
         XCTAssertEqual(parts["word/document.xml"]?.count, 64)
     }
 
+    /// R2 (PsychQuant/ooxml-swift#130 LOW-1, review sweep): the `fromDirectory:`
+    /// overload (reads an already-extracted directory, not a zip) had no size
+    /// bound at all — `public`, so reachable by an external caller pointing it
+    /// at a directory it extracted itself, outside `ZipHelper`'s own bounded
+    /// namespaces.
+    func testReadAllPartsFromDirectoryRefusesAFileOverTheLimit() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("i130-dir-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("word"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data(repeating: 0x41, count: 4 << 20).write(to: root.appendingPathComponent("word/document.xml"))
+        let l = ZipHelper.Limits(maximumEntryBytes: 1 << 20, maximumPartBytes: 1 << 20)
+        XCTAssertThrowsError(try RawPartChannel.readAllParts(fromDirectory: root, limits: l)) { error in
+            XCTAssertTrue(String(describing: error).contains("limit for a single part"), String(describing: error))
+        }
+    }
+
+    func testReadAllPartsFromDirectoryStillReadsALegitimateSmallDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("i130-dir-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("word"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data(repeating: 0x41, count: 64).write(to: root.appendingPathComponent("word/document.xml"))
+        let parts = try RawPartChannel.readAllParts(fromDirectory: root)
+        XCTAssertEqual(parts["word/document.xml"]?.count, 64)
+    }
+
     // MARK: - #110 · ZipHelper.zip must not delete a directory destination
 
     func testZipRefusesAnExistingDirectoryAsItsDestinationInsteadOfDeletingIt() throws {
@@ -305,6 +330,75 @@ final class IOHardeningTests: XCTestCase {
         }
     }
 
+    // MARK: - #150 R2 · XmlTreeReaderError.errorDescription must not re-embed
+    // attacker-controlled text unbounded (review finding HIGH-1)
+
+    /// R2 finding: `decodeXmlEntities` captures "from `&` to the end of the
+    /// text node" into `invalidEntityReference`'s `reference` when no `;`
+    /// follows — unbounded, limited only by the part's own size (up to
+    /// `maximumPartBytes`, 512 MB by default). Round-1's `errorDescription`
+    /// interpolated it verbatim; the review measured a 2,000,045-character
+    /// message from this exact shape.
+    func testInvalidEntityReferenceErrorDescriptionIsBoundedEvenWithA2MillionCharacterReference() throws {
+        let junk = String(repeating: "A", count: 2_000_000)
+        let xml = "<w:t xmlns:w=\"ns\">&" + junk + "</w:t>"
+        XCTAssertThrowsError(try XmlTreeReader.parse(Data(xml.utf8))) { error in
+            guard case .invalidEntityReference = error as? XmlTreeReaderError else {
+                return XCTFail("expected .invalidEntityReference, got \(error)")
+            }
+            let description = (error as! XmlTreeReaderError).errorDescription ?? ""
+            XCTAssertLessThan(description.count, 600,
+                              "must not reach anywhere near the 2,000,000-character input: \(description.prefix(100))…")
+        }
+    }
+
+    /// R2 finding: a numeric reference's digits run to the next `;`, also
+    /// unbounded — `&#` followed by two million digits and no valid scalar.
+    func testInvalidNumericReferenceErrorDescriptionIsBoundedEvenWithA2MillionDigitReference() throws {
+        let junk = String(repeating: "9", count: 2_000_000)
+        let xml = "<w:t xmlns:w=\"ns\">&#" + junk + ";</w:t>"
+        XCTAssertThrowsError(try XmlTreeReader.parse(Data(xml.utf8))) { error in
+            guard case .invalidNumericReference = error as? XmlTreeReaderError else {
+                return XCTFail("expected .invalidNumericReference, got \(error)")
+            }
+            let description = (error as! XmlTreeReaderError).errorDescription ?? ""
+            XCTAssertLessThan(description.count, 600,
+                              "must not reach anywhere near the 2,000,000-digit input: \(description.prefix(100))…")
+        }
+    }
+
+    /// R2 finding: `parseName()` reads NameChar bytes with no length cap, so a
+    /// closing tag can carry a multi-million-character name that does not
+    /// match the element it closes.
+    func testMismatchedClosingTagErrorDescriptionIsBoundedEvenWithA2MillionCharacterTagName() throws {
+        let junk = String(repeating: "b", count: 2_000_000)
+        let xml = "<a xmlns=\"ns\"></" + junk + ">"
+        XCTAssertThrowsError(try XmlTreeReader.parse(Data(xml.utf8))) { error in
+            guard case .mismatchedClosingTag = error as? XmlTreeReaderError else {
+                return XCTFail("expected .mismatchedClosingTag, got \(error)")
+            }
+            let description = (error as! XmlTreeReaderError).errorDescription ?? ""
+            XCTAssertLessThan(description.count, 600,
+                              "must not reach anywhere near the 2,000,000-character tag name: \(description.prefix(100))…")
+        }
+    }
+
+    /// R2 finding: `<\n>` throws `unexpectedCharacter('\n', ...)`, and
+    /// interpolating a raw `Character` drops a literal U+000A into the
+    /// message — the same "a newline forges a second line" shape #150
+    /// closed for `RawChannelSlotSurgery`'s parser-error text, reopened here.
+    func testUnexpectedCharacterErrorDescriptionEscapesARealNewline() throws {
+        let xml = "<\n>"
+        XCTAssertThrowsError(try XmlTreeReader.parse(Data(xml.utf8))) { error in
+            guard case .unexpectedCharacter = error as? XmlTreeReaderError else {
+                return XCTFail("expected .unexpectedCharacter, got \(error)")
+            }
+            let description = (error as! XmlTreeReaderError).errorDescription ?? ""
+            XCTAssertFalse(description.contains("\n"),
+                           "a literal newline must not reach the message: \(description.debugDescription)")
+        }
+    }
+
     // MARK: - #147 · directory entry permission bits (documented, not fixed here)
 
     /// PsychQuant/ooxml-swift#147: a readable package (content intact, only
@@ -354,5 +448,61 @@ final class IOHardeningTests: XCTestCase {
         // rendered text capped at 480 characters plus a truncation marker.
         XCTAssertLessThanOrEqual(capped.count, 520, "capped, whatever the raw text's size (\(raw.count) chars): \(capped.prefix(200))…")
         XCTAssertFalse(capped.contains("\n"), "newlines are escaped (\\n), not passed through as real line breaks")
+    }
+
+    // MARK: - #150 R2 · XMLHardeningError.errorDescription (review sweep finding)
+
+    /// `splitAttributes`'s "read until `=`" loop, and the production
+    /// `parseContainerRootAttributes` path via `Foundation.XMLParser`'s own
+    /// attribute dictionary, both cap nothing about an attribute NAME's
+    /// length before `validateAttrName` rejects it — the NameChar regex only
+    /// constrains character class, not length. A name that starts with a
+    /// digit (illegal) followed by two million legal NameChars reaches
+    /// `invalidAttributeName` unbounded.
+    func testInvalidAttributeNameErrorDescriptionIsBoundedEvenWithA2MillionCharacterName() {
+        let junk = "9" + String(repeating: "A", count: 2_000_000)
+        let error = XMLHardeningError.invalidAttributeName(name: junk, context: "split-attributes")
+        let description = error.errorDescription ?? ""
+        XCTAssertLessThan(description.count, 600,
+                          "must not reach anywhere near the 2,000,001-character name: \(description.prefix(100))…")
+    }
+
+    func testAttributeValueTooLargeErrorDescriptionNameIsBoundedEvenWhenUnbounded() {
+        let junk = String(repeating: "a", count: 2_000_000)
+        let error = XMLHardeningError.attributeValueTooLarge(name: junk, byteSize: 999_999, cap: 65_536)
+        let description = error.errorDescription ?? ""
+        XCTAssertLessThan(description.count, 600,
+                          "the NAME must not reach anywhere near 2,000,000 characters: \(description.prefix(100))…")
+    }
+
+    /// Integration: `document.xmlTreeLoadFailures` is a `public` property.
+    /// `String(describing: error)` — what this used to store — bypasses
+    /// `LocalizedError.errorDescription` entirely (Swift's reflection-based
+    /// description of an enum case renders its associated values raw), so a
+    /// non-essential part (anything the typed model doesn't already consume
+    /// — `word/fontTable.xml` here) that fails to parse with a 2,000,000-
+    /// character entity reference used to leak the whole thing into a public
+    /// dictionary even after `errorDescription` itself was fixed.
+    func testXmlTreeLoadFailuresDoesNotLeakUnboundedContentForANonEssentialPart() throws {
+        var doc = WordDocument.emptyAuthoringDocument()
+        let junk = String(repeating: "A", count: 2_000_000)
+        let malformed = "<a xmlns=\"ns\">&" + junk + "</a>"
+        doc.carriedParts["word/fontTable.xml"] = Data(malformed.utf8)
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("i150-r2-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: out) }
+        try doc.writeAuthoringPackage(to: out)
+
+        // #130's compression-ratio guard is not what this test is about: the
+        // 2,000,000-character payload is a run of one byte, which compresses
+        // far past the default 500x limit. Lifted within this test's own
+        // scope, matching the other fixtures in this file that build
+        // deliberately repetitive content.
+        let ratioExempt = ZipHelper.Limits(maximumCompressionRatio: .infinity)
+        var read = try DocxReader.read(from: out, limits: ratioExempt)
+        defer { read.close() }
+        let failure = try XCTUnwrap(read.xmlTreeLoadFailures["word/fontTable.xml"],
+                                    "the malformed part must be recorded as a load failure")
+        XCTAssertLessThan(failure.count, 600,
+                          "must not reach anywhere near the 2,000,000-character input: \(failure.prefix(100))…")
     }
 }
