@@ -91,6 +91,13 @@ All notable changes to ooxml-swift will be documented in this file.
   訂下的慣例一致；重新開啟時（`enabled == true`）會清掉先前留下的 `w:val="0"`，避免殘留互相
   矛盾的屬性。同一函式也管 `setItalic`，一併受益。
 
+- **`updateCell` 對含多個段落的儲存格，只保留第一段，其餘段落靜默丟失**
+  （PsychQuant/ooxml-swift#182）。呼叫端只想更新格子文字，`updateCell` 卻把整個
+  `paragraphs` 陣列換成單一新段落，同格其餘段落連同格式一起消失，同時照常回報成功。
+  決定採用 issue 討論的選項 A：`updateCell` 只改寫第一段（索引 0），其餘段落原樣保留；
+  需要定址特定段落請改用 `updateCellParagraph`（che-word-mcp#194）。此決定同時記在
+  `updateCell` 的 doc comment 裡。
+
 ## [3.14.0] - 2026-09-27
 
 ### Fixed
