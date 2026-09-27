@@ -1800,6 +1800,19 @@ public enum OperationReducer {
     /// `applySetRunFormatInRange`'s "ElementID allocation rule" doc
     /// comment) — silently reusing `deepClone()`'s copied id on an
     /// unaddressed piece is exactly how macdoc#232 R2 CRITICAL-1 happened.
+    /// Sets a split fragment's `<w:t>` text. A fragment whose text starts or
+    /// ends with whitespace gets `xml:space="preserve"`: without it Word
+    /// drops the edge whitespace, so the words on either side of the split
+    /// run together. The source `<w:t>` may not have needed the attribute
+    /// (its whitespace was interior), so it cannot be inherited.
+    private static func setFragmentText(_ t: XmlNode, _ text: String) {
+        t.children = [XmlNode.text(text)]
+        let isXMLWhitespace: (Character) -> Bool = { $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r" }
+        if let first = text.first, let last = text.last, isXMLWhitespace(first) || isXMLWhitespace(last) {
+            t.setAttribute(prefix: "xml", localName: "space", value: "preserve")
+        }
+    }
+
     private static func splitRunNode(
         _ run: XmlNode, atUTF16Offset offset: Int
     ) -> (prefix: XmlNode, suffix: XmlNode)? {
@@ -1816,8 +1829,8 @@ public enum OperationReducer {
 
         let prefixRun = run.deepClone()
         let suffixRun = run.deepClone()
-        prefixRun.children[tIndex].children = [XmlNode.text(prefixText)]
-        suffixRun.children[tIndex].children = [XmlNode.text(suffixText)]
+        setFragmentText(prefixRun.children[tIndex], prefixText)
+        setFragmentText(suffixRun.children[tIndex], suffixText)
         prefixRun.libraryUUID = nil
         suffixRun.libraryUUID = nil
 
