@@ -381,12 +381,26 @@ public struct RunProperties: Equatable {
     /// v0.20.0+ (#60): 3-axis `<w:lang>` (val / eastAsia / bidi).
     public var lang: LanguageProperties?
 
-    /// v0.20.0+ (#60): unrecognized direct children of `<w:rPr>`. Captured
-    /// verbatim for byte-equivalent emission. Common content: `<w14:textOutline>`,
-    /// `<w14:textFill>`, `<w14:glow>`, `<w14:shadow>`, `<w14:reflection>`,
-    /// `<w14:scene3d>`, `<w14:props3d>`, `<w14:ligatures>`, `<w14:numForm>`,
-    /// `<w14:numSpacing>`, `<w14:stylisticSets>`, `<w14:cntxtAlts>`. Same
-    /// architectural pattern as `Run.rawElements` (v0.14.0+, #52).
+    /// v0.20.0+ (#60), reinstated v1.0.x (#164): unrecognized direct children
+    /// of `<w:rPr>`. Captured verbatim for byte-equivalent emission whether
+    /// or not this run (or any other paragraph in the same part) was edited
+    /// through the typed API. Common content: `<w:bCs>`, `<w:iCs>`,
+    /// `<w:vanish>`, `<w:webHidden>`, `<w:dstrike>`, `<w:caps>`,
+    /// `<w:smallCaps>`, `<w14:textOutline>`, `<w14:textFill>`, `<w14:glow>`,
+    /// `<w14:shadow>`, `<w14:reflection>`, `<w14:scene3d>`, `<w14:props3d>`,
+    /// `<w14:ligatures>`, `<w14:numForm>`, `<w14:numSpacing>`,
+    /// `<w14:stylisticSets>`, `<w14:cntxtAlts>`. Same architectural pattern
+    /// as `Run.rawElements` (v0.14.0+, #52).
+    ///
+    /// v1.0 task 6.3 (#408a88e) removed this field on the premise that the
+    /// tree-backed reducer path would keep unknown content alive structurally.
+    /// #164 found a counterexample: the legacy direct-typed mutation surface
+    /// (`updateParagraph`, `replaceText`, che-word-mcp's `format_text`) is not
+    /// tree-fresh, so `DocxWriter` re-derives `word/document.xml` from this
+    /// typed model — with no `rawChildren` to draw from, every untouched
+    /// run's unmodeled `<w:rPr>` children silently vanished.
+    public var rawChildren: [RawElement]?
+
     public init() {}
 
     /// `nil` optional arguments mean "unspecified". To create an explicit
@@ -763,6 +777,13 @@ extension RunProperties {
         //
         // Source-document insertion order is preserved within same-position
         // groups via the stable `sortKey` tie-break.
+        if let rawChildren = rawChildren {
+            for rawChild in rawChildren {
+                let pos = Self.canonicalRPrPosition[rawChild.name] ?? Self.unknownTailPosition
+                add(pos, rawChild.xml)
+            }
+        }
+
         // Stable sort by canonical position (sortKey breaks same-position ties).
         slots.sort { lhs, rhs in
             if lhs.pos != rhs.pos { return lhs.pos < rhs.pos }

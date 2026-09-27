@@ -9,7 +9,6 @@ All notable changes to ooxml-swift will be documented in this file.
 ## [Unreleased]
 
 ### Added
-
 - **測試防呆：來源不得再出現 host-absolute fixture 路徑**（#162）。新增守門測試掃描
   `Tests/`／`Sources/`／`scripts/` 下所有 `.swift` 檔，偵測寫死的本機使用者目錄路徑；
   找不到 repo 根目錄時測試本身會失敗（不是安靜跳過）。`V1BenchmarkTests` 與
@@ -37,6 +36,15 @@ All notable changes to ooxml-swift will be documented in this file.
   （#51、#52、#53、#54）。補齊 `.contentControl` 包 `.table` 的四個容器覆蓋、
   endnote 的 `modifiedParts` 斷言、多個 header／footnote／endnote 實例的計數器
   累加與共用 dirty-bit 情境。
+### Fixed
+- **執行任何 typed 編輯存檔後，其他未觸及的文字執行（run）會丟掉模型沒有欄位的 `<w:rPr>`
+  子元素**（PsychQuant/ooxml-swift#164）。`<w:bCs>`、`<w:iCs>`、`<w:vanish>`（隱藏文字）等
+  `RunProperties` 沒有對應欄位的屬性，只要文件裡任何一段落被 `updateParagraph`／`replaceText`／
+  che-word-mcp 的 `format_text` 編輯過，就會讓整份 `word/document.xml` 用 typed model 重新
+  序列化，連沒被碰到的執行也一起遭殃——`<w:vanish/>` 一旦被拿掉，隱藏文字就變成可見文字，且
+  沒有任何警告。現在 `DocxReader` 會把這些未建模的子元素原樣保留下來，存檔時照原順序放回去；
+  已知限制：目前只涵蓋直接掛在 `<w:rPr>` 下的子元素（`RawElement` 承載，同一套機制已用於
+  `Run.rawElements` 與 `ParagraphProperties.rawChildren`）。
 
 ## [3.14.0] - 2026-09-27
 
