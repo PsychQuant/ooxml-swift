@@ -8,6 +8,66 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **解壓與讀取有大小上限了（#130、#157）**：`ZipHelper.unzip`／`ZipHelper.Limits` 新增單一
+  entry 上限（256 MB）、封裝總量上限（512 MB）、壓縮比上限（500×）、entry 數上限
+  （50000），三項預設值取自真實語料上緣並留有數倍餘裕；`DocxReader.read`／
+  `PackageInspector.imageConsistencyReport` 都新增可選的 `limits:` 參數，未指定時沿用預設值，
+  行為完全向下相容。宣告值與解壓後實際位元組數各擋一次（央目錄可能說謊）；**新增
+  `ExtractionBudget` 在解壓「進行中」即時計數並中止**（#157），宣告過小、實際遠大的封裝不會
+  把整份內容先寫到磁碟才被拒絕，超出上限後最多只多寫一個 16 KiB 區塊。`ZipHelper.readPart`
+  在讀入單一 part 前先檢查檔案大小，擋住把展開後的 part 整份讀進記憶體再解析所造成的
+  RSS 暴漲（PoC：0.56 MB 檔案膨脹到 1.7 GB RSS）。`RawPartChannel.readAllParts`（`macdoc word
+  render --verify-against`、`execute_script`／`export_script` 的 `source_path` 等入口）
+  同樣補上宣告與實際位元組數（逐區塊即時檢查）、entry 數上限（#107）。
+
+### Fixed
+
+- **`ZipHelper.zip(_:to:)` 目的地若為既有目錄，不再遞迴刪除整棵樹**（#110）。過去
+  `fileExists(atPath:)` 只回答「這裡有東西」，不分辨是檔案還是目錄，目錄存在時同樣進入
+  刪除分支；現在改用型別感知的檢查，目的地是目錄時直接拒絕，不論該目錄底下裝了什麼。
+- **`writeAuthoringPackage` 在建立目錄或寫檔前，一律驗證 part 路徑安全**（#93）。
+  `apply(operations:)` 雖已對 `.carryPart` 路徑做過 `isSafeRelativeOOXMLPath` 檢查，但
+  `carriedParts` 是 `public internal(set)`，`SyncOrchestrator` 會直接從 Word 寫出的封裝讀出的
+  part 指派給它，這條路徑完全繞過上述檢查。現在寫入邊界本身（`writeAuthoringPackage` 的
+  `write` 內部函式）不論路徑如何進入 `carriedParts`，一律驗證安全相對路徑並額外做一次
+  標準化路徑的目錄包含檢查。
+- **`ZipHelper.unzip` 的 entry 路徑檢查改為套用 `isSafeRelativeOOXMLPath`**（#145），
+  不再是手刻的子集。舊檢查只在 `..` 這一種形狀上守住，百分號編碼跳脫
+  （`%2e%2e`、`%2f`、`%5c`）、反斜線分隔的 `..`、控制字元、超長路徑都會漏放；macOS 上這兩者
+  目前都到不了跳脫（ZIPFoundation 解壓時不解碼 `%2e`、也不把 `\` 當作路徑分隔符），
+  屬於加固而非補洞，但現在全庫只剩一份「安全相對路徑」定義，而且是較嚴格的那份。
+- **`PackageInspector` 宣告的圖片關係與 reader 實際載入的不再有落差**（#143）。
+  掃描 rels 的 `Type` 屬性時，判準從 `hasSuffix("/image")`（同時吃到 transitional 與
+  strict OOXML 兩種命名空間）改為與 reader 的 `RelationshipType.image` 精確比對（只認
+  transitional URL）；strict 命名空間的封裝過去會被 inspector 宣告成「有圖片關係」，但 reader
+  根本不會把它載入 `WordDocument.images`，造成看似存在、其實從未被讀取的幻影孤兒。
+- **`XmlTreeReaderError` 現在有 `errorDescription`**（#146）。過去這個列舉沒有
+  `LocalizedError` 實作，`DocxReader` 十餘處呼叫 `XmlTreeReader.parse` 的地方也都沒有
+  接住它，rels 引號不成對等畸形輸入會讓它原封不動地逸出到呼叫端，`String(describing:)`
+  只印得出案例名稱與一個位元組偏移量（例如 `unexpectedEOF(at: 248)`），沒有任何說明。
+  現在每個案例都補上一句人類看得懂的原因（仍保留位元組偏移量方便除錯），錯誤型別本身
+  不變（既有的逐案例比對測試不受影響）。目錄 entry 帶不含 owner-write 的權限位
+  （如 0500）導致解壓中途 EACCES 的部分，3.7.0 起已由 `ZipHelper` 統一包成具名的
+  `WordError.invalidDocx`，不再逸出裸 POSIX／Cocoa 錯誤——這部分經查證確認已解決，
+  本次僅補上 `XmlTreeReaderError` 這一層。
+- **`XMLParser` 自己的解析錯誤文字，經過與封裝 entry 名稱相同的跳脫與長度上限**（#150）。
+  `RawChannelSlotSurgery` 對手術後 `word/document.xml` 做的健全性檢查，過去把
+  `parser.parserError` 原封不動地嵌進錯誤訊息；對抗性輸入可讓這段文字長達數千字元、數千行
+  （PoC：relationship id 塞 9000 個 `&#1;` 參照，讓錯誤文字膨脹到 441000 字元）。現在改走
+  `ZipHelper.displayName`，套用與封裝 entry 名稱、relationship id 相同的跳脫與 480 字元
+  上限。
+
+### Known limitation
+
+- **目錄 entry 帶不含 owner-write 的權限位時，即使封裝內容完整可讀，仍會整份被拒絕**
+  （#147）。根因是 ZIPFoundation 的 `unzipItem` 會把封裝宣告的權限位套用到解壓出的目錄，
+  子項目排在該目錄 entry 之後時就會 EACCES；唯一的修法是不再整體依賴 `unzipItem`、改成
+  自行走訪並套用權限，這會重新碰觸 #137–#139 十餘輪刻意維持不動的解壓核心路徑。
+  真實 Word 文件不含這種 entry（1025 份語料 0 命中），fail-closed 本身安全，此次評估後
+  判定不值得為一個可用性問題承擔重寫解壓路徑的風險，留待專門的後續改動處理。
+
 ## [3.16.2] - 2026-09-28
 
 ### Fixed
