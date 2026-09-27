@@ -9,6 +9,7 @@ All notable changes to ooxml-swift will be documented in this file.
 ## [Unreleased]
 
 ### Added
+
 - **測試防呆：來源不得再出現 host-absolute fixture 路徑**（#162）。新增守門測試掃描
   `Tests/`／`Sources/`／`scripts/` 下所有 `.swift` 檔，偵測寫死的本機使用者目錄路徑；
   找不到 repo 根目錄時測試本身會失敗（不是安靜跳過）。`V1BenchmarkTests` 與
@@ -36,7 +37,21 @@ All notable changes to ooxml-swift will be documented in this file.
   （#51、#52、#53、#54）。補齊 `.contentControl` 包 `.table` 的四個容器覆蓋、
   endnote 的 `modifiedParts` 斷言、多個 header／footnote／endnote 實例的計數器
   累加與共用 dirty-bit 情境。
+- **段落框線／底色的 typed 模型補上 theme 色、`bar` 邊、`shadow`、`frame`**
+  （PsychQuant/ooxml-swift#179）。#176 已讓 `DocxReader` 把 `<w:pBdr>`／`<w:shd>` 讀進
+  typed 欄位，未被指派時原樣輸出來源原文；但 typed 模型本身表達不了 `themeColor`／
+  `themeTint`／`themeShade`、`shadow`、`frame`（每邊都有）、`bar` 邊，以及底色的六個
+  `theme*` 屬性，所以只要 `border`／`shading` 被指派過一次（即使設回同一個值、或只改其中
+  一邊），來源原文就被捨棄、改走 typed 輸出，這些屬性隨之消失。現在 `ParagraphBorderStyle`
+  補上 `themeColor`／`themeTint`／`themeShade`／`shadow`／`frame`，`ParagraphBorder` 補上
+  `bar`，`CellShading`（`ParagraphShading` 的底層型別）補上對應六個 `theme*` 屬性；
+  `DocxReader` 讀入、`toXML()` 依序輸出。已知限制：`CellShading` 的 theme 欄位目前只有
+  段落底色的讀取路徑（`parseParagraphShading`）會填入；表格儲存格底色（`w:tcPr/w:shd`）
+  的讀取路徑尚未涵蓋，欄位對表格一律 nil，不影響既有輸出，但也代表儲存格底色的 theme
+  屬性仍有本文件所述的同一種遺失風險（留待未來處理）。
+
 ### Fixed
+
 - **執行任何 typed 編輯存檔後，其他未觸及的文字執行（run）會丟掉模型沒有欄位的 `<w:rPr>`
   子元素**（PsychQuant/ooxml-swift#164）。`<w:bCs>`、`<w:iCs>`、`<w:vanish>`（隱藏文字）等
   `RunProperties` 沒有對應欄位的屬性，只要文件裡任何一段落被 `updateParagraph`／`replaceText`／
@@ -45,7 +60,6 @@ All notable changes to ooxml-swift will be documented in this file.
   沒有任何警告。現在 `DocxReader` 會把這些未建模的子元素原樣保留下來，存檔時照原順序放回去；
   已知限制：目前只涵蓋直接掛在 `<w:rPr>` 下的子元素（`RawElement` 承載，同一套機制已用於
   `Run.rawElements` 與 `ParagraphProperties.rawChildren`）。
-
 - **屬性值裡的換行／CR／tab 經 typed 重新序列化後寫成字面字元，下一次解析就變成空白**
   （PsychQuant/ooxml-swift#165）。XML 1.0 規格規定：屬性值裡的字面換行等空白字元，任何
   正規的 parser 讀回時都會正規化成單一空白；只有寫成字元參照（`&#10;`／`&#13;`／`&#9;`）才能
@@ -68,22 +82,6 @@ All notable changes to ooxml-swift will be documented in this file.
   五個字元的複本。已知限制：僅供元素文字內容跳脫、從未用於屬性值的 `escapeXML`
   （`Footer`／`Footnote`／`Run`／`MathComponent` 等——文字節點的字面換行本身合法，不受
   此規格條款影響）不在此次調整範圍，未強制統一以避免無關改動。
-
-### Added
-
-- **段落框線／底色的 typed 模型補上 theme 色、`bar` 邊、`shadow`、`frame`**
-  （PsychQuant/ooxml-swift#179）。#176 已讓 `DocxReader` 把 `<w:pBdr>`／`<w:shd>` 讀進
-  typed 欄位，未被指派時原樣輸出來源原文；但 typed 模型本身表達不了 `themeColor`／
-  `themeTint`／`themeShade`、`shadow`、`frame`（每邊都有）、`bar` 邊，以及底色的六個
-  `theme*` 屬性，所以只要 `border`／`shading` 被指派過一次（即使設回同一個值、或只改其中
-  一邊），來源原文就被捨棄、改走 typed 輸出，這些屬性隨之消失。現在 `ParagraphBorderStyle`
-  補上 `themeColor`／`themeTint`／`themeShade`／`shadow`／`frame`，`ParagraphBorder` 補上
-  `bar`，`CellShading`（`ParagraphShading` 的底層型別）補上對應六個 `theme*` 屬性；
-  `DocxReader` 讀入、`toXML()` 依序輸出。已知限制：`CellShading` 的 theme 欄位目前只有
-  段落底色的讀取路徑（`parseParagraphShading`）會填入；表格儲存格底色（`w:tcPr/w:shd`）
-  的讀取路徑尚未涵蓋，欄位對表格一律 nil，不影響既有輸出，但也代表儲存格底色的 theme
-  屬性仍有本文件所述的同一種遺失風險（留待未來處理）。
-
 - **`<w:sectPr>` 自己的 rsid 屬性經 typed 重新序列化後消失**（PsychQuant/ooxml-swift#112）。
   `w:rsidR`／`w:rsidRPr`／`w:rsidSect` 是直接掛在 `<w:sectPr>` 標籤本身的屬性（不是子元素），
   過去讀取時完全沒被看到，任何一次分節重新序列化都會讓它們消失。對排版沒有影響，但 Word
@@ -95,7 +93,6 @@ All notable changes to ooxml-swift will be documented in this file.
   在 typed 重新序列化時消失，本次修法範圍僅止於 `sectPr`；已在真實文件上量到編輯前後
   幾乎全數消失（`w:rsidR` 168→1、`w:rsidRPr` 257→1，見 PsychQuant/ooxml-swift#185），
   追蹤留待該張 issue 處理。
-
 - **Tree-backed Edit API 的 `setBold(false)` 直接刪掉 `<w:b>`，讓套用了粗體樣式的段落／文字
   執行沒辦法真正取消粗體**（PsychQuant/ooxml-swift#161）。`OperationReducer.setBooleanRunProperty`
   對 `enabled == false` 呼叫的是刪除元素，而不是寫明確關閉值；對繼承自 Heading 或粗體字元樣式
@@ -103,14 +100,12 @@ All notable changes to ooxml-swift will be documented in this file.
   情況下變成沒有作用。現在改成寫 `<w:b w:val="0"/>`（明確關閉），與 #115 替 `RunProperties.toXML()`
   訂下的慣例一致；重新開啟時（`enabled == true`）會清掉先前留下的 `w:val="0"`，避免殘留互相
   矛盾的屬性。同一函式也管 `setItalic`，一併受益。
-
 - **`updateCell` 對含多個段落的儲存格，只保留第一段，其餘段落靜默丟失**
   （PsychQuant/ooxml-swift#182）。呼叫端只想更新格子文字，`updateCell` 卻把整個
   `paragraphs` 陣列換成單一新段落，同格其餘段落連同格式一起消失，同時照常回報成功。
   決定採用 issue 討論的選項 A：`updateCell` 只改寫第一段（索引 0），其餘段落原樣保留；
   需要定址特定段落請改用 `updateCellParagraph`（che-word-mcp#194）。此決定同時記在
   `updateCell` 的 doc comment 裡。
-
 - **含巢狀表格的儲存格，每經一次 typed 重新序列化就多長一個空段落，沒有上限**
   （PsychQuant/ooxml-swift#155）。`TableCell.toXML()` 只要儲存格有巢狀表格就無條件在
   表格後補一個空段落——註解寫「缺的時候才補」，程式碼其實從不檢查。因為 model 不記錄段落與
@@ -121,6 +116,7 @@ All notable changes to ooxml-swift will be documented in this file.
   存檔具備冪等性。已知限制：這是局部修法，不是本族問題（#133／#129）需要的架構修正——如果
   剛好有一個「沒有 run 但帶特定格式」的段落原本刻意放在表格前的最後一個位置，會被搬到表格
   後面，這個取捨是 issue 本身認可的範圍。
+
 ## [3.14.0] - 2026-09-27
 
 ### Fixed
