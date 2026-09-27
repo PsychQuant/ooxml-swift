@@ -3974,6 +3974,16 @@ public struct DocxReader {
             return Int(raw)
         }
 
+        // PsychQuant/ooxml-swift#112: `<w:sectPr>`'s own attributes are the
+        // rsid family (`AG_SectPrAttributes` — no other attribute is legal
+        // directly on this element per schema). Captured opaquely so a
+        // typed re-serialization no longer discards them.
+        for attribute in element.attributes ?? [] {
+            guard let localName = attribute.localName, let value = attribute.stringValue,
+                  localName.hasPrefix("rsid") else { continue }
+            props.rsidAttributes[localName] = value
+        }
+
         // Header / footer references, per w:type.
         for ref in element.elements(forName: "w:headerReference") {
             guard let rId = ref.attribute(forName: "r:id")?.stringValue else { continue }
