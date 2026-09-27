@@ -236,9 +236,22 @@ enum RawChannelSlotSurgery {
                 if didSubstitute {
                     let parser = XMLParser(data: Data(xml.utf8))
                     guard parser.parse() else {
+                        // PsychQuant/ooxml-swift#150: `XMLParser`'s own error
+                        // text is appended verbatim by nothing else in this
+                        // repo's hardening — the entry-name/relationship-id
+                        // escaping (`ZipHelper.displayName`) doesn't cover a
+                        // parser's OWN error description, which is unbounded
+                        // and can span many lines (a `substituted(value:)`
+                        // that reintroduces something libxml2 rejects, e.g.
+                        // thousands of invalid character references, can make
+                        // `parserError`'s description thousands of characters
+                        // and thousands of lines long). Routed through the
+                        // same escaping/length cap as attacker-controlled zip
+                        // entry names, rather than appended as-is.
+                        let errorText = parser.parserError.map { ZipHelper.displayName(String(describing: $0)) } ?? "unknown parser error"
                         throw TranscodeError.rawSlotExecutionFailure(
                             name: rawSlots.keys.sorted().first.flatMap { rawSlots[$0] } ?? "?",
-                            reason: "post-surgery well-formedness check failed: \(parser.parserError.map(String.init(describing:)) ?? "unknown parser error")")
+                            reason: "post-surgery well-formedness check failed: \(errorText)")
                     }
                 }
                 op = .carryPart(partPath: path, xml: xml)
