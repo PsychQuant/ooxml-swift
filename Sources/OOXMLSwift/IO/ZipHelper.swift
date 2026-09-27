@@ -19,8 +19,8 @@ public struct ZipHelper {
     /// document.xml` would be a second document. No Word output contains
     /// any of these (0 / 740 in the real corpus); refusing them here keeps
     /// one policy for the reader and the inspector.
-    public static func unzip(_ url: URL) throws -> URL {
-        try unzip(data: try Data(contentsOf: url))     // one read; everything below works on these bytes
+    public static func unzip(_ url: URL, limits: Limits = defaultLimits) throws -> URL {
+        try unzip(data: try Data(contentsOf: url), limits: limits)     // one read; everything below works on these bytes
     }
 
     /// The reader's extraction namespace under the temporary directory.
@@ -29,6 +29,58 @@ public struct ZipHelper {
     /// the reader's "did I leave an extraction directory behind" question
     /// keeps its answer when an inspection runs alongside (verify R5).
     public static let inspectorNamespace = "ooxml-swift-inspector"
+
+    /// How far a package may expand, and how large one part may be read into
+    /// memory (PsychQuant/ooxml-swift#130). A 0.56 MB crafted package was
+    /// measured expanding to 1.7 GB RSS over 39 s — a ~3000:1 amplification —
+    /// against a library with no bound on either axis:
+    ///
+    ///   disk    the bytes an extraction writes out
+    ///   memory  one part read into `Data` before it is parsed
+    ///
+    /// Defaults are set from the upper edge of a real corpus (738 documents):
+    /// largest single entry 17.5 MB, largest package 26.4 MB in total, highest
+    /// compression ratio 117.8x (p99 17.9x, p99.9 32.2x). The chosen defaults
+    /// — 256 MB / 512 MB / 500x — sit 14.6x, 19.4x and 4.24x above those
+    /// figures respectively: enough headroom that a legitimate document is not
+    /// refused, while a multi-thousand-fold amplification still is.
+    /// `maximumEntryCount` has no corpus measurement behind it (real packages
+    /// run to at most a few hundred parts); it exists for
+    /// PsychQuant/ooxml-swift#107, where many tiny entries — each individually
+    /// under every byte limit — could still exhaust memory via per-entry
+    /// dictionary and string overhead in `RawPartChannel.readAllParts`.
+    public struct Limits: Sendable, Equatable {
+        public var maximumEntryBytes: Int64
+        public var maximumTotalBytes: Int64
+        public var maximumCompressionRatio: Double
+        public var maximumPartBytes: Int64
+        public var maximumEntryCount: Int
+        public init(maximumEntryBytes: Int64 = 256 * 1024 * 1024,
+                    maximumTotalBytes: Int64 = 512 * 1024 * 1024,
+                    maximumCompressionRatio: Double = 500,
+                    maximumPartBytes: Int64 = 256 * 1024 * 1024,
+                    maximumEntryCount: Int = 50_000) {
+            self.maximumEntryBytes = maximumEntryBytes
+            self.maximumTotalBytes = maximumTotalBytes
+            self.maximumCompressionRatio = maximumCompressionRatio
+            self.maximumPartBytes = maximumPartBytes
+            self.maximumEntryCount = maximumEntryCount
+        }
+    }
+
+    /// The limits used when a caller does not name its own. An immutable
+    /// value passed to each call — never a shared mutable global: two
+    /// concurrent extractions would otherwise be able to capture each other's
+    /// scoped override, and a single document operation could run its
+    /// extraction and its part reads under two different policies. A caller
+    /// with a genuinely larger corpus passes its own `Limits` instead of
+    /// discovering the ceiling as an unexplained refusal.
+    public static let defaultLimits = Limits()
+
+    static func describeBytes(_ n: Int64) -> String {
+        n >= 1_048_576 ? String(format: "%.1f MB", Double(n) / 1_048_576)
+                       : String(format: "%.1f KB", Double(n) / 1024)
+    }
 
     /// Extract a package whose bytes are already in hand. Refused before
     /// anything is written: an entry ZIPFoundation would extract as a
@@ -44,13 +96,17 @@ public struct ZipHelper {
     /// scan passes.
     /// Public entry for bytes already in hand (the reader's namespace); the
     /// five refused entry kinds are the ones listed just above.
-    public static func unzip(data: Data) throws -> URL { try unzip(data: data, namespace: readerNamespace) }
+    public static func unzip(data: Data, limits: Limits = defaultLimits) throws -> URL {
+        try unzip(data: data, namespace: readerNamespace, limits: limits)
+    }
 
     /// The same, into a named namespace (one path component) under the
     /// temporary directory. Refuses the same five entry kinds.
-    static func unzip(data: Data, namespace: String) throws -> URL {
+    static func unzip(data: Data, namespace: String, limits: Limits = defaultLimits) throws -> URL {
         precondition(!namespace.isEmpty && !namespace.contains("/") && namespace != "." && namespace != "..", "namespace must be one path component")
         let archive = try Archive(data: data, accessMode: .read)
+        var declaredTotal: Int64 = 0
+        var entryCount = 0
         for entry in archive {
             if entry.type == .symlink {
                 throw WordError.invalidDocx("the package contains a symbolic-link entry (\(displayName(entry.path))); refusing to extract it.")
@@ -62,6 +118,52 @@ public struct ZipHelper {
             let components = path.split(separator: "/", omittingEmptySubsequences: false)
             if path.hasPrefix("/") || components.contains("..") {
                 throw WordError.invalidDocx("the package contains an entry whose path leaves its own directory (\(displayName(path))); refusing to extract it.")
+            }
+            // PsychQuant/ooxml-swift#145: the checks above are a hand-rolled
+            // subset of `PathValidator.isSafeRelativeOOXMLPath` — the fuller
+            // definition already used at the parse boundary for relationship
+            // targets — and were the looser of the two: percent-encoded
+            // traversal (`%2e%2e`, `%2f`, `%5c`), backslash-separated `..`,
+            // control characters, and paths over 256 characters passed here
+            // while `isSafeRelativeOOXMLPath` would refuse them. Neither gap
+            // yields an escape on macOS today (ZIPFoundation does not decode
+            // `%2e` or treat `\` as a path separator when it extracts), so
+            // this is hardening rather than closing a hole — but one
+            // definition of "safe relative path" replaces two, and it is now
+            // the stricter one everywhere.
+            guard isSafeRelativeOOXMLPath(path) else {
+                throw WordError.invalidDocx("the package contains an entry whose path is not a safe relative OPC path (\(displayName(path))); refusing to extract it.")
+            }
+            entryCount += 1
+            if entryCount > limits.maximumEntryCount {
+                throw WordError.invalidDocx("the package declares more than \(limits.maximumEntryCount) entries; refusing to extract it.")
+            }
+            // Size policy, from the archive's own declarations. The central
+            // directory can lie, so the extracted tree is measured again below
+            // (#130): declared and actual are each refused on their own.
+            // `clamping:`, not a plain `Int64(_:)` — these are UInt64 values
+            // taken straight from the central directory, and a ZIP64 header
+            // can declare up to `UInt64.max`, which the plain initializer
+            // TRAPS on ("Not enough bits to represent the passed value").
+            // Saturating instead lands an absurd declaration in the refusal
+            // below, where it belongs.
+            let declared = Int64(clamping: entry.uncompressedSize)
+            if declared > limits.maximumEntryBytes {
+                throw WordError.invalidDocx("the package declares an entry of \(describeBytes(declared)) (\(displayName(path))), over the \(describeBytes(limits.maximumEntryBytes)) limit; refusing to extract it.")
+            }
+            // `addingReportingOverflow`, not `+=`: Swift traps on integer
+            // overflow, and a caller expressing "no limit" as
+            // `maximumTotalBytes: .max` (the only spelling `Limits` offers)
+            // lets two entries near `Int64.max` reach the addition. An
+            // overflow IS "over the limit", so it is refused, not crashed on.
+            let (sum, overflowed) = declaredTotal.addingReportingOverflow(declared)
+            declaredTotal = overflowed ? Int64.max : sum
+            if overflowed || declaredTotal > limits.maximumTotalBytes {
+                throw WordError.invalidDocx("the package declares more than \(describeBytes(limits.maximumTotalBytes)) of content in total; refusing to extract it.")
+            }
+            let compressed = Int64(clamping: entry.compressedSize)
+            if compressed > 0, Double(declared) / Double(compressed) > limits.maximumCompressionRatio {
+                throw WordError.invalidDocx("the package declares an entry that expands \(Int(Double(declared) / Double(compressed)))x (\(displayName(path))), over the \(Int(limits.maximumCompressionRatio))x limit; refusing to extract it.")
             }
         }
         let fm = FileManager.default
@@ -122,7 +224,21 @@ public struct ZipHelper {
         let privateCopy = tempDir.appendingPathComponent(copyName)
         // Every error from here on is ours to name (verify R7 logic N-L2-R7: a
         // raw POSIX error carried the temporary path to the caller).
-        do { try fm.unzipItem(at: privateCopy, to: tempDir) }
+        //
+        // Extraction is bounded AS IT RUNS, not only afterwards
+        // (PsychQuant/ooxml-swift#157). The declared sizes were already
+        // refused above; a central directory that UNDERSTATES what it writes
+        // gets past that check, and without this, its bytes land on disk in
+        // full before the post-extraction walk below ever measures them.
+        // `ExtractionBudget` counts the bytes the decompressor actually
+        // produces and cancels the moment the running total crosses the
+        // limit — the check sits before each chunk reaches the consumer, so
+        // the overshoot is at most one 16 KiB chunk, not the whole entry.
+        let budget = ExtractionBudget(limit: limits.maximumTotalBytes)
+        do { try fm.unzipItem(at: privateCopy, to: tempDir, progress: budget) }
+        catch let error as Archive.ArchiveError where error == .cancelledOperation && budget.exceeded {
+            throw WordError.invalidDocx("the package wrote more than \(describeBytes(limits.maximumTotalBytes)) while being extracted, whatever its central directory declared; refusing it.")
+        }
         catch { throw WordError.invalidDocx("the package could not be extracted (\(describeWithoutPaths(error))); refusing it.") }
         do { try fm.removeItem(at: privateCopy) }
         catch { throw WordError.invalidDocx("the package's private copy could not be removed after extraction (\(describeWithoutPaths(error)))") }
@@ -141,6 +257,7 @@ public struct ZipHelper {
             throw WordError.invalidDocx("could not enumerate the extracted package")
         }
         let rootPrefixes = rootPrefixes(of: tempDir)                                // resolved once, not per item (verify R10 security N-S10-4)
+        var actualTotal: Int64 = 0                                                 // the central directory can lie; measure what is on disk (#130) — defence in depth alongside the streaming budget above
         for case let item as URL in walker {
             let relative = displayName(relativeName(of: item, rootPrefixes: rootPrefixes))   // an entry name is attacker-controlled text
             // `lstat` + `fchmodat(AT_SYMLINK_NOFOLLOW)`: nothing here follows a
@@ -159,6 +276,21 @@ public struct ZipHelper {
             }
             guard fchmodat(AT_FDCWD, item.path, mode, AT_SYMLINK_NOFOLLOW) == 0 else {
                 throw WordError.invalidDocx("could not make \(relative) in the package owner-only (\(errnoText()))")
+            }
+            // What the archive DECLARED was checked before extraction; this is
+            // what it actually wrote. The streaming budget above already stops
+            // an understating archive mid-write; this is the second line —
+            // measuring the finished tree — for whatever it lets through.
+            if mode == 0o600 {
+                let size = Int64(clamping: st.st_size)
+                if size > limits.maximumEntryBytes {
+                    throw WordError.invalidDocx("the package expanded \(relative) to \(describeBytes(size)), over the \(describeBytes(limits.maximumEntryBytes)) limit; refusing it.")
+                }
+                let (sum, overflowed) = actualTotal.addingReportingOverflow(size)
+                actualTotal = overflowed ? Int64.max : sum
+                if overflowed || actualTotal > limits.maximumTotalBytes {
+                    throw WordError.invalidDocx("the package expanded to more than \(describeBytes(limits.maximumTotalBytes)) on disk; refusing it.")
+                }
             }
         }
         if let walkError { throw WordError.invalidDocx("could not enumerate the extracted package (\(describeWithoutPaths(walkError)))") }
@@ -282,6 +414,27 @@ public struct ZipHelper {
         return item.lastPathComponent
     }
 
+    /// Read one part of an extracted package, refusing one too large to hold.
+    ///
+    /// The extraction limits already cap any single entry, so a part that came
+    /// through `unzip` cannot exceed `limits.maximumEntryBytes` — this is the
+    /// second line, for a part reached by a path the caller supplied directly,
+    /// and it is the bound on the MEMORY axis of #130: the original PoC's
+    /// 1.7 GB RSS came from reading one expanded part into `Data` before
+    /// parsing it, not from the extraction itself. Refusing before the read
+    /// means the process never holds it.
+    ///
+    /// Boundary: when `lstat` fails, or reports something other than a
+    /// regular file, this reads on rather than refusing — the caller's own
+    /// existence/identity check is what decides whether to call this at all.
+    static func readPart(at url: URL, describedAs name: String, limits: Limits = defaultLimits) throws -> Data {
+        var st = stat()
+        if lstat(url.path, &st) == 0, st.st_mode & S_IFMT == S_IFREG, Int64(clamping: st.st_size) > limits.maximumPartBytes {
+            throw WordError.invalidDocx("\(displayName(name)) is \(describeBytes(Int64(clamping: st.st_size))), over the \(describeBytes(limits.maximumPartBytes)) limit for a single part; refusing to read it.")
+        }
+        return try Data(contentsOf: url)
+    }
+
     /// `strerror(errno)` for the calling thread's last error.
     static func errnoText() -> String { String(cString: strerror(errno)) }
 
@@ -342,10 +495,23 @@ public struct ZipHelper {
     }
 
     /// 壓縮目錄內容為 ZIP 檔案（不包含目錄本身的路徑）
+    ///
+    /// Type-aware on purpose (PsychQuant/ooxml-swift#110). `fileExists(atPath:)`
+    /// alone answers "is something here", not "is it a file this call may
+    /// replace" — and `destination` naming an existing DIRECTORY previously
+    /// fell into that same branch, so `removeItem(at:)` deleted the whole tree
+    /// before writing the zip in its place. `destination` names a file to
+    /// produce, never a tree to clear, so a directory there is refused
+    /// regardless of what the tree contains.
     public static func zip(_ directory: URL, to destination: URL) throws {
         let data = try zipToData(directory)
 
-        if FileManager.default.fileExists(atPath: destination.path) {
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory)
+        if exists, isDirectory.boolValue {
+            throw WordError.zipError("the destination `\(destination.lastPathComponent)` is an existing directory, not a file to produce; refusing to delete it.")
+        }
+        if exists {
             try FileManager.default.removeItem(at: destination)
         }
         try data.write(to: destination)
@@ -408,5 +574,73 @@ public struct ZipHelper {
     /// 清理臨時目錄
     public static func cleanup(_ directory: URL) {
         try? FileManager.default.removeItem(at: directory)
+    }
+}
+
+/// Counts what an extraction actually writes, and stops it when that crosses a
+/// limit (PsychQuant/ooxml-swift#157).
+///
+/// ZIPFoundation reports progress per entry: `unzipItem` builds its own total
+/// from the archive's DECLARED sizes and aggregates per-entry children with
+/// `addChild`. Observing the parent is therefore useless for the case that
+/// matters — an archive that understates its entries makes each child saturate
+/// against its own declared total, so the parent's count stops rising exactly
+/// when the overflow happens (measured: a child at 4 194 304 actual bytes
+/// against a declared 1 024, with the parent stuck at 1 024 and its
+/// `fractionCompleted` pinned to 1.0).
+///
+/// The CHILD's `completedUnitCount` is the real figure and is not clamped, so
+/// this intercepts the children as they are attached and observes each one.
+/// Cancellation then propagates parent → child, and ZIPFoundation's
+/// `readCompressed` checks `isCancelled` BEFORE handing each chunk to the
+/// consumer — so the file on disk overshoots by at most one
+/// `defaultReadChunkSize` (16 KiB).
+///
+/// **The interception rides on an implementation detail**: that ZIPFoundation
+/// attaches its per-entry progress with `addChild(_:withPendingUnitCount:)`.
+/// Foundation has another way to attach a child —
+/// `Progress(totalUnitCount:parent:pendingUnitCount:)` — which does NOT call
+/// it. If a future version switches, nothing is captured, the total stays
+/// zero, and the limit disappears with no error at all — the same
+/// silent-failure shape as the `Int64` trap this feature's first round
+/// shipped. `testTheExtractionBudgetActuallySeesTheEntries` asserts the
+/// captured count matches the archive's file entries, so that upgrade turns a
+/// test red instead of turning the bound off.
+final class ExtractionBudget: Progress, @unchecked Sendable {
+    private let limit: Int64
+    private var observations: [NSKeyValueObservation] = []
+    private var children: [Progress] = []
+    private var totals: [ObjectIdentifier: Int64] = [:]
+    private(set) var exceeded = false
+    /// How many per-entry children were seen — the mechanism check above.
+    private(set) var capturedChildren = 0
+
+    init(limit: Int64) {
+        self.limit = limit
+        super.init(parent: nil, userInfo: nil)
+    }
+
+    override func addChild(_ child: Progress, withPendingUnitCount inUnitCount: Int64) {
+        capturedChildren += 1
+        children.append(child)
+        // A directory entry is reported by ASSIGNING 1, not by adding bytes, so
+        // it contributes at most one unit each — below any limit worth setting.
+        observations.append(child.observe(\.completedUnitCount, options: [.new]) { [weak self] observed, _ in
+            guard let self else { return }
+            self.totals[ObjectIdentifier(observed)] = observed.completedUnitCount
+            let written = self.totals.values.reduce(0, +)
+            if written > self.limit, !self.exceeded {
+                self.exceeded = true
+                // Cancel each entry's own progress, not just this parent.
+                // `Progress.cancel()` on the parent does NOT set `isCancelled`
+                // on a child attached through the overridden `addChild` —
+                // measured `child.isCancelled == false` immediately after —
+                // and ZIPFoundation checks the CHILD. Cancelling them directly
+                // is what actually stops the next chunk.
+                self.cancel()
+                for child in self.children { child.cancel() }
+            }
+        })
+        super.addChild(child, withPendingUnitCount: inUnitCount)
     }
 }
