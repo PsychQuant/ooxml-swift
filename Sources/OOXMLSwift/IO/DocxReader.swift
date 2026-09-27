@@ -3736,6 +3736,18 @@ public struct DocxReader {
             props.cantSplit = true
         }
 
+        // che-word-mcp#224(b): 列級水平對齊（未觸及列在存檔後會遺失，因為
+        // TableRowProperties 原本沒有對應欄位可以放）
+        if let jc = element.elements(forName: "w:jc").first,
+           let val = jc.attribute(forName: "w:val")?.stringValue {
+            props.justification = Alignment(rawValue: val)
+        }
+
+        // che-word-mcp#224(b) 附帶修：跟 isHeader/cantSplit 同形狀的缺口
+        if element.elements(forName: "w:hidden").first != nil {
+            props.hidden = true
+        }
+
         return props
     }
 
