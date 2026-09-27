@@ -66,6 +66,11 @@ final class OperationLogTests: XCTestCase {
             .appendParagraph(in: nil, paragraph: ParagraphPayload(text: "x")),
             .setRuns(target: id, runs: [RunPayload(text: "x", bold: true)]),
             .defineStyle(payload: StylePayload(styleId: "s1")),
+            // PsychQuant/macdoc#232: paragraph+substring-addressed sibling
+            // of setRunFormat.
+            .setRunFormatInRange(
+                target: id, substring: "world", instance: 1,
+                format: RunFormatPayload(bold: true)),
             .beginComponent(type: "Summary", id: id),
             .endComponent(id: id),
             .insertTab(in: id),
@@ -83,7 +88,7 @@ final class OperationLogTests: XCTestCase {
             .setDocumentProlog(prolog: "<?xml?>\r\n")
         ]
 
-        XCTAssertEqual(cases.count, 40, "Operation MUST have exactly 40 cases enumerated in the test")
+        XCTAssertEqual(cases.count, 41, "Operation MUST have exactly 41 cases enumerated in the test")
 
         // Pattern-match: each case maps to its expected discriminator.
         for op in cases {
@@ -91,7 +96,7 @@ final class OperationLogTests: XCTestCase {
             case .insertParagraphAfter, .insertParagraphBefore, .removeParagraph,
                  .setText, .setParagraphStyle,
                  .insertTable, .removeTable, .setCellText,
-                 .insertRun, .setRunFormat,
+                 .insertRun, .setRunFormat, .setRunFormatInRange,
                  .insertBookmark, .insertComment,
                  .undo, .redo,
                  .batchBegin, .batchEnd,

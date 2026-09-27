@@ -61,6 +61,39 @@ public enum Operation: Equatable, Sendable {
     /// replay of a duplicate `styleId` is an idempotent no-op).
     case defineStyle(payload: StylePayload)
 
+    /// Applies `format` to the text range inside paragraph `target` located
+    /// by the `instance`-th (1-based) occurrence of `substring` in the
+    /// paragraph's flattened text (the concatenation, in document order, of
+    /// every direct `<w:r>` child's `<w:t>` text — see `OperationReducer`'s
+    /// `.setRunFormatInRange` case).
+    ///
+    /// `setRunFormat` requires its `target` to already resolve to a single
+    /// `<w:r>`; it cannot locate a sub-run text range or split a run to
+    /// isolate one. This op is the paragraph+substring-addressed sibling
+    /// that does that resolution: it splits the run(s) spanning the matched
+    /// range as needed so `format` touches ONLY the matched text — runs (or
+    /// run fragments) outside the range keep their original formatting and
+    /// any unmodeled `<w:rPr>` children unchanged.
+    ///
+    /// PsychQuant/macdoc#232: `docx apply`'s `set_bold` manifest step only
+    /// has a paragraph anchor + a text range (the manifest's `substring`
+    /// field, previously declared but never consumed) — never a Run
+    /// ElementID — so `OOXMLEdit.setBold` (→ `setRunFormat`) always threw
+    /// `malformedOp("setRunFormat target must be <w:r>")`.
+    ///
+    /// Reducer support is currently limited to `format.bold`; any other
+    /// `RunFormatPayload` field being non-nil throws `ReducerError
+    /// .malformedOp` rather than silently doing nothing — the payload type
+    /// is shared with `setRunFormat` for forward compatibility (italic,
+    /// underline, … can extend the reducer additively later) but only bold
+    /// is implemented so far. `bold == false` writes an explicit
+    /// `<w:b w:val="0"/>` off value (matches `RunProperties` post-#115 and
+    /// closes the false-becomes-absent gap tracked for the plain
+    /// `setRunFormat` path in PsychQuant/ooxml-swift#161), and `bold == true`
+    /// writes the canonical naked `<w:b/>`.
+    case setRunFormatInRange(
+        target: ElementID, substring: String, instance: Int, format: RunFormatPayload)
+
     /// Component envelope markers — documented exception to OOXML-mirror
     /// naming: op-log metadata only (batch-marker pattern), zero OOXML output.
     case beginComponent(type: String, id: ElementID)
