@@ -26,8 +26,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
   | 上限 | 預設值 | 依據 |
   |---|---|---|
-  | 單一 entry（`maximumEntryBytes`）| 512 MB | 見下方 R2 更正 |
-  | 封裝總量（`maximumTotalBytes`）| 4096 MB（4 GiB）| 見下方 R2 更正 |
+  | 單一 entry（`maximumEntryBytes`）| 512 MB | 單張未優化 300 dpi A4 點陣圖約 26 MB，約 20× 餘裕 |
+  | 封裝總量（`maximumTotalBytes`）| 4096 MB（4 GiB）| 內嵌約 200 張 300 dpi 掃描圖的論文或報告約 1–2 GB，約 2–4× 餘裕 |
   | 壓縮比（`maximumCompressionRatio`）| 500× | 真實語料（738 份文件）最高 117.8×，4.24× 餘裕 |
   | 單一 part 讀入記憶體（`maximumPartBytes`）| 512 MB | 與單一 entry 同值（「一個 part 不會比一個 entry 大」，非獨立量測）|
   | entry 數（`maximumEntryCount`）| 50000 | 無語料依據，純粹餘裕判斷（真實文件通常數十到數百個 part）|
@@ -38,16 +38,11 @@ All notable changes to ooxml-swift will be documented in this file.
   `RawPartChannel.readAllParts(from:limits:)`）皆可傳入自訂的 `ZipHelper.Limits(...)`，
   例如 `ZipHelper.Limits(maximumTotalBytes: 8 * 1024 * 1024 * 1024)`。
 
-  **R2 更正（獨立審查 MEDIUM-1）**：單一 entry 與封裝總量上限原訂 256 MB／512 MB（僅取自
-  738 份真實語料的上緣，14.6×／19.4× 餘裕），審查指出這批語料本身都是小文件，「餘裕」無法
-  代表大文件的真實需求，並具體點出「內嵌約 200 張 300 dpi A4 掃描圖的論文/報告」這類合理情境：
-  單張 300 dpi A4 未優化點陣圖約 26 MB，200 張理論上限約 5.2 GB，但真實 Word 文件內嵌的通常是
-  JPEG/PNG 壓縮後的掃描檔（單張約 5–10 MB 較合理），200 張約 1–2 GB。**改為 512 MB／4096 MB**，
-  對上述「合理但生成」情境留有約 2–4× 餘裕，對單張離群的未優化大圖（約 26 MB）留有約 20×
-  餘裕。**壓縮比上限維持 500× 不變**——那才是真正擋住經典 zip bomb（極端放大）的那一軸，
-  與文件多大無關（真實圖片本身不會被 DEFLATE 壓出離群的高比值），調整總量／單一 entry 上限
-  不會削弱這一層防護；一個真的這麼大的封裝，需要真的寫出那麼多實際位元組，成本是攤平的、
-  不是被放大的。
+  **上限值的依據**：738 份真實文件都是小文件，無法代表大文件的需求，所以單一 entry 與封裝
+  總量改以「內嵌大量掃描圖的論文或報告」估算：單張 300 dpi A4 未優化點陣圖約 26 MB；真實 Word
+  文件內嵌的多是壓縮後的 JPEG/PNG（單張約 5–10 MB），200 張約 1–2 GB。**真正擋住 zip bomb 的是
+  壓縮比上限**：真實圖片不會被 DEFLATE 壓出離群的高比值，而一個真的這麼大的封裝必須真的寫出
+  那麼多位元組，成本不會被放大，所以放寬總量與單一 entry 上限不會削弱這一層防護。
 
 ### Fixed
 
@@ -74,8 +69,9 @@ All notable changes to ooxml-swift will be documented in this file.
   `LocalizedError` 實作，`DocxReader` 十餘處呼叫 `XmlTreeReader.parse` 的地方也都沒有
   接住它，rels 引號不成對等畸形輸入會讓它原封不動地逸出到呼叫端，`String(describing:)`
   只印得出案例名稱與一個位元組偏移量（例如 `unexpectedEOF(at: 248)`），沒有任何說明。
-  現在每個案例都補上一句人類看得懂的原因（仍保留位元組偏移量方便除錯），錯誤型別本身
-  不變（既有的逐案例比對測試不受影響）。目錄 entry 帶不含 owner-write 的權限位
+  現在每個案例都補上一句人類看得懂的原因（仍保留位元組偏移量方便除錯），嵌入訊息的輸入內容
+  （非預期字元、標籤名、實體參照）一律先經過 `ZipHelper.displayName` 的跳脫與 480 字元上限——
+  這些欄位來自攻擊者可控、長度不受限的輸入。錯誤型別本身不變（既有的逐案例比對測試不受影響）。目錄 entry 帶不含 owner-write 的權限位
   （如 0500）導致解壓中途 EACCES 的部分，3.7.0 起已由 `ZipHelper` 統一包成具名的
   `WordError.invalidDocx`，不再逸出裸 POSIX／Cocoa 錯誤——這部分經查證確認已解決，
   本次僅補上 `XmlTreeReaderError` 這一層。
@@ -86,20 +82,11 @@ All notable changes to ooxml-swift will be documented in this file.
   `ZipHelper.displayName`，套用與封裝 entry 名稱、relationship id 相同的跳脫與 480 字元
   上限。
 
-  **R2 更正（獨立審查 HIGH-1）**：上面 #146 新增的 `XmlTreeReaderError.errorDescription`
-  第一版本身帶有 #150 要防的同一種缺陷——`unexpectedCharacter`／`mismatchedClosingTag`／
-  `invalidEntityReference`／`invalidNumericReference` 四個 case 把攻擊者可控、長度不受限的
-  原始字串（`decodeXmlEntities` 找不到 `;` 時抓「從 `&` 到該文字節點結尾」整段、`parseName()`
-  讀到第一個非 name 字元為止都沒有長度上限）直接嵌進訊息，且是**退步**而非中性：修法前
-  `.localizedDescription` 只回傳 Swift 通用訊息、不洩漏任何內容。獨立審查實測重現
-  2,000,045 字元的錯誤訊息與內含真實換行字元（U+000A）的訊息。四個 case 現在改為先經過
-  `ZipHelper.displayName` 才進訊息。全 repo 額外掃出兩個同類缺口一併修正：
-  `XMLHardeningError.invalidAttributeName`／`.attributeValueTooLarge` 的 `name`（屬性名稱
-  的 NameChar 規則只限字元類別、不限長度）；`DocxReader` 一般 part 掃描寫入
-  `document.xmlTreeLoadFailures`（一個 `public` 屬性）時原本用
-  `String(describing: error)`——這個呼叫完全繞過 `LocalizedError.errorDescription`（Swift
-  對列舉關聯值的預設反射輸出，不經過任何自訂描述），即使 `errorDescription` 本身修好了，
-  這裡仍會逐字洩漏，改為 `error.localizedDescription`。
+  同一套跳脫也套用到另外兩處把輸入內容嵌進錯誤的地方：`XMLHardeningError.invalidAttributeName`／
+  `.attributeValueTooLarge` 的屬性名稱（NameChar 規則只限字元類別、不限長度）；`DocxReader`
+  寫入公開屬性 `document.xmlTreeLoadFailures` 時改用 `error.localizedDescription`——原本的
+  `String(describing: error)` 走 Swift 對列舉關聯值的反射輸出，會繞過 `errorDescription`
+  逐字洩漏原始內容。
 
 ### Known limitation
 
