@@ -165,13 +165,18 @@ public struct DocxReader {
     ///   v0.31.1 detached-typed-view contract — every Reader-produced typed
     ///   value has `xmlNode == nil`. Opt-in to `true` when downstream code
     ///   needs `paragraph.id` / `table.id` for op-log addressing (Phase 2).
-    public static func read(from url: URL, wireTreeBackedViews: Bool = false) throws -> WordDocument {
+    /// - Parameter limits: how far the package may expand and how large one
+    ///   part may be read into memory before it is refused
+    ///   (PsychQuant/ooxml-swift#130). Defaults to `ZipHelper.defaultLimits`.
+    public static func read(from url: URL,
+                            wireTreeBackedViews: Bool = false,
+                            limits: ZipHelper.Limits = ZipHelper.defaultLimits) throws -> WordDocument {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw WordError.fileNotFound(url.path)
         }
 
         // 1. 解壓縮 ZIP
-        let tempDir = try ZipHelper.unzip(url)
+        let tempDir = try ZipHelper.unzip(url, limits: limits)
 
         // tempDir is retained on the returned WordDocument for preserve-by-default
         // round-trip fidelity (v0.12.0+). Only clean up on error paths — success
@@ -232,7 +237,7 @@ public struct DocxReader {
             throw WordError.parseError("找不到 word/document.xml")
         }
 
-        let documentData = try Data(contentsOf: documentURL)
+        let documentData = try ZipHelper.readPart(at: documentURL, describedAs: "word/document.xml", limits: limits)
         try Self.rejectDTD(documentData, part: "word/document.xml")
 
         // 5. 讀取 styles.xml（先解析，用於語義標註）
