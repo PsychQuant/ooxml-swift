@@ -1898,7 +1898,17 @@ public enum OperationReducer {
             if underline {
                 setValuedRunProperty("u", value: "single", in: run)
             } else {
-                removeRunProperty("u", from: run)
+                // PsychQuant/ooxml-swift#189: used to call `removeRunProperty`,
+                // deleting `<w:u>` outright. For a run whose paragraph or
+                // character style is underlined, ABSENCE lets the run
+                // re-inherit underline from that style — so
+                // `setUnderline(false)` was a no-op exactly where it
+                // mattered. Same defect class #161 fixed for `<w:b>`/`<w:i>`
+                // (`setBooleanRunProperty`); `<w:u>` is valued rather than a
+                // bare on/off toggle, so the explicit-off value is the
+                // schema's own "no underline" value, `w:val="none"`, not a
+                // boolean attribute.
+                setValuedRunProperty("u", value: "none", in: run)
             }
         }
         if let size = format.fontSizeHalfPoints {
