@@ -390,12 +390,9 @@ extension WordDocument {
         return String(body[..<closeRange.lowerBound])
     }
 
+    /// PsychQuant/ooxml-swift#165 追蹤（R2 review finding F2）：委派給已修好
+    /// \n/\r/\t 跳脫的共用函式（書籤名稱是 `w:name` 屬性值）。
     private func escapeBookmarkName(_ name: String) -> String {
-        return name
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&apos;")
+        return escapeXMLAttribute(name)
     }
 }

@@ -1713,13 +1713,11 @@ public struct DocxWriter {
 
     // MARK: - Helpers
 
+    /// PsychQuant/ooxml-swift#165 追蹤（R2 review finding F2）：委派給已修好
+    /// \n/\r/\t 跳脫的共用函式——本函式同時用於屬性值（`Target=` at line 1112）
+    /// 與元素文字內容（`<dc:title>` 等 docProps 節點），前者是真正的缺陷面。
     private static func escapeXML(_ string: String) -> String {
-        return string
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&apos;")
+        return escapeXMLAttribute(string)
     }
 }
 
