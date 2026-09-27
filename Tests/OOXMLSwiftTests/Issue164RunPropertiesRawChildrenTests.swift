@@ -73,6 +73,100 @@ final class Issue164RunPropertiesRawChildrenTests: XCTestCase {
         XCTAssertEqual(reparsed.properties.rawChildren?.map(\.name), ["bCs", "iCs", "vanish"])
     }
 
+    // MARK: - Section A2: the remaining 4/7 elements the issue's Expected names
+    // (independent review finding F1)
+    //
+    // Issue #164's Expected: "A regression test should cover at least
+    // `vanish`, `bCs`, `iCs`, `caps`, `smallCaps`, `spacing`, `shd`" — the
+    // three tests above only exercise the first three. `caps`/`smallCaps`
+    // are empty ST_OnOff elements like `bCs`/`iCs`; `spacing`/`shd` carry
+    // attributes (character spacing in twentieths of a point; run shading),
+    // exercising a different shape than the boolean-flag elements above.
+
+    private static let watchedRunXML2 =
+        "<w:r><w:rPr><w:caps/><w:smallCaps/><w:spacing w:val=\"20\"/>"
+        + "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"FFFF00\"/></w:rPr><w:t>beta</w:t></w:r>"
+
+    func testParseCapturesCapsSmallCapsSpacingShd() throws {
+        let run = try parseRunFragment(Self.watchedRunXML2)
+        let names = run.properties.rawChildren?.map(\.name)
+        XCTAssertEqual(names, ["caps", "smallCaps", "spacing", "shd"],
+                       "unmodeled rPr children must be captured, in source order")
+    }
+
+    func testToXMLReemitsCapsSmallCapsSpacingShdAtCanonicalPositions() throws {
+        let run = try parseRunFragment(Self.watchedRunXML2)
+        let xml = run.toXML()
+        XCTAssertTrue(xml.contains("<w:caps/>"), "got: \(xml)")
+        XCTAssertTrue(xml.contains("<w:smallCaps/>"), "got: \(xml)")
+        XCTAssertTrue(xml.contains("<w:spacing w:val=\"20\"/>"), "got: \(xml)")
+        XCTAssertTrue(xml.contains("w:shd") && xml.contains("w:fill=\"FFFF00\""), "got: \(xml)")
+        // CT_RPr canonical order: caps(7) smallCaps(8) … spacing(20) … shd(30).
+        let capsRange = try XCTUnwrap(xml.range(of: "<w:caps/>"))
+        let smallCapsRange = try XCTUnwrap(xml.range(of: "<w:smallCaps/>"))
+        let spacingRange = try XCTUnwrap(xml.range(of: "<w:spacing"))
+        let shdRange = try XCTUnwrap(xml.range(of: "<w:shd"))
+        XCTAssertLessThan(capsRange.lowerBound, smallCapsRange.lowerBound)
+        XCTAssertLessThan(smallCapsRange.lowerBound, spacingRange.lowerBound)
+        XCTAssertLessThan(spacingRange.lowerBound, shdRange.lowerBound)
+    }
+
+    func testParseThenEmitRoundTripsCapsSmallCapsSpacingShdVerbatim() throws {
+        let run = try parseRunFragment(Self.watchedRunXML2)
+        let reparsed = try parseRunFragment(run.toXML())
+        XCTAssertEqual(reparsed.properties.rawChildren?.map(\.name), ["caps", "smallCaps", "spacing", "shd"])
+        // Attribute-bearing elements must keep their attributes, not just
+        // their element name (same "name-only checks would still pass if
+        // attributes were dropped" concern the existing tests guard against).
+        let shd = reparsed.properties.rawChildren?.first { $0.name == "shd" }
+        XCTAssertTrue(shd?.xml.contains("w:fill=\"FFFF00\"") ?? false, "got: \(String(describing: shd?.xml))")
+        let spacing = reparsed.properties.rawChildren?.first { $0.name == "spacing" }
+        XCTAssertTrue(spacing?.xml.contains("w:val=\"20\"") ?? false, "got: \(String(describing: spacing?.xml))")
+    }
+
+    /// Full-docx regression, mirroring Section B below but for the second
+    /// element set — an unrelated typed edit elsewhere must not drop
+    /// caps/smallCaps/spacing/shd from this untouched run either.
+    func testUpdateParagraphElsewherePreservesCapsSmallCapsSpacingShdOnUntouchedRun() throws {
+        let documentXML = """
+            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>\
+            <w:p>\(Self.watchedRunXML2)</w:p>\
+            <w:p><w:r><w:t>gamma</w:t></w:r></w:p>\
+            <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>\
+            </w:body></w:document>
+            """
+        let fixture = try buildFixture(documentXML: documentXML)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        var doc = try DocxReader.read(from: fixture)
+        defer { doc.close() }
+
+        try doc.updateParagraph(at: 1, text: "GAMMA")
+
+        let outURL = try save(doc)
+        defer { try? FileManager.default.removeItem(at: outURL) }
+        let outputXML = try extractDocumentXML(from: outURL)
+        let tree = try XmlTreeReader.parse(outputXML)
+
+        func containsMarker(_ node: XmlNode) -> Bool {
+            if node.kind == .text, node.textContent.contains("beta") { return true }
+            return node.children.contains(where: containsMarker)
+        }
+        func findParagraph(_ node: XmlNode) -> XmlNode? {
+            if node.kind == .element, node.localName == "p", containsMarker(node) { return node }
+            for child in node.children { if let found = findParagraph(child) { return found } }
+            return nil
+        }
+        let paragraph = try XCTUnwrap(findParagraph(tree.root), "no <w:p> containing 'beta' found")
+        let run = try XCTUnwrap(paragraph.children.first { $0.kind == .element && $0.localName == "r" })
+        let rPr = try XCTUnwrap(run.children.first { $0.kind == .element && $0.localName == "rPr" })
+        let names = rPr.children.filter { $0.kind == .element }.map(\.localName)
+        for expected in ["caps", "smallCaps", "spacing", "shd"] {
+            XCTAssertEqual(names.filter { $0 == expected }.count, 1,
+                           "\(expected) must survive exactly once")
+        }
+    }
+
     // MARK: - Section B: full-docx regression via the issue's exact repro
 
     /// `document.xml` for the fixture — mirrors the issue body exactly:
@@ -87,7 +181,7 @@ final class Issue164RunPropertiesRawChildrenTests: XCTestCase {
         </w:body></w:document>
         """
 
-    private func buildFixture() throws -> URL {
+    private func buildFixture(documentXML: String? = nil) throws -> URL {
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue164-staging-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
@@ -114,7 +208,7 @@ final class Issue164RunPropertiesRawChildrenTests: XCTestCase {
                 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
             </Relationships>
             """, to: "_rels/.rels")
-        try write(Self.documentXML, to: "word/document.xml")
+        try write(documentXML ?? Self.documentXML, to: "word/document.xml")
 
         let docxURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue164-\(UUID().uuidString).docx")
