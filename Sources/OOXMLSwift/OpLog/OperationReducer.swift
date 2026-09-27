@@ -47,6 +47,33 @@ public enum ReducerError: Error, Equatable {
     case cannotUndo(targetOpID: UUID)
 }
 
+// MARK: - ReducerError + LocalizedError
+//
+// PsychQuant/macdoc#232: without `LocalizedError`, `ReducerError.localizedDescription`
+// bridges to a generic NSError-synthesized message ("The operation couldn't
+// be completed. (OOXMLSwift.ReducerError error 1.)") that drops the case's
+// own payload entirely — in particular `.malformedOp`'s `reason` string,
+// which is the one piece of information callers need to diagnose a failed
+// `apply`/`materialize`. `WordDocument+Apply.swift` wraps every reducer
+// failure as `EditError.operationLogFailure(underlying:
+// "...: \(error.localizedDescription)")`, so this conformance is what makes
+// that `underlying` string say "setRunFormat target must be <w:r>" instead
+// of "error 1".
+extension ReducerError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .elementNotFound(let opID, let elementID):
+            return "op \(opID): no element in the tree matches ElementID '\(elementID.raw)'"
+        case .malformedOp(let opID, let reason):
+            return "op \(opID): \(reason)"
+        case .cannotRedo(let targetOpID):
+            return "cannot redo op \(targetOpID): no prior .undo entry targets it"
+        case .cannotUndo(let targetOpID):
+            return "cannot undo op \(targetOpID): its operation kind is not invertible, or no matching entry exists"
+        }
+    }
+}
+
 // MARK: - OperationReducer
 
 /// Pure-replay reducer namespace. Holds NO state — every entry point is a
@@ -847,6 +874,11 @@ public enum OperationReducer {
             }
             applyRunFormat(format, to: node)
 
+        case .setRunFormatInRange(let target, let substring, let instance, let format):
+            try applySetRunFormatInRange(
+                target: target, substring: substring, instance: instance,
+                format: format, opID: entry.opID, tree: tree)
+
         case .insertBookmark(let paragraphID, let bookmarkID, let name):
             guard let paragraph = findNode(elementID: paragraphID, in: tree) else {
                 throw ReducerError.elementNotFound(opID: entry.opID, elementID: paragraphID)
@@ -1167,6 +1199,256 @@ public enum OperationReducer {
     private static func containsNodeIdentical(to target: XmlNode, in root: XmlNode) -> Bool {
         if root === target { return true }
         return root.children.contains { containsNodeIdentical(to: target, in: $0) }
+    }
+
+    // MARK: - setRunFormatInRange (PsychQuant/macdoc#232)
+
+    /// Implements `.setRunFormatInRange`: locates the `instance`-th
+    /// occurrence of `substring` inside paragraph `target`'s flattened text,
+    /// splits the run(s) spanning the match, and applies `format` to ONLY
+    /// the matched run fragment(s).
+    private static func applySetRunFormatInRange(
+        target: ElementID, substring: String, instance: Int,
+        format: RunFormatPayload, opID: UUID, tree: XmlTree
+    ) throws {
+        guard let node = findNode(elementID: target, in: tree) else {
+            throw ReducerError.elementNotFound(opID: opID, elementID: target)
+        }
+        guard node.localName == "p" else {
+            throw ReducerError.malformedOp(
+                opID: opID,
+                reason: "setRunFormatInRange target must be a <w:p>, got <\(node.localName)>")
+        }
+        guard !substring.isEmpty else {
+            throw ReducerError.malformedOp(
+                opID: opID, reason: "setRunFormatInRange substring must not be empty")
+        }
+        guard instance >= 1 else {
+            throw ReducerError.malformedOp(
+                opID: opID,
+                reason: "setRunFormatInRange instance must be >= 1, got \(instance)")
+        }
+        // Reducer support is bold-only so far (macdoc#232 scope). Any other
+        // RunFormatPayload field being set fails loudly rather than being
+        // silently ignored — the payload type is shared with setRunFormat
+        // for forward compatibility, but only bold is wired up here.
+        guard format.italic == nil, format.underline == nil,
+              format.fontSizeHalfPoints == nil, format.color == nil else {
+            throw ReducerError.malformedOp(
+                opID: opID,
+                reason: "setRunFormatInRange only supports RunFormatPayload.bold currently; "
+                    + "italic/underline/fontSizeHalfPoints/color are accepted by the payload "
+                    + "type for forward compatibility but not yet implemented")
+        }
+        guard let bold = format.bold else {
+            throw ReducerError.malformedOp(
+                opID: opID,
+                reason: "setRunFormatInRange requires RunFormatPayload.bold to be set "
+                    + "(the only field currently supported)")
+        }
+
+        // Build (childIndex-in-paragraph, text, startGlobal-UTF16-offset) for
+        // every direct <w:r> child, in document order. Non-run children
+        // (<w:pPr>, bookmark markers, …) contribute no searchable text and
+        // are left untouched.
+        var spans: [(childIndex: Int, text: String, startGlobal: Int)] = []
+        var globalOffset = 0
+        for (idx, child) in node.children.enumerated()
+        where child.kind == .element && child.localName == "r" {
+            let text = runText(child)
+            spans.append((idx, text, globalOffset))
+            globalOffset += text.utf16.count
+        }
+
+        let combinedUTF16: [UInt16] = spans.reduce(into: []) { acc, span in
+            acc.append(contentsOf: span.text.utf16)
+        }
+        let needleUTF16 = Array(substring.utf16)
+        guard combinedUTF16.count >= needleUTF16.count else {
+            throw ReducerError.malformedOp(
+                opID: opID,
+                reason: "setRunFormatInRange: substring \(String(reflecting: substring)) "
+                    + "not found in paragraph text (requested occurrence \(instance))")
+        }
+
+        // Overlapping linear scan (advance by 1 code unit regardless of
+        // match) — matches the counting convention already used by
+        // `resolveRunAnchor` (WordDocument+SpliceOMath.swift) for anchor
+        // `instance` resolution elsewhere in this package.
+        var occurrencesFound = 0
+        var matchGlobalStart: Int?
+        var searchStart = 0
+        while searchStart + needleUTF16.count <= combinedUTF16.count {
+            if Array(combinedUTF16[searchStart..<(searchStart + needleUTF16.count)]) == needleUTF16 {
+                occurrencesFound += 1
+                if occurrencesFound == instance {
+                    matchGlobalStart = searchStart
+                    break
+                }
+            }
+            searchStart += 1
+        }
+        guard let globalStart = matchGlobalStart else {
+            throw ReducerError.malformedOp(
+                opID: opID,
+                reason: "setRunFormatInRange: substring \(String(reflecting: substring)) "
+                    + "occurrence \(instance) not found (only \(occurrencesFound) occurrence(s) present)")
+        }
+        let globalEnd = globalStart + needleUTF16.count
+
+        guard let startSpanIdx = spans.firstIndex(where: {
+            globalStart >= $0.startGlobal && globalStart < $0.startGlobal + $0.text.utf16.count
+        }) else {
+            throw ReducerError.malformedOp(
+                opID: opID,
+                reason: "setRunFormatInRange: internal error resolving the start run for the match")
+        }
+        let lastMatchedChar = globalEnd - 1
+        guard let endSpanIdx = spans.firstIndex(where: {
+            lastMatchedChar >= $0.startGlobal && lastMatchedChar < $0.startGlobal + $0.text.utf16.count
+        }) else {
+            throw ReducerError.malformedOp(
+                opID: opID,
+                reason: "setRunFormatInRange: internal error resolving the end run for the match")
+        }
+
+        let startSpan = spans[startSpanIdx]
+        let endSpan = spans[endSpanIdx]
+        let startOffsetInRun = globalStart - startSpan.startGlobal
+        let endOffsetInRun = globalEnd - endSpan.startGlobal
+
+        func applyBold(_ run: XmlNode) { applyBoldInRange(bold, to: run) }
+
+        if startSpanIdx == endSpanIdx {
+            // Whole match lives inside one run — split into up to 3 pieces
+            // (prefix / matched-middle / suffix); empty pieces are omitted.
+            let originalRun = node.children[startSpan.childIndex]
+            guard let (prefix, middle, suffix) = splitRunNodeThree(
+                originalRun, start: startOffsetInRun, end: endOffsetInRun
+            ) else {
+                throw ReducerError.malformedOp(
+                    opID: opID,
+                    reason: "setRunFormatInRange: the matched run has no <w:t> child to split")
+            }
+            applyBold(middle)
+            var replacement: [XmlNode] = []
+            if let prefix { replacement.append(prefix) }
+            replacement.append(middle)
+            if let suffix { replacement.append(suffix) }
+            node.children.replaceSubrange(startSpan.childIndex...startSpan.childIndex, with: replacement)
+        } else {
+            // Match crosses run boundaries: split the start run's tail and
+            // the end run's head; every fully-enclosed run in between gets
+            // the whole-run format applied in place (no split needed).
+            let startRun = node.children[startSpan.childIndex]
+            let endRun = node.children[endSpan.childIndex]
+            guard let (startPrefix, startMiddle) = splitRunNode(startRun, atUTF16Offset: startOffsetInRun) else {
+                throw ReducerError.malformedOp(
+                    opID: opID,
+                    reason: "setRunFormatInRange: the match's start run has no <w:t> child to split")
+            }
+            guard let (endMiddle, endSuffix) = splitRunNode(endRun, atUTF16Offset: endOffsetInRun) else {
+                throw ReducerError.malformedOp(
+                    opID: opID,
+                    reason: "setRunFormatInRange: the match's end run has no <w:t> child to split")
+            }
+            applyBold(startMiddle)
+            applyBold(endMiddle)
+            for spanIdx in (startSpanIdx + 1)..<endSpanIdx {
+                applyBold(node.children[spans[spanIdx].childIndex])
+            }
+
+            // Replace the higher index first so the lower index stays valid.
+            var endReplacement: [XmlNode] = [endMiddle]
+            if !runText(endSuffix).isEmpty { endReplacement.append(endSuffix) }
+            node.children.replaceSubrange(endSpan.childIndex...endSpan.childIndex, with: endReplacement)
+
+            var startReplacement: [XmlNode] = []
+            if !runText(startPrefix).isEmpty { startReplacement.append(startPrefix) }
+            startReplacement.append(startMiddle)
+            node.children.replaceSubrange(startSpan.childIndex...startSpan.childIndex, with: startReplacement)
+        }
+    }
+
+    /// Flattened visible text of a `<w:r>` node: the concatenation, in
+    /// document order, of its direct `<w:t>` element children's text.
+    /// Non-text children (`<w:rPr>`, `<w:tab/>`, `<w:br/>`, drawings, …)
+    /// contribute no characters.
+    private static func runText(_ run: XmlNode) -> String {
+        run.children
+            .filter { $0.kind == .element && $0.localName == "t" }
+            .map { textOf($0) }
+            .joined()
+    }
+
+    private static func textOf(_ node: XmlNode) -> String {
+        node.children.filter { $0.kind == .text }.map { $0.textContent }.joined()
+    }
+
+    /// Splits a `<w:r>` node at a UTF-16 offset into `(prefix, suffix)`
+    /// clones. Assumes the run's text comes from a single `<w:t>` child (the
+    /// common OOXML shape) — every other child (`<w:rPr>`, …) is duplicated
+    /// onto BOTH sides unchanged, so formatting and unmodeled `<w:rPr>`
+    /// children survive the split. Returns `nil` when the run has no
+    /// `<w:t>` child (nothing to split — caller treats the run as atomic).
+    private static func splitRunNode(
+        _ run: XmlNode, atUTF16Offset offset: Int
+    ) -> (prefix: XmlNode, suffix: XmlNode)? {
+        guard let tIndex = run.children.firstIndex(where: {
+            $0.kind == .element && $0.localName == "t"
+        }) else {
+            return nil
+        }
+        let text = textOf(run.children[tIndex])
+        let utf16 = Array(text.utf16)
+        let safeOffset = max(0, min(offset, utf16.count))
+        let prefixText = String(decoding: utf16.prefix(safeOffset), as: UTF16.self)
+        let suffixText = String(decoding: utf16.suffix(utf16.count - safeOffset), as: UTF16.self)
+
+        let prefixRun = run.deepClone()
+        let suffixRun = run.deepClone()
+        prefixRun.children[tIndex].children = [XmlNode.text(prefixText)]
+        suffixRun.children[tIndex].children = [XmlNode.text(suffixText)]
+        return (prefixRun, suffixRun)
+    }
+
+    /// Splits a run's text into three UTF-16-offset pieces `[0, start)`,
+    /// `[start, end)`, `[end, len)`. `prefix`/`suffix` are `nil` when empty
+    /// (so callers omit zero-length run fragments from the rebuilt paragraph,
+    /// matching the `[insertAtAnchor]` convention in
+    /// `WordDocument+SpliceOMath.swift`). `middle` is always returned.
+    /// Returns `nil` when the run has no `<w:t>` child to split.
+    private static func splitRunNodeThree(
+        _ run: XmlNode, start: Int, end: Int
+    ) -> (prefix: XmlNode?, middle: XmlNode, suffix: XmlNode?)? {
+        guard let (left, rightOfStart) = splitRunNode(run, atUTF16Offset: start) else {
+            return nil
+        }
+        guard let (middle, suffix) = splitRunNode(rightOfStart, atUTF16Offset: end - start) else {
+            return nil
+        }
+        let prefix: XmlNode? = runText(left).isEmpty ? nil : left
+        let suffixNode: XmlNode? = runText(suffix).isEmpty ? nil : suffix
+        return (prefix, middle, suffixNode)
+    }
+
+    /// Sets `<w:b>` with explicit on/off semantics (PsychQuant/ooxml-swift#161):
+    /// `true` writes the canonical naked `<w:b/>`; `false` writes
+    /// `<w:b w:val="0"/>` rather than removing the element, so a run inside a
+    /// bold paragraph/character style is actually turned off instead of
+    /// re-inheriting bold from the style. Deliberately NOT shared with
+    /// `applyRunFormat`/`setBooleanRunProperty` (the plain `setRunFormat`
+    /// path `.setRunFormat` still has the absence-on-false behavior #161
+    /// tracks separately) — `.setRunFormatInRange` is new code and has no
+    /// reason to replicate a known-bad default.
+    private static func applyBoldInRange(_ value: Bool, to run: XmlNode) {
+        let node = upsertRunProperty("b", in: run)
+        if value {
+            node.attributes.removeAll { $0.prefix == "w" && $0.localName == "val" }
+        } else {
+            node.setAttribute(prefix: "w", localName: "val", value: "0")
+        }
+        removeEmptyRunProperties(from: run)
     }
 
     private static func applyRunFormat(_ format: RunFormatPayload, to run: XmlNode) {
@@ -1758,6 +2040,7 @@ public enum OperationReducer {
         case .setCellText(let table, _, _, _): return [table]
         case .insertRun(let parent, _, _): return [parent]
         case .setRunFormat(let target, _): return [target]
+        case .setRunFormatInRange(let target, _, _, _): return [target]
         case .insertBookmark(let at, _, _): return [at]
         case .insertComment(let anchor, _, _, _): return [anchor]
         case .insertNode(let parent, _, _): return [parent]
@@ -1838,6 +2121,7 @@ public enum OperationReducer {
         case .setCellText(let table, _, _, _): return table == elementID
         case .insertRun(let parent, _, _): return parent == elementID
         case .setRunFormat(let target, _): return target == elementID
+        case .setRunFormatInRange(let target, _, _, _): return target == elementID
         case .insertBookmark(let at, _, _): return at == elementID
         case .insertComment(let anchor, _, _, _): return anchor == elementID
         case .appendParagraph(let container, _): return container == elementID

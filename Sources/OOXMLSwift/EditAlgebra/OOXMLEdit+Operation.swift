@@ -8,6 +8,7 @@
 //   OOXMLEdit.insertParagraph        → Operation.insertParagraphAfter
 //   OOXMLEdit.insertParagraphBefore  → Operation.insertParagraphBefore
 //   OOXMLEdit.setBold                → Operation.setRunFormat
+//   OOXMLEdit.setBoldInRange         → Operation.setRunFormatInRange (macdoc#232)
 //   OOXMLEdit.removeParagraph        → Operation.removeParagraph
 //   OOXMLEdit.insertHyperlink        → [Operation.insertNode, Operation.addRelationship]
 //                                       (composite, pre-validated)
@@ -48,6 +49,14 @@ extension OOXMLEdit {
         case .setBold(let target, let value):
             return [.setRunFormat(
                 target: target,
+                format: RunFormatPayload(bold: value)
+            )]
+
+        case .setBoldInRange(let target, let substring, let value, let instance):
+            return [.setRunFormatInRange(
+                target: target,
+                substring: substring,
+                instance: instance,
                 format: RunFormatPayload(bold: value)
             )]
 
