@@ -83,6 +83,14 @@ All notable changes to ooxml-swift will be documented in this file.
   也各自有自己的 rsid 屬性家族（`w:rsidP`、`w:rsidR`、`w:rsidRPr`、`w:rsidTr` 等），一樣會
   在 typed 重新序列化時消失，本次修法範圍僅止於 `sectPr`；追蹤留待後續 issue。
 
+- **Tree-backed Edit API 的 `setBold(false)` 直接刪掉 `<w:b>`，讓套用了粗體樣式的段落／文字
+  執行沒辦法真正取消粗體**（PsychQuant/ooxml-swift#161）。`OperationReducer.setBooleanRunProperty`
+  對 `enabled == false` 呼叫的是刪除元素，而不是寫明確關閉值；對繼承自 Heading 或粗體字元樣式
+  的文字執行來說，刪掉 `<w:b>` 反而讓它重新繼承樣式的粗體，`setBold(false)` 在最需要生效的
+  情況下變成沒有作用。現在改成寫 `<w:b w:val="0"/>`（明確關閉），與 #115 替 `RunProperties.toXML()`
+  訂下的慣例一致；重新開啟時（`enabled == true`）會清掉先前留下的 `w:val="0"`，避免殘留互相
+  矛盾的屬性。同一函式也管 `setItalic`，一併受益。
+
 ## [3.14.0] - 2026-09-27
 
 ### Fixed
