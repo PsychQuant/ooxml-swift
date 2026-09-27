@@ -58,6 +58,21 @@ All notable changes to ooxml-swift will be documented in this file.
   實務上不含這類字元）與其餘僅供元素文字內容跳脫的 `escapeXML` 私有函式（文字節點的字面
   換行本身合法，不受此規格條款影響）不在本次修法範圍。
 
+### Added
+
+- **段落框線／底色的 typed 模型補上 theme 色、`bar` 邊、`shadow`、`frame`**
+  （PsychQuant/ooxml-swift#179）。#176 已讓 `DocxReader` 把 `<w:pBdr>`／`<w:shd>` 讀進
+  typed 欄位，未被指派時原樣輸出來源原文；但 typed 模型本身表達不了 `themeColor`／
+  `themeTint`／`themeShade`、`shadow`、`frame`（每邊都有）、`bar` 邊，以及底色的六個
+  `theme*` 屬性，所以只要 `border`／`shading` 被指派過一次（即使設回同一個值、或只改其中
+  一邊），來源原文就被捨棄、改走 typed 輸出，這些屬性隨之消失。現在 `ParagraphBorderStyle`
+  補上 `themeColor`／`themeTint`／`themeShade`／`shadow`／`frame`，`ParagraphBorder` 補上
+  `bar`，`CellShading`（`ParagraphShading` 的底層型別）補上對應六個 `theme*` 屬性；
+  `DocxReader` 讀入、`toXML()` 依序輸出。已知限制：`CellShading` 的 theme 欄位目前只有
+  段落底色的讀取路徑（`parseParagraphShading`）會填入；表格儲存格底色（`w:tcPr/w:shd`）
+  的讀取路徑尚未涵蓋，欄位對表格一律 nil，不影響既有輸出，但也代表儲存格底色的 theme
+  屬性仍有本文件所述的同一種遺失風險（留待未來處理）。
+
 ## [3.14.0] - 2026-09-27
 
 ### Fixed

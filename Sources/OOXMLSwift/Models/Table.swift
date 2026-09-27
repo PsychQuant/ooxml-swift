@@ -497,16 +497,37 @@ public enum BorderStyle: String, Codable {
     case nil_ = "nil"           // 無邊框
 }
 
-/// 儲存格底色
+/// 儲存格底色（`CT_Shd`——同一結構也供段落底色 `ParagraphShading` 使用）
 public struct CellShading: Equatable {
     public var fill: String            // 背景色 RGB hex
     public var color: String?          // 前景色（用於圖案）
     public var pattern: ShadingPattern?
 
-    public init(fill: String, color: String? = nil, pattern: ShadingPattern? = nil) {
+    /// PsychQuant/ooxml-swift#179: `CT_Shd` 的 theme 系列屬性。`themeColor`／
+    /// `themeTint`／`themeShade` 對應前景色（`color`）的主題色版本；
+    /// `themeFill`／`themeFillTint`／`themeFillShade` 對應背景色（`fill`）。
+    /// 目前只有段落底色（`parseParagraphShading`）讀寫這五個欄位；表格儲存格
+    /// 底色的讀取路徑尚未涵蓋（見 issue #179 討論），欄位對表格用法一律 nil，
+    /// 不影響既有輸出。
+    public var themeColor: String?
+    public var themeTint: String?
+    public var themeShade: String?
+    public var themeFill: String?
+    public var themeFillTint: String?
+    public var themeFillShade: String?
+
+    public init(fill: String, color: String? = nil, pattern: ShadingPattern? = nil,
+                themeColor: String? = nil, themeTint: String? = nil, themeShade: String? = nil,
+                themeFill: String? = nil, themeFillTint: String? = nil, themeFillShade: String? = nil) {
         self.fill = fill
         self.color = color
         self.pattern = pattern
+        self.themeColor = themeColor
+        self.themeTint = themeTint
+        self.themeShade = themeShade
+        self.themeFill = themeFill
+        self.themeFillTint = themeFillTint
+        self.themeFillShade = themeFillShade
     }
 
     /// 便利方法：純色背景
@@ -530,6 +551,13 @@ public struct CellShading: Equatable {
         if let color = color {
             attrs.append("w:color=\"\(escapeXMLAttribute(color))\"")
         }
+        // PsychQuant/ooxml-swift#179.
+        if let themeColor = themeColor { attrs.append("w:themeColor=\"\(escapeXMLAttribute(themeColor))\"") }
+        if let themeTint = themeTint { attrs.append("w:themeTint=\"\(escapeXMLAttribute(themeTint))\"") }
+        if let themeShade = themeShade { attrs.append("w:themeShade=\"\(escapeXMLAttribute(themeShade))\"") }
+        if let themeFill = themeFill { attrs.append("w:themeFill=\"\(escapeXMLAttribute(themeFill))\"") }
+        if let themeFillTint = themeFillTint { attrs.append("w:themeFillTint=\"\(escapeXMLAttribute(themeFillTint))\"") }
+        if let themeFillShade = themeFillShade { attrs.append("w:themeFillShade=\"\(escapeXMLAttribute(themeFillShade))\"") }
 
         return "<w:shd \(attrs.joined(separator: " "))/>"
     }
