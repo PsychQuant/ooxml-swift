@@ -73,6 +73,16 @@ All notable changes to ooxml-swift will be documented in this file.
   的讀取路徑尚未涵蓋，欄位對表格一律 nil，不影響既有輸出，但也代表儲存格底色的 theme
   屬性仍有本文件所述的同一種遺失風險（留待未來處理）。
 
+- **`<w:sectPr>` 自己的 rsid 屬性經 typed 重新序列化後消失**（PsychQuant/ooxml-swift#112）。
+  `w:rsidR`／`w:rsidRPr`／`w:rsidSect` 是直接掛在 `<w:sectPr>` 標籤本身的屬性（不是子元素），
+  過去讀取時完全沒被看到，任何一次分節重新序列化都會讓它們消失。對排版沒有影響，但 Word
+  的文件比較／合併功能靠這些屬性辨認修訂工作階段，遺失代表這份出處資訊回不來。現在
+  `SectionProperties.rsidAttributes` 原樣保留 `<w:sectPr>` 自身所有 `rsid*` 屬性
+  （涵蓋整個 `AG_SectPrAttributes` 群組，不只issue原本點名的三個），`toXML()`／
+  `toSectionBreakXML()` 依固定順序寫回開頭標籤。已知限制：段落／文字執行／表格列層級
+  也各自有自己的 rsid 屬性家族（`w:rsidP`、`w:rsidR`、`w:rsidRPr`、`w:rsidTr` 等），一樣會
+  在 typed 重新序列化時消失，本次修法範圍僅止於 `sectPr`；追蹤留待後續 issue。
+
 ## [3.14.0] - 2026-09-27
 
 ### Fixed
