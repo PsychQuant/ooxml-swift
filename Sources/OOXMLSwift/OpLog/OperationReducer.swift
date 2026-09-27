@@ -1192,13 +1192,24 @@ public enum OperationReducer {
         removeEmptyRunProperties(from: run)
     }
 
+    /// PsychQuant/ooxml-swift#161: `enabled == false` used to call
+    /// `removeRunProperty`, deleting `<w:b>`/`<w:i>` outright. For a run whose
+    /// paragraph or character style is bold (a Heading, a "Strong" character
+    /// style), ABSENCE lets the run re-inherit bold from that style — so
+    /// `setBold(false)` was a no-op exactly where it mattered. Same defect
+    /// class #115 fixed for `RunProperties.toXML()` (`isBoldSpecified` +
+    /// explicit `w:val="0"`); this brings the tree-backed Edit API to the
+    /// same convention. `enabled == true` also clears any stale `w:val="0"`
+    /// left by a PRIOR `false` call on the same node — leaving it would
+    /// contradict the "on" just requested.
     private static func setBooleanRunProperty(
         _ localName: String, enabled: Bool, in run: XmlNode
     ) {
+        let node = upsertRunProperty(localName, in: run)
         if enabled {
-            _ = upsertRunProperty(localName, in: run)
+            node.attributes.removeAll { $0.prefix == "w" && $0.localName == "val" }
         } else {
-            removeRunProperty(localName, from: run)
+            node.setAttribute(prefix: "w", localName: "val", value: "0")
         }
     }
 

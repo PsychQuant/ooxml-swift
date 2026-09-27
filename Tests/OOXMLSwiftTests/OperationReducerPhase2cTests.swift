@@ -264,7 +264,11 @@ final class OperationReducerPhase2cTests: XCTestCase {
     }
 
     /// Walks tree finding the run with given ElementID, returns true if it has
-    /// <w:rPr><w:b/></w:rPr> (i.e., bold is on).
+    /// an ST_OnOff-true `<w:b>` in `<w:rPr>` — presence without `w:val`, or
+    /// `w:val` outside the recognized off-values, means "on"; PsychQuant/
+    /// ooxml-swift#161 made `<w:b w:val="0"/>` (explicit off) distinct from
+    /// absence, so this must inspect the attribute, not just presence of the
+    /// element (a presence-only check would read #161's fix as still bold).
     private func runIsBold(_ tree: XmlTree, runID: ElementID) -> Bool {
         guard let run = OperationReducer.findNode(elementID: runID, in: tree) else {
             return false
@@ -272,7 +276,13 @@ final class OperationReducerPhase2cTests: XCTestCase {
         guard let rPr = run.children.first(where: { $0.kind == .element && $0.localName == "rPr" }) else {
             return false
         }
-        return rPr.children.contains { $0.kind == .element && $0.localName == "b" }
+        guard let b = rPr.children.first(where: { $0.kind == .element && $0.localName == "b" }) else {
+            return false
+        }
+        guard let val = b.attributes.first(where: { $0.prefix == "w" && $0.localName == "val" })?.value else {
+            return true
+        }
+        return !["0", "false", "off"].contains(val.lowercased())
     }
 
     func testSetRunFormatBoldTrueAddsBoldElement() throws {
@@ -290,8 +300,15 @@ final class OperationReducerPhase2cTests: XCTestCase {
                       "After setRunFormat(bold: true), run has <w:b/> in rPr")
     }
 
-    func testSetRunFormatBoldFalseRemovesBoldElement() throws {
-        // First add bold, then remove it via a second op.
+    /// PsychQuant/ooxml-swift#161: `setRunFormat(bold: false)` used to DELETE
+    /// `<w:b>` outright. For a run inside a bold paragraph/character style
+    /// (a Heading, a "Strong" style), removing the element lets the run
+    /// re-inherit bold from that style — `setBold(false)` was a no-op exactly
+    /// where it mattered. Renamed from `testSetRunFormatBoldFalseRemovesBoldElement`
+    /// (that name described the bug, not the contract) — the element must now
+    /// SURVIVE as an explicit `<w:b w:val="0"/>`.
+    func testSetRunFormatBoldFalseWritesExplicitOffNotRemoval() throws {
+        // First add bold, then turn it off via a second op.
         let (base, runID) = makeBodyWithSingleRun(text: "hello")
 
         var log = OperationLog()
@@ -300,7 +317,17 @@ final class OperationReducerPhase2cTests: XCTestCase {
 
         let result = try OperationReducer.materialize(log: log, base: base)
         XCTAssertFalse(runIsBold(result, runID: runID),
-                       "After setRunFormat(bold: false), <w:b/> removed from rPr")
+                       "After setRunFormat(bold: false), bold reads as off")
+
+        guard let run = OperationReducer.findNode(elementID: runID, in: result),
+              let rPr = run.children.first(where: { $0.kind == .element && $0.localName == "rPr" }) else {
+            return XCTFail("run lost its <w:rPr>")
+        }
+        guard let b = rPr.children.first(where: { $0.kind == .element && $0.localName == "b" }) else {
+            return XCTFail("<w:b> was deleted — bold would silently re-inherit from an enclosing style")
+        }
+        let val = b.attributes.first(where: { $0.prefix == "w" && $0.localName == "val" })?.value
+        XCTAssertEqual(val, "0", "explicit off must be w:val=\"0\", not element absence")
     }
 
     func testSetRunFormatBoldNilLeavesUnchanged() throws {
