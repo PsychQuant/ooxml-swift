@@ -16,11 +16,12 @@ All notable changes to ooxml-swift will be documented in this file.
   未觸及的表格一起消失，不只是被編輯的那一格——這正是三張 issue 都描述的「零編輯 round-trip 沒事、
   一編輯就全域遭殃」的共同放大機制：
   - **垂直合併續格 `<w:vMerge/>`（無 `w:val`）讀不進來**（che-word-mcp#185）。OOXML 允許省略 `w:val`
-    表示 continuation（ECMA-376 §17.4.85），是 Word／python-docx 產生續格最常見的寫法，但
+    表示 continuation（ECMA-376 Part 1 對 `w:vMerge` 的定義），是 Word／python-docx 產生續格最常見的寫法，但
     `DocxReader.parseTableCellProperties` 原本要求 `w:val` 存在才設定 `verticalMerge`，讀不到就當
     `nil`，整份重寫時把續格從所有列一起剝掉。現在讀入時把無 `w:val` 的 `<w:vMerge/>` 視為
     `.continue`；寫出時 `.continue` 一律輸出裸 `<w:vMerge/>`（不帶 `w:val`），貼近真實文件的來源
     字節，`.restart` 維持既有的顯式 `w:val="restart"`。
+    **位元組變動（照實揭露）**：來源若以明確的 `w:val="continue"` 寫續格，任何其他 typed 編輯觸發整份重寫後，該格會被寫成裸 `<w:vMerge/>`。兩者在規格上語意相同，但檔案位元組會改變；Word 產生的文件本來就用裸形式，不受影響。
   - **`update_cell` 對空段落（無 run）的 cell 丟掉既有 `pPr`**（che-word-mcp#224a）。官方表單裡待填寫
     的欄位常是「無 run 但仍帶 `pPr`」的段落（樣式、精確行距、對齊、東亞字型預設），`updateCell` 原本
     直接用 `Paragraph(text:)` 建一個全新段落蓋掉整個 `paragraphs` 陣列，連 `pPr` 一起丟棄。現在比照
