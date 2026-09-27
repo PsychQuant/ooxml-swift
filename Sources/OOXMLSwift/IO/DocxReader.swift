@@ -1515,6 +1515,18 @@ public struct DocxReader {
             paragraph.w14TextId = textIdAttr
         }
 
+        // PsychQuant/ooxml-swift#185: `<w:p>`'s own rsid attributes
+        // (`w:rsidRPr`, `w:rsidR`, `w:rsidDel`, `w:rsidP`, `w:rsidRDefault`)
+        // — captured opaquely by local-name prefix, same approach #112 used
+        // for `<w:sectPr>`. Prefix-filtering also naturally excludes the
+        // `w14:paraId`/`w14:textId` attributes already handled above (their
+        // local names don't start with "rsid").
+        for attribute in element.attributes ?? [] {
+            guard let localName = attribute.localName, let value = attribute.stringValue,
+                  localName.hasPrefix("rsid") else { continue }
+            paragraph.rsidAttributes[localName] = value
+        }
+
         // 解析段落屬性
         //
         // Foreign-namespace asymmetry note (#14): this lookup is
@@ -2688,6 +2700,16 @@ public struct DocxReader {
     /// so `@testable import OOXMLSwift` consumers can drive parser directly.
     internal static func parseRun(from element: XMLElement, relationships: RelationshipsCollection) throws -> Run {
         var run = Run(text: "")
+
+        // PsychQuant/ooxml-swift#185: `<w:r>`'s own rsid attributes
+        // (`w:rsidRPr`, `w:rsidDel`, `w:rsidR`) — captured opaquely by
+        // local-name prefix, same approach #112 used for `<w:sectPr>` and
+        // #185 used for `<w:p>` above.
+        for attribute in element.attributes ?? [] {
+            guard let localName = attribute.localName, let value = attribute.stringValue,
+                  localName.hasPrefix("rsid") else { continue }
+            run.rsidAttributes[localName] = value
+        }
 
         // 解析 Run 屬性
         // Matched by namespace URI, not the literal `w:` QName: the raw-capture
