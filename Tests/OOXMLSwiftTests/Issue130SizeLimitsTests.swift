@@ -100,6 +100,34 @@ final class Issue130SizeLimitsTests: XCTestCase {
         ZipHelper.cleanup(out)
     }
 
+    /// R2 (PsychQuant/ooxml-swift#130 MEDIUM-1): a single large, but honest
+    /// and legitimate, embedded image — e.g. one unoptimized 300-DPI A4
+    /// bitmap scan (~26 MB) with headroom for something several times
+    /// larger — must open under the DEFAULTS. Round-1's 256 MB per-entry
+    /// default already covered this specific case; this pins the R2-raised
+    /// 512 MB value so a future edit that lowers it again is a deliberate
+    /// decision, not silent regression. Uses incompressible-enough content
+    /// (a short repeating, non-trivial pattern) so DEFLATE cannot collapse
+    /// it into a tiny stream and trip the ratio check instead of exercising
+    /// the entry-size default.
+    func testALargeSingleImageIsNotRefusedByTheDefaults() throws {
+        let d = ZipHelper.Limits()
+        XCTAssertGreaterThanOrEqual(d.maximumEntryBytes, Int64(300) << 20, "the R2-raised default must actually cover a single large scanned image")
+        let archive = try Archive(accessMode: .create)
+        // `.none` (STORED): compressed size == uncompressed size by
+        // construction, so the ratio check (1.0x) is a non-issue regardless
+        // of content — this is what actually keeps the test fast (no DEFLATE
+        // over 300 MB) rather than needing genuinely incompressible content.
+        let payload = Data(repeating: 0x41, count: 300 << 20)
+        try archive.addEntry(with: "word/media/image1.png", type: .file, uncompressedSize: Int64(payload.count),
+                             compressionMethod: .none,
+                             provider: { pos, size in payload.subdata(in: Int(pos)..<Int(pos) + size) })
+        let ns = "i130-\(UUID().uuidString)"
+        defer { cleanupNamespace(ns) }
+        let out = try ZipHelper.unzip(data: try XCTUnwrap(archive.data), namespace: ns)
+        ZipHelper.cleanup(out)
+    }
+
     func testAPartTooLargeToHoldIsRefusedBeforeItIsRead() throws {
         // The memory axis. The file is written directly, so the extraction
         // limits are not what refuses it — `readPart` is.
@@ -230,17 +258,71 @@ final class Issue130SizeLimitsTests: XCTestCase {
     }
 
     /// The DEFAULT values bind.
+    ///
+    /// R2 (PsychQuant/ooxml-swift#130 MEDIUM-1): `maximumEntryBytes` /
+    /// `maximumTotalBytes` were raised (512 MB / 4096 MB) to give real
+    /// headroom to a legitimate large document (a report with ~200 embedded
+    /// 300-DPI scans) — see the corpus-and-estimate reasoning on `Limits`'
+    /// doc comment. What actually still binds by default, regardless of
+    /// those two, is the RATIO axis: a run of one repeated byte compresses
+    /// far past 500x under DEFLATE no matter how large real documents get,
+    /// because real documents don't look like that. This is a stronger test
+    /// of "the defaults actually bind" than the previous version (which
+    /// tripped the total-bytes axis with an honestly-declared bomb) —
+    /// amplification, not raw size, is what #130's original 3000:1 PoC was.
     func testTheDefaultsThemselvesRefuseAnAmplifiedPackage() throws {
         let d = ZipHelper.defaultLimits
         XCTAssertLessThan(d.maximumEntryBytes, Int64(1) << 40, "a default must actually bind")
         XCTAssertLessThan(d.maximumCompressionRatio, 100_000)
-        // 600 MB of one byte: over the 512 MB default total, declared honestly.
-        let data = try bomb(entryBytes: 100 << 20, entries: 6)
+        // 8 MB of one repeated byte: honestly declared, but DEFLATE collapses
+        // it to a small fraction of that — well past the default 500x ratio.
+        let data = try bomb(entryBytes: 8 << 20)
         let ns = "i130-\(UUID().uuidString)"
         defer { cleanupNamespace(ns) }
         XCTAssertThrowsError(try ZipHelper.unzip(data: data, namespace: ns)) { error in
-            XCTAssertTrue(String(describing: error).contains("in total") || String(describing: error).contains("expands"),
-                          String(describing: error))
+            XCTAssertTrue(String(describing: error).contains("expands"), String(describing: error))
+        }
+    }
+
+    /// The size axis (not just the ratio axis) still binds by default too.
+    ///
+    /// Declares 10 entries at ~420 MB each (under the 512 MB per-entry
+    /// default, summing to ~4102 MB — over the 4096 MB total default) by
+    /// patching each entry's OWN central-directory record, the same
+    /// technique `packageDeclaring`/`testATotalThatOverflowsIsRefusedRatherThanTrapping`
+    /// use — real content per entry is a few bytes, so this is cheap to
+    /// build and run despite describing a multi-GB package.
+    func testTheDefaultTotalStillBindsForAnHonestlyDeclaredMultiGigabytePackage() throws {
+        let entryCount = 10
+        let perEntryDeclaredUncompressed: UInt64 = 420 * 1024 * 1024   // under the 512 MB per-entry default
+        let perEntryDeclaredCompressed: UInt64 = perEntryDeclaredUncompressed / 450   // keeps the ratio under the 500x default, so the RATIO check (checked after the total check, per entry) does not fire first
+        let archive = try Archive(accessMode: .create)
+        let tiny = Data([0x41])
+        for i in 0..<entryCount {
+            try archive.addEntry(with: "word/media/blob\(i).bin", type: .file, uncompressedSize: Int64(tiny.count),
+                                 compressionMethod: .deflate,
+                                 provider: { pos, size in tiny.subdata(in: Int(pos)..<Int(pos) + size) })
+        }
+        // Patch every entry's OWN central-directory record: compressed size at
+        // +20, uncompressed size at +24 (never reached — the pre-scan throws
+        // before any extraction attempts to read the real, tiny local data).
+        var raw = [UInt8](archive.data ?? Data())
+        var idx = 0, patched = 0
+        while let r = raw[idx...].firstRange(of: Array("PK\u{01}\u{02}".utf8)) {
+            let base = r.lowerBound
+            let nameLen = Int(raw[base+28]) | Int(raw[base+29]) << 8
+            let extraLen = Int(raw[base+30]) | Int(raw[base+31]) << 8
+            for k in 0..<4 { raw[base + 20 + k] = UInt8((perEntryDeclaredCompressed >> (8 * UInt64(k))) & 0xFF) }
+            for k in 0..<4 { raw[base + 24 + k] = UInt8((perEntryDeclaredUncompressed >> (8 * UInt64(k))) & 0xFF) }
+            idx = base + 46 + nameLen + extraLen
+            patched += 1
+        }
+        XCTAssertEqual(patched, entryCount, "every entry must carry the forged declaration")
+        let ns = "i130-\(UUID().uuidString)"
+        defer { cleanupNamespace(ns) }
+        XCTAssertThrowsError(try ZipHelper.unzip(data: Data(raw), namespace: ns)) { error in
+            let m = String(describing: error)
+            XCTAssertTrue(m.contains("in total"), "must be refused on the TOTAL, not the ratio (which stays under 500x by construction) or the per-entry size (420 MB < 512 MB): \(m)")
         }
     }
 
