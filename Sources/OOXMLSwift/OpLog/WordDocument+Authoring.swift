@@ -84,8 +84,30 @@ extension WordDocument {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
+        // Validated here regardless of how a path reached `carriedParts`
+        // (PsychQuant/ooxml-swift#93). `apply(operations:)` already refuses an
+        // unsafe `carryPart` path with `isSafeRelativeOOXMLPath` when a script
+        // op-log populates it — but `SyncOrchestrator` also writes
+        // `carriedParts` directly from parts read off a Word-written package
+        // (`RawPartChannel.readAllParts`), a route that never goes through
+        // that guard. This is the last place every path is still under this
+        // library's control before a directory is created or a byte is
+        // written, so it is checked here unconditionally rather than trusted
+        // from upstream: `isSafeRelativeOOXMLPath` rejects `..`, absolute
+        // paths, backslash and percent-encoded traversal, control characters,
+        // and oversized paths; and — since none of that touches the file
+        // system — a lexical containment check on the resulting URL is kept
+        // alongside it as the second line, the same defense-in-depth shape
+        // `ZipHelper`'s extraction uses.
         func write(_ content: Data, _ relativePath: String) throws {
+            guard isSafeRelativeOOXMLPath(relativePath) else {
+                throw WordError.invalidDocx("authoring package part path is not a safe relative OPC path: \(relativePath)")
+            }
             let fileURL = tempDir.appendingPathComponent(relativePath)
+            let root = tempDir.path + "/"
+            guard fileURL.path.hasPrefix(root) else {
+                throw WordError.invalidDocx("authoring package part path escapes the package root: \(relativePath)")
+            }
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try content.write(to: fileURL)
