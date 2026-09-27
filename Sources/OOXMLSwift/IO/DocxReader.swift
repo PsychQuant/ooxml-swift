@@ -3762,7 +3762,7 @@ public struct DocxReader {
         return row
     }
 
-    private static func parseTableRowProperties(from element: XMLElement) -> TableRowProperties {
+    static func parseTableRowProperties(from element: XMLElement) -> TableRowProperties {
         var props = TableRowProperties()
 
         // 行高
@@ -3795,6 +3795,24 @@ public struct DocxReader {
         // che-word-mcp#224(b) 附帶修：跟 isHeader/cantSplit 同形狀的缺口
         if element.elements(forName: "w:hidden").first != nil {
             props.hidden = true
+        }
+
+        // PsychQuant/ooxml-swift#184: every other `<w:trPr>` child
+        // (`cnfStyle`, `divId`, `gridBefore`/`gridAfter`, `wBefore`/`wAfter`,
+        // `tblCellSpacing`, `ins`/`del`/`trPrChange`) has no typed field —
+        // preserve verbatim so a typed edit elsewhere in the document doesn't
+        // silently drop it from this row. `.nodeCompactEmptyElement` keeps
+        // self-closing source elements self-closing on re-emit (matches the
+        // `ParagraphProperties.rawChildren` capture convention).
+        let typedNames: Set<String> = ["trHeight", "tblHeader", "cantSplit", "jc", "hidden"]
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement,
+                  let localName = childElement.localName,
+                  isWordprocessingMLElement(childElement),
+                  !typedNames.contains(localName) else { continue }
+            props.rawChildren.append(RawElement(
+                name: localName,
+                xml: childElement.xmlString(options: .nodeCompactEmptyElement)))
         }
 
         return props

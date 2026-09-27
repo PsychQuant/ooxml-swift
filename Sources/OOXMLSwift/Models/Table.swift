@@ -261,7 +261,53 @@ public struct TableRowProperties: Equatable {
     /// kind of gap; low-risk enough to fix in the same pass.
     public var hidden: Bool = false
 
+    /// PsychQuant/ooxml-swift#184: `<w:trPr>` children the typed model has no
+    /// field for — `w:cnfStyle` (conditional formatting), `w:divId`,
+    /// `w:gridBefore`/`w:gridAfter` + `w:wBefore`/`w:wAfter` (space before/
+    /// after the row's grid columns), `w:tblCellSpacing` (row-level cell
+    /// spacing override), and the row's own tracked-revision markers
+    /// (`w:ins`/`w:del`/`w:trPrChange`). Captured verbatim by
+    /// `DocxReader.parseTableRowProperties` (same "if not typed, preserve as
+    /// raw" principle as `ParagraphProperties.rawChildren` / `Run
+    /// .rawElements`) and re-emitted by `TableRow.toXML()`.
+    ///
+    /// Why this exists: any typed edit anywhere in the document marks
+    /// `word/document.xml` dirty, and `DocxWriter` then regenerates the
+    /// WHOLE part from the typed model — including rows the edit never
+    /// touched. Before this field, any `<w:trPr>` child outside the typed
+    /// vocabulary above silently vanished from EVERY row in the document,
+    /// not just the one being edited.
+    ///
+    /// Internal (not public) — same access level as `TableProperties
+    /// .rawChildren`, so callers cannot use this as an unchecked raw-XML
+    /// injection surface; the fields above (`justification`, `hidden`, …)
+    /// are the supported typed surface for `<w:trPr>`.
+    internal var rawChildren: [RawElement] = []
+
     public init() {}
+}
+
+extension TableRowProperties {
+    /// PsychQuant/ooxml-swift#184: ECMA-376 `CT_TrPr` child schema order —
+    /// `EG_TrPrBase` (an unbounded choice, so practically any order
+    /// validates, but real Word output — and every other canonical-order
+    /// table in this codebase, e.g. `ParagraphProperties
+    /// .canonicalPPrPosition` / `SectionProperties`'s `AG_SectPrAttributes`
+    /// ordering — follows this declaration order) followed by the fixed
+    /// trailing sequence `ins`, `del`, `trPrChange`.
+    internal static let canonicalTrPrPosition: [String: Int] = [
+        "cnfStyle": 0, "divId": 1, "gridBefore": 2, "gridAfter": 3,
+        "wBefore": 4, "wAfter": 5, "cantSplit": 6, "trHeight": 7,
+        "tblHeader": 8, "tblCellSpacing": 9, "jc": 10, "hidden": 11,
+        "ins": 12, "del": 13, "trPrChange": 14,
+    ]
+
+    /// Position for a raw child whose element name is outside the known
+    /// `CT_TrPr` vocabulary (should not occur per schema — every legal
+    /// `<w:trPr>` child is one of the 15 names above — but handled
+    /// defensively rather than crashing): placed after every known element,
+    /// in capture order.
+    internal static let unknownBasePosition = 1000
 }
 
 /// 行高規則
@@ -1365,46 +1411,7 @@ extension TableRow {
     /// (PsychQuant/ooxml-swift#195).
     func toXML(depth: Int) -> String {
         var xml = "<w:tr>"
-
-        // Row Properties
-        if properties.height != nil || properties.isHeader || properties.cantSplit
-            || properties.justification != nil || properties.hidden {
-            xml += "<w:trPr>"
-            if let height = properties.height {
-                // che-word-mcp#224(b): `heightRule == nil` now omits
-                // `w:hRule` entirely instead of manufacturing
-                // `w:hRule="auto"`. OOXML's own default for the attribute
-                // is already "auto" (ECMA-376 Part 1's `w:trHeight` definition), so this changes
-                // no document's rendered behavior — it only stops a save
-                // from adding an attribute that was never in the source to
-                // every row a mutation didn't otherwise touch. An
-                // explicitly-set `.auto` is unaffected; only *absence* of a
-                // rule is suppressed.
-                if let rule = properties.heightRule?.rawValue {
-                    xml += "<w:trHeight w:val=\"\(height)\" w:hRule=\"\(rule)\"/>"
-                } else {
-                    xml += "<w:trHeight w:val=\"\(height)\"/>"
-                }
-            }
-            if properties.isHeader {
-                xml += "<w:tblHeader/>"
-            }
-            if properties.cantSplit {
-                xml += "<w:cantSplit/>"
-            }
-            // che-word-mcp#224(b): row-level justification. Schema position
-            // (CT_TrPrBase) is after tblCellSpacing/tblHeader; tblCellSpacing
-            // isn't modeled, so this is emitted right after tblHeader/
-            // cantSplit, matching relative order for every element this
-            // model currently knows about.
-            if let justification = properties.justification {
-                xml += "<w:jc w:val=\"\(justification.rawValue)\"/>"
-            }
-            if properties.hidden {
-                xml += "<w:hidden/>"
-            }
-            xml += "</w:trPr>"
-        }
+        xml += TableRow.trPrXML(for: properties)
 
         // Cells
         for cell in cells {
@@ -1412,6 +1419,75 @@ extension TableRow {
         }
 
         xml += "</w:tr>"
+        return xml
+    }
+
+    /// Builds the `<w:trPr>…</w:trPr>` block (or `""` when the row has no
+    /// row properties at all — matches pre-#184 behavior exactly for the
+    /// common case).
+    ///
+    /// PsychQuant/ooxml-swift#184: typed fields and `rawChildren` (unmodeled
+    /// `<w:trPr>` children — `cnfStyle`, `divId`, `gridBefore`/`gridAfter`,
+    /// `wBefore`/`wAfter`, `tblCellSpacing`, `ins`/`del`/`trPrChange`) are
+    /// collected into one `(position, sequence, xml)` list and sorted by
+    /// `CT_TrPr` schema position, so a raw child that schema-precedes a
+    /// typed field (e.g. a source `<w:cnfStyle>` before `<w:jc>`) is
+    /// re-emitted before it rather than always trailing.
+    ///
+    /// `@inline(never)`: PsychQuant/ooxml-swift#195 R2 — `TableRow.toXML(depth:)`
+    /// is on the recursive nested-table serialization path (`Table` →
+    /// `TableRow` → `TableCell` → nested `Table`); a debug (`-Onone`) build
+    /// never inlines regardless, but keeping this a real, separate stack
+    /// frame (rather than local state inside `toXML(depth:)` itself) avoids
+    /// growing that already-large per-level frame. See `Table
+    /// .maxSerializationDepth`'s doc comment for the measurements this
+    /// guards against.
+    @inline(never)
+    private static func trPrXML(for properties: TableRowProperties) -> String {
+        guard properties.height != nil || properties.isHeader || properties.cantSplit
+            || properties.justification != nil || properties.hidden
+            || !properties.rawChildren.isEmpty else { return "" }
+
+        var slots: [(position: Int, sequence: Int, xml: String)] = []
+        func add(_ name: String, _ xml: String) {
+            slots.append((TableRowProperties.canonicalTrPrPosition[name]!, slots.count, xml))
+        }
+        if let height = properties.height {
+            // che-word-mcp#224(b): `heightRule == nil` now omits `w:hRule`
+            // entirely instead of manufacturing `w:hRule="auto"`. OOXML's own
+            // default for the attribute is already "auto" (ECMA-376 Part 1's
+            // `w:trHeight` definition), so this changes no document's
+            // rendered behavior — it only stops a save from adding an
+            // attribute that was never in the source to every row a
+            // mutation didn't otherwise touch. An explicitly-set `.auto` is
+            // unaffected; only *absence* of a rule is suppressed.
+            if let rule = properties.heightRule?.rawValue {
+                add("trHeight", "<w:trHeight w:val=\"\(height)\" w:hRule=\"\(rule)\"/>")
+            } else {
+                add("trHeight", "<w:trHeight w:val=\"\(height)\"/>")
+            }
+        }
+        if properties.isHeader {
+            add("tblHeader", "<w:tblHeader/>")
+        }
+        if properties.cantSplit {
+            add("cantSplit", "<w:cantSplit/>")
+        }
+        if let justification = properties.justification {
+            add("jc", "<w:jc w:val=\"\(justification.rawValue)\"/>")
+        }
+        if properties.hidden {
+            add("hidden", "<w:hidden/>")
+        }
+        for (index, raw) in properties.rawChildren.enumerated() {
+            let position = TableRowProperties.canonicalTrPrPosition[raw.name]
+                ?? (TableRowProperties.unknownBasePosition + index)
+            slots.append((position, slots.count, raw.xml))
+        }
+        slots.sort { $0.position != $1.position ? $0.position < $1.position : $0.sequence < $1.sequence }
+        var xml = "<w:trPr>"
+        for slot in slots { xml += slot.xml }
+        xml += "</w:trPr>"
         return xml
     }
 }
