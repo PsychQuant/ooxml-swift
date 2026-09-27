@@ -1310,11 +1310,42 @@ extension TableCell {
         // Cell Properties
         xml += properties.toXML()
 
+        // PsychQuant/ooxml-swift#155: this model emits ALL `paragraphs`
+        // before ALL `nestedTables` regardless of their relative order in
+        // the source — it does not track "paragraph N came after table M".
+        // The trailing-paragraph append below used to be unconditional
+        // ("if there's a nested table, append one"), with no check for
+        // whether `paragraphs` already ended in one. Consequence: a source
+        // cell parsed as `[P0, Pempty]` + `[T]` (the OOXML-required trailing
+        // paragraph already present, now merged into the ordinary
+        // `paragraphs` list by the reader) re-emitted as `P0, Pempty, T,
+        // <freshly appended Pempty>` — the ORIGINAL trailing paragraph is
+        // now misplaced BEFORE the table, and a brand-new one is appended
+        // after it. Re-parsing that output repeats the same misclassification
+        // and appends yet another — +1 paragraph per nested-table cell, per
+        // save, unbounded.
+        //
+        // Fix: if the cell already ends with a run-less paragraph, treat it
+        // as the existing trailing placeholder and re-use it (move it after
+        // the nested tables) instead of leaving it in place AND synthesizing
+        // a new one. This makes repeated saves idempotent (paragraph count
+        // stops moving) without requiring the harder architectural fix
+        // (preserving exact paragraph/table interleaving order) that #133 /
+        // #129 still owns. Trade-off: a genuinely run-less-but-styled
+        // paragraph that happens to sit last (before the table) gets moved
+        // to trail the table instead — accepted per the issue's own framing
+        // of this as a bounded, local fix.
+        var bodyParagraphs = paragraphs
+        var trailingParagraph: Paragraph?
+        if !nestedTables.isEmpty, let last = bodyParagraphs.last, last.runs.isEmpty {
+            trailingParagraph = bodyParagraphs.removeLast()
+        }
+
         // Paragraphs (每個儲存格至少需要一個段落)
-        if paragraphs.isEmpty {
+        if bodyParagraphs.isEmpty, trailingParagraph == nil {
             xml += Paragraph().toXML()
         } else {
-            for para in paragraphs {
+            for para in bodyParagraphs {
                 xml += para.toXML()
             }
         }
@@ -1325,10 +1356,10 @@ extension TableCell {
         }
 
         // OOXML requires the cell to end with a paragraph after a nested table
-        // (Word silently appends one if missing). Append a trailing empty
-        // paragraph so re-saving produces compliant output.
+        // (Word silently appends one if missing). Re-emit the reused trailing
+        // placeholder if we found one above; otherwise synthesize a fresh one.
         if !nestedTables.isEmpty {
-            xml += "<w:p/>"
+            xml += (trailingParagraph ?? Paragraph()).toXML()
         }
 
         xml += "</w:tc>"
