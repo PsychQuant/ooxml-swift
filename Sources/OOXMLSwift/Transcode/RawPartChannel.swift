@@ -15,12 +15,57 @@ public enum RawPartChannel {
     /// parameters, and timestamps (Stage C) never enter it, per the acceptance
     /// contract (`format-alignment-pipeline`, Decision 1). Feed two of these to
     /// `PartFidelity` to evaluate Stage A/B.
-    public static func readAllParts(from docxURL: URL) throws -> [String: Data] {
+    ///
+    /// Every caller of this function takes an arbitrary `.docx` path — a
+    /// `--verify-against` target, an `execute_script` / `export_script`
+    /// `source_path`, or a package Word itself just wrote — so, unlike
+    /// `ZipHelper.unzip`, nothing here refused an entry count or a byte total
+    /// before this was written (PsychQuant/ooxml-swift#107). `limits` bounds
+    /// three things, each refused on its own evidence and before the whole
+    /// package is held in memory: the number of entries, one entry's DECLARED
+    /// size, and the ACTUAL bytes a decompressing entry produces (checked
+    /// per chunk, so an entry whose declaration understates what it
+    /// decompresses to is stopped within one read-chunk of the limit, not
+    /// after the fact). The running total across all entries is bounded too.
+    public static func readAllParts(from docxURL: URL, limits: ZipHelper.Limits = ZipHelper.defaultLimits) throws -> [String: Data] {
         let archive = try Archive(url: docxURL, accessMode: .read)
         var parts: [String: Data] = [:]
+        var entryCount = 0
+        var declaredTotal: Int64 = 0
+        var actualTotal: Int64 = 0
         for entry in archive where entry.type == .file {
+            entryCount += 1
+            if entryCount > limits.maximumEntryCount {
+                throw WordError.invalidDocx("the package declares more than \(limits.maximumEntryCount) entries; refusing to read it.")
+            }
+            let declared = Int64(clamping: entry.uncompressedSize)
+            if declared > limits.maximumEntryBytes {
+                throw WordError.invalidDocx("the package declares an entry of \(ZipHelper.describeBytes(declared)) (\(ZipHelper.displayName(entry.path))), over the \(ZipHelper.describeBytes(limits.maximumEntryBytes)) limit; refusing to read it.")
+            }
+            let (declaredSum, declaredOverflowed) = declaredTotal.addingReportingOverflow(declared)
+            declaredTotal = declaredOverflowed ? Int64.max : declaredSum
+            if declaredOverflowed || declaredTotal > limits.maximumTotalBytes {
+                throw WordError.invalidDocx("the package declares more than \(ZipHelper.describeBytes(limits.maximumTotalBytes)) of content in total; refusing to read it.")
+            }
             var buffer = Data()
-            _ = try archive.extract(entry) { buffer.append($0) }
+            var entryActual: Int64 = 0
+            // Checked per chunk, DURING decompression — not after the entry is
+            // fully buffered — so an entry whose declared size understates
+            // what it actually decompresses to is stopped within one chunk of
+            // the limit rather than after the whole thing is already in
+            // memory.
+            _ = try archive.extract(entry) { chunk in
+                buffer.append(chunk)
+                entryActual += Int64(chunk.count)
+                if entryActual > limits.maximumEntryBytes {
+                    throw WordError.invalidDocx("the package decompresses an entry to more than \(ZipHelper.describeBytes(limits.maximumEntryBytes)) (\(ZipHelper.displayName(entry.path))), whatever it declared; refusing to read it.")
+                }
+            }
+            let (actualSum, actualOverflowed) = actualTotal.addingReportingOverflow(entryActual)
+            actualTotal = actualOverflowed ? Int64.max : actualSum
+            if actualOverflowed || actualTotal > limits.maximumTotalBytes {
+                throw WordError.invalidDocx("the package decompresses to more than \(ZipHelper.describeBytes(limits.maximumTotalBytes)) of content in total; refusing to read it.")
+            }
             parts[entry.path] = buffer
         }
         return parts
