@@ -3886,7 +3886,7 @@ public struct DocxReader {
         return cell
     }
 
-    private static func parseTableCellProperties(from element: XMLElement) -> TableCellProperties {
+    static func parseTableCellProperties(from element: XMLElement) -> TableCellProperties {
         var props = TableCellProperties()
 
         // 寬度
@@ -3931,6 +3931,14 @@ public struct DocxReader {
         }
 
         // 底色
+        //
+        // PsychQuant/ooxml-swift#188: `CellShading` gained six `w:theme*`
+        // attributes in #179, but that fix only wired them into the
+        // paragraph-shading read path (`parseParagraphShading`) — this
+        // table-cell path kept reading only `fill`/`color`/`val`, so a
+        // theme-colored cell background lost its theme attributes on the
+        // next typed edit anywhere in the document (whole part regenerated
+        // from the typed model). Mirrors `parseParagraphShading` exactly.
         if let shd = element.elements(forName: "w:shd").first,
            let fill = shd.attribute(forName: "w:fill")?.stringValue {
             var shading = CellShading(fill: fill)
@@ -3940,6 +3948,12 @@ public struct DocxReader {
             if let val = shd.attribute(forName: "w:val")?.stringValue {
                 shading.pattern = ShadingPattern(rawValue: val)
             }
+            shading.themeColor = shd.attribute(forName: "w:themeColor")?.stringValue
+            shading.themeTint = shd.attribute(forName: "w:themeTint")?.stringValue
+            shading.themeShade = shd.attribute(forName: "w:themeShade")?.stringValue
+            shading.themeFill = shd.attribute(forName: "w:themeFill")?.stringValue
+            shading.themeFillTint = shd.attribute(forName: "w:themeFillTint")?.stringValue
+            shading.themeFillShade = shd.attribute(forName: "w:themeFillShade")?.stringValue
             props.shading = shading
         }
 

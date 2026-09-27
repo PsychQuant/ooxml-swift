@@ -552,9 +552,9 @@ public struct CellShading: Equatable {
     /// PsychQuant/ooxml-swift#179: `CT_Shd` 的 theme 系列屬性。`themeColor`／
     /// `themeTint`／`themeShade` 對應前景色（`color`）的主題色版本；
     /// `themeFill`／`themeFillTint`／`themeFillShade` 對應背景色（`fill`）。
-    /// 目前只有段落底色（`parseParagraphShading`）讀寫這五個欄位；表格儲存格
-    /// 底色的讀取路徑尚未涵蓋（見 issue #179 討論），欄位對表格用法一律 nil，
-    /// 不影響既有輸出。
+    /// #179 落地時只有段落底色（`parseParagraphShading`）讀寫這六個欄位；
+    /// #188 補上表格儲存格底色的讀取路徑（`parseTableCellProperties`），兩條
+    /// 路徑現在都會填入這些欄位。
     public var themeColor: String?
     public var themeTint: String?
     public var themeShade: String?
@@ -1672,6 +1672,16 @@ extension TableCellProperties {
             var attrs = "w:fill=\"\(escapeXMLAttribute(shading.fill))\""
             if let color = shading.color { attrs += " w:color=\"\(escapeXMLAttribute(color))\"" }
             if let pattern = shading.pattern { attrs += " w:val=\"\(pattern.rawValue)\"" }
+            // PsychQuant/ooxml-swift#188: the six `w:theme*` attributes
+            // `CellShading` gained in #179 — read side fixed alongside this
+            // (`DocxReader.parseTableCellProperties`); appended here so a
+            // theme-colored cell background round-trips.
+            if let themeColor = shading.themeColor { attrs += " w:themeColor=\"\(escapeXMLAttribute(themeColor))\"" }
+            if let themeTint = shading.themeTint { attrs += " w:themeTint=\"\(escapeXMLAttribute(themeTint))\"" }
+            if let themeShade = shading.themeShade { attrs += " w:themeShade=\"\(escapeXMLAttribute(themeShade))\"" }
+            if let themeFill = shading.themeFill { attrs += " w:themeFill=\"\(escapeXMLAttribute(themeFill))\"" }
+            if let themeFillTint = shading.themeFillTint { attrs += " w:themeFillTint=\"\(escapeXMLAttribute(themeFillTint))\"" }
+            if let themeFillShade = shading.themeFillShade { attrs += " w:themeFillShade=\"\(escapeXMLAttribute(themeFillShade))\"" }
             parts.append("<w:shd \(attrs)/>")
         }
 
