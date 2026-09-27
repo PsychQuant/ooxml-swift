@@ -54,9 +54,20 @@ All notable changes to ooxml-swift will be documented in this file.
   都只處理 `& < > " '` 五個字元，沒有處理這三個空白字元。第一次存檔看起來沒事（原始的字元
   參照被解碼成真正的換行，重新輸出時又寫成字面字元，位元組雖變了但內容還對），但接下來
   只要再解析一次，該屬性值就被正規化掉、內容永久性改變。現在這三處都會把這三個字元轉成
-  字元參照。已知限制：`ContainerRootTag.escapeAttr`（僅用於 xmlns 宣告，命名空間 URI
-  實務上不含這類字元）與其餘僅供元素文字內容跳脫的 `escapeXML` 私有函式（文字節點的字面
-  換行本身合法，不受此規格條款影響）不在本次修法範圍。
+  字元參照。**R2 更新（獨立審查 finding F2）**：同一缺陷類別在既有程式碼的其他屬性值
+  寫出路徑一樣存在——書籤名稱（`Bookmark.escapeXML`）、註解作者／縮寫
+  （`Comment.escapeXML`）、追蹤修訂作者（`Revision.escapeXML`，`<w:ins>`／`<w:del>`／
+  `<w:moveFrom>`／`<w:moveTo>`／`<w:rPrChange>`／`<w:pPrChange>`／`<w:cellDel>`／
+  `<w:cellMerge>` 共用）、內容控制項的 `alias`／`tag`／`displayText`／`w15:val`／
+  `prefixMappings`／`xpath`／`storeItemID`（`Field.swift` 11 個各自獨立的 `escapeXML`／
+  `escapeXMLForField`）、超連結的 `tooltip`／`anchor`／自訂屬性（`Hyperlink.escapeXML`，
+  審查清單未列出、由本次 grep 盤點另外找到）、容器根標籤 xmlns（`ContainerRootTag.escapeAttr`，
+  即上一段「已知限制」點名的那個）、`DocxWriter` 的關聯 `Target` 屬性、`[Content_Types].xml`／
+  `.rels` 覆蓋層的屬性（`ContentTypesOverlay`／`RelationshipsOverlay` 的 `escape`）——全部
+  已改為委派給同一個已修好的 `escapeXMLAttribute`，不再各自維護一份只處理 `& < > " '`
+  五個字元的複本。已知限制：僅供元素文字內容跳脫、從未用於屬性值的 `escapeXML`
+  （`Footer`／`Footnote`／`Run`／`MathComponent` 等——文字節點的字面換行本身合法，不受
+  此規格條款影響）不在此次調整範圍，未強制統一以避免無關改動。
 
 ### Added
 
@@ -81,7 +92,9 @@ All notable changes to ooxml-swift will be documented in this file.
   （涵蓋整個 `AG_SectPrAttributes` 群組，不只issue原本點名的三個），`toXML()`／
   `toSectionBreakXML()` 依固定順序寫回開頭標籤。已知限制：段落／文字執行／表格列層級
   也各自有自己的 rsid 屬性家族（`w:rsidP`、`w:rsidR`、`w:rsidRPr`、`w:rsidTr` 等），一樣會
-  在 typed 重新序列化時消失，本次修法範圍僅止於 `sectPr`；追蹤留待後續 issue。
+  在 typed 重新序列化時消失，本次修法範圍僅止於 `sectPr`；已在真實文件上量到編輯前後
+  幾乎全數消失（`w:rsidR` 168→1、`w:rsidRPr` 257→1，見 PsychQuant/ooxml-swift#185），
+  追蹤留待該張 issue 處理。
 
 - **Tree-backed Edit API 的 `setBold(false)` 直接刪掉 `<w:b>`，讓套用了粗體樣式的段落／文字
   執行沒辦法真正取消粗體**（PsychQuant/ooxml-swift#161）。`OperationReducer.setBooleanRunProperty`
