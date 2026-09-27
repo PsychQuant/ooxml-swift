@@ -91,13 +91,10 @@ extension Comment {
         return "<w:r><w:commentReference w:id=\"\(id)\"/></w:r>"
     }
 
+    /// PsychQuant/ooxml-swift#165 追蹤（R2 review finding F2）：委派給已修好
+    /// \n/\r/\t 跳脫的共用函式（`w:author`／`w:initials` 是屬性值）。
     private func escapeXML(_ string: String) -> String {
-        return string
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&apos;")
+        return escapeXMLAttribute(string)
     }
 }
 
