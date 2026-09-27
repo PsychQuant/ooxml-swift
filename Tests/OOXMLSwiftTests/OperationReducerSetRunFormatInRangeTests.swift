@@ -128,6 +128,32 @@ final class OperationReducerSetRunFormatInRangeTests: XCTestCase {
         XCTAssertFalse(isBold(runs[2]), "suffix unchanged")
     }
 
+    /// A fragment that starts or ends with whitespace needs
+    /// `xml:space="preserve"` on its `<w:t>`; without it Word drops the edge
+    /// whitespace and the words on either side of the split run together
+    /// ("Hello world today" rendered as "Helloworldtoday"). The source run
+    /// did not need the attribute, so it cannot simply be inherited.
+    func testSplitFragmentsWithEdgeWhitespacePreserveIt() throws {
+        let (base, paragraphID) = makeParagraph(runs: ["Hello world today"])
+
+        var log = OperationLog()
+        log.append(
+            .setRunFormatInRange(
+                target: paragraphID, substring: "world", instance: 1,
+                format: RunFormatPayload(bold: true)),
+            source: .swift)
+
+        let result = try OperationReducer.materialize(log: log, base: base)
+        let runs = runsOf(result, paragraphID: paragraphID)
+        func space(_ run: XmlNode) -> String? {
+            run.children.first { $0.kind == .element && $0.localName == "t" }?
+                .attributeValue(prefix: "xml", localName: "space")
+        }
+        XCTAssertEqual(runs.map(text(of:)), ["Hello ", "world", " today"])
+        XCTAssertEqual(space(runs[0]), "preserve", "\"Hello \" ends with a space")
+        XCTAssertEqual(space(runs[2]), "preserve", "\" today\" starts with a space")
+    }
+
     // MARK: - 2. Range equals a whole run — no split needed
 
     func testRangeEqualsWholeRun_noSplitNeeded() throws {

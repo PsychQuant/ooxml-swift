@@ -8,6 +8,12 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.16.1] - 2026-09-28
+
+### Fixed
+
+- **`setRunFormatInRange` 切出的片段前後有空白時，Word 顯示時字會黏在一起**（PsychQuant/macdoc#232）。切分 run 時，新片段的 `<w:t>` 沒有補上 `xml:space="preserve"`；原本的 `<w:t>` 空白都在中間所以不需要這個屬性，但切開之後「The 」的結尾、「 word」的開頭都有空白，Word 會忽略沒有這個屬性的前後空白，畫面變成「TheTARGETword」。現在前後有空白的片段一律帶上 `xml:space="preserve"`。以 3.16.0 發布的 macdoc binary 實跑時發現。
+
 ## [3.16.0] - 2026-09-28
 
 ### Added
