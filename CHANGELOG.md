@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.16.2] - 2026-09-28
+
 ### Fixed
 
 - **巢狀表格文件在 debug build 下存檔會讓行程因 stack 溢位當掉**（#195）。實測情境：對一份兩層巢狀表格文件的最外層儲存格編輯後存檔，debug build 3/3 次 `EXC_BAD_ACCESS`；backtrace 總共只有 29 個 frame、`Table.toXML` 只遞迴 3 層。根因不是遞迴太深，而是這條路徑上的 frame 太大：`Paragraph.toXMLSortedByPosition()`（每個從文件讀入的段落都走這條路）把十多個迴圈的區域變數擠在同一個函式，`-Onone` 下每個變數各佔一個 stack slot；`TableCell.toXML()` 又把整個 `Paragraph` 結構跨越遞迴呼叫留在 stack 上。而呼叫端（例如 che-word-mcp）的存檔跑在 Swift concurrency 的工作執行緒上，stack 只有約 512 KB，不是主執行緒的 8 MB。現在把這些函式拆成 `@inline(never)` 的小函式，跨遞迴邊界只傳已組好的字串：同一份三層文件在 debug build 下所需的最小 stack 從約 536 KB 降到 200 KB 以下，五層（讀取端上限）約 210 KB。序列化輸出位元組不變。release build 在五層以內修正前後都能正常存檔。
