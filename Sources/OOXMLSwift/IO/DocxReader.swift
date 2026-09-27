@@ -2177,12 +2177,14 @@ public struct DocxReader {
         return props
     }
 
-    /// v3.13.0+ (#176): `<w:pBdr>` 的 typed 投影。來源有這個元素就回傳非 nil 的
-    /// `ParagraphBorder`（即使沒有任何一邊表達得了），讓 `border = nil` 能表達
-    /// 「刪除」。一個邊只有在 `w:val` 對得上 `ParagraphBorderType` 時才投影；
-    /// 缺席的屬性取 schema 預設值（`color` = "auto"、`space` = 0），`sz` 在
-    /// schema 沒有預設值，缺席時投影成 0。`bar` 邊與 theme*／shadow／frame
-    /// 屬性沒有 typed 欄位——它們靠 `sourceBorder` 原文保留。
+    /// v3.13.0+ (#176), extended by #179: `<w:pBdr>` 的 typed 投影。來源有這個
+    /// 元素就回傳非 nil 的 `ParagraphBorder`（即使沒有任何一邊表達得了），讓
+    /// `border = nil` 能表達「刪除」。一個邊只有在 `w:val` 對得上
+    /// `ParagraphBorderType` 時才投影；缺席的屬性取 schema 預設值（`color` =
+    /// "auto"、`space` = 0），`sz` 在 schema 沒有預設值，缺席時投影成 0。
+    /// #179 起 `bar` 邊與 `themeColor`／`themeTint`／`themeShade`／`shadow`／
+    /// `frame` 也讀進 typed 欄位；`ParagraphBorderType` 外的 `w:val`（如
+    /// vendor 擴充值）仍靠 `sourceBorder` 原文保留。
     private static func parseParagraphBorder(from element: XMLElement) -> ParagraphBorder {
         func side(_ name: String) -> ParagraphBorderStyle? {
             guard let side = element.elements(forName: "w:\(name)").first,
@@ -2192,23 +2194,35 @@ public struct DocxReader {
                 type: type,
                 color: side.attribute(forName: "w:color")?.stringValue ?? "auto",
                 size: side.attribute(forName: "w:sz")?.stringValue.flatMap { Int($0) } ?? 0,
-                space: side.attribute(forName: "w:space")?.stringValue.flatMap { Int($0) } ?? 0)
+                space: side.attribute(forName: "w:space")?.stringValue.flatMap { Int($0) } ?? 0,
+                themeColor: side.attribute(forName: "w:themeColor")?.stringValue,
+                themeTint: side.attribute(forName: "w:themeTint")?.stringValue,
+                themeShade: side.attribute(forName: "w:themeShade")?.stringValue,
+                shadow: side.attribute(forName: "w:shadow")?.stringValue.map { !["0", "false", "off"].contains($0.lowercased()) },
+                frame: side.attribute(forName: "w:frame")?.stringValue.map { !["0", "false", "off"].contains($0.lowercased()) })
         }
         return ParagraphBorder(top: side("top"), bottom: side("bottom"),
                                left: side("left"), right: side("right"),
-                               between: side("between"))
+                               between: side("between"), bar: side("bar"))
     }
 
-    /// v3.13.0+ (#176): `<w:shd>` 的 typed 投影。`fill` 缺席時投影成 "auto"
-    /// （`CellShading.fill` 非 optional，而「來源有 shd」必須對應非 nil 的值）；
-    /// `w:val` 對不上 `ShadingPattern` 時 `pattern` 為 nil。theme* 屬性與
-    /// enum 外的 val 靠 `sourceShading` 原文保留。
+    /// v3.13.0+ (#176), extended by #179: `<w:shd>` 的 typed 投影。`fill` 缺席時
+    /// 投影成 "auto"（`CellShading.fill` 非 optional，而「來源有 shd」必須對應
+    /// 非 nil 的值）；`w:val` 對不上 `ShadingPattern` 時 `pattern` 為 nil。
+    /// #179 起六個 theme* 屬性也讀進 typed 欄位；enum 外的 `w:val` 仍靠
+    /// `sourceShading` 原文保留。
     private static func parseParagraphShading(from element: XMLElement) -> ParagraphShading {
         CellShading(
             fill: element.attribute(forName: "w:fill")?.stringValue ?? "auto",
             color: element.attribute(forName: "w:color")?.stringValue,
             pattern: element.attribute(forName: "w:val")?.stringValue
-                .flatMap(ShadingPattern.init(rawValue:)))
+                .flatMap(ShadingPattern.init(rawValue:)),
+            themeColor: element.attribute(forName: "w:themeColor")?.stringValue,
+            themeTint: element.attribute(forName: "w:themeTint")?.stringValue,
+            themeShade: element.attribute(forName: "w:themeShade")?.stringValue,
+            themeFill: element.attribute(forName: "w:themeFill")?.stringValue,
+            themeFillTint: element.attribute(forName: "w:themeFillTint")?.stringValue,
+            themeFillShade: element.attribute(forName: "w:themeFillShade")?.stringValue)
     }
 
     // MARK: - Container Parsing Helpers (Part C of ooxml-swift#1)
