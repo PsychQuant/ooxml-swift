@@ -47,6 +47,24 @@ extension XmlTreeReaderError: LocalizedError {
     /// `errorDescription` for one, matching the guarantee every other
     /// error type in this package (`WordError`, `XMLHardeningError`, …)
     /// already makes.
+    ///
+    /// **R2 correction (PsychQuant/ooxml-swift#150)**: the four cases below
+    /// that carry a `Character` or `String` from the SOURCE bytes
+    /// (`unexpectedCharacter`, `mismatchedClosingTag`, `invalidEntityReference`,
+    /// `invalidNumericReference`) route that value through `ZipHelper.displayName`
+    /// before it enters the message. The first round of this fix added
+    /// `errorDescription` without that escaping — a review reproduced a
+    /// 2,000,045-character message (an unterminated `&` followed by two
+    /// million `A`s makes `decodeXmlEntities` capture "from `&` to the end of
+    /// the text node" into `invalidEntityReference`'s `reference` with no cap)
+    /// and a message containing a literal, unescaped U+000A (`<\n>` throws
+    /// `unexpectedCharacter('\n', ...)`, and interpolating a `Character`
+    /// drops it in verbatim) — the exact "a parser's own error text reaches a
+    /// message unbounded, and a newline forges a second line" shape #150
+    /// exists to close, reopened one type over. This was a regression, not a
+    /// neutral gap: before `errorDescription` existed, `.localizedDescription`
+    /// on this type returned Swift's generic "the operation couldn't be
+    /// completed" text and leaked nothing.
     public var errorDescription: String? {
         switch self {
         case .emptyInput:
@@ -54,17 +72,17 @@ extension XmlTreeReaderError: LocalizedError {
         case .unexpectedEOF(let at):
             return "the XML part ended before a tag or attribute was closed (byte offset \(at))"
         case .unexpectedCharacter(let char, let at):
-            return "unexpected character '\(char)' where a tag or attribute was expected (byte offset \(at))"
+            return "unexpected character '\(ZipHelper.displayName(String(char)))' where a tag or attribute was expected (byte offset \(at))"
         case .malformedAttribute(let at):
             return "malformed attribute — expected `name=\"value\"` with matching quotes (byte offset \(at))"
         case .malformedTag(let at):
             return "malformed tag (byte offset \(at))"
         case .mismatchedClosingTag(let expected, let found, let at):
-            return "closing tag </\(found)> does not match the open tag <\(expected)> (byte offset \(at))"
+            return "closing tag </\(ZipHelper.displayName(found))> does not match the open tag <\(ZipHelper.displayName(expected))> (byte offset \(at))"
         case .invalidEntityReference(let reference, let at):
-            return "invalid entity reference &\(reference); (byte offset \(at))"
+            return "invalid entity reference &\(ZipHelper.displayName(reference)); (byte offset \(at))"
         case .invalidNumericReference(let reference, let at):
-            return "numeric character reference &#\(reference); does not resolve to a valid XML character (byte offset \(at))"
+            return "numeric character reference &#\(ZipHelper.displayName(reference)); does not resolve to a valid XML character (byte offset \(at))"
         case .unexpectedTrailingContent(let at):
             return "unexpected content after the document's root element (byte offset \(at))"
         case .nestingTooDeep(let limit, let at):
