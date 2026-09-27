@@ -805,28 +805,69 @@ extension Table {
     /// while a huge string keeps growing one nested `<w:tbl>` at a time
     /// before the crash finally surfaces.
     ///
-    /// 20 gives headroom over the reader's own practical ceiling (5) while
-    /// staying well clear of the stack cost measured empirically for THIS
-    /// call chain: `TableProperties.toXML`'s slot-computation machinery
-    /// (`extendedTablePropertiesXML()`, invoked once per table level) makes
-    /// each level unusually expensive — a debug build of
-    /// `testAPIConstructedExcessiveDepthDoesNotCrashAndTruncates` measured
-    /// an EXC_BAD_ACCESS crash around depth ~62-64 on a full 8MB thread
-    /// stack (`ulimit -s` default) BEFORE this guard existed, i.e. roughly
-    /// 40x more stack per recursion level than a typical small Swift
-    /// function. A production process with a smaller stack (containerized
-    /// services commonly run with 512KB-1MB thread stacks) would hit that
-    /// ceiling far sooner. 20 keeps a >3x safety margin under the measured
-    /// crash point even on the generous 8MB stack this was measured on.
-    /// Every legitimately nested document this library can currently
-    /// produce or read serializes exactly as before (see
+    /// R2 correction (PsychQuant/ooxml-swift#195): the R1 value (64, then
+    /// 20) was calibrated against `table.toXML()` called directly on an
+    /// 8MB thread — che-word-mcp's actual document saves run on Swift
+    /// concurrency's cooperative-pool worker threads, whose stack is far
+    /// smaller (measured/assumed ≈512KB, not 8MB), AND the real crash goes
+    /// through the FULL `DocxWriter.write(_:to:)` path (which adds its own
+    /// baseline frames — zip, styles/settings/relationships writers — on
+    /// top of the table recursion). Measured on THIS repro
+    /// (`update_cell` on a table with source-positioned paragraphs, full
+    /// `DocxWriter.write` on a `Thread` with an explicit `stackSize`,
+    /// `-Onone` debug build):
+    ///
+    /// | depth | crash threshold (highest KB that still crashes) | first safe KB |
+    /// |------:|---------------------------------------------------:|--------------:|
+    /// | 1     | 160                                                 | 192           |
+    /// | 5     | 208                                                 | 212           |
+    /// | 10    | 288                                                 | 292           |
+    /// | 20    | 416                                                 | 448           |
+    ///
+    /// (Base overhead — everything in `DocxWriter.write` that isn't table
+    /// recursion — accounts for the ~160-190KB floor even at depth 1; the
+    /// per-level marginal cost after the R2 frame-splitting fixes below is
+    /// roughly 8-13KB, down from ~118KB/level measured before those fixes.)
+    ///
+    /// 10 keeps the safe-KB point (~292KB) at <60% of the assumed 512KB
+    /// production stack — i.e. >40% margin — while still doubling the
+    /// reader's own practical ceiling (5). 20 also technically still fits
+    /// (safe at 448KB) but leaves only ~12% margin under 512KB, which is
+    /// too thin given "512KB" is itself an estimate, not a value read from
+    /// the actual che-word-mcp process. Every legitimately nested document
+    /// this library can currently produce or read (capped at depth 5 by
+    /// the reader) serializes exactly as before (see
     /// `Issue195TwoLevelNestedTableCrashTests` for round-trip coverage up
-    /// to 3 levels); only genuinely pathological depth is affected, and it
-    /// now degrades by truncating the excess nesting instead of crashing
-    /// the whole process (and, with it, every other open document's
-    /// unsaved edits — che-word-mcp's session model holds multiple open
-    /// documents in one process).
-    static let maxSerializationDepth = 20
+    /// to 3 levels); only genuinely pathological depth (>10) is affected,
+    /// and it now degrades by truncating the excess nesting instead of
+    /// crashing the whole process (and, with it, every other open
+    /// document's unsaved edits — che-word-mcp's session model holds
+    /// multiple open documents in one process).
+    ///
+    /// R2 frame-splitting (what actually bought the >10x per-level
+    /// reduction, from ~118KB/level down to ~8-13KB/level): the crash
+    /// report's faulting frame was `___chkstk_darwin ← Paragraph
+    /// .toXMLSortedByPosition()` — the sorted-by-position paragraph emit
+    /// path (taken by every normally-parsed paragraph: `DocxReader`
+    /// assigns every run a source `position ≥ 1`) had ~15 `for` loops, a
+    /// tagged-union positioned-entries array, and a nested grouping loop
+    /// all declared in ONE `-Onone` function frame, which does not shrink
+    /// as loop variables go dead. Splitting it into five `@inline(never)`
+    /// helpers (`pPrBlockXML`, `sortByPositionPreContentXML`,
+    /// `sortByPositionEntries`, `emitSortedPositionedEntries`,
+    /// `sortByPositionPostContentXML`) — each freed before the next
+    /// runs — helped, but `TableCell.toXML(depth:)` holding a full
+    /// `Paragraph?` (a ~25-stored-property struct) as `trailingParagraph`
+    /// ACROSS the recursive `for nested in nestedTables` call was the
+    /// larger single contributor: that local (and the sibling
+    /// `bodyParagraphs`/`para` locals) stayed allocated on every
+    /// currently-open level's frame for the entire remaining depth of the
+    /// recursion. Moving that work into `bodyAndTrailingParagraphXML`,
+    /// which renders to `String`s and returns before the recursive call
+    /// begins, removed the large struct from the per-level carried state
+    /// entirely. `Table.toXML(depth:)`'s `tblGridXML` extraction is the
+    /// same pattern for the (smaller) `firstRow`/`cell` locals.
+    static let maxSerializationDepth = 10
 
     /// 轉換為 OOXML XML 字串
     public func toXML() -> String {
@@ -845,15 +886,15 @@ extension Table {
         // layout / conditional styles into the existing tblPr block)
         xml += extendedTablePropertiesXML()
 
-        // Table Grid (欄位定義)
-        xml += "<w:tblGrid>"
-        if let firstRow = rows.first {
-            for cell in firstRow.cells {
-                let width = cell.properties.width ?? 2000
-                xml += "<w:gridCol w:w=\"\(width)\"/>"
-            }
-        }
-        xml += "</w:tblGrid>"
+        // Table Grid (欄位定義). PsychQuant/ooxml-swift#195 R2: rendered by
+        // a separate `@inline(never)` helper rather than inline here — in a
+        // `-Onone` build, `firstRow: TableRow` and `cell: TableCell` (both
+        // multi-field structs) would otherwise sit in THIS function's frame
+        // for the entire `for row in rows` recursion below, even though
+        // they are dead the moment this block finishes. See the same
+        // pattern (and its measured effect) in `TableCell.toXML(depth:)`'s
+        // `bodyAndTrailingParagraphXML`.
+        xml += Self.tblGridXML(firstRowCells: rows.first?.cells ?? [])
 
         // Rows
         for row in rows {
@@ -861,6 +902,19 @@ extension Table {
         }
 
         xml += "</w:tbl>"
+        return xml
+    }
+
+    /// `@inline(never)`: PsychQuant/ooxml-swift#195 R2 — see the doc
+    /// comment on the call site above.
+    @inline(never)
+    private static func tblGridXML(firstRowCells: [TableCell]) -> String {
+        var xml = "<w:tblGrid>"
+        for cell in firstRowCells {
+            let width = cell.properties.width ?? 2000
+            xml += "<w:gridCol w:w=\"\(width)\"/>"
+        }
+        xml += "</w:tblGrid>"
         return xml
     }
 }
@@ -1377,45 +1431,26 @@ extension TableCell {
         // Cell Properties
         xml += properties.toXML()
 
-        // PsychQuant/ooxml-swift#155: this model emits ALL `paragraphs`
-        // before ALL `nestedTables` regardless of their relative order in
-        // the source — it does not track "paragraph N came after table M".
-        // The trailing-paragraph append below used to be unconditional
-        // ("if there's a nested table, append one"), with no check for
-        // whether `paragraphs` already ended in one. Consequence: a source
-        // cell parsed as `[P0, Pempty]` + `[T]` (the OOXML-required trailing
-        // paragraph already present, now merged into the ordinary
-        // `paragraphs` list by the reader) re-emitted as `P0, Pempty, T,
-        // <freshly appended Pempty>` — the ORIGINAL trailing paragraph is
-        // now misplaced BEFORE the table, and a brand-new one is appended
-        // after it. Re-parsing that output repeats the same misclassification
-        // and appends yet another — +1 paragraph per nested-table cell, per
-        // save, unbounded.
-        //
-        // Fix: if the cell already ends with a run-less paragraph, treat it
-        // as the existing trailing placeholder and re-use it (move it after
-        // the nested tables) instead of leaving it in place AND synthesizing
-        // a new one. This makes repeated saves idempotent (paragraph count
-        // stops moving) without requiring the harder architectural fix
-        // (preserving exact paragraph/table interleaving order) that #133 /
-        // #129 still owns. Trade-off: a genuinely run-less-but-styled
-        // paragraph that happens to sit last (before the table) gets moved
-        // to trail the table instead — accepted per the issue's own framing
-        // of this as a bounded, local fix.
-        var bodyParagraphs = paragraphs
-        var trailingParagraph: Paragraph?
-        if !nestedTables.isEmpty, let last = bodyParagraphs.last, last.runs.isEmpty {
-            trailingParagraph = bodyParagraphs.removeLast()
-        }
-
-        // Paragraphs (每個儲存格至少需要一個段落)
-        if bodyParagraphs.isEmpty, trailingParagraph == nil {
-            xml += Paragraph().toXML()
-        } else {
-            for para in bodyParagraphs {
-                xml += para.toXML()
-            }
-        }
+        // PsychQuant/ooxml-swift#195 R2: `bodyAndTrailingParagraphXML` used
+        // to be inlined here, holding `bodyParagraphs: [Paragraph]` and a
+        // full `trailingParagraph: Paragraph?` (Paragraph has ~25 stored
+        // properties — a sizeable struct) as LOCALS of THIS function, for
+        // its entire duration. In a `-Onone` (debug) build a function's
+        // frame is sized for every local declared anywhere in its body and
+        // does not shrink as loop variables go dead, so those Paragraph-sized
+        // slots stayed allocated on the stack for the ENTIRE
+        // `for nested in nestedTables` recursion below — i.e., on every
+        // currently-open level's frame, all the way down. Moving the
+        // paragraph work into its own `@inline(never)` helper that returns
+        // already-rendered STRINGS confines those Paragraph-sized locals to
+        // a frame that is freed before the recursive call below ever runs,
+        // and shrinks what THIS function carries across the recursive
+        // boundary to two Strings. Measured contribution: see the R2
+        // section of the fix report (this was the single largest per-level
+        // stack-depth reduction of the whole investigation).
+        let (bodyXML, trailingXML) = Self.bodyAndTrailingParagraphXML(
+            paragraphs, hasNestedTables: !nestedTables.isEmpty)
+        xml += bodyXML
 
         // v0.17.0+ (#49): nested tables emit as siblings of paragraphs.
         // PsychQuant/ooxml-swift#195: tables reached here can come from a
@@ -1437,11 +1472,66 @@ extension TableCell {
         // (Word silently appends one if missing). Re-emit the reused trailing
         // placeholder if we found one above; otherwise synthesize a fresh one.
         if !nestedTables.isEmpty {
-            xml += (trailingParagraph ?? Paragraph()).toXML()
+            xml += trailingXML ?? Paragraph().toXML()
         }
 
         xml += "</w:tc>"
         return xml
+    }
+
+    /// PsychQuant/ooxml-swift#155: this model emits ALL `paragraphs`
+    /// before ALL `nestedTables` regardless of their relative order in
+    /// the source — it does not track "paragraph N came after table M".
+    /// The trailing-paragraph append below used to be unconditional
+    /// ("if there's a nested table, append one"), with no check for
+    /// whether `paragraphs` already ended in one. Consequence: a source
+    /// cell parsed as `[P0, Pempty]` + `[T]` (the OOXML-required trailing
+    /// paragraph already present, now merged into the ordinary
+    /// `paragraphs` list by the reader) re-emitted as `P0, Pempty, T,
+    /// <freshly appended Pempty>` — the ORIGINAL trailing paragraph is
+    /// now misplaced BEFORE the table, and a brand-new one is appended
+    /// after it. Re-parsing that output repeats the same misclassification
+    /// and appends yet another — +1 paragraph per nested-table cell, per
+    /// save, unbounded.
+    ///
+    /// Fix: if the cell already ends with a run-less paragraph, treat it
+    /// as the existing trailing placeholder and re-use it (move it after
+    /// the nested tables) instead of leaving it in place AND synthesizing
+    /// a new one. This makes repeated saves idempotent (paragraph count
+    /// stops moving) without requiring the harder architectural fix
+    /// (preserving exact paragraph/table interleaving order) that #133 /
+    /// #129 still owns. Trade-off: a genuinely run-less-but-styled
+    /// paragraph that happens to sit last (before the table) gets moved
+    /// to trail the table instead — accepted per the issue's own framing
+    /// of this as a bounded, local fix.
+    ///
+    /// Returns the rendered body-paragraph XML and, separately, the
+    /// rendered trailing-placeholder XML (already a `String`, not a
+    /// `Paragraph` — see the caller's PsychQuant/ooxml-swift#195 R2 comment
+    /// for why that representation matters here).
+    ///
+    /// `@inline(never)`: PsychQuant/ooxml-swift#195 R2 — see the doc
+    /// comment on the call site in `toXML(depth:)`.
+    @inline(never)
+    private static func bodyAndTrailingParagraphXML(
+        _ paragraphs: [Paragraph], hasNestedTables: Bool
+    ) -> (bodyXML: String, trailingXML: String?) {
+        var bodyParagraphs = paragraphs
+        var trailingXML: String?
+        if hasNestedTables, let last = bodyParagraphs.last, last.runs.isEmpty {
+            trailingXML = bodyParagraphs.removeLast().toXML()
+        }
+
+        // Paragraphs (每個儲存格至少需要一個段落)
+        var xml = ""
+        if bodyParagraphs.isEmpty, trailingXML == nil {
+            xml += Paragraph().toXML()
+        } else {
+            for para in bodyParagraphs {
+                xml += para.toXML()
+            }
+        }
+        return (xml, trailingXML)
     }
 }
 
