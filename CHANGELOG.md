@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.17.0] - 2026-09-28
+
 ### Added
 
 - **解壓與讀取有大小上限了（#130、#157）**：`ZipHelper.unzip`／`ZipHelper.Limits` 新增單一
