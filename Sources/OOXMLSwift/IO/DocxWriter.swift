@@ -1272,8 +1272,11 @@ public struct DocxWriter {
         return "<w:document " + pieces.joined(separator: " ") + ">"
     }
 
-    /// Minimal XML attribute-value escape: `&` `<` `>` `"` are the only
-    /// characters that may not appear unescaped inside a `"…"`-quoted value.
+    /// Minimal XML attribute-value escape: `&` `<` `>` `"` may not appear
+    /// unescaped inside a `"…"`-quoted value, and PsychQuant/ooxml-swift#165:
+    /// `\n`/`\r`/`\t` must be written as character references or a
+    /// conformant reader normalizes the literal character to a plain space
+    /// on the very next parse (XML 1.0 §3.3.3).
     private static func escapeAttr(_ s: String) -> String {
         var result = ""
         result.reserveCapacity(s.count)
@@ -1283,6 +1286,9 @@ public struct DocxWriter {
             case "<": result += "&lt;"
             case ">": result += "&gt;"
             case "\"": result += "&quot;"
+            case "\n": result += "&#10;"
+            case "\r": result += "&#13;"
+            case "\t": result += "&#9;"
             default: result.append(c)
             }
         }
