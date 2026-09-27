@@ -126,6 +126,18 @@ public struct Paragraph: Equatable {
     /// (Word can emit either alone). Same opaque-String preservation rules.
     public var w14TextId: String?
 
+    /// PsychQuant/ooxml-swift#185: revision-save ids carried as direct
+    /// attributes on `<w:p>` itself (`w:rsidRPr`, `w:rsidR`, `w:rsidDel`,
+    /// `w:rsidP`, `w:rsidRDefault`) — same shape and rationale as
+    /// `SectionProperties.rsidAttributes` (#112): no visual effect, but
+    /// Word's compare/merge uses them to attribute edits across sessions,
+    /// and any typed edit anywhere in the document regenerates the whole
+    /// `word/document.xml` from the typed model, dropping them from EVERY
+    /// paragraph if nothing carries them. Keyed by local name (no `w:`
+    /// prefix); emitted in a fixed canonical order, not dictionary iteration
+    /// order.
+    public var rsidAttributes: [String: String] = [:]
+
     public init(runs: [Run] = [], properties: ParagraphProperties = ParagraphProperties()) {
         self._legacyRuns = runs
         self.properties = properties
@@ -333,6 +345,7 @@ extension Paragraph {
             && lhs.unrecognizedChildren == rhs.unrecognizedChildren
             && lhs.w14ParaId == rhs.w14ParaId
             && lhs.w14TextId == rhs.w14TextId
+            && lhs.rsidAttributes == rhs.rsidAttributes
     }
 }
 
@@ -633,6 +646,19 @@ extension Paragraph {
     /// prevent XML injection if a caller sets an unsanitized GUID value.
     private func openingPTag() -> String {
         var attrs: [String] = []
+        // PsychQuant/ooxml-swift#185: rsid family first — matches the
+        // relative order `SectionProperties`'s `AG_SectPrAttributes`-style
+        // rsid emission uses, base schema attributes before the w14:
+        // extension-namespace ones below.
+        let canonicalOrder = ["rsidRPr", "rsidDel", "rsidR", "rsidP", "rsidRDefault"]
+        for name in canonicalOrder {
+            if let value = rsidAttributes[name] {
+                attrs.append("w:\(name)=\"\(escapeXMLAttribute(value))\"")
+            }
+        }
+        for name in rsidAttributes.keys.sorted() where !canonicalOrder.contains(name) {
+            attrs.append("w:\(name)=\"\(escapeXMLAttribute(rsidAttributes[name]!))\"")
+        }
         if let paraId = w14ParaId {
             attrs.append("w14:paraId=\"\(escapeXMLAttribute(paraId))\"")
         }
