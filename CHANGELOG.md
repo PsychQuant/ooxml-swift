@@ -46,6 +46,18 @@ All notable changes to ooxml-swift will be documented in this file.
   已知限制：目前只涵蓋直接掛在 `<w:rPr>` 下的子元素（`RawElement` 承載，同一套機制已用於
   `Run.rawElements` 與 `ParagraphProperties.rawChildren`）。
 
+- **屬性值裡的換行／CR／tab 經 typed 重新序列化後寫成字面字元，下一次解析就變成空白**
+  （PsychQuant/ooxml-swift#165）。XML 1.0 規格規定：屬性值裡的字面換行等空白字元，任何
+  正規的 parser 讀回時都會正規化成單一空白；只有寫成字元參照（`&#10;`／`&#13;`／`&#9;`）才能
+  存活。`escapeXMLAttribute`（`Models/*.swift` 廣泛使用的 typed 輸出跳脫函式）、
+  `DocxWriter` 文件根標籤的屬性跳脫，以及圖片替代文字 `wp:docPr/@descr`／`name` 的跳脫，
+  都只處理 `& < > " '` 五個字元，沒有處理這三個空白字元。第一次存檔看起來沒事（原始的字元
+  參照被解碼成真正的換行，重新輸出時又寫成字面字元，位元組雖變了但內容還對），但接下來
+  只要再解析一次，該屬性值就被正規化掉、內容永久性改變。現在這三處都會把這三個字元轉成
+  字元參照。已知限制：`ContainerRootTag.escapeAttr`（僅用於 xmlns 宣告，命名空間 URI
+  實務上不含這類字元）與其餘僅供元素文字內容跳脫的 `escapeXML` 私有函式（文字節點的字面
+  換行本身合法，不受此規格條款影響）不在本次修法範圍。
+
 ## [3.14.0] - 2026-09-27
 
 ### Fixed
