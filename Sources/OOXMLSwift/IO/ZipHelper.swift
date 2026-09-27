@@ -38,14 +38,42 @@ public struct ZipHelper {
     ///   disk    the bytes an extraction writes out
     ///   memory  one part read into `Data` before it is parsed
     ///
-    /// Defaults are set from the upper edge of a real corpus (738 documents):
+    /// The corpus measurement behind these is small (738 real documents):
     /// largest single entry 17.5 MB, largest package 26.4 MB in total, highest
-    /// compression ratio 117.8x (p99 17.9x, p99.9 32.2x). The chosen defaults
-    /// — 256 MB / 512 MB / 500x — sit 14.6x, 19.4x and 4.24x above those
-    /// figures respectively: enough headroom that a legitimate document is not
-    /// refused, while a multi-thousand-fold amplification still is.
-    /// `maximumEntryCount` has no corpus measurement behind it (real packages
-    /// run to at most a few hundred parts); it exists for
+    /// compression ratio 117.8x (p99 17.9x, p99.9 32.2x). `maximumCompressionRatio`
+    /// tracks that measurement directly — 500x sits 4.24x above the observed
+    /// maximum, and this is the axis that actually stops the classic zip-bomb
+    /// shape (a tiny file, extreme amplification): a real document's DEFLATE
+    /// ratio has no reason to approach 500x regardless of how large real
+    /// documents get, so tightening it further buys safety margin on
+    /// amplification without touching the size axes below.
+    ///
+    /// `maximumEntryBytes` / `maximumTotalBytes` / `maximumPartBytes` (R2
+    /// correction, 2026-09-28) do NOT track the corpus measurement the way the
+    /// ratio does — 738 real documents are not 738 *large* real documents, and
+    /// a corpus of small samples cannot bound how large a legitimate one gets.
+    /// The concrete case this repo's own review named: a document or report with
+    /// ~200 embedded 300-DPI A4 scans. A 300-DPI A4 page is ~2481×3508 px;
+    /// stored as an unoptimized 24-bit bitmap that is ~26 MB per image and
+    /// ~5.2 GB for 200 of them, but Word documents in practice carry compressed
+    /// JPEG/PNG scans, not raw bitmaps — a realistic (if generous) per-image
+    /// estimate for a high-quality 300-DPI scan is 5–10 MB, i.e. roughly 1–2 GB
+    /// for 200 images. `maximumEntryBytes` covers the single-large-image case
+    /// with room for the unoptimized-bitmap outlier (a single such image, not
+    /// 200 of them, is the realistic single-entry ceiling); `maximumTotalBytes`
+    /// covers the many-realistic-images case with about 2–4x headroom over
+    /// that 1–2 GB estimate. Both remain hard, real bounds — nowhere near
+    /// "effectively unlimited" — because the amplification defense lives on
+    /// the ratio axis, not here: a package that is actually this large has to
+    /// really contain that many actual bytes, which is a fixed cost to
+    /// whoever sends it, not a multiplied one.
+    ///
+    /// Every default here is overridable per call via `limits:` — a caller
+    /// with a genuinely larger corpus, or a workload the defaults are too
+    /// tight for, does not need to fork this library to raise them.
+    ///
+    /// `maximumEntryCount` has no corpus measurement behind it either (real
+    /// packages run to at most a few hundred parts); it exists for
     /// PsychQuant/ooxml-swift#107, where many tiny entries — each individually
     /// under every byte limit — could still exhaust memory via per-entry
     /// dictionary and string overhead in `RawPartChannel.readAllParts`.
@@ -55,10 +83,10 @@ public struct ZipHelper {
         public var maximumCompressionRatio: Double
         public var maximumPartBytes: Int64
         public var maximumEntryCount: Int
-        public init(maximumEntryBytes: Int64 = 256 * 1024 * 1024,
-                    maximumTotalBytes: Int64 = 512 * 1024 * 1024,
+        public init(maximumEntryBytes: Int64 = 512 * 1024 * 1024,
+                    maximumTotalBytes: Int64 = 4096 * 1024 * 1024,
                     maximumCompressionRatio: Double = 500,
-                    maximumPartBytes: Int64 = 256 * 1024 * 1024,
+                    maximumPartBytes: Int64 = 512 * 1024 * 1024,
                     maximumEntryCount: Int = 50_000) {
             self.maximumEntryBytes = maximumEntryBytes
             self.maximumTotalBytes = maximumTotalBytes
