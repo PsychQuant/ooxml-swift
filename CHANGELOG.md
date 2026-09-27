@@ -9,6 +9,31 @@ All notable changes to ooxml-swift will be documented in this file.
 ## [Unreleased]
 
 ## [3.15.0] - 2026-09-27
+### Fixed（R3，發版前追加）
+- **`setRunFormatInRange` 把 `<w:proofErr>`／書籤／註解範圍／`permStart`／`permEnd`／
+  移動範圍標記一律當成邊界，拒絕真實文件裡肉眼完全連續的文字**（PsychQuant/macdoc#232
+  R3，對抗式審查 R2 複審 MEDIUM (b)）：R2 把任何非直接 `<w:r>` 子節點都當邊界，但
+  `<w:proofErr>`（拼字檢查標記）、書籤、註解範圍、`permStart`／`permEnd`、移動範圍
+  標記這些**依 ECMA-376 schema 型別保證絕對不含文字**的零寬結構標記，跟真正會包住
+  文字的 `<w:ins>`／`<w:hyperlink>`／`<w:sdt>` 性質完全不同——把它們當邊界會讓「含專有
+  名詞、術語的學術文件」（這個操作原本就是為了真實 Word 文件而存在，這類文件幾乎必然
+  有拼字檢查標記）裡完全普通的文字被拒絕格式化。現在這批標記（封閉列舉，見
+  `OperationReducer.transparentZeroWidthMarkerNames`）在分組與診斷掃描時都當透明處理：
+  跳過、不斷開群組、切分時原位保留（不複製、不移動）。追蹤修訂、超連結、SDT、多
+  `<w:t>` run 這些**仍然**視為邊界，行為不變。
+- **同一 run 內 `<w:rPr>` ＋ `<w:t>` 之外只帶 `<w:lastRenderedPageBreak/>` 的 run 被當
+  「複雜 run」整個排除，讓自己的文字變成不可搜尋**（PsychQuant/macdoc#232 R3，對抗式
+  審查 R2 複審 MEDIUM (b)）：`<w:lastRenderedPageBreak/>` 是 Word 排版引擎自己插入的
+  標記（記錄「上次算繪到這裡發生分頁」），出現在幾乎所有多頁真實 `.docx` 裡、位置不受
+  使用者控制。現在這種 run 也算「簡單 run」，可以正常搜尋與切分；切分時
+  `<w:lastRenderedPageBreak/>` 保證只出現在**一個**片段（依它在原 run 中相對於文字的
+  位置決定——通常在文字前面，就留在第一個切出的片段），絕不被複製到多個片段。
+- **比對因邊界失敗、但擋住的邊界本身沒有貢獻任何字元時，錯誤訊息退化成泛用的
+  「not found」**（PsychQuant/macdoc#232 R3，對抗式審查 R2 複審 MEDIUM (c)）：
+  `diagnoseCrossBoundaryMatch` 原本只能靠「比對範圍裡有沒有帶標籤的字元」判斷要不要
+  指名邊界種類，但零字元的邊界（例如空的 `<w:hyperlink>`）沒有字元可以掛標籤，只能
+  靜默退回泛用訊息。現在額外用位置記錄邊界（`VisualBoundary`）：只要邊界的位置落在
+  比對範圍內，即使它貢獻 0 個字元，reason 一樣會指名是哪一種邊界。
 ### Added
 - **測試防呆：來源不得再出現 host-absolute fixture 路徑**（#162）。新增守門測試掃描
   `Tests/`／`Sources/`／`scripts/` 下所有 `.swift` 檔，偵測寫死的本機使用者目錄路徑；
