@@ -3,9 +3,11 @@
 // template fixtures (`format-alignment-pipeline`, «Template fixture policy»;
 // Decision 5). Real templates live outside version control under
 // `$MACDOC_TEMPLATE_DIR`; tests resolve them here and XCTSkip when absent, so
-// CI (which lacks the private documents) stays green. Mirrors the inline
-// `OOXML_LOCAL_DOCUMENT_FIXTURE` guard (Issue66HeaderVMLProbeTests) as a shared,
-// reusable helper.
+// CI (which lacks the private documents) stays green. Also used by
+// `V1BenchmarkTests` and `Issue66HeaderVMLProbeTests` (#162) — both
+// previously bypassed this shared gate (host-absolute home-directory paths
+// hard-coded in source, and a standalone `OOXML_LOCAL_DOCUMENT_FIXTURE` env
+// var, respectively).
 
 import XCTest
 import Foundation
@@ -26,6 +28,14 @@ enum TemplateFixtureGate {
 
     /// Private document corpus fixture used by the content-equality matrix.
     static var documentFixtureName: String { "document-fixture.docx" }
+
+    /// #162 — `V1BenchmarkTests` 6.6/6.6-attr candidate fixtures, largest
+    /// first. Neither name is special; they're simply the two real-world
+    /// documents recorded in `docs/benchmarks-word-aligned-state-sync.md`
+    /// when those benchmarks were last run.
+    static var benchmarkFixtureNames: [String] {
+        ["20260505v.docx", "ETST.docx"]
+    }
 
     /// Resolves a real-template fixture `name` under the gate directory
     /// (`dirOverride` when given — for tests injecting a temp dir without
@@ -49,5 +59,23 @@ enum TemplateFixtureGate {
             throw XCTSkip(missingFixtureMessage(for: name))
         }
         return url
+    }
+
+    /// Resolves the first of `names` that exists under the gate directory —
+    /// for callers with a primary fixture plus fallbacks (#162,
+    /// `V1BenchmarkTests`' "largest real-world fixture, else a smaller one"
+    /// shape). `XCTSkip`s (gate unset, or none of `names` present) exactly
+    /// like `requireTemplate`.
+    static func requireFirstAvailable(_ names: [String], dirOverride: String? = nil) throws -> URL {
+        guard let dir = dirOverride ?? ProcessInfo.processInfo.environment["MACDOC_TEMPLATE_DIR"] else {
+            throw XCTSkip(missingGateMessage(for: names.first ?? "<fixture>"))
+        }
+        for name in names {
+            let url = URL(fileURLWithPath: dir).appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+        throw XCTSkip("none of \(names) found under MACDOC_TEMPLATE_DIR")
     }
 }
