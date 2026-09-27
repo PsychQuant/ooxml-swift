@@ -63,9 +63,19 @@ public enum Operation: Equatable, Sendable {
 
     /// Applies `format` to the text range inside paragraph `target` located
     /// by the `instance`-th (1-based) occurrence of `substring` in the
-    /// paragraph's flattened text (the concatenation, in document order, of
-    /// every direct `<w:r>` child's `<w:t>` text — see `OperationReducer`'s
-    /// `.setRunFormatInRange` case).
+    /// paragraph's SEARCHABLE text — the concatenation, in document order,
+    /// of maximal runs of consecutive "simple" direct `<w:r>` children's
+    /// `<w:t>` text. A run with anything other than exactly one `<w:t>`
+    /// child (e.g. interleaved `<w:tab/>`/`<w:br/>`), and any non-`<w:r>`
+    /// direct child (tracked insertions/deletions, hyperlinks, SDT content
+    /// controls, …), is EXCLUDED from that text and breaks adjacency — text
+    /// on either side is never glued together across one. See
+    /// `OperationReducer`'s `applySetRunFormatInRange` doc comment (the
+    /// "Flatten/adjacency rule" and "ElementID allocation rule" sections)
+    /// for the full, normative contract, including exactly which fragment
+    /// keeps a split run's pre-existing `ElementID` and how a caller obtains
+    /// the id of any newly-created fragment via
+    /// `ElementID.derivedFragmentID(fromOpID:index:)`.
     ///
     /// `setRunFormat` requires its `target` to already resolve to a single
     /// `<w:r>`; it cannot locate a sub-run text range or split a run to

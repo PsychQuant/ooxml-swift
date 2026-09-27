@@ -1201,12 +1201,76 @@ public enum OperationReducer {
         return root.children.contains { containsNodeIdentical(to: target, in: $0) }
     }
 
-    // MARK: - setRunFormatInRange (PsychQuant/macdoc#232)
+    // MARK: - setRunFormatInRange (PsychQuant/macdoc#232, revised in R2 per
+    // adversarial review — see doc comments below for the three fixed
+    // findings: ElementID collision after split, multi-<w:t>/tab-interleaved
+    // runs, and tracked-change/hyperlink/SDT false adjacency.)
 
     /// Implements `.setRunFormatInRange`: locates the `instance`-th
-    /// occurrence of `substring` inside paragraph `target`'s flattened text,
-    /// splits the run(s) spanning the match, and applies `format` to ONLY
-    /// the matched run fragment(s).
+    /// occurrence of `substring` inside paragraph `target`'s SEARCHABLE text
+    /// (see "Flatten/adjacency rule" below), splits the run(s) spanning the
+    /// match, and applies `format` to ONLY the matched run fragment(s).
+    ///
+    /// ## Flatten/adjacency rule (macdoc#232 R2 CRITICAL-2 + HIGH-3)
+    ///
+    /// The search text is built ONLY from maximal runs of consecutive
+    /// "simple" direct `<w:r>` children of the paragraph (see
+    /// `isSimpleRun` / `runFormatRangeGroups`) — a `<w:r>` whose only
+    /// content is exactly one `<w:t>`. Two things are NEVER merged into that
+    /// search text, and NEVER treated as adjacent to their neighbors:
+    ///   - a "complex" `<w:r>` (zero, or more than one, `<w:t>` content
+    ///     child, or a `<w:t>` alongside `<w:tab/>`/`<w:br/>`/
+    ///     `<w:noBreakHyphen/>`/anything else) — tab/br/noBreakHyphen do
+    ///     NOT count as zero-width characters that vanish from the flatten;
+    ///     the WHOLE run they live in is excluded and breaks adjacency,
+    ///     because this reducer's split logic (`splitRunNode`) only knows
+    ///     how to rewrite a single `<w:t>` child and cannot correctly
+    ///     reconstruct a run with interleaved non-text content;
+    ///   - any direct paragraph child that is NOT a `<w:r>` — tracked
+    ///     insertions (`<w:ins>`), tracked deletions (`<w:del>`),
+    ///     hyperlinks (`<w:hyperlink>`), content controls (`<w:sdt>`),
+    ///     bookmark/comment-range markers, etc. all wrap their `<w:r>`
+    ///     content one level deeper, so a naive "concatenate every visible
+    ///     character" flatten would silently glue the text before and after
+    ///     one of these together as if the wrapper were not there.
+    /// A match may therefore fall ENTIRELY inside one contiguous run of
+    /// simple `<w:r>` siblings and succeed normally, but a match that would
+    /// need to cross (or land inside) one of the above is refused —
+    /// `malformedOp` names the specific container/run shape responsible
+    /// (via `diagnoseCrossBoundaryMatch`) whenever the substring genuinely
+    /// exists in the paragraph's full visible text but only reachable that
+    /// way. `<w:del>` content is additionally never shown in that
+    /// diagnostic text at all (deleted text is not visible content).
+    ///
+    /// ## ElementID allocation rule (macdoc#232 R2 CRITICAL-1)
+    ///
+    /// Splitting a run produces up to 3 new `XmlNode` fragments from one
+    /// original node. Exactly ONE of them — the fragment that ends up FIRST
+    /// in document order among the pieces derived from that particular
+    /// original run — keeps that run's PRE-EXISTING `ElementID` (so a
+    /// caller who recorded "the run before this op" can still resolve it,
+    /// landing on whichever fragment is now first where that run used to
+    /// be). Every OTHER fragment gets a freshly, but DETERMINISTICALLY,
+    /// allocated id via `ElementID.derivedFragmentID(fromOpID:index:)`:
+    ///   - `index: 1` — the fragment beginning exactly at the match's START
+    ///     offset, if (and only if) splitting was required there (the match
+    ///     does not start exactly at an existing run boundary). In the
+    ///     single-run case this is the "matched middle" piece; in the
+    ///     cross-run case this is the START run's post-split matched piece.
+    ///   - `index: 2` — the fragment beginning exactly at the match's END
+    ///     offset, if (and only if) splitting was required there. In the
+    ///     single-run case this is the "suffix" piece; in the cross-run
+    ///     case this is the END run's post-split suffix piece.
+    /// When a boundary needs no split (the match starts/ends exactly at an
+    /// existing run edge), that run is reformatted IN PLACE — no clone, no
+    /// new id, its ElementID is completely unchanged. A fully-enclosed
+    /// "middle" run in a cross-run match is always reformatted in place too
+    /// (never split). This is why at most 2 new ids are ever allocated by
+    /// one `setRunFormatInRange` op, and why the derivation is keyed by
+    /// `entry.opID` (not a random `UUID()`) — replaying the same
+    /// `OperationLog` twice must reproduce byte-identical trees, including
+    /// these derived ids (see `OperationReducer`'s file-header pure-function
+    /// contract).
     private static func applySetRunFormatInRange(
         target: ElementID, substring: String, instance: Int,
         format: RunFormatPayload, opID: UUID, tree: XmlTree
@@ -1247,53 +1311,58 @@ public enum OperationReducer {
                     + "(the only field currently supported)")
         }
 
-        // Build (childIndex-in-paragraph, text, startGlobal-UTF16-offset) for
-        // every direct <w:r> child, in document order. Non-run children
-        // (<w:pPr>, bookmark markers, …) contribute no searchable text and
-        // are left untouched.
-        var spans: [(childIndex: Int, text: String, startGlobal: Int)] = []
-        var globalOffset = 0
-        for (idx, child) in node.children.enumerated()
-        where child.kind == .element && child.localName == "r" {
-            let text = runText(child)
-            spans.append((idx, text, globalOffset))
-            globalOffset += text.utf16.count
-        }
-
-        let combinedUTF16: [UInt16] = spans.reduce(into: []) { acc, span in
-            acc.append(contentsOf: span.text.utf16)
-        }
         let needleUTF16 = Array(substring.utf16)
-        guard combinedUTF16.count >= needleUTF16.count else {
-            throw ReducerError.malformedOp(
-                opID: opID,
-                reason: "setRunFormatInRange: substring \(String(reflecting: substring)) "
-                    + "not found in paragraph text (requested occurrence \(instance))")
+        var occurrencesFound = 0
+        var matchSpans: [(childIndex: Int, text: String, startGlobal: Int)]?
+        var matchGlobalStart = 0
+
+        searchGroups: for group in runFormatRangeGroups(of: node) {
+            var spans: [(childIndex: Int, text: String, startGlobal: Int)] = []
+            var globalOffset = 0
+            for (idx, text) in group {
+                spans.append((idx, text, globalOffset))
+                globalOffset += text.utf16.count
+            }
+            let combinedUTF16: [UInt16] = spans.reduce(into: []) { acc, span in
+                acc.append(contentsOf: span.text.utf16)
+            }
+            guard combinedUTF16.count >= needleUTF16.count else { continue }
+
+            // Overlapping linear scan (advance by 1 code unit regardless of
+            // match) — matches the counting convention already used by
+            // `resolveRunAnchor` (WordDocument+SpliceOMath.swift) for anchor
+            // `instance` resolution elsewhere in this package. The
+            // occurrence counter is cumulative ACROSS groups (in document
+            // order) so `instance` still means "the Nth occurrence in the
+            // paragraph's searchable text", not "the Nth occurrence within
+            // whichever group happens to contain it".
+            var searchStart = 0
+            while searchStart + needleUTF16.count <= combinedUTF16.count {
+                if Array(combinedUTF16[searchStart..<(searchStart + needleUTF16.count)]) == needleUTF16 {
+                    occurrencesFound += 1
+                    if occurrencesFound == instance {
+                        matchSpans = spans
+                        matchGlobalStart = searchStart
+                        break searchGroups
+                    }
+                }
+                searchStart += 1
+            }
         }
 
-        // Overlapping linear scan (advance by 1 code unit regardless of
-        // match) — matches the counting convention already used by
-        // `resolveRunAnchor` (WordDocument+SpliceOMath.swift) for anchor
-        // `instance` resolution elsewhere in this package.
-        var occurrencesFound = 0
-        var matchGlobalStart: Int?
-        var searchStart = 0
-        while searchStart + needleUTF16.count <= combinedUTF16.count {
-            if Array(combinedUTF16[searchStart..<(searchStart + needleUTF16.count)]) == needleUTF16 {
-                occurrencesFound += 1
-                if occurrencesFound == instance {
-                    matchGlobalStart = searchStart
-                    break
-                }
+        guard let spans = matchSpans else {
+            if let crossBoundaryReason = diagnoseCrossBoundaryMatch(
+                paragraph: node, substring: substring, instance: instance
+            ) {
+                throw ReducerError.malformedOp(
+                    opID: opID, reason: "setRunFormatInRange: \(crossBoundaryReason)")
             }
-            searchStart += 1
-        }
-        guard let globalStart = matchGlobalStart else {
             throw ReducerError.malformedOp(
                 opID: opID,
                 reason: "setRunFormatInRange: substring \(String(reflecting: substring)) "
                     + "occurrence \(instance) not found (only \(occurrencesFound) occurrence(s) present)")
         }
+        let globalStart = matchGlobalStart
         let globalEnd = globalStart + needleUTF16.count
 
         guard let startSpanIdx = spans.firstIndex(where: {
@@ -1318,62 +1387,112 @@ public enum OperationReducer {
         let endOffsetInRun = globalEnd - endSpan.startGlobal
 
         func applyBold(_ run: XmlNode) { applyBoldInRange(bold, to: run) }
+        func newFragmentID(index: Int) -> UUID { derivedFragmentUUID(opID: opID, index: index) }
 
         if startSpanIdx == endSpanIdx {
-            // Whole match lives inside one run — split into up to 3 pieces
-            // (prefix / matched-middle / suffix); empty pieces are omitted.
             let originalRun = node.children[startSpan.childIndex]
-            guard let (prefix, middle, suffix) = splitRunNodeThree(
-                originalRun, start: startOffsetInRun, end: endOffsetInRun
-            ) else {
-                throw ReducerError.malformedOp(
-                    opID: opID,
-                    reason: "setRunFormatInRange: the matched run has no <w:t> child to split")
+            let fullLength = startSpan.text.utf16.count
+            if startOffsetInRun == 0 && endOffsetInRun == fullLength {
+                // Whole run matched exactly — no split needed; mutate in
+                // place, ElementID fully unchanged.
+                applyBold(originalRun)
+            } else if startOffsetInRun == 0 {
+                // Match starts at the run's beginning, ends partway through:
+                // [matched-middle(ORIGINAL id) | suffix(NEW id @ index 2)].
+                guard let (middle, suffix) = splitRunNode(originalRun, atUTF16Offset: endOffsetInRun) else {
+                    throw ReducerError.malformedOp(
+                        opID: opID,
+                        reason: "setRunFormatInRange: the matched run has no <w:t> child to split")
+                }
+                middle.libraryUUID = originalRun.libraryUUID
+                suffix.libraryUUID = newFragmentID(index: 2)
+                applyBold(middle)
+                node.children.replaceSubrange(startSpan.childIndex...startSpan.childIndex, with: [middle, suffix])
+            } else if endOffsetInRun == fullLength {
+                // Match starts partway through, runs to the run's end:
+                // [prefix(ORIGINAL id) | matched-middle(NEW id @ index 1)].
+                guard let (prefix, middle) = splitRunNode(originalRun, atUTF16Offset: startOffsetInRun) else {
+                    throw ReducerError.malformedOp(
+                        opID: opID,
+                        reason: "setRunFormatInRange: the matched run has no <w:t> child to split")
+                }
+                prefix.libraryUUID = originalRun.libraryUUID
+                middle.libraryUUID = newFragmentID(index: 1)
+                applyBold(middle)
+                node.children.replaceSubrange(startSpan.childIndex...startSpan.childIndex, with: [prefix, middle])
+            } else {
+                // Match strictly inside the run on both sides:
+                // [prefix(ORIGINAL id) | middle(NEW id @ 1) | suffix(NEW id @ 2)].
+                guard let (prefix, middle, suffix) = splitRunNodeThree(
+                    originalRun, start: startOffsetInRun, end: endOffsetInRun
+                ), let prefix, let suffix else {
+                    throw ReducerError.malformedOp(
+                        opID: opID,
+                        reason: "setRunFormatInRange: the matched run has no <w:t> child to split")
+                }
+                prefix.libraryUUID = originalRun.libraryUUID
+                middle.libraryUUID = newFragmentID(index: 1)
+                suffix.libraryUUID = newFragmentID(index: 2)
+                applyBold(middle)
+                node.children.replaceSubrange(
+                    startSpan.childIndex...startSpan.childIndex, with: [prefix, middle, suffix])
             }
-            applyBold(middle)
-            var replacement: [XmlNode] = []
-            if let prefix { replacement.append(prefix) }
-            replacement.append(middle)
-            if let suffix { replacement.append(suffix) }
-            node.children.replaceSubrange(startSpan.childIndex...startSpan.childIndex, with: replacement)
         } else {
-            // Match crosses run boundaries: split the start run's tail and
-            // the end run's head; every fully-enclosed run in between gets
-            // the whole-run format applied in place (no split needed).
-            let startRun = node.children[startSpan.childIndex]
-            let endRun = node.children[endSpan.childIndex]
-            guard let (startPrefix, startMiddle) = splitRunNode(startRun, atUTF16Offset: startOffsetInRun) else {
-                throw ReducerError.malformedOp(
-                    opID: opID,
-                    reason: "setRunFormatInRange: the match's start run has no <w:t> child to split")
-            }
-            guard let (endMiddle, endSuffix) = splitRunNode(endRun, atUTF16Offset: endOffsetInRun) else {
-                throw ReducerError.malformedOp(
-                    opID: opID,
-                    reason: "setRunFormatInRange: the match's end run has no <w:t> child to split")
-            }
-            applyBold(startMiddle)
-            applyBold(endMiddle)
+            // Match crosses run boundaries. Fully-enclosed runs strictly
+            // between start and end get the whole-run format applied in
+            // place (never split, ids unchanged) — order relative to the
+            // start/end handling below doesn't matter, since this loop
+            // never touches `node.children`'s array structure.
             for spanIdx in (startSpanIdx + 1)..<endSpanIdx {
                 applyBold(node.children[spans[spanIdx].childIndex])
             }
 
-            // Replace the higher index first so the lower index stays valid.
-            var endReplacement: [XmlNode] = [endMiddle]
-            if !runText(endSuffix).isEmpty { endReplacement.append(endSuffix) }
-            node.children.replaceSubrange(endSpan.childIndex...endSpan.childIndex, with: endReplacement)
+            // End run: in place (id unchanged) if the match runs exactly to
+            // this run's end; otherwise split off a NEW suffix fragment
+            // (index 2), keeping the matched head on the run's ORIGINAL id.
+            // Handled BEFORE the start run so a replaceSubrange here (at the
+            // higher childIndex) never invalidates startSpan.childIndex.
+            let endRun = node.children[endSpan.childIndex]
+            if endOffsetInRun == endSpan.text.utf16.count {
+                applyBold(endRun)
+            } else {
+                guard let (middle, suffix) = splitRunNode(endRun, atUTF16Offset: endOffsetInRun) else {
+                    throw ReducerError.malformedOp(
+                        opID: opID,
+                        reason: "setRunFormatInRange: the match's end run has no <w:t> child to split")
+                }
+                middle.libraryUUID = endRun.libraryUUID
+                suffix.libraryUUID = newFragmentID(index: 2)
+                applyBold(middle)
+                node.children.replaceSubrange(endSpan.childIndex...endSpan.childIndex, with: [middle, suffix])
+            }
 
-            var startReplacement: [XmlNode] = []
-            if !runText(startPrefix).isEmpty { startReplacement.append(startPrefix) }
-            startReplacement.append(startMiddle)
-            node.children.replaceSubrange(startSpan.childIndex...startSpan.childIndex, with: startReplacement)
+            // Start run: in place (id unchanged) if the match starts
+            // exactly at this run's beginning; otherwise split off a NEW
+            // matched-tail fragment (index 1), keeping the prefix on the
+            // run's ORIGINAL id.
+            let startRun = node.children[startSpan.childIndex]
+            if startOffsetInRun == 0 {
+                applyBold(startRun)
+            } else {
+                guard let (prefix, middle) = splitRunNode(startRun, atUTF16Offset: startOffsetInRun) else {
+                    throw ReducerError.malformedOp(
+                        opID: opID,
+                        reason: "setRunFormatInRange: the match's start run has no <w:t> child to split")
+                }
+                prefix.libraryUUID = startRun.libraryUUID
+                middle.libraryUUID = newFragmentID(index: 1)
+                applyBold(middle)
+                node.children.replaceSubrange(startSpan.childIndex...startSpan.childIndex, with: [prefix, middle])
+            }
         }
     }
 
     /// Flattened visible text of a `<w:r>` node: the concatenation, in
-    /// document order, of its direct `<w:t>` element children's text.
-    /// Non-text children (`<w:rPr>`, `<w:tab/>`, `<w:br/>`, drawings, …)
-    /// contribute no characters.
+    /// document order, of its direct `<w:t>` element children's text. Used
+    /// ONLY on runs `isSimpleRun` has already accepted (exactly one
+    /// content-bearing child, and it's `<w:t>`) — for those, this is simply
+    /// that one child's text.
     private static func runText(_ run: XmlNode) -> String {
         run.children
             .filter { $0.kind == .element && $0.localName == "t" }
@@ -1385,12 +1504,183 @@ public enum OperationReducer {
         node.children.filter { $0.kind == .text }.map { $0.textContent }.joined()
     }
 
+    /// A `<w:r>` is "simple" — eligible for `setRunFormatInRange` search and
+    /// splitting — iff it has EXACTLY one content-bearing child (ignoring
+    /// `<w:rPr>`, which is formatting metadata, not content) and that child
+    /// is `<w:t>`. Any other shape (no `<w:t>` at all, more than one
+    /// `<w:t>`, or a `<w:t>` alongside `<w:tab/>`/`<w:br/>`/
+    /// `<w:noBreakHyphen/>`/a drawing/anything else) is "complex" and is
+    /// entirely excluded from the search (macdoc#232 R2 CRITICAL-2):
+    /// `splitRunNode` assumes a single `<w:t>` child and cannot correctly
+    /// rewrite a run with interleaved non-text content without either
+    /// duplicating or dropping some of it.
+    private static func isSimpleRun(_ run: XmlNode) -> Bool {
+        let content = run.children.filter { !($0.kind == .element && $0.localName == "rPr") }
+        guard content.count == 1, let only = content.first,
+              only.kind == .element, only.localName == "t" else {
+            return false
+        }
+        return true
+    }
+
+    /// Groups the paragraph's DIRECT children into maximal runs of "simple"
+    /// `<w:r>` siblings (see `isSimpleRun`) — the unit
+    /// `setRunFormatInRange`'s substring search operates on. A group
+    /// boundary (ending the current group WITHOUT starting a new one at
+    /// that position — the boundary element itself never contributes text)
+    /// is introduced by:
+    ///   - any non-`<w:r>`, non-`<w:pPr>` direct child — tracked-insertion
+    ///     `<w:ins>`, tracked-deletion `<w:del>`, `<w:hyperlink>`, `<w:sdt>`
+    ///     content controls, bookmark/comment-range markers, `<w:proofErr>`,
+    ///     … — none of these are direct `<w:r>` children, so text on either
+    ///     side of one is NEVER treated as adjacent (macdoc#232 R2 HIGH-3);
+    ///   - a direct `<w:r>` child that is not "simple" (macdoc#232 R2
+    ///     CRITICAL-2) — such a run is excluded from the searchable text
+    ///     wholesale AND breaks adjacency, rather than silently
+    ///     contributing zero characters and gluing its neighbors together.
+    /// `<w:pPr>` (paragraph properties) is skipped WITHOUT breaking a group
+    /// — it carries no inline content, so it cannot separate two runs of
+    /// otherwise-adjacent visible text (in practice it can only appear as
+    /// the paragraph's first child anyway).
+    private static func runFormatRangeGroups(
+        of paragraph: XmlNode
+    ) -> [[(childIndex: Int, text: String)]] {
+        var groups: [[(childIndex: Int, text: String)]] = [[]]
+        for (idx, child) in paragraph.children.enumerated() {
+            guard child.kind == .element else {
+                if !groups[groups.count - 1].isEmpty { groups.append([]) }
+                continue
+            }
+            if child.localName == "pPr" { continue }
+            if child.localName == "r", isSimpleRun(child) {
+                groups[groups.count - 1].append((idx, runText(child)))
+                continue
+            }
+            if !groups[groups.count - 1].isEmpty { groups.append([]) }
+        }
+        return groups.filter { !$0.isEmpty }
+    }
+
+    /// Diagnostic-only helper (NEVER used to decide whether or how to apply
+    /// a format — only to make a failed match's `reason` actionable).
+    /// Recursively gathers `<w:t>` text under `node`, tagging every
+    /// character with `tag` (or `nil` for ordinary already-searchable
+    /// text). `<w:del>` subtrees are skipped entirely — deleted text is not
+    /// visible content and must never appear here (macdoc#232 R2 HIGH-3).
+    private static func gatherVisibleText(
+        _ node: XmlNode, tag: String?, into out: inout [(character: Character, tag: String?)]
+    ) {
+        guard node.kind == .element else { return }
+        if node.localName == "del" { return }
+        if node.localName == "t" {
+            for child in node.children where child.kind == .text {
+                for ch in child.textContent {
+                    out.append((ch, tag))
+                }
+            }
+            return
+        }
+        for child in node.children {
+            gatherVisibleText(child, tag: tag, into: &out)
+        }
+    }
+
+    /// Diagnostic-only (see `gatherVisibleText`): builds the paragraph's
+    /// FULL visible text — including tracked-insertion/hyperlink/SDT
+    /// content, which `runFormatRangeGroups` correctly excludes from the
+    /// actual search but which a human reading the document still SEES —
+    /// with each character tagged by which non-plain container (if any) it
+    /// lives inside, then searches that text for the `instance`-th
+    /// occurrence of `substring`. If found and the match touches any tagged
+    /// region, returns a reason NAMING the container(s) responsible;
+    /// otherwise `nil` (the caller falls back to a generic "not found").
+    private static func diagnoseCrossBoundaryMatch(
+        paragraph: XmlNode, substring: String, instance: Int
+    ) -> String? {
+        var visual: [(character: Character, tag: String?)] = []
+        for child in paragraph.children {
+            guard child.kind == .element else { continue }
+            switch child.localName {
+            case "pPr", "del":
+                continue
+            case "r":
+                if isSimpleRun(child) {
+                    gatherVisibleText(child, tag: nil, into: &visual)
+                } else {
+                    gatherVisibleText(
+                        child,
+                        tag: "a <w:r> with unsupported mixed content (multiple <w:t>, or "
+                            + "<w:tab/>/<w:br/>/<w:noBreakHyphen/>)",
+                        into: &visual)
+                }
+            default:
+                gatherVisibleText(child, tag: "<w:\(child.localName)>", into: &visual)
+            }
+        }
+        let chars = visual.map(\.character)
+        let needle = Array(substring)
+        guard !needle.isEmpty, chars.count >= needle.count else { return nil }
+        var occurrencesFound = 0
+        var i = 0
+        while i + needle.count <= chars.count {
+            if Array(chars[i..<(i + needle.count)]) == needle {
+                occurrencesFound += 1
+                if occurrencesFound == instance {
+                    let tags = visual[i..<(i + needle.count)].compactMap(\.tag)
+                    guard !tags.isEmpty else { return nil }
+                    var seen: [String] = []
+                    for t in tags where !seen.contains(t) { seen.append(t) }
+                    return "substring \(String(reflecting: substring)) occurrence \(instance) "
+                        + "is only reachable via \(seen.joined(separator: " and ")); "
+                        + "setRunFormatInRange does not support targeting text inside such "
+                        + "content, nor treating text on either side of it as adjacent"
+                }
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    /// Deterministically derives a NEW `UUID` from `opID` plus a small
+    /// positive `index`, for reducer cases that must allocate MORE THAN ONE
+    /// mutually-distinct new node identity from a single `LogEntry.opID`
+    /// (the pre-existing one-new-node-per-op convention elsewhere in this
+    /// file — e.g. `insertRun`'s `run.libraryUUID = entry.opID` — only ever
+    /// has one id to give out). Deterministic in `opID` so replaying the
+    /// same `OperationLog` always reproduces the same derived ids (the
+    /// pure-function/replay-determinism contract — see file header).
+    /// `index` MUST be >= 1 (0 is reserved/never produced, keeping this
+    /// visibly distinct from the plain "id == opID" convention). See
+    /// `ElementID.derivedFragmentID(fromOpID:index:)` for the public,
+    /// caller-facing wrapper.
+    internal static func derivedFragmentUUID(opID: UUID, index: Int) -> UUID {
+        precondition(index >= 1, "derivedFragmentUUID index must be >= 1")
+        var bytes = withUnsafeBytes(of: opID.uuid) { Array($0) }
+        let salt = UInt8(truncatingIfNeeded: index)
+        bytes[14] ^= salt
+        bytes[15] ^= salt &* 131 &+ 1
+        let tuple: uuid_t = (
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        )
+        return UUID(uuid: tuple)
+    }
+
     /// Splits a `<w:r>` node at a UTF-16 offset into `(prefix, suffix)`
-    /// clones. Assumes the run's text comes from a single `<w:t>` child (the
-    /// common OOXML shape) — every other child (`<w:rPr>`, …) is duplicated
+    /// clones. ONLY ever called on a run `isSimpleRun` has accepted (exactly
+    /// one `<w:t>` child) — every other child (`<w:rPr>`, …) is duplicated
     /// onto BOTH sides unchanged, so formatting and unmodeled `<w:rPr>`
     /// children survive the split. Returns `nil` when the run has no
-    /// `<w:t>` child (nothing to split — caller treats the run as atomic).
+    /// `<w:t>` child (defensive — should be unreachable given the
+    /// `isSimpleRun` gate upstream).
+    ///
+    /// Deliberately clears `libraryUUID` on BOTH clones rather than letting
+    /// `deepClone()`'s default (copy-the-source's-id) stand: the caller
+    /// MUST explicitly decide which piece (if any) keeps the original
+    /// element's id and which gets a fresh one (see
+    /// `applySetRunFormatInRange`'s "ElementID allocation rule" doc
+    /// comment) — silently reusing `deepClone()`'s copied id on an
+    /// unaddressed piece is exactly how macdoc#232 R2 CRITICAL-1 happened.
     private static func splitRunNode(
         _ run: XmlNode, atUTF16Offset offset: Int
     ) -> (prefix: XmlNode, suffix: XmlNode)? {
@@ -1409,6 +1699,8 @@ public enum OperationReducer {
         let suffixRun = run.deepClone()
         prefixRun.children[tIndex].children = [XmlNode.text(prefixText)]
         suffixRun.children[tIndex].children = [XmlNode.text(suffixText)]
+        prefixRun.libraryUUID = nil
+        suffixRun.libraryUUID = nil
         return (prefixRun, suffixRun)
     }
 
@@ -1417,7 +1709,9 @@ public enum OperationReducer {
     /// (so callers omit zero-length run fragments from the rebuilt paragraph,
     /// matching the `[insertAtAnchor]` convention in
     /// `WordDocument+SpliceOMath.swift`). `middle` is always returned.
-    /// Returns `nil` when the run has no `<w:t>` child to split.
+    /// Returns `nil` when the run has no `<w:t>` child to split. Like
+    /// `splitRunNode`, every returned clone's `libraryUUID` is `nil` — the
+    /// caller assigns ids explicitly.
     private static func splitRunNodeThree(
         _ run: XmlNode, start: Int, end: Int
     ) -> (prefix: XmlNode?, middle: XmlNode, suffix: XmlNode?)? {
