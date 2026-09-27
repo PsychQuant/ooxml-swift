@@ -10,7 +10,12 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ### Fixed
 
-- **巢狀表格在儲存時可能讓行程當掉或卡死**（#195）：真正的根因是**巢狀表格序列化路徑（`Table.toXML()` → `TableRow.toXML()` → `TableCell.toXML()` → `Paragraph.toXMLSortedByPosition()`）每一層在 debug build 的 `-Onone` 堆疊 frame 異常肥大，而 che-word-mcp 的文件存檔實際跑在 Swift concurrency cooperative-pool 的工作執行緒上——那條執行緒的堆疊只有約 512 KB，遠小於一般主執行緒的 8 MB。`Paragraph.toXMLSortedByPosition()`（每個正常從文件讀入的段落都會走這條路：`DocxReader` 給每個 run 的 source position 從 1 起算）內含約 15 個迴圈與多個中繼變數擠在同一個函式，`-Onone` 不會在變數死亡後回收 stack slot，所以整個函式的 frame 大小是所有區域變數的總和；`TableCell.toXML()` 另外還把一整個 `Paragraph` 結構（約 25 個欄位）當區域變數横跨遞迴呼叫持續留在堆疊上。這兩點合起來，只要對一份三層巢狀表格文件的**最外層** cell 呼叫 `update_cell` 之後存檔，即使完全沒動到巢狀表格本身，也可能已經逼近甚至超出 512 KB。現在把這幾個肥大函式拆成多個 `@inline(never)` 的小函式（各自的區域變數在呼叫返回後才需要的資訊改成先轉成 `String` 再往外傳，不再讓一整個 `Paragraph`/`TableRow`/`TableCell` 橫跨遞迴邊界留在堆疊上），實測同一份三層文件在 debug build 下「還能正常存檔」所需的最小堆疊，從修正前的約 536 KB（已經逼近／超過 512 KB 的實際可用堆疊）降到修正後不到 200 KB；五層巢狀（讀取端本來就有的上限）修正後約 210 KB 即可安全存檔，相對 512 KB 留有超過一倍餘裕。同時把寫出端的遞迴深度上限（`Table.maxSerializationDepth`）從讀取端上限（5）的等比例值重新校準為 10——這是實測「512 KB 執行緒＋debug build」下仍有 40% 以上餘裕的深度，超過上限的巢狀表格會截斷多餘內容而不是讓整個行程當掉，對 che-word-mcp 這種一個行程同時開著多份文件的情境尤其重要，一次當掉會連帶遺失其他文件尚未存檔的修改。二、三、五層的正常巢狀表格文件（含 `update_cell` 編輯）不受影響，讀入、編輯、存檔、讀回內容逐字保留，序列化位元組不變。
+- **巢狀表格文件在 debug build 下存檔會讓行程因 stack 溢位當掉**（#195）。實測情境：對一份兩層巢狀表格文件的最外層儲存格編輯後存檔，debug build 3/3 次 `EXC_BAD_ACCESS`；backtrace 總共只有 29 個 frame、`Table.toXML` 只遞迴 3 層。根因不是遞迴太深，而是這條路徑上的 frame 太大：`Paragraph.toXMLSortedByPosition()`（每個從文件讀入的段落都走這條路）把十多個迴圈的區域變數擠在同一個函式，`-Onone` 下每個變數各佔一個 stack slot；`TableCell.toXML()` 又把整個 `Paragraph` 結構跨越遞迴呼叫留在 stack 上。而呼叫端（例如 che-word-mcp）的存檔跑在 Swift concurrency 的工作執行緒上，stack 只有約 512 KB，不是主執行緒的 8 MB。現在把這些函式拆成 `@inline(never)` 的小函式，跨遞迴邊界只傳已組好的字串：同一份三層文件在 debug build 下所需的最小 stack 從約 536 KB 降到 200 KB 以下，五層（讀取端上限）約 210 KB。序列化輸出位元組不變。release build 在五層以內修正前後都能正常存檔。
+- **寫出端新增巢狀深度上限 `Table.maxSerializationDepth = 10`**（#195），依「512 KB 執行緒、debug build」的實測餘裕選定，作為 stack 溢位的最後防線。
+
+### 已知限制
+
+- 超過 10 層的巢狀表格存檔時，多出的層會被略過，**不會丟錯，`DocxWriter.write` 仍回報成功**。讀取端上限是 5 層，che-word-mcp 的 `insert_nested_table` 也限制 5 層，所以只有直接用公開 API（`TableCell.nestedTables`）建構超過 10 層結構的呼叫端會碰到；改為寫入前具名失敗追蹤於 #196。
 
 ## [3.16.1] - 2026-09-28
 
