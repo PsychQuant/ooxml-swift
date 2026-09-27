@@ -27,7 +27,7 @@ final class TableRowJustificationAndHeightRuleFidelityTests: XCTestCase {
     /// che-word-mcp#224(b): a `<w:trHeight>` that never carried `w:hRule`
     /// must not gain one on save. `heightRule == nil` now means "omit the
     /// attribute", not "assume auto" — OOXML's own default for `w:hRule`
-    /// is already "auto" (ECMA-376 §17.4.88), so this changes zero
+    /// is already "auto" (ECMA-376 Part 1's `w:trHeight` definition), so this changes zero
     /// documents' rendered behavior while stopping the manufactured
     /// attribute from showing up as a spurious diff on unrelated rows.
     func testRowHeightWithoutExplicitRuleOmitsHRuleAttribute() {
@@ -61,7 +61,7 @@ final class TableRowJustificationAndHeightRuleFidelityTests: XCTestCase {
     }
 
     /// While auditing `<w:trPr>` for other unmodeled children (che-word-mcp#224(b)
-    /// asked us to check), `<w:hidden/>` (ECMA-376 §17.4.36) turned
+    /// asked us to check), `<w:hidden/>` (ECMA-376 Part 1 `CT_TrPrBase`) turned
     /// out to be the exact same shape as the already-modeled `tblHeader`/
     /// `cantSplit` flags — a bare boolean, trivial and low-risk to add
     /// alongside the `jc` fix rather than leaving it for a future pass.
