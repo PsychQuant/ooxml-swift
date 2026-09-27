@@ -47,6 +47,18 @@ public struct SectionProperties {
     public var titlePageDistinct: Bool = false
     public var sectionBreakType: SectionBreakType?
 
+    /// PsychQuant/ooxml-swift#112: revision-save ids carried as direct
+    /// attributes on `<w:sectPr>` itself (`w:rsidRPr`, `w:rsidDel`,
+    /// `w:rsidR`, `w:rsidSect` — ECMA-376 `AG_SectPrAttributes`). No visual
+    /// effect, but Word's compare/merge uses them to attribute edits across
+    /// sessions; dropping them on every typed re-serialization discards that
+    /// provenance. Carried opaquely (unqualified attribute local name →
+    /// value) rather than as four named fields — same shape covers
+    /// `w:rsidDel` and any future member of the same attribute group without
+    /// a field per attribute. Keyed by local name (no `w:` prefix); emitted
+    /// in a fixed canonical order, not dictionary iteration order.
+    public var rsidAttributes: [String: String] = [:]
+
     public init(pageSize: PageSize = .letter,
          pageMargins: PageMargins = .normal,
          orientation: PageOrientation = .portrait,
@@ -149,6 +161,7 @@ extension SectionProperties: Equatable {
             && lhs.pageNumberStartValue == rhs.pageNumberStartValue
             && lhs.titlePageDistinct == rhs.titlePageDistinct
             && lhs.sectionBreakType == rhs.sectionBreakType
+            && lhs.rsidAttributes == rhs.rsidAttributes
     }
 }
 
@@ -376,9 +389,32 @@ public struct PageBreak: Equatable {
 // MARK: - XML Generation
 
 extension SectionProperties {
+    /// PsychQuant/ooxml-swift#112: renders `rsidAttributes` as the opening
+    /// `<w:sectPr ...>` tag's attribute list, in `AG_SectPrAttributes`
+    /// schema-declaration order (`rsidRPr`, `rsidDel`, `rsidR`, `rsidSect`);
+    /// any other key (should not occur per schema, but kept defensive rather
+    /// than silently dropped) is appended afterward in alphabetical order.
+    /// Empty dict (the overwhelming common case — no source rsids, or a
+    /// programmatically-built document) yields `""`, so `<w:sectPr>` keeps
+    /// emitting with no attributes exactly as before this field existed.
+    private func rsidAttributesXML() -> String {
+        guard !rsidAttributes.isEmpty else { return "" }
+        let canonicalOrder = ["rsidRPr", "rsidDel", "rsidR", "rsidSect"]
+        var parts: [String] = []
+        for name in canonicalOrder {
+            if let value = rsidAttributes[name] {
+                parts.append("w:\(name)=\"\(escapeXMLAttribute(value))\"")
+            }
+        }
+        for name in rsidAttributes.keys.sorted() where !canonicalOrder.contains(name) {
+            parts.append("w:\(name)=\"\(escapeXMLAttribute(rsidAttributes[name]!))\"")
+        }
+        return " " + parts.joined(separator: " ")
+    }
+
     /// 轉換為 XML（完整的 sectPr）
     func toXML() -> String {
-        var xml = "<w:sectPr>"
+        var xml = "<w:sectPr\(rsidAttributesXML())>"
 
         // v0.16.0+ (#44 §4): per-type header refs first, then default if no per-type set
         // v0.19.5+ (#56 R5 P0 #3): rId values are caller-controllable via
@@ -473,7 +509,7 @@ extension SectionProperties {
 
     /// 轉換為分節符 XML（放在段落內）
     func toSectionBreakXML(type: SectionBreakType = .nextPage) -> String {
-        var xml = "<w:sectPr>"
+        var xml = "<w:sectPr\(rsidAttributesXML())>"
 
         // 分節類型
         xml += "<w:type w:val=\"\(type.rawValue)\"/>"
