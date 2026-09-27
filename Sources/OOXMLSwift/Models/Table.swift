@@ -244,6 +244,23 @@ public struct TableRowProperties: Equatable {
     public var isHeader: Bool = false      // 是否為表頭行（每頁重複）
     public var cantSplit: Bool = false     // 禁止跨頁分割
 
+    /// che-word-mcp#224(b): row-level horizontal justification
+    /// (`<w:trPr><w:jc>`, ECMA-376 §17.4.36 CT_TrPrBase). Distinct from a
+    /// cell's own content alignment — this controls where an
+    /// under-page-width row sits relative to the margins. The model had no
+    /// field for this at all, so every save silently dropped it, not just
+    /// on the row being edited (see `DocxWriter.writeAllParts`'s
+    /// mark-dirty-then-rewrite-the-whole-part mechanism). Reuses the same
+    /// `Alignment` enum `TableProperties.alignment` already reuses for the
+    /// table-level `<w:tblPr><w:jc>` sibling, for consistency.
+    public var justification: Alignment?
+
+    /// che-word-mcp#224(b) follow-up: `<w:trPr><w:hidden/>` (ECMA-376
+    /// §17.4.36) — the same bare-boolean shape as `isHeader`/`cantSplit`
+    /// above. Found while auditing `<w:trPr>`'s other children for the same
+    /// kind of gap; low-risk enough to fix in the same pass.
+    public var hidden: Bool = false
+
     public init() {}
 }
 
@@ -1209,17 +1226,41 @@ extension TableRow {
         var xml = "<w:tr>"
 
         // Row Properties
-        if properties.height != nil || properties.isHeader || properties.cantSplit {
+        if properties.height != nil || properties.isHeader || properties.cantSplit
+            || properties.justification != nil || properties.hidden {
             xml += "<w:trPr>"
             if let height = properties.height {
-                let rule = properties.heightRule?.rawValue ?? "auto"
-                xml += "<w:trHeight w:val=\"\(height)\" w:hRule=\"\(rule)\"/>"
+                // che-word-mcp#224(b): `heightRule == nil` now omits
+                // `w:hRule` entirely instead of manufacturing
+                // `w:hRule="auto"`. OOXML's own default for the attribute
+                // is already "auto" (ECMA-376 §17.4.88), so this changes
+                // no document's rendered behavior — it only stops a save
+                // from adding an attribute that was never in the source to
+                // every row a mutation didn't otherwise touch. An
+                // explicitly-set `.auto` is unaffected; only *absence* of a
+                // rule is suppressed.
+                if let rule = properties.heightRule?.rawValue {
+                    xml += "<w:trHeight w:val=\"\(height)\" w:hRule=\"\(rule)\"/>"
+                } else {
+                    xml += "<w:trHeight w:val=\"\(height)\"/>"
+                }
             }
             if properties.isHeader {
                 xml += "<w:tblHeader/>"
             }
             if properties.cantSplit {
                 xml += "<w:cantSplit/>"
+            }
+            // che-word-mcp#224(b): row-level justification. Schema position
+            // (CT_TrPrBase) is after tblCellSpacing/tblHeader; tblCellSpacing
+            // isn't modeled, so this is emitted right after tblHeader/
+            // cantSplit, matching relative order for every element this
+            // model currently knows about.
+            if let justification = properties.justification {
+                xml += "<w:jc w:val=\"\(justification.rawValue)\"/>"
+            }
+            if properties.hidden {
+                xml += "<w:hidden/>"
             }
             xml += "</w:trPr>"
         }
