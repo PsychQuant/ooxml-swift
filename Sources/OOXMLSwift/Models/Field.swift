@@ -379,19 +379,24 @@ public struct ParagraphBorder: Equatable {
     public var left: ParagraphBorderStyle?
     public var right: ParagraphBorderStyle?
     public var between: ParagraphBorderStyle?  // 段落之間的邊框
+    /// PsychQuant/ooxml-swift#179: `CT_PBdr` 的第六邊——多欄排版時欄與欄之間
+    /// 的邊框（ECMA-376 §17.3.1.4）。
+    public var bar: ParagraphBorderStyle?
 
     public init(
         top: ParagraphBorderStyle? = nil,
         bottom: ParagraphBorderStyle? = nil,
         left: ParagraphBorderStyle? = nil,
         right: ParagraphBorderStyle? = nil,
-        between: ParagraphBorderStyle? = nil
+        between: ParagraphBorderStyle? = nil,
+        bar: ParagraphBorderStyle? = nil
     ) {
         self.top = top
         self.bottom = bottom
         self.left = left
         self.right = right
         self.between = between
+        self.bar = bar
     }
 
     /// 便利方法：建立四邊相同的邊框
@@ -407,11 +412,29 @@ public struct ParagraphBorderStyle: Equatable {
     public var size: Int           // 邊框寬度 (1/8 點)
     public var space: Int          // 與文字間距 (點)
 
-    public init(type: ParagraphBorderType = .single, color: String = "000000", size: Int = 4, space: Int = 1) {
+    /// PsychQuant/ooxml-swift#179: `CT_Border` 的 theme 色與旗標屬性。
+    /// `themeColor` 指到主題色盤（`ST_ThemeColor`），`themeTint`／
+    /// `themeShade` 是套在該主題色上的加亮／加深係數（16 進位字串）；
+    /// `color` 仍是解析後的固定 RGB 備援值，Word 兩者都寫。`shadow`／`frame`
+    /// 是 `ST_OnOff`。
+    public var themeColor: String?
+    public var themeTint: String?
+    public var themeShade: String?
+    public var shadow: Bool?
+    public var frame: Bool?
+
+    public init(type: ParagraphBorderType = .single, color: String = "000000", size: Int = 4, space: Int = 1,
+                themeColor: String? = nil, themeTint: String? = nil, themeShade: String? = nil,
+                shadow: Bool? = nil, frame: Bool? = nil) {
         self.type = type
         self.color = color
         self.size = size
         self.space = space
+        self.themeColor = themeColor
+        self.themeTint = themeTint
+        self.themeShade = themeShade
+        self.shadow = shadow
+        self.frame = frame
     }
 }
 
@@ -430,6 +453,17 @@ public enum ParagraphBorderType: String, Codable {
 }
 
 extension ParagraphBorder {
+    /// 一邊的完整屬性字串（PsychQuant/ooxml-swift#179 起含 theme*／shadow／frame）。
+    private func sideXML(_ name: String, _ style: ParagraphBorderStyle) -> String {
+        var attrs = "w:val=\"\(style.type.rawValue)\" w:sz=\"\(style.size)\" w:space=\"\(style.space)\" w:color=\"\(escapeXMLAttribute(style.color))\""
+        if let themeColor = style.themeColor { attrs += " w:themeColor=\"\(escapeXMLAttribute(themeColor))\"" }
+        if let themeTint = style.themeTint { attrs += " w:themeTint=\"\(escapeXMLAttribute(themeTint))\"" }
+        if let themeShade = style.themeShade { attrs += " w:themeShade=\"\(escapeXMLAttribute(themeShade))\"" }
+        if let shadow = style.shadow { attrs += " w:shadow=\"\(shadow ? "1" : "0")\"" }
+        if let frame = style.frame { attrs += " w:frame=\"\(frame ? "1" : "0")\"" }
+        return "<w:\(name) \(attrs)/>"
+    }
+
     /// 產生段落邊框的 XML
     func toXML() -> String {
         var xml = "<w:pBdr>"
@@ -438,21 +472,13 @@ extension ParagraphBorder {
         // through escapeXMLAttribute (MCP `set_paragraph_border`).
         // v3.13.0+ (#175): ECMA-376 `CT_PBdr` 順序是 top, left, bottom, right,
         // between, bar（修正前 bottom 排在 left 之前）。
-        if let top = top {
-            xml += "<w:top w:val=\"\(top.type.rawValue)\" w:sz=\"\(top.size)\" w:space=\"\(top.space)\" w:color=\"\(escapeXMLAttribute(top.color))\"/>"
-        }
-        if let left = left {
-            xml += "<w:left w:val=\"\(left.type.rawValue)\" w:sz=\"\(left.size)\" w:space=\"\(left.space)\" w:color=\"\(escapeXMLAttribute(left.color))\"/>"
-        }
-        if let bottom = bottom {
-            xml += "<w:bottom w:val=\"\(bottom.type.rawValue)\" w:sz=\"\(bottom.size)\" w:space=\"\(bottom.space)\" w:color=\"\(escapeXMLAttribute(bottom.color))\"/>"
-        }
-        if let right = right {
-            xml += "<w:right w:val=\"\(right.type.rawValue)\" w:sz=\"\(right.size)\" w:space=\"\(right.space)\" w:color=\"\(escapeXMLAttribute(right.color))\"/>"
-        }
-        if let between = between {
-            xml += "<w:between w:val=\"\(between.type.rawValue)\" w:sz=\"\(between.size)\" w:space=\"\(between.space)\" w:color=\"\(escapeXMLAttribute(between.color))\"/>"
-        }
+        if let top = top { xml += sideXML("top", top) }
+        if let left = left { xml += sideXML("left", left) }
+        if let bottom = bottom { xml += sideXML("bottom", bottom) }
+        if let right = right { xml += sideXML("right", right) }
+        if let between = between { xml += sideXML("between", between) }
+        // PsychQuant/ooxml-swift#179: bar — CT_PBdr's sixth (last) child.
+        if let bar = bar { xml += sideXML("bar", bar) }
 
         xml += "</w:pBdr>"
         return xml
