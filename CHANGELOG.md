@@ -9,9 +9,7 @@ All notable changes to ooxml-swift will be documented in this file.
 ## [Unreleased]
 
 ## [3.15.0] - 2026-09-27
-
 ### Added
-
 - **測試防呆：來源不得再出現 host-absolute fixture 路徑**（#162）。新增守門測試掃描
   `Tests/`／`Sources/`／`scripts/` 下所有 `.swift` 檔，偵測寫死的本機使用者目錄路徑；
   找不到 repo 根目錄時測試本身會失敗（不是安靜跳過）。`V1BenchmarkTests` 與
@@ -51,9 +49,7 @@ All notable changes to ooxml-swift will be documented in this file.
   段落底色的讀取路徑（`parseParagraphShading`）會填入；表格儲存格底色（`w:tcPr/w:shd`）
   的讀取路徑尚未涵蓋，欄位對表格一律 nil，不影響既有輸出，但也代表儲存格底色的 theme
   屬性仍有本文件所述的同一種遺失風險（留待未來處理）。
-
 ### Fixed
-
 - **執行任何 typed 編輯存檔後，其他未觸及的文字執行（run）會丟掉模型沒有欄位的 `<w:rPr>`
   子元素**（PsychQuant/ooxml-swift#164）。`<w:bCs>`、`<w:iCs>`、`<w:vanish>`（隱藏文字）等
   `RunProperties` 沒有對應欄位的屬性，只要文件裡任何一段落被 `updateParagraph`／`replaceText`／
@@ -118,6 +114,22 @@ All notable changes to ooxml-swift will be documented in this file.
   存檔具備冪等性。已知限制：這是局部修法，不是本族問題（#133／#129）需要的架構修正——如果
   剛好有一個「沒有 run 但帶特定格式」的段落原本刻意放在表格前的最後一個位置，會被搬到表格
   後面，這個取捨是 issue 本身認可的範圍。
+- **新操作 `Operation.setRunFormatInRange` / `OOXMLEdit.setBoldInRange`**（PsychQuant/macdoc#232）：
+  以「段落 ElementID ＋ substring（可指定第幾次出現，預設第 1 次）」定位一段文字範圍並套用格式，
+  取代 manifest 驅動編輯（`docx apply` 的 `set_bold` 步驟）誤用 `OOXMLEdit.setBold`／
+  `Operation.setRunFormat` 的用法——後者的目標一律要求是單一 `<w:r>`，段落目標必定拋出
+  `malformedOp("setRunFormat target must be <w:r>")`，且 manifest 的 `substring` 欄位從未被使用。
+  範圍跨越或落在 run 中間時會就地切分 run，被切出的每一段（含未建模的原始 `<w:rPr>` 子元素）
+  保留原有格式，只有比對到的文字範圍被改動。目前 reducer 僅實作 `bold`；`RunFormatPayload`
+  的其他欄位（italic/underline/fontSizeHalfPoints/color）若非 `nil` 會明確拋錯而非靜默忽略，
+  留給未來擴充。`value: false` 會寫出明確的 `<w:b w:val="0"/>` 關閉值而非移除元素
+  （對齊 PsychQuant/ooxml-swift#161 的期望行為）。
+- **`ReducerError` 補上 `LocalizedError`**（PsychQuant/macdoc#232）：`ReducerError.localizedDescription`
+  原本沒有自訂 `errorDescription`，會被橋接成通用的 NSError 訊息（如「The operation couldn't be
+  completed. (OOXMLSwift.ReducerError error 1.)」），把 `.malformedOp` 的 `reason` 字串整段吃掉。
+  `WordDocument+Apply.swift` 把 reducer 失敗包成 `EditError.operationLogFailure(underlying:
+  "...: \(error.localizedDescription)")`，因此呼叫端原本只看得到「error 1」，看不到真正原因
+  （例如「setRunFormat target must be <w:r>」）。現在四個 case 都有對應的 `errorDescription`。
 
 ## [3.14.0] - 2026-09-27
 

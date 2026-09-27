@@ -186,6 +186,13 @@ internal enum JSONLLineCoder {
                 ("target", jsonString(target.raw)),
                 ("format", encodeCodable(format))
             ])
+        case .setRunFormatInRange(let target, let substring, let instance, let format):
+            return ("setRunFormatInRange", [
+                ("target", jsonString(target.raw)),
+                ("substring", jsonString(substring)),
+                ("instance", String(instance)),
+                ("format", encodeCodable(format))
+            ])
         case .insertBookmark(let at, let bookmarkId, let name):
             return ("insertBookmark", [
                 ("at", jsonString(at.raw)),
@@ -392,6 +399,12 @@ internal enum JSONLLineCoder {
             return .insertRun(in: try eid("in"), position: try int("position"), run: try payload("run", RunPayload.self))
         case "setRunFormat":
             return .setRunFormat(target: try eid("target"), format: try payload("format", RunFormatPayload.self))
+        case "setRunFormatInRange":
+            return .setRunFormatInRange(
+                target: try eid("target"),
+                substring: try str("substring"),
+                instance: try int("instance"),
+                format: try payload("format", RunFormatPayload.self))
         case "insertBookmark":
             return .insertBookmark(at: try eid("at"), bookmarkId: try int("bookmarkId"), name: try str("name"))
         case "insertComment":

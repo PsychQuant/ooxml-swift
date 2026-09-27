@@ -56,6 +56,41 @@ public enum OOXMLEdit: Edit, Equatable, Sendable {
     /// Throws `EditError.unsupportedOperation` if target is not a Run.
     case setBold(target: ElementID, value: Bool)
 
+    /// Toggle bold formatting on a text range within a paragraph, located by
+    /// substring.
+    ///
+    /// - `target`: ElementID of the paragraph containing the text (must
+    ///   resolve to a `<w:p>` element).
+    /// - `substring`: exact text to locate within the paragraph's flattened
+    ///   text (concatenation, in document order, of every run's `<w:t>`
+    ///   text).
+    /// - `instance`: 1-based occurrence to target when `substring` appears
+    ///   more than once in the paragraph (default `1`, matching
+    ///   `InsertLocation.afterText`'s `instance` convention).
+    /// - `value`: `true` writes the canonical naked `<w:b/>`; `false` writes
+    ///   an explicit `<w:b w:val="0"/>` off value (PsychQuant/ooxml-swift#161).
+    ///
+    /// Maps to `Operation.setRunFormatInRange(target:substring:instance:
+    /// format:)` with `RunFormatPayload(bold: value)`. Unlike `.setBold`,
+    /// `target` here is a PARAGRAPH, not a Run — the reducer resolves
+    /// `substring` to a text range that may span or fall inside one or more
+    /// runs, splitting run(s) as needed so only the matched text is
+    /// reformatted.
+    ///
+    /// PsychQuant/macdoc#232: `docx apply`'s `set_bold` manifest step has a
+    /// paragraph anchor + a `substring` field (declared but previously
+    /// unused) — never a Run ElementID — which made `.setBold` always throw
+    /// `malformedOp("setRunFormat target must be <w:r>")`. This case is the
+    /// paragraph+substring-addressed entry point manifest-driven callers
+    /// (`EditPlanner`/`docx-workflow-swift`) should use for `set_bold`
+    /// instead.
+    ///
+    /// Throws (at reducer/apply time — `operations()` itself never inspects
+    /// document content) `ReducerError.malformedOp` when `substring` is
+    /// empty, not found, `instance < 1`, or `target` does not resolve to a
+    /// `<w:p>`.
+    case setBoldInRange(target: ElementID, substring: String, value: Bool, instance: Int = 1)
+
     /// Insert a NEW hyperlink wrapper after the specified target element.
     ///
     /// **Insert semantics (Design X from macdoc#110 §5 walkthrough)**:
