@@ -74,20 +74,41 @@ public enum RawPartChannel {
     /// Reads every regular file under an already-extracted package root.
     /// Used by sync to compare Word's new package against the preserved
     /// pre-import archive without re-zipping it first.
-    public static func readAllParts(fromDirectory root: URL) throws -> [String: Data] {
+    ///
+    /// R2 (PsychQuant/ooxml-swift#130 LOW-1, review sweep): no production
+    /// call site currently reaches this with a `root` outside `ZipHelper`'s
+    /// own already-bounded extraction namespaces, but it is `public` — an
+    /// external caller (che-word-mcp, macdoc) could point it at a directory
+    /// it extracted itself, with no size bound at all. Bounded the same way
+    /// `readAllParts(from:)` bounds a zip: per-file size via
+    /// `ZipHelper.readPart` (stat before read, cheap and consistent with the
+    /// zip-reading overload), entry count, and a running total.
+    public static func readAllParts(fromDirectory root: URL, limits: ZipHelper.Limits = ZipHelper.defaultLimits) throws -> [String: Data] {
         let fm = FileManager.default
         let normalizedRoot = root.resolvingSymlinksInPath().path
         guard let walk = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else {
             return [:]
         }
         var parts: [String: Data] = [:]
+        var entryCount = 0
+        var total: Int64 = 0
         for case let url as URL in walk {
             let values = try url.resourceValues(forKeys: [.isRegularFileKey])
             guard values.isRegularFile == true else { continue }
             let normalized = url.resolvingSymlinksInPath().path
             guard normalized.hasPrefix(normalizedRoot + "/") else { continue }
             let path = String(normalized.dropFirst(normalizedRoot.count + 1))
-            parts[path] = try Data(contentsOf: url)
+            entryCount += 1
+            if entryCount > limits.maximumEntryCount {
+                throw WordError.invalidDocx("more than \(limits.maximumEntryCount) files under the extracted package root; refusing to read it.")
+            }
+            let bytes = try ZipHelper.readPart(at: url, describedAs: path, limits: limits)
+            let (sum, overflowed) = total.addingReportingOverflow(Int64(bytes.count))
+            total = overflowed ? Int64.max : sum
+            if overflowed || total > limits.maximumTotalBytes {
+                throw WordError.invalidDocx("more than \(ZipHelper.describeBytes(limits.maximumTotalBytes)) of content under the extracted package root in total; refusing to read it.")
+            }
+            parts[path] = bytes
         }
         return parts
     }
