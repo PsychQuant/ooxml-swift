@@ -204,8 +204,14 @@ final class Issue137to139InspectorParserTests: XCTestCase {
                 extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#,
                         "word/charts/_rels/chart1.xml.rels": rels(payload)])
         }
+        // PsychQuant/ooxml-swift#130/#157: these payloads are thousands of
+        // repetitions of a 3-4 byte token, so they compress far past the
+        // default 500x ratio limit — a size-hardening concern this test is
+        // not about (it is about comment/CDATA parsing degrading libxml2,
+        // not about compression ratio). Lifted within this test's own scope.
+        let ratioExempt = ZipHelper.Limits(maximumCompressionRatio: .infinity)
         for (label, payload) in payloads {
-            let report = try PackageInspector.imageConsistencyReport(of: try packageData(payload(20_000)))
+            let report = try PackageInspector.imageConsistencyReport(of: try packageData(payload(20_000)), limits: ratioExempt)
             // Whatever the parser makes of the payload, it must not invent a
             // chart-part orphan out of a part it could not read.
             XCTAssertFalse(report.orphanImageRelationshipRefs.contains { $0.part.hasPrefix("word/charts/") }, label)
@@ -215,7 +221,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             // noise floor, at both sizes.
             try XCTAssertScalesLinearly(label, baseSize: 5_000,
                                         prepare: { try packageData(payload($0)) }) {
-                _ = try PackageInspector.imageConsistencyReport(of: $0)
+                _ = try PackageInspector.imageConsistencyReport(of: $0, limits: ratioExempt)
             }
         }
     }
@@ -235,9 +241,13 @@ final class Issue137to139InspectorParserTests: XCTestCase {
                         docRels: #"<Relationship Id="rId4" Type="\#(imageType)" Target="media/image1.png"/>"#,
                         extra: ["word/charts/chart1.xml": #"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#, "word/charts/_rels/chart1.xml.rels": rels(payload)])
         }
+        // PsychQuant/ooxml-swift#130/#157: same reasoning as the sibling test
+        // above — these payloads are highly repetitive and compress past the
+        // default ratio limit, which is not what this test exercises.
+        let ratioExempt = ZipHelper.Limits(maximumCompressionRatio: .infinity)
         for (label, payload) in payloads {
             XCTAssertNotNil(PackageInspector.linearPrecheckFailure(Data(payload(n).utf8)), label)
-            let report = try PackageInspector.imageConsistencyReport(of: try packageData(payload(n)))
+            let report = try PackageInspector.imageConsistencyReport(of: try packageData(payload(n)), limits: ratioExempt)
             XCTAssertEqual(report.unparsableParts, ["word/charts/_rels/chart1.xml.rels"], label)
             XCTAssertFalse(report.isConsistent, label)
             // #174: both steps linear, asserted as scale ratios rather than
@@ -250,7 +260,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             }
             try XCTAssertScalesLinearly("\(label) · report", baseSize: n / 4,
                                         prepare: { try packageData(payload($0)) }) {
-                _ = try PackageInspector.imageConsistencyReport(of: $0)
+                _ = try PackageInspector.imageConsistencyReport(of: $0, limits: ratioExempt)
             }
         }
         // …and a benign comment of the same size is parsed normally.
@@ -1738,7 +1748,16 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             }
         }
         poller.start()
-        let out = try ZipHelper.unzip(data: data, namespace: ns)
+        // PsychQuant/ooxml-swift#130/#157: this fixture's 48 MB payload is a
+        // 16-byte pattern repeated 3,000,000 times, so it compresses far
+        // past the default 500x ratio limit and the default 512 MB total —
+        // neither of which this test is about (it is about the private
+        // copy's mode). Lifted within this test's own scope, matching how
+        // other deliberately pathological fixtures in this file lift limits
+        // rather than being refused by the size hardening.
+        let permissive = ZipHelper.Limits(maximumEntryBytes: 256 << 20, maximumTotalBytes: 256 << 20,
+                                          maximumCompressionRatio: .infinity, maximumPartBytes: 256 << 20)
+        let out = try ZipHelper.unzip(data: data, namespace: ns, limits: permissive)
         poller.cancel()
         ZipHelper.cleanup(out)
         samples.lock.lock(); let modes = samples.modes; samples.lock.unlock()
