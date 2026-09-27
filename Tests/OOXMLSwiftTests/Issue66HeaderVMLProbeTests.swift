@@ -3,13 +3,12 @@ import XCTest
 
 final class Issue66HeaderVMLProbeTests: XCTestCase {
     func testHeaderVMLPictParsedIntoRawElements() throws {
-        // Local-only real-world fixture (path via env — a third party's document
-        // name does not belong in the repo; see the repo privacy discipline).
-        guard let fixturePath = ProcessInfo.processInfo.environment["OOXML_LOCAL_DOCUMENT_FIXTURE"],
-              FileManager.default.fileExists(atPath: fixturePath) else {
-            throw XCTSkip("set OOXML_LOCAL_DOCUMENT_FIXTURE to a local document docx to run this probe")
-        }
-        let raw = URL(fileURLWithPath: fixturePath)
+        // #162 — resolved through the shared MACDOC_TEMPLATE_DIR gate
+        // (TemplateFixtureGate.documentFixtureName) instead of this file's own
+        // standalone OOXML_LOCAL_DOCUMENT_FIXTURE env var. Local-only
+        // real-world fixture: a third party's document name does not belong
+        // in the repo; see the repo privacy discipline.
+        let raw = try TemplateFixtureGate.requireTemplate(TemplateFixtureGate.documentFixtureName)
         let doc = try DocxReader.read(from: raw)
         XCTAssertGreaterThan(doc.headers.count, 0, "expected at least one header")
         var foundPict = false
@@ -33,13 +32,9 @@ final class Issue66HeaderVMLProbeTests: XCTestCase {
     }
 
     func testHeaderRoundTripPreservesVML() throws {
-        // Local-only real-world fixture (path via env — a third party's document
-        // name does not belong in the repo; see the repo privacy discipline).
-        guard let fixturePath = ProcessInfo.processInfo.environment["OOXML_LOCAL_DOCUMENT_FIXTURE"],
-              FileManager.default.fileExists(atPath: fixturePath) else {
-            throw XCTSkip("set OOXML_LOCAL_DOCUMENT_FIXTURE to a local document docx to run this probe")
-        }
-        let raw = URL(fileURLWithPath: fixturePath)
+        // #162 — resolved through the shared MACDOC_TEMPLATE_DIR gate; see
+        // testHeaderVMLPictParsedIntoRawElements above.
+        let raw = try TemplateFixtureGate.requireTemplate(TemplateFixtureGate.documentFixtureName)
         let out = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("issue66_repro.docx")
         try? FileManager.default.removeItem(at: out)
 
