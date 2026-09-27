@@ -3805,9 +3805,22 @@ public struct DocxReader {
         }
 
         // 垂直合併
-        if let vMerge = element.elements(forName: "w:vMerge").first,
-           let val = vMerge.attribute(forName: "w:val")?.stringValue {
-            props.verticalMerge = VerticalMerge(rawValue: val)
+        //
+        // che-word-mcp#185: `<w:vMerge/>` with no `w:val` is valid OOXML
+        // (ECMA-376 §17.4.85) and the common continuation form emitted by
+        // Word / python-docx — absence of `w:val` means "continue". The
+        // previous guard chain required `w:val` to exist before recording
+        // anything, so a bare continuation cell read as `verticalMerge ==
+        // nil`. Because the writer re-serializes the whole part once any
+        // table mutation marks it dirty, that silently dropped the
+        // continuation from every untouched row in the document, not just
+        // the one being edited.
+        if let vMerge = element.elements(forName: "w:vMerge").first {
+            if let val = vMerge.attribute(forName: "w:val")?.stringValue {
+                props.verticalMerge = VerticalMerge(rawValue: val)
+            } else {
+                props.verticalMerge = .continue
+            }
         }
 
         // 垂直對齊

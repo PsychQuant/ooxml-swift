@@ -1283,8 +1283,22 @@ extension TableCellProperties {
         }
 
         // 垂直合併
+        //
+        // che-word-mcp#185: `.continue` writes back as the bare
+        // self-closing form (no `w:val`) rather than `w:val="continue"`.
+        // OOXML treats the two as identical (absence of `w:val` implies
+        // "continue" per ECMA-376 §17.4.85), and the bare form is what
+        // real documents already carry — emitting it unchanged keeps a
+        // save from producing a byte diff on every continuation cell the
+        // edit never touched. `.restart` has no implied default and must
+        // always be explicit.
         if let vMerge = verticalMerge {
-            parts.append("<w:vMerge w:val=\"\(vMerge.rawValue)\"/>")
+            switch vMerge {
+            case .continue:
+                parts.append("<w:vMerge/>")
+            case .restart:
+                parts.append("<w:vMerge w:val=\"\(vMerge.rawValue)\"/>")
+            }
         }
 
         // 邊框
