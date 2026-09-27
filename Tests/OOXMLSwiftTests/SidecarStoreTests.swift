@@ -13,31 +13,11 @@ import XCTest
 /// plain `DocxWriter.write` / `DocxReader.read` never touch them.
 final class SidecarStoreTests: XCTestCase {
 
-    private var readerArchiveRoot: URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent(ZipHelper.readerNamespace)
-    }
-
-    private func extractedPackageDirectories() -> Set<String> {
-        Set((try? FileManager.default.contentsOfDirectory(
-            atPath: readerArchiveRoot.path)) ?? [])
-    }
-
-    /// Archive directories that appeared under the shared reader namespace since
-    /// `before` **and belong to this test** — recognised by `marker`, a per-test
-    /// UUID written into the fixture's document.xml. Other processes extract into
-    /// the same namespace concurrently (a second `swift test`, an MCP server), so a
-    /// bare before/after set comparison flaps (logic N-L6-R6, regression N-R5-1).
-    /// `TMPDIR` cannot isolate it either: macOS's `NSTemporaryDirectory()`
-    /// ignores it (regression N-R6-2).
-    private func leakedArchiveDirectories(since before: Set<String>, marker: String) -> [String] {
-        extractedPackageDirectories().subtracting(before).filter { name in
-            let part = readerArchiveRoot.appendingPathComponent(name)
-                .appendingPathComponent("word/document.xml")
-            guard let data = try? Data(contentsOf: part) else { return false }
-            return String(decoding: data, as: UTF8.self).contains(marker)
-        }.sorted()
-    }
+    // #152 — the namespace-snapshot / leaked-directory logic previously
+    // duplicated here now lives in the shared `ReaderNamespaceLeakProbe`
+    // (`Tests/OOXMLSwiftTests/Helpers/ReaderNamespaceLeakProbe.swift`); see
+    // its doc comment for why a bare before/after `Set` diff flaps and why
+    // ownership is recognised via a per-test marker rather than by name.
 
     private func makeDoc(marker: String? = nil) -> WordDocument {
         var doc = WordDocument()
@@ -345,11 +325,11 @@ final class SidecarStoreTests: XCTestCase {
         try DocxWriter.write(makeDoc(marker: marker), to: docxURL)
         try Data("{malformed-jsonl\n".utf8).write(
             to: SidecarStore.oplogURL(for: docxURL))
-        let before = extractedPackageDirectories()
+        let before = ReaderNamespaceLeakProbe.snapshot()
 
         XCTAssertThrowsError(try WordDocument.openWithSidecars(from: docxURL))
 
-        XCTAssertEqual(leakedArchiveDirectories(since: before, marker: marker), [],
+        XCTAssertEqual(ReaderNamespaceLeakProbe.leakedByDocumentMarker(since: before, marker: marker), [],
                        "a failed sidecar open must release its extracted package")
     }
 

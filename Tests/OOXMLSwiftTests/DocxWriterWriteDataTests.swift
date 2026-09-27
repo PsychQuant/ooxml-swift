@@ -55,12 +55,17 @@ final class DocxWriterWriteDataTests: XCTestCase {
         // N-R6-2), so a bare before/after listing flaps under concurrent
         // readers (N-R6-1). The document carries a per-test marker; only an
         // item that contains it counts as OUR leak.
-        let macdocTempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent(ZipHelper.readerNamespace)
+        //
+        // #152 — `root`/`snapshot()` are the shared `ReaderNamespaceLeakProbe`
+        // primitives (also used by SidecarStoreTests / SyncOrchestratorTests);
+        // the marker-recognition predicate below stays local because it's
+        // meaningfully different from either of that helper's convenience
+        // forms — it has to look INSIDE a leaked private zip copy, not just
+        // check for an unreferenced part's presence.
+        let macdocTempRoot = ReaderNamespaceLeakProbe.root
         let marker = "writeData-leak-marker-\(UUID().uuidString)"
 
-        let beforeFiles = Set(((try? FileManager.default.contentsOfDirectory(
-            at: macdocTempRoot, includingPropertiesForKeys: nil)) ?? []).map(\.lastPathComponent))
+        let beforeFiles = ReaderNamespaceLeakProbe.snapshot()
 
         var document = WordDocument()
         document.appendParagraph(Paragraph(text: marker))
