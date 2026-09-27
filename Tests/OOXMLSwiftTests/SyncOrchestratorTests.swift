@@ -81,30 +81,12 @@ final class SyncOrchestratorTests: XCTestCase {
         try? FileManager.default.removeItem(at: docxURL.deletingLastPathComponent())
     }
 
-    private var readerArchiveRoot: URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent(ZipHelper.readerNamespace)
-    }
-
-    private func extractedPackageDirectories() -> Set<String> {
-        Set((try? FileManager.default.contentsOfDirectory(
-            atPath: readerArchiveRoot.path)) ?? [])
-    }
-
-    /// Archive directories that appeared under the shared reader namespace since
-    /// `before` **and belong to this test** — recognised by the per-test marker
-    /// media part `buildFixture(marker:)` adds. Other processes extract into the
-    /// same namespace concurrently, so a bare before/after set comparison flaps
-    /// (logic N-L6-R6, regression N-R5-1).
-    /// `TMPDIR` cannot isolate it either: macOS's `NSTemporaryDirectory()`
-    /// ignores it (regression N-R6-2).
-    private func leakedArchiveDirectories(since before: Set<String>, marker: String) -> [String] {
-        extractedPackageDirectories().subtracting(before).filter { name in
-            FileManager.default.fileExists(atPath: readerArchiveRoot
-                .appendingPathComponent(name)
-                .appendingPathComponent("word/media/\(marker).bin").path)
-        }.sorted()
-    }
+    // #152 — the namespace-snapshot / leaked-directory logic previously
+    // duplicated here now lives in the shared `ReaderNamespaceLeakProbe`
+    // (`Tests/OOXMLSwiftTests/Helpers/ReaderNamespaceLeakProbe.swift`); see
+    // its doc comment for why a bare before/after `Set` diff flaps and why
+    // ownership is recognised via `buildFixture(marker:)`'s per-test
+    // unreferenced media part rather than by name.
 
     /// Simulates a Word save: rewrites `word/document.xml` inside the zip
     /// with `transform` applied, touching nothing else and creating no
@@ -202,11 +184,11 @@ final class SyncOrchestratorTests: XCTestCase {
         defer { cleanup(docxURL) }
         try Data("{malformed-jsonl\n".utf8).write(
             to: SidecarStore.oplogURL(for: docxURL))
-        let before = extractedPackageDirectories()
+        let before = ReaderNamespaceLeakProbe.snapshot()
 
         XCTAssertThrowsError(try SyncOrchestrator.bootstrapFromDocx(url: docxURL))
 
-        XCTAssertEqual(leakedArchiveDirectories(since: before, marker: marker), [],
+        XCTAssertEqual(ReaderNamespaceLeakProbe.leakedByMediaMarkerFile(since: before, marker: marker), [],
                        "a failed bootstrap must release its extracted package")
     }
 
