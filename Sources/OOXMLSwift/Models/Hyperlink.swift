@@ -278,12 +278,10 @@ extension Hyperlink {
         return xml
     }
 
+    /// PsychQuant/ooxml-swift#165 追蹤（R2 review finding F2，本函式為 review
+    /// 清單未列出的額外個案）：委派給已修好 \n/\r/\t 跳脫的共用函式——
+    /// `r:id`／`w:anchor`／`w:tooltip` 與任意自訂屬性（`\(name)=`）都是屬性值。
     private func escapeXML(_ string: String) -> String {
-        return string
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&apos;")
+        return escapeXMLAttribute(string)
     }
 }

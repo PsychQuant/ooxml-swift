@@ -167,11 +167,10 @@ internal struct ContentTypesOverlay {
         return xml
     }
 
+    /// PsychQuant/ooxml-swift#165 追蹤（R2 review finding F2）：委派給已修好
+    /// \n/\r/\t 跳脫（且多帶 `'`）的共用函式——`Extension`／`ContentType`／
+    /// `PartName` 都是屬性值。
     private static func escape(_ s: String) -> String {
-        return s
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
+        return escapeXMLAttribute(s)
     }
 }

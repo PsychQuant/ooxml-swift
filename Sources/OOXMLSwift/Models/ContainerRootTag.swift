@@ -97,11 +97,10 @@ enum ContainerRootTag {
         return pieces.joined(separator: " ") + ">"
     }
 
+    /// PsychQuant/ooxml-swift#165 追蹤（R2 review finding F2；R1 報告曾把本函式
+    /// 列為已知限制「未處理」，此處補上）：委派給已修好 \n/\r/\t 且多帶 `'`
+    /// 跳脫的共用函式——用於容器根標籤（頁首/頁尾等）的 xmlns 屬性值。
     private static func escapeAttr(_ s: String) -> String {
-        return s
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
+        return escapeXMLAttribute(s)
     }
 }

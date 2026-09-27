@@ -2,14 +2,12 @@ import Foundation
 
 // MARK: - Helper Functions
 
-/// XML 特殊字元跳脫
+/// XML 特殊字元跳脫。PsychQuant/ooxml-swift#165 追蹤（R2 review finding F2）：
+/// 委派給已修好 \n/\r/\t 跳脫的共用函式——本檔案 12 個呼叫點裡有 11 個是
+/// `w:author` 屬性值（`<w:ins>`/`<w:del>`/`<w:moveFrom>`/`<w:moveTo>`/
+/// `<w:rPrChange>`/`<w:pPrChange>`/`<w:cellDel>`/`<w:cellMerge>`）。
 private func escapeXML(_ string: String) -> String {
-    return string
-        .replacingOccurrences(of: "&", with: "&amp;")
-        .replacingOccurrences(of: "<", with: "&lt;")
-        .replacingOccurrences(of: ">", with: "&gt;")
-        .replacingOccurrences(of: "\"", with: "&quot;")
-        .replacingOccurrences(of: "'", with: "&apos;")
+    return escapeXMLAttribute(string)
 }
 
 // MARK: - Revision Source
