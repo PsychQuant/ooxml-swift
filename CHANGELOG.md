@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.16.0] - 2026-09-28
+
 ### Added
 
 - **新操作 `Operation.setRunFormatInRange`／`OOXMLEdit.setBoldInRange`**（PsychQuant/macdoc#232）：以「段落 ElementID ＋ `substring`（可指定第幾次出現，預設第 1 次）」定位段落中的一段文字並套用格式。過去只能對單一 `<w:r>` 套格式（`setBold`／`setRunFormat`），指向段落一律失敗。
