@@ -1059,6 +1059,11 @@ public struct WordDocument: Equatable {
     }
 
     /// 更新表格儲存格內容
+    ///
+    /// PsychQuant/ooxml-swift#182：只改寫第一段（索引 0）；其餘段落原樣保留
+    /// （選項 A，見 issue 討論）。舊實作把整個 `paragraphs` 陣列換成單一元素，
+    /// 對多段落儲存格會連同其餘段落一起靜默刪除，同時回報成功。呼叫端若要
+    /// 定址特定段落，改用 `updateCellParagraph`。
     public mutating func updateCell(tableIndex: Int, row: Int, col: Int, text: String) throws {
         let location = try cellLocation(tableIndex: tableIndex, row: row, col: col)
         let actualIndex = location.bodyIndex
@@ -1072,7 +1077,7 @@ public struct WordDocument: Equatable {
             updatedRun.text = text
             var updatedPara = cell.paragraphs[0]
             updatedPara.runs = [updatedRun]
-            table.rows[row].cells[col].paragraphs = [updatedPara]
+            table.rows[row].cells[col].paragraphs[0] = updatedPara
         } else {
             // che-word-mcp#224(a)：目標段落沒有任何 run（官方表單裡待填寫
             // 欄位的常態），但段落本身可能仍帶 pPr（樣式、行距、東亞字型
@@ -1080,10 +1085,15 @@ public struct WordDocument: Equatable {
             // 連同既有 pPr 一起丟棄。比照 `updateCellParagraph`（che-word-mcp#194）已
             // 驗證過的做法：就地改既有段落的 `.runs`，`.properties` 原樣
             // 保留。`cell.paragraphs` 理論上不會是空陣列（DocxReader 保證
-            // 每個 cell 至少一段），但仍以 `Paragraph()` 兜底避免崩潰。
+            // 每個 cell 至少一段），但仍以 `Paragraph()` 兜底避免崩潰
+            // ——這個 else 分支的兜底只影響索引 0，其餘段落（若有）不受影響。
             var updatedPara = cell.paragraphs.first ?? Paragraph()
             updatedPara.runs = [Run(text: text)]
-            table.rows[row].cells[col].paragraphs = [updatedPara]
+            if table.rows[row].cells[col].paragraphs.isEmpty {
+                table.rows[row].cells[col].paragraphs = [updatedPara]
+            } else {
+                table.rows[row].cells[col].paragraphs[0] = updatedPara
+            }
         }
 
         body.children[actualIndex] = .table(table)
