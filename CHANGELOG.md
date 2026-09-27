@@ -8,6 +8,36 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **測試防呆：來源不得再出現 host-absolute fixture 路徑**（#162）。新增守門測試掃描
+  `Tests/`／`Sources/`／`scripts/` 下所有 `.swift` 檔，偵測寫死的本機使用者目錄路徑；
+  找不到 repo 根目錄時測試本身會失敗（不是安靜跳過）。`V1BenchmarkTests` 與
+  `Issue66HeaderVMLProbeTests` 兩處殘留的本機路徑／專屬環境變數一併遷移到共用的
+  `TemplateFixtureGate`（`MACDOC_TEMPLATE_DIR`）。
+- **測試防呆：reader namespace 洩漏偵測邏輯收斂為共用 helper**（#152）。新增
+  `ReaderNamespaceLeakProbe`（root／snapshot／leaked 判定）與
+  `XCTestCase.readAutoClosing(from:)`——透過 `DocxReader` 開檔時自動在
+  `addTeardownBlock` 註冊 `close()`，避免測試忘記關檔而在共用的 reader 暫存命名空間
+  留下大量殘留目錄。既有三處重複實作的洩漏偵測邏輯改為呼叫共用版本。
+- **測試防呆：`macdoc` 版本落地**（#111）。`MdocxFixtureCorpusTests` 的 reverse-CLI
+  斷言（Requirement 15）改為先確認本機 `macdoc` 版本達到下限，未達下限或找不到執行
+  檔時清楚 skip 並附上「需要版本／目前版本」，不再讓過舊或缺失的 `macdoc` 顯示成
+  來源回歸或含糊的「command not found」。
+- **測試覆蓋：canonical 5-run SEQ 邊界案例**（#29、#30、#31）。補齊 `SEQ Table` 識別字、
+  19 段混合 Figure／Table 的計數累加、同段落多個 canonical SEQ、缺結尾 fldChar 的
+  截斷 span 等邊界情境。
+- **防禦性強化：canonical 5-run 解析改為逐片段掃描**（#32）。`FieldParser` 對
+  begin／instrText／separate／end 訊號的偵測不再對每個 run 先配置一份 joined
+  字串，新增大量空白 run 的防禦性效能測試。
+- **具名判別式：baked-form／canonical cached run**（#33）。`WordDocument.updateAllFields`
+  抽出 `isBakedFormCachedRun(_:)`，並新增 round-trip 前後兩種快取 run 形態的覆蓋
+  測試，避免未來 refactor 讓 canonical 快取 run 被誤判成 baked form。
+- **測試覆蓋：header／footer／footnote／endnote 容器的巢狀 SDT-表格與多實例情境**
+  （#51、#52、#53、#54）。補齊 `.contentControl` 包 `.table` 的四個容器覆蓋、
+  endnote 的 `modifiedParts` 斷言、多個 header／footnote／endnote 實例的計數器
+  累加與共用 dirty-bit 情境。
+
 ## [3.14.0] - 2026-09-27
 
 ### Fixed
