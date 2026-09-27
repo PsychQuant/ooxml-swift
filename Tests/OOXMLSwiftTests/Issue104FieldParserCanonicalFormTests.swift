@@ -24,6 +24,48 @@ import XCTest
 ///   hyperlink / fieldSimple / alternateContent)
 final class Issue104FieldParserCanonicalFormTests: XCTestCase {
 
+    // MARK: - Helpers
+
+    private func canonicalSEQFieldRuns(identifier: String, cachedResult: String = "999") -> [Run] {
+        var beginRun = Run(text: "")
+        beginRun.rawXML = "<w:fldChar w:fldCharType=\"begin\"/>"
+
+        var instrRun = Run(text: "")
+        instrRun.rawXML = "<w:instrText xml:space=\"preserve\"> SEQ \(identifier) \\* ARABIC </w:instrText>"
+
+        var separateRun = Run(text: "")
+        separateRun.rawXML = "<w:fldChar w:fldCharType=\"separate\"/>"
+
+        var cachedRun = Run(text: cachedResult)
+        cachedRun.rawXML = "<w:t xml:space=\"preserve\">\(cachedResult)</w:t>"
+
+        var endRun = Run(text: "")
+        endRun.rawXML = "<w:fldChar w:fldCharType=\"end\"/>"
+
+        return [beginRun, instrRun, separateRun, cachedRun, endRun]
+    }
+
+    private func canonicalSEQParagraph(
+        identifier: String,
+        cachedResult: String = "999",
+        prefix: String = ""
+    ) -> Paragraph {
+        var para = Paragraph()
+        para.runs = prefix.isEmpty ? [] : [Run(text: prefix)]
+        para.runs.append(contentsOf: canonicalSEQFieldRuns(identifier: identifier, cachedResult: cachedResult))
+        para.properties.style = "Caption"
+        return para
+    }
+
+    private func sequenceIdentifiers(_ fields: [ParsedField]) -> [String] {
+        fields.compactMap { field in
+            if case .sequence(let seq) = field.field {
+                return seq.identifier
+            }
+            return nil
+        }
+    }
+
     // MARK: - 104.1 Primary RED reproducer: roundtrip via Writer → Reader
 
     /// The exact reproducer from che-word-mcp#271: build a paragraph via
@@ -65,6 +107,95 @@ final class Issue104FieldParserCanonicalFormTests: XCTestCase {
         }
         XCTAssertEqual(seq.identifier, "Figure",
             "ParsedField should expose identifier 'Figure' from instrText 'SEQ Figure \\* ARABIC'")
+    }
+
+    // MARK: - 104.1.1 Baked-vs-canonical discriminator invariant (#33)
+
+    /// `wrapCaptionSequenceFields` emits the baked form before save: the parsed
+    /// cached-result run is the same run whose rawXML embeds the full field
+    /// block, including fldChar markers. `updateAllFields` depends on this
+    /// invariant to choose the baked rewrite path (#33).
+    func testBakedFormCachedRunRawXMLAlwaysContainsFldCharBeforeSave() throws {
+        var doc = WordDocument()
+        doc.body.children = [
+            .paragraph(Paragraph(text: "Figure 7. Distribution"))
+        ]
+        let pattern = try NSRegularExpression(pattern: "Figure (\\d+)\\.")
+        _ = try doc.wrapCaptionSequenceFields(pattern: pattern, sequenceName: "Figure")
+
+        guard case .paragraph(let paragraph) = doc.body.children[0] else {
+            return XCTFail("expected paragraph")
+        }
+
+        let fields = FieldParser.parse(paragraph: paragraph)
+        XCTAssertEqual(fields.count, 1)
+        guard let field = fields.first,
+              let cachedRunIdx = field.cachedResultRunIdx else {
+            return XCTFail("expected parsed field with cached result run")
+        }
+
+        XCTAssertEqual(field.startRunIdx, cachedRunIdx,
+            "baked form should report the same run for field start and cached result")
+        let cachedRawXML = paragraph.runs[cachedRunIdx].rawXML
+        XCTAssertNotNil(cachedRawXML)
+        XCTAssertTrue(cachedRawXML?.contains("fldChar") ?? false,
+            "baked-form cached run must carry fldChar markers for the discriminator")
+    }
+
+    /// After Writer -> Reader roundtrip, the same field is canonical 5-run
+    /// form: cached-result run is a dedicated value run and must not contain
+    /// fldChar. This prevents the baked-form discriminator from accidentally
+    /// routing canonical fields through the rawXML field-block regex (#33).
+    func testRoundTripCanonicalFormCachedRunRawXMLDoesNotContainFldChar() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Issue33RoundTripCanonical-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        var doc = WordDocument()
+        doc.body.children = [
+            .paragraph(Paragraph(text: "Figure 7. Distribution"))
+        ]
+        let pattern = try NSRegularExpression(pattern: "Figure (\\d+)\\.")
+        _ = try doc.wrapCaptionSequenceFields(pattern: pattern, sequenceName: "Figure")
+
+        let docxURL = tempDir.appendingPathComponent("test.docx")
+        try DocxWriter.write(doc, to: docxURL)
+        let reloaded = try DocxReader.read(from: docxURL)
+
+        guard case .paragraph(let paragraph) = reloaded.body.children[0] else {
+            return XCTFail("expected paragraph after roundtrip")
+        }
+
+        let fields = FieldParser.parse(paragraph: paragraph)
+        XCTAssertEqual(fields.count, 1)
+        guard let field = fields.first,
+              let cachedRunIdx = field.cachedResultRunIdx else {
+            return XCTFail("expected parsed field with cached result run")
+        }
+
+        XCTAssertNotEqual(field.startRunIdx, cachedRunIdx,
+            "canonical form should use a dedicated cached-result run")
+        XCTAssertFalse(paragraph.runs[cachedRunIdx].rawXML?.contains("fldChar") ?? false,
+            "canonical cached run must not look like a baked field block")
+    }
+
+    // MARK: - 104.1.2 Defensive large-paragraph scan (#32)
+
+    /// DoS regression guard for #32: large paragraphs with many runs should not
+    /// allocate a joined fragment string per run. The parser should complete a
+    /// 100k-run empty paragraph within a conservative local-test budget.
+    func testFieldParserHandlesHundredThousandEmptyRunsWithinBudget() {
+        var paragraph = Paragraph()
+        paragraph.runs = Array(repeating: Run(text: ""), count: 100_000)
+
+        let started = Date()
+        let fields = FieldParser.parse(paragraph: paragraph)
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertTrue(fields.isEmpty)
+        XCTAssertLessThan(elapsed, 5.0,
+            "FieldParser.parse should not do expensive per-run fragment joining for empty runs")
     }
 
     // MARK: - 104.2 End-to-end: updateAllFields finds and updates SEQ after roundtrip
@@ -158,6 +289,128 @@ final class Issue104FieldParserCanonicalFormTests: XCTestCase {
             "endRunIdx should point to the run containing fldCharType=end (run index 7)")
         XCTAssertEqual(field.cachedResultRunIdx, 6,
             "cachedResultRunIdx should point to the standalone <w:t> run between separate and end (run index 6)")
+    }
+
+    // MARK: - #29: SEQ Table identifier coverage
+
+    func testFieldParserHandlesCanonical5RunSEQTableIdentifier() {
+        let para = canonicalSEQParagraph(identifier: "Table", prefix: "Table 1: ")
+
+        let fields = FieldParser.parse(paragraph: para)
+
+        XCTAssertEqual(fields.count, 1)
+        XCTAssertEqual(sequenceIdentifiers(fields), ["Table"])
+        guard let field = fields.first,
+              case .sequence(let seq) = field.field else {
+            return XCTFail("expected one .sequence Table field")
+        }
+        XCTAssertEqual(seq.identifier, "Table")
+        XCTAssertEqual(field.cachedResultRunIdx, 4)
+    }
+
+    // MARK: - #30: multi-paragraph canonical counter accumulation
+
+    func testUpdateAllFieldsCountsCanonicalFigureAndTableAcrossNineteenParagraphs() {
+        let identifiers = [
+            "Figure", "Table", "Figure", "Table", "Figure",
+            "Figure", "Table", "Figure", "Table", "Figure",
+            "Figure", "Table", "Figure", "Figure", "Table",
+            "Figure", "Table", "Figure", "Figure"
+        ]
+
+        var doc = WordDocument()
+        doc.body.children = identifiers.enumerated().map { index, identifier in
+            .paragraph(canonicalSEQParagraph(
+                identifier: identifier,
+                prefix: "\(identifier) caption \(index + 1): "
+            ))
+        }
+
+        let result = doc.updateAllFields()
+
+        XCTAssertEqual(result, ["Figure": 12, "Table": 7])
+
+        var figureValues: [String] = []
+        var tableValues: [String] = []
+        for (index, child) in doc.body.children.enumerated() {
+            guard case .paragraph(let paragraph) = child else {
+                XCTFail("expected paragraph at body child \(index)")
+                continue
+            }
+
+            let identifier = identifiers[index]
+            let cachedRun = paragraph.runs[4]
+            if identifier == "Figure" {
+                figureValues.append(cachedRun.text)
+            } else {
+                tableValues.append(cachedRun.text)
+            }
+
+            XCTAssertTrue(
+                (cachedRun.rawXML ?? "").contains(">\(cachedRun.text)<"),
+                "cached rawXML should be rewritten in sync with Run.text for \(identifier) at index \(index); got \(cachedRun.rawXML ?? "<nil>")"
+            )
+            XCTAssertFalse(
+                (cachedRun.rawXML ?? "").contains(">999<"),
+                "stale cached value should not survive updateAllFields for \(identifier) at index \(index)"
+            )
+        }
+
+        XCTAssertEqual(figureValues, (1...12).map(String.init))
+        XCTAssertEqual(tableValues, (1...7).map(String.init))
+    }
+
+    // MARK: - #31: canonical state-machine edge cases
+
+    func testFieldParserHandlesTwoCanonicalSEQFieldsInOneParagraph() {
+        var para = Paragraph()
+        para.runs = [Run(text: "Figures: ")]
+            + canonicalSEQFieldRuns(identifier: "Figure", cachedResult: "99")
+            + [Run(text: " and ")]
+            + canonicalSEQFieldRuns(identifier: "Figure", cachedResult: "88")
+
+        let fields = FieldParser.parse(paragraph: para)
+
+        XCTAssertEqual(fields.count, 2)
+        XCTAssertEqual(sequenceIdentifiers(fields), ["Figure", "Figure"])
+        XCTAssertEqual(fields.map(\.cachedResultRunIdx), [4, 10])
+    }
+
+    func testUpdateAllFieldsCountsMixedCanonicalSEQFieldsInOneParagraph() {
+        var para = Paragraph()
+        para.runs = [Run(text: "Mixed: ")]
+            + canonicalSEQFieldRuns(identifier: "Figure", cachedResult: "99")
+            + [Run(text: " / ")]
+            + canonicalSEQFieldRuns(identifier: "Table", cachedResult: "88")
+
+        let fields = FieldParser.parse(paragraph: para)
+        XCTAssertEqual(sequenceIdentifiers(fields), ["Figure", "Table"])
+
+        var doc = WordDocument()
+        doc.body.children = [.paragraph(para)]
+
+        let result = doc.updateAllFields()
+
+        XCTAssertEqual(result, ["Figure": 1, "Table": 1])
+        guard case .paragraph(let updatedPara) = doc.body.children[0] else {
+            return XCTFail("expected paragraph after updateAllFields")
+        }
+
+        XCTAssertEqual(updatedPara.runs[4].text, "1")
+        XCTAssertEqual(updatedPara.runs[10].text, "1")
+        XCTAssertTrue((updatedPara.runs[4].rawXML ?? "").contains(">1<"))
+        XCTAssertTrue((updatedPara.runs[10].rawXML ?? "").contains(">1<"))
+        XCTAssertFalse((updatedPara.runs[4].rawXML ?? "").contains(">99<"))
+        XCTAssertFalse((updatedPara.runs[10].rawXML ?? "").contains(">88<"))
+    }
+
+    func testFieldParserIgnoresTruncatedCanonicalSEQSpanWithoutEnd() {
+        var para = Paragraph()
+        para.runs = Array(canonicalSEQFieldRuns(identifier: "Figure").prefix(2))
+
+        let fields = FieldParser.parse(paragraph: para)
+
+        XCTAssertTrue(fields.isEmpty, "begin + instrText without separate/cached/end must not emit a partial ParsedField")
     }
 
     // MARK: - 104.4 Native-Word 5-run + updateAllFields rewrite + emit roundtrip
