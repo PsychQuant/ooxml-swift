@@ -145,19 +145,38 @@ final class PPrBorderShadingReadTests: XCTestCase {
 
     // MARK: - Section A: reading into typed fields
 
+    /// PsychQuant/ooxml-swift#179 extended the typed projection: `bar`, and
+    /// each side's `themeColor`/`themeTint`/`themeShade`/`shadow`/`frame`,
+    /// plus the shading's six `theme*` attributes, are now read into typed
+    /// fields too (previously only `sourceBorder`/`sourceShading` carried
+    /// them). `thinThickSmallGap` (an enum-outside `ParagraphBorderType`
+    /// value) and `pct10` (an enum-outside `ShadingPattern` value) remain
+    /// the still-genuinely-unrepresentable cases this test pins.
     func testParseReadsPBdrAndShdIntoTypedFields() throws {
         let props = try parseParagraph(Self.borderedParagraph).properties
         let border = try XCTUnwrap(props.border, "<w:pBdr> must be read into `border`")
-        XCTAssertEqual(border.top, ParagraphBorderStyle(type: .single, color: "auto", size: 4, space: 1))
-        XCTAssertEqual(border.bottom, ParagraphBorderStyle(type: .double, color: "1F3864", size: 6, space: 1))
+        XCTAssertEqual(border.top, ParagraphBorderStyle(
+            type: .single, color: "auto", size: 4, space: 1,
+            themeColor: "accent1", themeTint: "99", shadow: true))
+        XCTAssertEqual(border.bottom, ParagraphBorderStyle(
+            type: .double, color: "1F3864", size: 6, space: 1,
+            themeColor: "accent1", themeShade: "80"))
         XCTAssertEqual(border.right, ParagraphBorderStyle(type: .single, color: "auto", size: 4, space: 4))
         XCTAssertEqual(border.between, ParagraphBorderStyle(type: .single, color: "auto", size: 4, space: 1))
+        XCTAssertEqual(border.bar, ParagraphBorderStyle(type: .single, color: "auto", size: 4, space: 0),
+                       "#179: bar is now projected")
         XCTAssertNil(border.left, "`thinThickSmallGap` has no ParagraphBorderType case — not projected")
 
         let shading = try XCTUnwrap(props.shading, "<w:shd> must be read into `shading`")
         XCTAssertEqual(shading.fill, "DEEAF6")
         XCTAssertEqual(shading.color, "auto")
         XCTAssertNil(shading.pattern, "`pct10` has no ShadingPattern case — not projected")
+        XCTAssertEqual(shading.themeColor, "text1", "#179: theme* shading attributes are now projected")
+        XCTAssertEqual(shading.themeTint, "80")
+        XCTAssertEqual(shading.themeShade, "BF")
+        XCTAssertEqual(shading.themeFill, "accent1")
+        XCTAssertEqual(shading.themeFillTint, "33")
+        XCTAssertEqual(shading.themeFillShade, "F2")
 
         let rawNames = props.rawChildren.map(\.name)
         XCTAssertFalse(rawNames.contains("pBdr"), "pBdr is typed, never raw-captured too")
@@ -176,12 +195,15 @@ final class PPrBorderShadingReadTests: XCTestCase {
     }
 
     /// 只有 enum 外的邊（或空的 `<w:pBdr/>`）時，typed 值仍是非 nil 的空
-    /// `ParagraphBorder()`——「有這個元素」不能被讀成「沒有」。
+    /// `ParagraphBorder()`——「有這個元素」不能被讀成「沒有」。PsychQuant/
+    /// ooxml-swift#179 把 `bar` 變成可投影，所以本測試改用真正仍不可投影的
+    /// `thinThickSmallGap`（enum 外的 `w:val`）當唯一的邊，維持測試原意。
     func testPBdrWithOnlyUnrepresentableSidesStillProjectsNonNil() throws {
-        let props = try parseParagraph("<w:p><w:pPr><w:pBdr><w:bar w:val=\"single\" w:sz=\"4\"/>"
+        let props = try parseParagraph("<w:p><w:pPr><w:pBdr>"
+            + "<w:left w:val=\"thinThickSmallGap\" w:sz=\"12\"/>"
             + "</w:pBdr></w:pPr><w:r><w:t>x</w:t></w:r></w:p>").properties
         XCTAssertEqual(props.border, ParagraphBorder())
-        XCTAssertTrue(props.toXML().contains("<w:bar w:val=\"single\" w:sz=\"4\"/>"),
+        XCTAssertTrue(props.toXML().contains("<w:left w:val=\"thinThickSmallGap\" w:sz=\"12\"/>"),
                       "untouched → the source element is emitted verbatim: \(props.toXML())")
     }
 
@@ -251,8 +273,10 @@ final class PPrBorderShadingReadTests: XCTestCase {
     }
 
     /// 已知限制，刻意釘住：讀出 typed 值、改其中一個欄位再寫回（read-modify-write），
-    /// 就走 typed 輸出——typed 模型表達不了的屬性（theme 色、bar 邊…）在這條路上
-    /// 不保留。只有一份 pBdr，被改的欄位生效。
+    /// 就走 typed 輸出。PsychQuant/ooxml-swift#179 之後 typed 輸出已能承載
+    /// theme 色與 `bar` 邊，所以 top 的 `themeColor` 現在會存活；仍不保留的
+    /// 只剩 enum 外的 `w:val`（`left` 的 `thinThickSmallGap` 依然沒有 typed
+    /// 欄位可放，這條路上還是會消失）。只有一份 pBdr，被改的欄位生效。
     func testReadModifyWriteOfTheProjectionFallsBackToTypedOutput() throws {
         var props = try parseParagraph(Self.borderedParagraph).properties
         props.border?.top?.color = "00FF00"
@@ -260,9 +284,11 @@ final class PPrBorderShadingReadTests: XCTestCase {
         let pBdrs = wrapper.elements(forName: "w:pBdr")
         XCTAssertEqual(pBdrs.count, 1)
         let sides = childAttributes(try XCTUnwrap(pBdrs.first))
-        XCTAssertEqual(sides.map(\.0), ["w:top", "w:bottom", "w:right", "w:between"])
+        XCTAssertEqual(sides.map(\.0), ["w:top", "w:bottom", "w:right", "w:between", "w:bar"],
+                       "#179: bar is now typed, so it survives read-modify-write too; `left` (thinThickSmallGap) still doesn't")
         XCTAssertEqual(sides.first?.1["w:color"], "00FF00")
-        XCTAssertNil(sides.first?.1["w:themeColor"], "typed output cannot carry theme attributes")
+        XCTAssertEqual(sides.first?.1["w:themeColor"], "accent1",
+                       "#179: typed output now carries theme attributes")
         XCTAssertTrue(props.toXML().contains(Self.sourceShd), "shading untouched → still verbatim")
     }
 
@@ -340,7 +366,9 @@ final class PPrBorderShadingReadTests: XCTestCase {
     }
 
     /// `merge(with:)` 併入呼叫端自組、值剛好等於投影的 shading：那是一次指派，
-    /// 走 typed；來源的 `pct10`／theme 屬性不能復活。
+    /// 走 typed。`pct10`（enum 外的 `w:val`）依然不能復活；PsychQuant/
+    /// ooxml-swift#179 之後 `themeFill` 已是 typed 欄位，所以現在會存活
+    /// （這是本次修法的改善，不是退步）。
     func testMergingACallerBuiltValueEqualToTheProjectionIsTypedOutput() throws {
         var props = try parseParagraph(Self.borderedParagraph).properties
         var change = ParagraphProperties()
@@ -348,7 +376,8 @@ final class PPrBorderShadingReadTests: XCTestCase {
         props.merge(with: change)
         let xml = props.toXML()
         XCTAssertFalse(xml.contains("pct10"), xml)
-        XCTAssertFalse(xml.contains("themeFill"), xml)
+        XCTAssertTrue(xml.contains("w:themeFill=\"accent1\""),
+                     "#179: themeFill is now typed and survives typed re-emission: \(xml)")
         XCTAssertTrue(xml.contains(Self.sourcePBdr), "the untouched border still round-trips verbatim: \(xml)")
     }
 
