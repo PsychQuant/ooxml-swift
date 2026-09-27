@@ -1211,13 +1211,15 @@ public enum OperationReducer {
     /// (see "Flatten/adjacency rule" below), splits the run(s) spanning the
     /// match, and applies `format` to ONLY the matched run fragment(s).
     ///
-    /// ## Flatten/adjacency rule (macdoc#232 R2 CRITICAL-2 + HIGH-3)
+    /// ## Flatten/adjacency rule (macdoc#232 R2 CRITICAL-2 + HIGH-3, revised R3)
     ///
     /// The search text is built ONLY from maximal runs of consecutive
     /// "simple" direct `<w:r>` children of the paragraph (see
     /// `isSimpleRun` / `runFormatRangeGroups`) — a `<w:r>` whose only
-    /// content is exactly one `<w:t>`. Two things are NEVER merged into that
-    /// search text, and NEVER treated as adjacent to their neighbors:
+    /// content is exactly one `<w:t>`, optionally plus exactly one
+    /// `<w:lastRenderedPageBreak/>` (R3 — Word's own layout engine marker;
+    /// see `isSimpleRun`'s doc comment). Two things are NEVER merged into
+    /// that search text, and NEVER treated as adjacent to their neighbors:
     ///   - a "complex" `<w:r>` (zero, or more than one, `<w:t>` content
     ///     child, or a `<w:t>` alongside `<w:tab/>`/`<w:br/>`/
     ///     `<w:noBreakHyphen/>`/anything else) — tab/br/noBreakHyphen do
@@ -1226,21 +1228,36 @@ public enum OperationReducer {
     ///     because this reducer's split logic (`splitRunNode`) only knows
     ///     how to rewrite a single `<w:t>` child and cannot correctly
     ///     reconstruct a run with interleaved non-text content;
-    ///   - any direct paragraph child that is NOT a `<w:r>` — tracked
-    ///     insertions (`<w:ins>`), tracked deletions (`<w:del>`),
-    ///     hyperlinks (`<w:hyperlink>`), content controls (`<w:sdt>`),
-    ///     bookmark/comment-range markers, etc. all wrap their `<w:r>`
-    ///     content one level deeper, so a naive "concatenate every visible
-    ///     character" flatten would silently glue the text before and after
-    ///     one of these together as if the wrapper were not there.
+    ///   - any direct paragraph child that is NOT a `<w:r>` and NOT a
+    ///     member of `transparentZeroWidthMarkerNames` — tracked insertions
+    ///     (`<w:ins>`), tracked deletions (`<w:del>`), hyperlinks
+    ///     (`<w:hyperlink>`), content controls (`<w:sdt>`), etc. all wrap
+    ///     their `<w:r>` content one level deeper, so a naive "concatenate
+    ///     every visible character" flatten would silently glue the text
+    ///     before and after one of these together as if the wrapper were
+    ///     not there. R3 exception: `transparentZeroWidthMarkerNames`
+    ///     (`<w:proofErr>`, bookmark/comment-range/perm/move-range
+    ///     start/end markers — a CLOSED list of elements verified, by
+    ///     ECMA-376 schema type, to never carry a `<w:t>` descendant) ARE
+    ///     skipped WITHOUT breaking adjacency — they are genuinely
+    ///     zero-width, so text on either side of one really is contiguous,
+    ///     and treating them as boundaries was an overly conservative R2
+    ///     default that rejected ordinary running text in any document
+    ///     with a spell-check annotation, a bookmark, or similar sitting
+    ///     between two words (macdoc#232 R2 review, MEDIUM finding (b)).
     /// A match may therefore fall ENTIRELY inside one contiguous run of
-    /// simple `<w:r>` siblings and succeed normally, but a match that would
-    /// need to cross (or land inside) one of the above is refused —
+    /// simple `<w:r>` siblings (now also spanning across any transparent
+    /// zero-width marker) and succeed normally, but a match that would need
+    /// to cross (or land inside) a REMAINING boundary is refused —
     /// `malformedOp` names the specific container/run shape responsible
-    /// (via `diagnoseCrossBoundaryMatch`) whenever the substring genuinely
-    /// exists in the paragraph's full visible text but only reachable that
-    /// way. `<w:del>` content is additionally never shown in that
-    /// diagnostic text at all (deleted text is not visible content).
+    /// (via `diagnoseCrossBoundaryMatch`, including a zero-width,
+    /// textless-but-still-a-boundary element via its `VisualBoundary`
+    /// position tracking — R3, closing MEDIUM finding (c)) whenever the
+    /// substring genuinely exists in the paragraph's full visible text but
+    /// only reachable that way. `<w:del>` content is additionally never
+    /// shown in that diagnostic text at all (deleted text is not visible
+    /// content), and `transparentZeroWidthMarkerNames` members are likewise
+    /// never named in a diagnostic reason (they are not boundaries).
     ///
     /// ## ElementID allocation rule (macdoc#232 R2 CRITICAL-1)
     ///
@@ -1506,21 +1523,66 @@ public enum OperationReducer {
 
     /// A `<w:r>` is "simple" — eligible for `setRunFormatInRange` search and
     /// splitting — iff it has EXACTLY one content-bearing child (ignoring
-    /// `<w:rPr>`, which is formatting metadata, not content) and that child
-    /// is `<w:t>`. Any other shape (no `<w:t>` at all, more than one
-    /// `<w:t>`, or a `<w:t>` alongside `<w:tab/>`/`<w:br/>`/
-    /// `<w:noBreakHyphen/>`/a drawing/anything else) is "complex" and is
-    /// entirely excluded from the search (macdoc#232 R2 CRITICAL-2):
-    /// `splitRunNode` assumes a single `<w:t>` child and cannot correctly
-    /// rewrite a run with interleaved non-text content without either
-    /// duplicating or dropping some of it.
+    /// `<w:rPr>`, which is formatting metadata, not content) that is
+    /// `<w:t>`, OPTIONALLY accompanied by exactly one
+    /// `<w:lastRenderedPageBreak/>` (macdoc#232 R3): Word's own layout
+    /// engine stamps this zero-width, textless marker into whatever run
+    /// happens to span a rendered page boundary — it is present in
+    /// essentially every multi-page real `.docx` Word itself produced, at a
+    /// position outside the author's control, so treating a run that merely
+    /// carries one as "complex" would make ordinary running text
+    /// unsearchable for no correctness reason. Any OTHER shape (no `<w:t>`
+    /// at all, more than one `<w:t>`, or a `<w:t>` alongside `<w:tab/>`/
+    /// `<w:br/>`/`<w:noBreakHyphen/>`/a drawing/anything else) is "complex"
+    /// and is entirely excluded from the search (macdoc#232 R2 CRITICAL-2):
+    /// `splitRunNode` assumes a single `<w:t>` child (plus, since R3, an
+    /// optional `<w:lastRenderedPageBreak/>` it explicitly dedupes) and
+    /// cannot correctly rewrite a run with other interleaved non-text
+    /// content without either duplicating or dropping some of it.
     private static func isSimpleRun(_ run: XmlNode) -> Bool {
         let content = run.children.filter { !($0.kind == .element && $0.localName == "rPr") }
-        guard content.count == 1, let only = content.first,
-              only.kind == .element, only.localName == "t" else {
-            return false
-        }
-        return true
+        let textChildren = content.filter { $0.kind == .element && $0.localName == "t" }
+        let otherChildren = content.filter { !($0.kind == .element && $0.localName == "t") }
+        guard textChildren.count == 1 else { return false }
+        if otherChildren.isEmpty { return true }
+        return otherChildren.count == 1
+            && otherChildren[0].kind == .element
+            && otherChildren[0].localName == "lastRenderedPageBreak"
+    }
+
+    /// CLOSED list of paragraph-direct-child element local names that are
+    /// definitely zero-width, textless structural markers — every entry is
+    /// a self-closing, attributes-only OOXML element (ECMA-376 CT_ProofErr /
+    /// CT_Bookmark / CT_MarkupRange / CT_Perm / CT_MoveBookmark) that NEVER
+    /// carries a `<w:t>` descendant. Transparent to `setRunFormatInRange`'s
+    /// grouping (macdoc#232 R3, MEDIUM (b) from the R2 adversarial review):
+    /// skipped WITHOUT breaking a group — text on either side stays
+    /// adjacent — and never touched by the split logic (never selected as a
+    /// span, so it simply stays at its original document position; no copy,
+    /// no move). `<w:proofErr>` (spell-check squiggly markers) is the
+    /// review's concrete real-world example: a paragraph with a spell-check
+    /// annotation sitting between two ordinary words is common in any
+    /// document with technical terms or names, and previously made an
+    /// otherwise-unremarkable match fail.
+    ///
+    /// This list MUST NOT be extended by "looks like it has no text"
+    /// inference (coordinator directive, macdoc#232 R3) — every addition
+    /// must be verified, by its ECMA-376 schema type, to never carry a
+    /// `<w:t>` descendant. `<w:ins>`/`<w:del>`/`<w:hyperlink>`/`<w:sdt>` are
+    /// deliberately NOT here: they CAN and typically DO wrap real `<w:r>`
+    /// text content, so treating them as transparent would reintroduce
+    /// macdoc#232 R2 HIGH-3's false-adjacency bug.
+    private static let transparentZeroWidthMarkerNames: Set<String> = [
+        "proofErr",
+        "bookmarkStart", "bookmarkEnd",
+        "commentRangeStart", "commentRangeEnd",
+        "permStart", "permEnd",
+        "moveFromRangeStart", "moveFromRangeEnd",
+        "moveToRangeStart", "moveToRangeEnd",
+    ]
+
+    private static func isTransparentZeroWidthMarker(_ node: XmlNode) -> Bool {
+        node.kind == .element && transparentZeroWidthMarkerNames.contains(node.localName)
     }
 
     /// Groups the paragraph's DIRECT children into maximal runs of "simple"
@@ -1529,19 +1591,20 @@ public enum OperationReducer {
     /// boundary (ending the current group WITHOUT starting a new one at
     /// that position — the boundary element itself never contributes text)
     /// is introduced by:
-    ///   - any non-`<w:r>`, non-`<w:pPr>` direct child — tracked-insertion
-    ///     `<w:ins>`, tracked-deletion `<w:del>`, `<w:hyperlink>`, `<w:sdt>`
-    ///     content controls, bookmark/comment-range markers, `<w:proofErr>`,
-    ///     … — none of these are direct `<w:r>` children, so text on either
-    ///     side of one is NEVER treated as adjacent (macdoc#232 R2 HIGH-3);
+    ///   - any non-`<w:r>`, non-`<w:pPr>` direct child that is NOT in
+    ///     `transparentZeroWidthMarkerNames` — tracked-insertion `<w:ins>`,
+    ///     tracked-deletion `<w:del>`, `<w:hyperlink>`, `<w:sdt>` content
+    ///     controls, … — none of these are direct `<w:r>` children, so text
+    ///     on either side of one is NEVER treated as adjacent (macdoc#232
+    ///     R2 HIGH-3);
     ///   - a direct `<w:r>` child that is not "simple" (macdoc#232 R2
     ///     CRITICAL-2) — such a run is excluded from the searchable text
     ///     wholesale AND breaks adjacency, rather than silently
     ///     contributing zero characters and gluing its neighbors together.
-    /// `<w:pPr>` (paragraph properties) is skipped WITHOUT breaking a group
-    /// — it carries no inline content, so it cannot separate two runs of
-    /// otherwise-adjacent visible text (in practice it can only appear as
-    /// the paragraph's first child anyway).
+    /// `<w:pPr>` (paragraph properties) and any
+    /// `transparentZeroWidthMarkerNames` member (macdoc#232 R3) are skipped
+    /// WITHOUT breaking a group — neither carries inline content, so
+    /// neither can separate two runs of otherwise-adjacent visible text.
     private static func runFormatRangeGroups(
         of paragraph: XmlNode
     ) -> [[(childIndex: Int, text: String)]] {
@@ -1552,6 +1615,7 @@ public enum OperationReducer {
                 continue
             }
             if child.localName == "pPr" { continue }
+            if isTransparentZeroWidthMarker(child) { continue }
             if child.localName == "r", isSimpleRun(child) {
                 groups[groups.count - 1].append((idx, runText(child)))
                 continue
@@ -1585,6 +1649,22 @@ public enum OperationReducer {
         }
     }
 
+    /// A zero-width diagnostic marker: records that boundary element `tag`
+    /// sat at `position` (an index into the diagnostic `visual` character
+    /// array) WITHOUT contributing any character of its own — e.g. a
+    /// `<w:hyperlink>` with no runs, or a "complex" `<w:r>` made of nothing
+    /// but `<w:tab/>`. Recorded so `diagnoseCrossBoundaryMatch` can still
+    /// name it even though the per-character tagging below has no
+    /// character to hang the tag on (macdoc#232 R3, closing the (c) gap the
+    /// R2 adversarial review flagged MEDIUM for `<w:proofErr>` specifically
+    /// — `<w:proofErr>` itself is now whitelisted/transparent instead, but
+    /// this general mechanism also covers any FUTURE non-whitelisted,
+    /// textless boundary element, not just that one case).
+    private struct VisualBoundary {
+        let position: Int
+        let tag: String
+    }
+
     /// Diagnostic-only (see `gatherVisibleText`): builds the paragraph's
     /// FULL visible text — including tracked-insertion/hyperlink/SDT
     /// content, which `runFormatRangeGroups` correctly excludes from the
@@ -1592,30 +1672,42 @@ public enum OperationReducer {
     /// with each character tagged by which non-plain container (if any) it
     /// lives inside, then searches that text for the `instance`-th
     /// occurrence of `substring`. If found and the match touches any tagged
-    /// region, returns a reason NAMING the container(s) responsible;
+    /// character OR passes through a zero-contribution `VisualBoundary`,
+    /// returns a reason NAMING the container(s)/marker(s) responsible;
     /// otherwise `nil` (the caller falls back to a generic "not found").
+    /// `transparentZeroWidthMarkerNames` members are skipped here exactly
+    /// as in `runFormatRangeGroups` — they are not boundaries at all
+    /// (macdoc#232 R3), so they are invisible to diagnostics too, never
+    /// named in a reason.
     private static func diagnoseCrossBoundaryMatch(
         paragraph: XmlNode, substring: String, instance: Int
     ) -> String? {
         var visual: [(character: Character, tag: String?)] = []
+        var boundaries: [VisualBoundary] = []
+        func gather(_ child: XmlNode, tag: String) {
+            let before = visual.count
+            gatherVisibleText(child, tag: tag, into: &visual)
+            if visual.count == before {
+                // This container contributed zero characters (e.g. an empty
+                // <w:hyperlink>, or a complex run made only of <w:tab/>) —
+                // record it positionally so it can still be named.
+                boundaries.append(VisualBoundary(position: before, tag: tag))
+            }
+        }
         for child in paragraph.children {
             guard child.kind == .element else { continue }
-            switch child.localName {
-            case "pPr", "del":
-                continue
-            case "r":
+            if child.localName == "pPr" || child.localName == "del" { continue }
+            if isTransparentZeroWidthMarker(child) { continue }
+            if child.localName == "r" {
                 if isSimpleRun(child) {
                     gatherVisibleText(child, tag: nil, into: &visual)
                 } else {
-                    gatherVisibleText(
-                        child,
-                        tag: "a <w:r> with unsupported mixed content (multiple <w:t>, or "
-                            + "<w:tab/>/<w:br/>/<w:noBreakHyphen/>)",
-                        into: &visual)
+                    gather(child, tag: "a <w:r> with unsupported mixed content (multiple <w:t>, "
+                        + "or <w:tab/>/<w:br/>/<w:noBreakHyphen/>)")
                 }
-            default:
-                gatherVisibleText(child, tag: "<w:\(child.localName)>", into: &visual)
+                continue
             }
+            gather(child, tag: "<w:\(child.localName)>")
         }
         let chars = visual.map(\.character)
         let needle = Array(substring)
@@ -1626,10 +1718,18 @@ public enum OperationReducer {
             if Array(chars[i..<(i + needle.count)]) == needle {
                 occurrencesFound += 1
                 if occurrencesFound == instance {
-                    let tags = visual[i..<(i + needle.count)].compactMap(\.tag)
-                    guard !tags.isEmpty else { return nil }
+                    let matchEnd = i + needle.count
+                    let charTags = visual[i..<matchEnd].compactMap(\.tag)
+                    // A zero-width boundary "crosses" the match when it sits
+                    // STRICTLY between the match's first and last matched
+                    // character (a boundary sitting exactly at the match's
+                    // own edges is not being crossed BY this match).
+                    let boundaryTags = boundaries
+                        .filter { $0.position > i && $0.position < matchEnd }
+                        .map(\.tag)
                     var seen: [String] = []
-                    for t in tags where !seen.contains(t) { seen.append(t) }
+                    for t in charTags + boundaryTags where !seen.contains(t) { seen.append(t) }
+                    guard !seen.isEmpty else { return nil }
                     return "substring \(String(reflecting: substring)) occurrence \(instance) "
                         + "is only reachable via \(seen.joined(separator: " and ")); "
                         + "setRunFormatInRange does not support targeting text inside such "
@@ -1668,11 +1768,30 @@ public enum OperationReducer {
 
     /// Splits a `<w:r>` node at a UTF-16 offset into `(prefix, suffix)`
     /// clones. ONLY ever called on a run `isSimpleRun` has accepted (exactly
-    /// one `<w:t>` child) — every other child (`<w:rPr>`, …) is duplicated
-    /// onto BOTH sides unchanged, so formatting and unmodeled `<w:rPr>`
-    /// children survive the split. Returns `nil` when the run has no
-    /// `<w:t>` child (defensive — should be unreachable given the
-    /// `isSimpleRun` gate upstream).
+    /// one `<w:t>` child, optionally plus one `<w:lastRenderedPageBreak/>`)
+    /// — every other child (`<w:rPr>`, …) is duplicated onto BOTH sides
+    /// unchanged, so formatting and unmodeled `<w:rPr>` children survive
+    /// the split. Returns `nil` when the run has no `<w:t>` child
+    /// (defensive — should be unreachable given the `isSimpleRun` gate
+    /// upstream).
+    ///
+    /// `<w:lastRenderedPageBreak/>` is the ONE exception to "duplicated onto
+    /// BOTH sides unchanged" (macdoc#232 R3): it is a POSITIONAL marker
+    /// (Word's layout engine records where it last rendered a page break),
+    /// not formatting, so letting it survive on both clones would plant it
+    /// twice in the document. Deduped by position relative to the text it
+    /// was split around: Word always emits it BEFORE the run's `<w:t>`, so
+    /// it is kept ONLY on whichever side comes first out of this split
+    /// (`prefix`) and stripped from the other (`suffix`) — the defensive
+    /// `else` branch (marker after the text) mirrors that logic the other
+    /// way, so EITHER order still yields exactly one occurrence, never
+    /// zero, never two. `splitRunNodeThree` composes two calls to this
+    /// function; because the FIRST call already strips the marker from
+    /// whichever half it doesn't belong to, the SECOND call never sees it
+    /// on the half it operates on — the "exactly one fragment, deterministic
+    /// by original position" contract holds transitively across a 3-way
+    /// split too, with no extra bookkeeping needed at the two call sites in
+    /// `applySetRunFormatInRange`.
     ///
     /// Deliberately clears `libraryUUID` on BOTH clones rather than letting
     /// `deepClone()`'s default (copy-the-source's-id) stand: the caller
@@ -1701,6 +1820,16 @@ public enum OperationReducer {
         suffixRun.children[tIndex].children = [XmlNode.text(suffixText)]
         prefixRun.libraryUUID = nil
         suffixRun.libraryUUID = nil
+
+        if let lastRenderedPageBreakIndex = run.children.firstIndex(where: {
+            $0.kind == .element && $0.localName == "lastRenderedPageBreak"
+        }) {
+            if lastRenderedPageBreakIndex < tIndex {
+                suffixRun.children.removeAll { $0.kind == .element && $0.localName == "lastRenderedPageBreak" }
+            } else {
+                prefixRun.children.removeAll { $0.kind == .element && $0.localName == "lastRenderedPageBreak" }
+            }
+        }
         return (prefixRun, suffixRun)
     }
 
