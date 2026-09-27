@@ -8,33 +8,23 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
-## [3.15.0] - 2026-09-27
-### Fixed（R3，發版前追加）
-- **`setRunFormatInRange` 把 `<w:proofErr>`／書籤／註解範圍／`permStart`／`permEnd`／
-  移動範圍標記一律當成邊界，拒絕真實文件裡肉眼完全連續的文字**（PsychQuant/macdoc#232
-  R3，對抗式審查 R2 複審 MEDIUM (b)）：R2 把任何非直接 `<w:r>` 子節點都當邊界，但
-  `<w:proofErr>`（拼字檢查標記）、書籤、註解範圍、`permStart`／`permEnd`、移動範圍
-  標記這些**依 ECMA-376 schema 型別保證絕對不含文字**的零寬結構標記，跟真正會包住
-  文字的 `<w:ins>`／`<w:hyperlink>`／`<w:sdt>` 性質完全不同——把它們當邊界會讓「含專有
-  名詞、術語的學術文件」（這個操作原本就是為了真實 Word 文件而存在，這類文件幾乎必然
-  有拼字檢查標記）裡完全普通的文字被拒絕格式化。現在這批標記（封閉列舉，見
-  `OperationReducer.transparentZeroWidthMarkerNames`）在分組與診斷掃描時都當透明處理：
-  跳過、不斷開群組、切分時原位保留（不複製、不移動）。追蹤修訂、超連結、SDT、多
-  `<w:t>` run 這些**仍然**視為邊界，行為不變。
-- **同一 run 內 `<w:rPr>` ＋ `<w:t>` 之外只帶 `<w:lastRenderedPageBreak/>` 的 run 被當
-  「複雜 run」整個排除，讓自己的文字變成不可搜尋**（PsychQuant/macdoc#232 R3，對抗式
-  審查 R2 複審 MEDIUM (b)）：`<w:lastRenderedPageBreak/>` 是 Word 排版引擎自己插入的
-  標記（記錄「上次算繪到這裡發生分頁」），出現在幾乎所有多頁真實 `.docx` 裡、位置不受
-  使用者控制。現在這種 run 也算「簡單 run」，可以正常搜尋與切分；切分時
-  `<w:lastRenderedPageBreak/>` 保證只出現在**一個**片段（依它在原 run 中相對於文字的
-  位置決定——通常在文字前面，就留在第一個切出的片段），絕不被複製到多個片段。
-- **比對因邊界失敗、但擋住的邊界本身沒有貢獻任何字元時，錯誤訊息退化成泛用的
-  「not found」**（PsychQuant/macdoc#232 R3，對抗式審查 R2 複審 MEDIUM (c)）：
-  `diagnoseCrossBoundaryMatch` 原本只能靠「比對範圍裡有沒有帶標籤的字元」判斷要不要
-  指名邊界種類，但零字元的邊界（例如空的 `<w:hyperlink>`）沒有字元可以掛標籤，只能
-  靜默退回泛用訊息。現在額外用位置記錄邊界（`VisualBoundary`）：只要邊界的位置落在
-  比對範圍內，即使它貢獻 0 個字元，reason 一樣會指名是哪一種邊界。
 ### Added
+
+- **新操作 `Operation.setRunFormatInRange`／`OOXMLEdit.setBoldInRange`**（PsychQuant/macdoc#232）：以「段落 ElementID ＋ `substring`（可指定第幾次出現，預設第 1 次）」定位段落中的一段文字並套用格式。過去只能對單一 `<w:r>` 套格式（`setBold`／`setRunFormat`），指向段落一律失敗。
+  - 範圍邊界落在 run 中間時就地切分 run；切出的每一段保留原 run 的全部格式（含未建模的 `<w:rPr>` 子元素），只有比對到的文字被改動。邊界剛好落在 run 邊界時不切分、直接改該 run。
+  - 切分後只有第一個片段（依文件順序）保留原 run 的 ElementID，其餘片段以該次操作的 `opID` 決定性地衍生新 ID（新的公開 API `ElementID.derivedFragmentID(fromOpID:index:)`），所以文件內不會出現重複 ID，重播同一份 op-log 會得到相同的 ID。
+  - 可比對的範圍只在「簡單 run」之間：`<w:rPr>` 加上恰好一個 `<w:t>`，可另帶一個 `<w:lastRenderedPageBreak/>`（切分後只留在一個片段）。段落層級的零寬標記（`proofErr`、書籤、註解範圍、`permStart`／`permEnd`、移動範圍標記，共 11 種的封閉清單）視為透明、原位保留。插入與刪除修訂、超連結、SDT、含多個 `<w:t>` 的 run 視為邊界：比對範圍碰到它們時明確拋錯，錯誤訊息指名擋住的是哪一種，不會把兩側文字當成相鄰。`<w:del>` 裡的文字不算在可比對的文字中。
+  - 目前只實作 `bold`；`RunFormatPayload` 的其他欄位若不是 `nil` 會明確拋錯，不會靜默忽略。`value: false` 寫出明確的 `<w:b w:val="0"/>`，覆蓋樣式的粗體（與 #161 一致）。
+  - 找不到 `substring`、`substring` 為空、段落不存在時拋出帶具體原因的錯誤。
+
+### Fixed
+
+- **`ReducerError` 的錯誤原因不再在上層遺失**（PsychQuant/macdoc#232）：`ReducerError` 補上 `LocalizedError`。過去 `localizedDescription` 被橋接成通用的 NSError 訊息（「… ReducerError error 1.」），`WordDocument.apply` 包裝 reducer 失敗時只剩「error 1」，看不到真正原因（例如「setRunFormat target must be <w:r>」）。現在四種錯誤都有對應的說明文字。
+
+## [3.15.0] - 2026-09-27
+
+### Added
+
 - **測試防呆：來源不得再出現 host-absolute fixture 路徑**（#162）。新增守門測試掃描
   `Tests/`／`Sources/`／`scripts/` 下所有 `.swift` 檔，偵測寫死的本機使用者目錄路徑；
   找不到 repo 根目錄時測試本身會失敗（不是安靜跳過）。`V1BenchmarkTests` 與
@@ -74,7 +64,9 @@ All notable changes to ooxml-swift will be documented in this file.
   段落底色的讀取路徑（`parseParagraphShading`）會填入；表格儲存格底色（`w:tcPr/w:shd`）
   的讀取路徑尚未涵蓋，欄位對表格一律 nil，不影響既有輸出，但也代表儲存格底色的 theme
   屬性仍有本文件所述的同一種遺失風險（留待未來處理）。
+
 ### Fixed
+
 - **執行任何 typed 編輯存檔後，其他未觸及的文字執行（run）會丟掉模型沒有欄位的 `<w:rPr>`
   子元素**（PsychQuant/ooxml-swift#164）。`<w:bCs>`、`<w:iCs>`、`<w:vanish>`（隱藏文字）等
   `RunProperties` 沒有對應欄位的屬性，只要文件裡任何一段落被 `updateParagraph`／`replaceText`／
@@ -139,53 +131,6 @@ All notable changes to ooxml-swift will be documented in this file.
   存檔具備冪等性。已知限制：這是局部修法，不是本族問題（#133／#129）需要的架構修正——如果
   剛好有一個「沒有 run 但帶特定格式」的段落原本刻意放在表格前的最後一個位置，會被搬到表格
   後面，這個取捨是 issue 本身認可的範圍。
-- **新操作 `Operation.setRunFormatInRange` / `OOXMLEdit.setBoldInRange`**（PsychQuant/macdoc#232）：
-  以「段落 ElementID ＋ substring（可指定第幾次出現，預設第 1 次）」定位一段文字範圍並套用格式，
-  取代 manifest 驅動編輯（`docx apply` 的 `set_bold` 步驟）誤用 `OOXMLEdit.setBold`／
-  `Operation.setRunFormat` 的用法——後者的目標一律要求是單一 `<w:r>`，段落目標必定拋出
-  `malformedOp("setRunFormat target must be <w:r>")`，且 manifest 的 `substring` 欄位從未被使用。
-  範圍跨越或落在 run 中間時會就地切分 run，被切出的每一段（含未建模的原始 `<w:rPr>` 子元素）
-  保留原有格式，只有比對到的文字範圍被改動。目前 reducer 僅實作 `bold`；`RunFormatPayload`
-  的其他欄位（italic/underline/fontSizeHalfPoints/color）若非 `nil` 會明確拋錯而非靜默忽略，
-  留給未來擴充。`value: false` 會寫出明確的 `<w:b w:val="0"/>` 關閉值而非移除元素
-  （對齊 PsychQuant/ooxml-swift#161 的期望行為）。
-- **`ElementID.derivedFragmentID(fromOpID:index:)`**（PsychQuant/macdoc#232 R2）：對抗式審查
-  抓到 `setRunFormatInRange` 切分 run 時，切出的每個片段都透過 `deepClone()` 原封不動複製了
-  來源 run 的 `libraryUUID`，導致同一個 ElementID 同時命中多個片段——任何後續操作（同一批次、
-  undo 歷史、或單純重複引用先前記下的 Run ID）若仍以切分前的 ID 定址，會靜默命中錯誤片段
-  （見下方 Fixed）。現在切分後**只有第一個片段**（依文件順序）保留原 run 的 ElementID，其餘
-  片段透過這支新的公開 API、以該次操作的 `opID` 決定性地衍生新 ID（`index: 1` 對應範圍起點
-  需要的新片段，`index: 2` 對應範圍終點需要的新片段），保證同一份 op-log 重播兩次會得到完全
-  相同的 ID（符合 reducer 的 pure-function／replay-determinism 契約）。呼叫端可用這支 API
-  取得新片段的 ID。
-### Fixed
-- **`setRunFormatInRange` 切分 run 時，所有切出的片段共用同一個 ElementID**（PsychQuant/macdoc#232
-  R2，對抗式審查 CRITICAL-1）：任一片段後續被其他操作（同批次、undo/redo、或呼叫端記下的舊
-  Run ID）定址時會靜默改到錯的片段，且完全沒有錯誤或警告——`findNode` 對 `lib:` 前綴的
-  ElementID 有意跳過自身的 ambiguity 偵測（信任 `lib:` ID 天生唯一），這個假設被新程式碼打破
-  卻沒被抓到。詳見上方 Added 的 `ElementID.derivedFragmentID` 說明。
-- **同一個 run 內若有多個 `<w:t>`（例如中間夾 `<w:tab/>`／`<w:br/>`）會造成文字重複**
-  （PsychQuant/macdoc#232 R2，對抗式審查 CRITICAL-2）：`splitRunNode` 原本只找第一個
-  `<w:t>` 並只改寫它，run 內其餘 `<w:t>`（例如同一個 run 內 `"AB"<w:tab/>"CD"` 的第二個
-  `"CD"`）在切出的兩份 clone 上都原封不動留著，實際產生的三個片段是 `["CD", "ABCD", "CD"]`——
-  「CD」憑空重複了兩次，這是真正的內容毀損，不只是格式套用範圍不精準（先前的殘留風險描述
-  低估了嚴重度，已一併更正）。現在這種「複雜 run」（非剛好一個 `<w:t>` 內容子元素）整個被排除
-  在可搜尋文字之外，且視為邊界——文字不會被拆開、也不會被跟鄰居黏成假相鄰，只有明確拒絕
-  （`malformedOp`，reason 點名「mixed content」）。
-- **比對範圍可跨越 `<w:ins>`／`<w:del>`／`<w:hyperlink>`／`<w:sdt>` 等非直接 `<w:r>` 子節點，
-  造成假相鄰**（PsychQuant/macdoc#232 R2，對抗式審查 HIGH-3）：這些容器包住的 `<w:r>` 都不是
-  段落的直接子節點，原本的掃描邏輯只看直接子節點，會讓容器前後的文字被當成緊鄰（例如
-  「foo」＋追蹤插入「XXX」＋「bar」會被拼成「foobar」成功比對，中間的追蹤插入完全被跳過）。
-  現在段落的直接子節點被分組成「連續的一般 `<w:r>` 片段」，任何非 `<w:r>` 子節點都會斷開
-  分組、兩側文字不再視為相鄰；範圍需要碰到或跨越這類容器時明確拒絕，reason 指名是哪一種
-  容器（`<w:ins>`／`<w:hyperlink>`／`<w:sdt>` 等）。`<w:del>` 內的文字額外確保完全不出現在
-  任何（含診斷用的）扁平化文字中。
-- **`ReducerError` 補上 `LocalizedError`**（PsychQuant/macdoc#232）：`ReducerError.localizedDescription`
-  原本沒有自訂 `errorDescription`，會被橋接成通用的 NSError 訊息（如「The operation couldn't be
-  completed. (OOXMLSwift.ReducerError error 1.)」），把 `.malformedOp` 的 `reason` 字串整段吃掉。
-  `WordDocument+Apply.swift` 把 reducer 失敗包成 `EditError.operationLogFailure(underlying:
-  "...: \(error.localizedDescription)")`，因此呼叫端原本只看得到「error 1」，看不到真正原因
-  （例如「setRunFormat target must be <w:r>」）。現在四個 case 都有對應的 `errorDescription`。
 
 ## [3.14.0] - 2026-09-27
 
