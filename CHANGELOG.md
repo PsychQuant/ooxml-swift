@@ -8,6 +8,10 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **巢狀表格在儲存時可能讓行程當掉或卡死**（#195）：`Table.toXML()` → `TableRow.toXML()` → `TableCell.toXML()` 這條巢狀表格序列化路徑過去沒有任何遞迴深度上限——不同於讀取端的 `DocxReader.parseTable`（`MAX_TABLE_NEST_DEPTH = 5`）與 `XmlTreeReader`（`maxElementDepth`）都已有的防呆。純用公開 API 建構的表格（`TableCell.nestedTables` 只是一般的陣列 setter，沒有深度檢查）或透過 `resyncBodyFromDocumentTree()` 從即時 XML 樹重建的表格，都可能帶著超乎預期的巢狀深度進入 `toXML()`；已實測在本機 8MB 執行緒堆疊下，約 62–64 層真實遞迴就會讓 debug build 出現 `EXC_BAD_ACCESS`。現在寫出端加上與讀取端同源精神的深度上限（`Table.maxSerializationDepth`），超過上限的巢狀表格會截斷多餘的巢狀內容而不是讓整個行程當掉——對 che-word-mcp 這種一個行程同時開著多份文件的使用情境尤其重要，一次當掉會連帶遺失其他文件尚未存檔的修改。二、三層的正常巢狀表格文件不受影響，讀入、編輯、存檔、讀回內容逐字保留。
+
 ## [3.16.1] - 2026-09-28
 
 ### Fixed
