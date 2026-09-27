@@ -77,3 +77,28 @@ public struct ElementID: Equatable, Hashable, Sendable, Codable {
         return UUID(uuidString: uuidString)
     }
 }
+
+// MARK: - Derived fragment ids (macdoc#232 R2)
+
+extension ElementID {
+    /// Deterministically derives the `ElementID` of a NEW node-fragment a
+    /// reducer case allocates when it must split ONE existing element into
+    /// several independently-addressable pieces within a single op.
+    /// Currently only `Operation.setRunFormatInRange` does this — see its
+    /// doc comment in `OperationReducer.swift` (`applySetRunFormatInRange`)
+    /// for the exact index-1/index-2 contract. After a run splits, exactly
+    /// one resulting fragment keeps that run's PRE-EXISTING `ElementID` (so
+    /// an id recorded before the op keeps resolving to somewhere sensible);
+    /// every OTHER fragment gets an id obtained through this function.
+    /// `index` is 1 for the first newly-allocated fragment such an op can
+    /// produce, 2 for the second — never obtain the RETAINED original
+    /// fragment's id this way, it is simply unchanged from before the op.
+    ///
+    /// Deterministic in `opID` (the `LogEntry.opID` the op was appended
+    /// with — readable from `OperationLog.entries` after `apply`/
+    /// `materialize`) so replaying the same `OperationLog` twice always
+    /// reproduces byte-identical trees, including these derived ids.
+    public static func derivedFragmentID(fromOpID opID: UUID, index: Int) -> ElementID {
+        ElementID(libraryUUID: OperationReducer.derivedFragmentUUID(opID: opID, index: index))
+    }
+}
