@@ -77,6 +77,17 @@ public struct Run {
     /// Default 0 keeps backward compat with API-built Runs.
     public var position: Int? = nil
 
+    /// PsychQuant/ooxml-swift#185: revision-save ids carried as direct
+    /// attributes on `<w:r>` itself (`w:rsidRPr`, `w:rsidDel`, `w:rsidR` —
+    /// `CT_R`'s full attribute set) — same shape and rationale as
+    /// `SectionProperties.rsidAttributes` (#112) / `Paragraph.rsidAttributes`
+    /// (also #185): no visual effect, but Word's compare/merge uses them,
+    /// and any typed edit anywhere in the document regenerates the whole
+    /// `word/document.xml` from the typed model, dropping them from EVERY
+    /// run if nothing carries them. Keyed by local name (no `w:` prefix);
+    /// emitted in a fixed canonical order, not dictionary iteration order.
+    public var rsidAttributes: [String: String] = [:]
+
     public init(text: String, properties: RunProperties = RunProperties()) {
         self._legacyText = text
         self._legacyProperties = properties
@@ -259,6 +270,7 @@ extension Run: Equatable {
             && lhs.revisionId == rhs.revisionId
             && lhs.formatChangeRevisionId == rhs.formatChangeRevisionId
             && lhs.position == rhs.position
+            && lhs.rsidAttributes == rhs.rsidAttributes
     }
 }
 
@@ -508,6 +520,30 @@ public enum VerticalAlign: String, Codable {
 // MARK: - XML 生成
 
 extension Run {
+    /// PsychQuant/ooxml-swift#185: builds the `<w:r ...>` opening tag with
+    /// `rsidAttributes` rendered in `CT_R` schema-declaration order
+    /// (`rsidRPr`, `rsidDel`, `rsidR` — the same three-attribute prefix
+    /// `SectionProperties`'s `AG_SectPrAttributes` canonical order uses,
+    /// minus the section-only `rsidSect`). Any other key (should not occur
+    /// per schema, but kept defensive rather than silently dropped) is
+    /// appended afterward in alphabetical order. Empty dict (the overwhelming
+    /// common case) yields the plain `"<w:r>"` this emitted before the field
+    /// existed.
+    private static func openingRTag(rsidAttributes: [String: String]) -> String {
+        guard !rsidAttributes.isEmpty else { return "<w:r>" }
+        let canonicalOrder = ["rsidRPr", "rsidDel", "rsidR"]
+        var attrs: [String] = []
+        for name in canonicalOrder {
+            if let value = rsidAttributes[name] {
+                attrs.append("w:\(name)=\"\(escapeXMLAttribute(value))\"")
+            }
+        }
+        for name in rsidAttributes.keys.sorted() where !canonicalOrder.contains(name) {
+            attrs.append("w:\(name)=\"\(escapeXMLAttribute(rsidAttributes[name]!))\"")
+        }
+        return "<w:r \(attrs.joined(separator: " "))>"
+    }
+
     /// 轉換為 OOXML XML 字串
     func toXML() -> String {
         // 如果 Run 本身有原始 XML，直接輸出（用於欄位代碼、SDT 等）
@@ -520,7 +556,7 @@ extension Run {
             return rawXML
         }
 
-        var xml = "<w:r>"
+        var xml = Run.openingRTag(rsidAttributes: rsidAttributes)
 
         // Run Properties
         let propsXML = properties.toXML()
