@@ -76,6 +76,42 @@ final class Issue155NestedTableTrailingParagraphTests: XCTestCase {
         XCTAssertEqual(outerPCount, 2, "1 real + 1 synthesized trailing — got: \(xml)")
     }
 
+    // MARK: - Section A2: the reused placeholder's OWN content/format
+    // (independent review finding F5)
+    //
+    // The tests above only assert PARAGRAPH COUNT stays bounded. Count
+    // staying flat is also what a mutation that always synthesizes a fresh
+    // `Paragraph()` (never reusing the real one) would produce — one
+    // paragraph is dropped from `bodyParagraphs`, one fresh one is
+    // appended, so the count is unchanged either way. These tests instead
+    // assert the SPECIFIC paragraph object survives: its own `pPr`
+    // (alignment) and, in the docx-round-trip case below, its `w14:paraId`.
+
+    /// Trailing placeholder with non-default `properties` (alignment) — the
+    /// shape che-word-mcp#224(a) already fixed elsewhere for the "empty but
+    /// formatted" paragraph case.
+    private func makeCellWithFormattedTrailingPlaceholder() -> TableCell {
+        var placeholder = Paragraph()
+        placeholder.properties.alignment = .center
+        var cell = TableCell(paragraphs: [Paragraph(text: "Outer"), placeholder])
+        cell.nestedTables = [Table(rows: [
+            TableRow(cells: [TableCell(text: "Inner")])
+        ])]
+        return cell
+    }
+
+    func testToXMLPreservesTrailingPlaceholderFormatting() throws {
+        let cell = makeCellWithFormattedTrailingPlaceholder()
+        let xml = cell.toXML()
+        // The trailing paragraph (after the nested table) must carry the
+        // alignment — not a bare `<w:p/>` that silently dropped it.
+        let afterNestedTable = xml.components(separatedBy: "</w:tbl>").last ?? ""
+        XCTAssertTrue(afterNestedTable.contains("w:jc") && afterNestedTable.contains("center"),
+                     "the reused trailing paragraph must keep its own pPr — got: \(xml)")
+        XCTAssertFalse(afterNestedTable.hasPrefix("<w:p/>"),
+                      "a bare self-closing <w:p/> means the real placeholder was discarded and a fresh default one synthesized instead — got: \(xml)")
+    }
+
     // MARK: - Section B: full-docx regression — the issue's own guard test
 
     private static let documentXMLTemplate = """
@@ -152,6 +188,24 @@ final class Issue155NestedTableTrailingParagraphTests: XCTestCase {
         return data
     }
 
+    /// Counts `<w:p` element occurrences (`<w:p>`, `<w:p/>`, or
+    /// `<w:p w14:paraId="...">`) in `s` — precise counting: a naive
+    /// `components(separatedBy: "<w:p")` also matches `<w:pPr>`, `<w:pStyle>`,
+    /// etc. (any element whose name starts with `p`), over-counting the
+    /// moment a counted region contains a paragraph WITH properties.
+    private func countParagraphElements(in s: String) -> Int {
+        var count = 0
+        var searchRange = s.startIndex..<s.endIndex
+        while let match = s.range(of: "<w:p", range: searchRange) {
+            let next = s.index(match.upperBound, offsetBy: 0)
+            if next < s.endIndex, [">", "/", " "].contains(String(s[next])) {
+                count += 1
+            }
+            searchRange = match.upperBound..<s.endIndex
+        }
+        return count
+    }
+
     /// Counts the OUTER cell's own direct `<w:p` occurrences, excluding
     /// whatever is inside the nested `<w:tbl>…</w:tbl>`. There are exactly
     /// two `<w:tbl>` elements in this fixture (outer, inner): the outer
@@ -171,8 +225,7 @@ final class Issue155NestedTableTrailingParagraphTests: XCTestCase {
         }
         let leading = openParts[1]   // between outer <w:tbl> and inner <w:tbl>
         let trailing = closeParts[1] // between inner </w:tbl> and outer </w:tbl>
-        return (leading.components(separatedBy: "<w:p").count - 1)
-            + (trailing.components(separatedBy: "<w:p").count - 1)
+        return countParagraphElements(in: leading) + countParagraphElements(in: trailing)
     }
 
     /// The issue's own suggested guard: save the same document three times
@@ -214,5 +267,63 @@ final class Issue155NestedTableTrailingParagraphTests: XCTestCase {
                      "sanity floor: outer cell must have at least its real paragraph + 1 trailing — got \(counts)")
         XCTAssertEqual(Set(counts).count, 1,
                        "outer cell paragraph count must stay bounded across repeated saves — got \(counts)")
+    }
+
+    /// Same fixture shape as `documentXMLTemplate`, but the trailing
+    /// placeholder carries a `pPr` (centered alignment) instead of being
+    /// bare `<w:p/>` — the "empty but formatted" shape #182's
+    /// che-word-mcp#224(a) note already treats as a real case, not a
+    /// hypothetical one.
+    private static let documentXMLWithFormattedPlaceholder = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" \
+        xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>\
+        <w:p><w:r><w:t>Unrelated</w:t></w:r></w:p>\
+        <w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>\
+        <w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>\
+        <w:p><w:r><w:t>Outer</w:t></w:r></w:p>\
+        <w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>\
+        <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>\
+        <w:p><w:r><w:t>Inner</w:t></w:r></w:p>\
+        </w:tc></w:tr></w:tbl>\
+        <w:p w14:paraId="7F00BA55"><w:pPr><w:jc w:val="center"/></w:pPr></w:p>\
+        </w:tc></w:tr></w:tbl>\
+        <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>\
+        </w:body></w:document>
+        """
+
+    /// Review finding F5: the count staying flat is not proof the SAME
+    /// placeholder survived — a mutation that always drops the real one and
+    /// synthesizes `Paragraph()` fresh would also keep the count flat (one
+    /// removed from `bodyParagraphs`, one added back). This asserts the
+    /// reused paragraph's own `pPr` (and `w14:paraId`, which only a REUSED
+    /// object — not a freshly synthesized `Paragraph()` — can carry) survive
+    /// an unrelated typed-dirty save.
+    func testRepeatedSavePreservesTrailingPlaceholderOwnFormatting() throws {
+        let url = try buildFixture(documentXML: Self.documentXMLWithFormattedPlaceholder)
+        defer { try? FileManager.default.removeItem(at: url) }
+        var doc = try DocxReader.read(from: url)
+        defer { doc.close() }
+
+        try doc.updateParagraph(at: 0, text: "unrelated edit")
+
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue155-formatted-out-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: outURL) }
+        try DocxWriter.write(doc, to: outURL)
+
+        let xml = try extractDocumentXML(from: outURL)
+        let outerCount = try outerCellParagraphCount(in: xml)
+        XCTAssertEqual(outerCount, 2, "count must still be bounded — got \(outerCount)")
+
+        let closeParts = (String(data: xml, encoding: .utf8)!).components(separatedBy: "</w:tbl>")
+        let trailing = closeParts.count >= 3 ? closeParts[1] : "" // between inner </w:tbl> and outer </w:tbl>
+        XCTAssertTrue(trailing.contains("w:jc") && trailing.contains("center"),
+                     "the trailing paragraph's own pPr (centered alignment) must survive — got: \(trailing)")
+        XCTAssertTrue(trailing.contains("7F00BA55"),
+                     "the trailing paragraph must be the SAME object (its w14:paraId survives) — " +
+                     "a fresh Paragraph() has no paraId, so this fails under the F5 mutation " +
+                     "(reviewer's report) that always synthesizes a new one instead of reusing " +
+                     "the real placeholder — got: \(trailing)")
     }
 }
