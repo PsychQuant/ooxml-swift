@@ -11,16 +11,43 @@ All notable changes to ooxml-swift will be documented in this file.
 ### Added
 
 - **解壓與讀取有大小上限了（#130、#157）**：`ZipHelper.unzip`／`ZipHelper.Limits` 新增單一
-  entry 上限（256 MB）、封裝總量上限（512 MB）、壓縮比上限（500×）、entry 數上限
-  （50000），三項預設值取自真實語料上緣並留有數倍餘裕；`DocxReader.read`／
-  `PackageInspector.imageConsistencyReport` 都新增可選的 `limits:` 參數，未指定時沿用預設值，
-  行為完全向下相容。宣告值與解壓後實際位元組數各擋一次（央目錄可能說謊）；**新增
-  `ExtractionBudget` 在解壓「進行中」即時計數並中止**（#157），宣告過小、實際遠大的封裝不會
-  把整份內容先寫到磁碟才被拒絕，超出上限後最多只多寫一個 16 KiB 區塊。`ZipHelper.readPart`
-  在讀入單一 part 前先檢查檔案大小，擋住把展開後的 part 整份讀進記憶體再解析所造成的
-  RSS 暴漲（PoC：0.56 MB 檔案膨脹到 1.7 GB RSS）。`RawPartChannel.readAllParts`（`macdoc word
-  render --verify-against`、`execute_script`／`export_script` 的 `source_path` 等入口）
-  同樣補上宣告與實際位元組數（逐區塊即時檢查）、entry 數上限（#107）。
+  entry 上限、封裝總量上限、壓縮比上限（500×）、entry 數上限（50000）。`DocxReader.read`／
+  `PackageInspector.imageConsistencyReport`／`RawPartChannel.readAllParts` 都新增可選的
+  `limits:` 參數，未指定時沿用預設值，行為完全向下相容。宣告值與解壓後實際位元組數各擋
+  一次（央目錄可能說謊）；**新增 `ExtractionBudget` 在解壓「進行中」即時計數並中止**
+  （#157），宣告過小、實際遠大的封裝不會把整份內容先寫到磁碟才被拒絕，超出上限後最多只多寫
+  一個 16 KiB 區塊。`ZipHelper.readPart` 在讀入單一 part 前先檢查檔案大小，擋住把展開後的
+  part 整份讀進記憶體再解析所造成的 RSS 暴漲（PoC：0.56 MB 檔案膨脹到 1.7 GB RSS）。
+  `RawPartChannel.readAllParts`（`macdoc word render --verify-against`、`execute_script`／
+  `export_script` 的 `source_path` 等入口）同樣補上宣告與實際位元組數（逐區塊即時檢查）、
+  entry 數上限（#107）。
+
+  **升級注意——上限值與如何覆寫**：
+
+  | 上限 | 預設值 | 依據 |
+  |---|---|---|
+  | 單一 entry（`maximumEntryBytes`）| 512 MB | 見下方 R2 更正 |
+  | 封裝總量（`maximumTotalBytes`）| 4096 MB（4 GiB）| 見下方 R2 更正 |
+  | 壓縮比（`maximumCompressionRatio`）| 500× | 真實語料（738 份文件）最高 117.8×，4.24× 餘裕 |
+  | 單一 part 讀入記憶體（`maximumPartBytes`）| 512 MB | 與單一 entry 同值（「一個 part 不會比一個 entry 大」，非獨立量測）|
+  | entry 數（`maximumEntryCount`）| 50000 | 無語料依據，純粹餘裕判斷（真實文件通常數十到數百個 part）|
+
+  超過上限的合法大文件會被拒絕，這是代價本身，不是副作用。有理由的呼叫端可自行覆寫，三個
+  入口（`DocxReader.read(from:limits:)`、
+  `PackageInspector.imageConsistencyReport(of:/ofPackageAt:/extracting:listSubpaths:listDirectory:limits:)`、
+  `RawPartChannel.readAllParts(from:limits:)`）皆可傳入自訂的 `ZipHelper.Limits(...)`，
+  例如 `ZipHelper.Limits(maximumTotalBytes: 8 * 1024 * 1024 * 1024)`。
+
+  **R2 更正（獨立審查 MEDIUM-1）**：單一 entry 與封裝總量上限原訂 256 MB／512 MB（僅取自
+  738 份真實語料的上緣，14.6×／19.4× 餘裕），審查指出這批語料本身都是小文件，「餘裕」無法
+  代表大文件的真實需求，並具體點出「內嵌約 200 張 300 dpi A4 掃描圖的論文/報告」這類合理情境：
+  單張 300 dpi A4 未優化點陣圖約 26 MB，200 張理論上限約 5.2 GB，但真實 Word 文件內嵌的通常是
+  JPEG/PNG 壓縮後的掃描檔（單張約 5–10 MB 較合理），200 張約 1–2 GB。**改為 512 MB／4096 MB**，
+  對上述「合理但生成」情境留有約 2–4× 餘裕，對單張離群的未優化大圖（約 26 MB）留有約 20×
+  餘裕。**壓縮比上限維持 500× 不變**——那才是真正擋住經典 zip bomb（極端放大）的那一軸，
+  與文件多大無關（真實圖片本身不會被 DEFLATE 壓出離群的高比值），調整總量／單一 entry 上限
+  不會削弱這一層防護；一個真的這麼大的封裝，需要真的寫出那麼多實際位元組，成本是攤平的、
+  不是被放大的。
 
 ### Fixed
 
@@ -58,6 +85,21 @@ All notable changes to ooxml-swift will be documented in this file.
   （PoC：relationship id 塞 9000 個 `&#1;` 參照，讓錯誤文字膨脹到 441000 字元）。現在改走
   `ZipHelper.displayName`，套用與封裝 entry 名稱、relationship id 相同的跳脫與 480 字元
   上限。
+
+  **R2 更正（獨立審查 HIGH-1）**：上面 #146 新增的 `XmlTreeReaderError.errorDescription`
+  第一版本身帶有 #150 要防的同一種缺陷——`unexpectedCharacter`／`mismatchedClosingTag`／
+  `invalidEntityReference`／`invalidNumericReference` 四個 case 把攻擊者可控、長度不受限的
+  原始字串（`decodeXmlEntities` 找不到 `;` 時抓「從 `&` 到該文字節點結尾」整段、`parseName()`
+  讀到第一個非 name 字元為止都沒有長度上限）直接嵌進訊息，且是**退步**而非中性：修法前
+  `.localizedDescription` 只回傳 Swift 通用訊息、不洩漏任何內容。獨立審查實測重現
+  2,000,045 字元的錯誤訊息與內含真實換行字元（U+000A）的訊息。四個 case 現在改為先經過
+  `ZipHelper.displayName` 才進訊息。全 repo 額外掃出兩個同類缺口一併修正：
+  `XMLHardeningError.invalidAttributeName`／`.attributeValueTooLarge` 的 `name`（屬性名稱
+  的 NameChar 規則只限字元類別、不限長度）；`DocxReader` 一般 part 掃描寫入
+  `document.xmlTreeLoadFailures`（一個 `public` 屬性）時原本用
+  `String(describing: error)`——這個呼叫完全繞過 `LocalizedError.errorDescription`（Swift
+  對列舉關聯值的預設反射輸出，不經過任何自訂描述），即使 `errorDescription` 本身修好了，
+  這裡仍會逐字洩漏，改為 `error.localizedDescription`。
 
 ### Known limitation
 
