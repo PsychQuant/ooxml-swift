@@ -499,7 +499,8 @@ extension Drawing {
         """
     }
 
-    /// XML 跳脫
+    /// XML 跳脫（僅用於 `wp:docPr` 的 `name`／`descr` 屬性值——PsychQuant/ooxml-swift#165：
+    /// 換行／CR／tab 若寫成字面字元，下一次解析會被 XML 正規化成空白，故一併轉成字元參照）
     private func escapeXML(_ string: String) -> String {
         return string
             .replacingOccurrences(of: "&", with: "&amp;")
@@ -507,6 +508,9 @@ extension Drawing {
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&apos;")
+            .replacingOccurrences(of: "\n", with: "&#10;")
+            .replacingOccurrences(of: "\r", with: "&#13;")
+            .replacingOccurrences(of: "\t", with: "&#9;")
     }
 }
 
