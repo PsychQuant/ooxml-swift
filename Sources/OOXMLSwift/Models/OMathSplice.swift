@@ -247,11 +247,21 @@ internal extension RunProperties {
     ///
     /// - `.full`: returns self verbatim (deep copy via Equatable struct semantics).
     /// - `.omathOnly`: returns a new `RunProperties` with only OMath-rendering-relevant fields:
-    ///   `rFonts`, `fontName`, `fontSize`, `bold`, `italic`. Other fields (rStyle / color /
-    ///   highlight / verticalAlign / etc.) are dropped.
+    ///   `rFonts`, `fontName`, `fontSize`, `lang`, `bold`, `italic`. Other fields (rStyle /
+    ///   color / highlight / verticalAlign / etc.) are dropped.
     /// - `.discard`: returns `RunProperties()` (default-initialized).
     ///
     /// Spec: rPr propagation modes (Decision Q4)
+    ///
+    /// R2 fix (independent review of PsychQuant/ooxml-swift#117, Finding #2):
+    /// this branch never copied `lang`, even though it was always part of the
+    /// documented `.omathOnly` whitelist (spec.md's "rPr propagation modes"
+    /// Requirement, and design.md, both list `rFonts`/`sz`/`lang`) — a
+    /// pre-existing gap between the whitelist's own documentation and its
+    /// implementation, predating (and not introduced by) the carrier fix in
+    /// this same file. `lang` is copied verbatim (no on/off tri-state concern
+    /// — `LanguageProperties` has no boolean fields, so there is no
+    /// absent-vs-explicit-off distinction to preserve here, unlike bold/italic).
     func filteredForOMathSplice(mode: OMathSpliceRpRMode) -> RunProperties {
         switch mode {
         case .full:
@@ -261,6 +271,7 @@ internal extension RunProperties {
             out.rFonts = self.rFonts
             out.fontName = self.fontName
             out.fontSize = self.fontSize
+            out.lang = self.lang
             if let bold = self.specifiedBold { out.bold = bold }
             if let italic = self.specifiedItalic { out.italic = italic }
             return out
