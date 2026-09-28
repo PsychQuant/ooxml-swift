@@ -25,7 +25,7 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 - Preserve source Run's `rPr` (font/size/lang) by default, with escape hatches for cross-doc style/theme conflicts
 - Support mid-paragraph splice via `.afterText(...)` / `.beforeText(...)` anchors mirroring existing `InsertLocation` API
 - Provide both single-OMath low-level API (full caller control) and paragraph-level batch API (convenient for cross-doc rescue scenarios)
-- Maintain round-trip lossless guarantee — `DocxReader.read()` of the spliced doc returns OMath XML byte-equal to source
+- Maintain round-trip lossless guarantee — `DocxReader.read()` of the spliced doc returns OMath XML **semantically equivalent** to source (PsychQuant/ooxml-swift#123: canonical semantic XML equivalence, not lexical byte identity — Foundation's XML parser normalizes legal lexical variants such as entity/character-reference spelling on reload, so byte-for-byte identity is not representable through the typed reader architecture)
 
 **Non-Goals:**
 
@@ -65,7 +65,7 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 **Alternatives considered**:
 
-- *Renumber whole paragraph's positioned entries*: re-sequence all 13 carrier types. **Rejected** — touches every carrier kind (each is a separate array; missing one causes silent ordering bug; this is the fragile area #56 series fixed). Renumber also loses correspondence between `position` and source byte offset, breaking byte-equal round-trip diagnostics
+- *Renumber whole paragraph's positioned entries*: re-sequence all 13 carrier types. **Rejected** — touches every carrier kind (each is a separate array; missing one causes silent ordering bug; this is the fragile area #56 series fixed). Renumber also loses correspondence between `position` and source byte offset, breaking round-trip diagnostics that key off it
 - *Append-only API (no mid-paragraph)*: only support `.atStart` / `.atEnd`. **Rejected** — thesis use case requires mid-paragraph (e.g., "進行 t 檢定" needs splicing the OMath `t` between "進行 " and " 檢定")
 
 **Rationale**: Run-split isolates blast radius to `runs[]` array; the other 12 carriers are untouched. This is the same anchor-split approach `WordDocument+ReplaceTextWithBoundaryDetection.swift` already implements — proven robust by the existing test suite.
@@ -105,7 +105,7 @@ The design decisions below were converged via [PsychQuant/ooxml-swift#57](https:
 
 ## Risks / Trade-offs
 
-[**Risk: round-trip lossy after splice**] → Mitigation: 8 round-trip test fixtures in `Tests/OOXMLSwiftTests/OMathSpliceTests.swift` enforce byte-equal `DocxReader.read()` of spliced output vs original `<m:oMath>` block. PR merge blocked on any byte mismatch.
+[**Risk: round-trip lossy after splice**] → Mitigation: round-trip test fixtures in `Tests/OOXMLSwiftTests/OMathSpliceTests.swift` enforce semantic equivalence (PsychQuant/ooxml-swift#123) of `DocxReader.read()` of spliced output vs original `<m:oMath>` block — content/structure preserved; lexical variants (entity spelling, attribute order, namespace-declaration placement) are not treated as mismatches. PR merge blocked on any semantic mismatch.
 
 [**Risk: anchor-Run split with whitespace-sensitive `<w:t xml:space="preserve">`**] → Mitigation: copy `xml:space` attribute when splitting; existing `replaceText` code path tested with similar fixtures. Add explicit test case for whitespace-bearing anchor.
 

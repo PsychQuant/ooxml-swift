@@ -33,6 +33,27 @@ final class OMathSpliceTests: XCTestCase {
         return doc
     }
 
+    /// PsychQuant/ooxml-swift#117: a spliced-into Run carries its OMath payload
+    /// as a verbatim `Run.rawElements` child (so `Run.toXML()` still emits
+    /// `<w:rPr>` before it), not the legacy `Run.rawXML` full-run-replacement
+    /// channel that a document loaded straight off disk uses. Both are valid
+    /// "this Run is OMath" signals; tests should not care which one a given
+    /// Run happens to use, so every OMath-detection assertion in this file
+    /// goes through this helper instead of inspecting `.rawXML` directly.
+    private func omathPayload(of run: Run) -> String? {
+        if let raw = run.rawXML, raw.contains("oMath") { return raw }
+        if let elements = run.rawElements {
+            for element in elements where element.name == "oMath" || element.name == "oMathPara" {
+                return element.xml
+            }
+        }
+        return nil
+    }
+
+    private func isOMathRun(_ run: Run) -> Bool {
+        omathPayload(of: run) != nil
+    }
+
     /// Wrap multiple paragraphs as body.
     private func makeDocument(with paragraphs: [Paragraph]) -> WordDocument {
         var doc = WordDocument()
@@ -123,8 +144,8 @@ final class OMathSpliceTests: XCTestCase {
 
     // MARK: - Tests
 
-    /// Test 6.2: Inline OMath spliced from source Run.rawXML to target paragraph end.
-    /// Covers: Inline OMath spliced from source Run.rawXML to target paragraph end scenario.
+    /// Test 6.2: Inline OMath spliced from source into target paragraph end.
+    /// Covers: Inline OMath spliced from source Run to target paragraph end scenario.
     func testInlineRunRawXMLSpliceAtEnd() throws {
         let sourcePara = try parseParagraph(xml: Self.sourceInlineRunOMath)
         let targetPara = try parseParagraph(xml: Self.targetEmpty)
@@ -142,14 +163,13 @@ final class OMathSpliceTests: XCTestCase {
             XCTFail("Expected paragraph"); return
         }
 
-        // Verify a Run with rawXML containing OMath was added.
-        let omathRuns = resultPara.runs.filter {
-            ($0.rawXML ?? "").contains("oMath")
-        }
+        // Verify a Run carrying an OMath payload was added (PsychQuant/ooxml-swift#117:
+        // the carrier is `rawElements`, not `rawXML` — see `isOMathRun`).
+        let omathRuns = resultPara.runs.filter { isOMathRun($0) }
         XCTAssertEqual(omathRuns.count, 1, "Expected exactly one OMath run in target")
 
-        // Verify the rawXML byte-equals (or substring-matches) the source OMath block.
-        let spliced = omathRuns[0].rawXML ?? ""
+        // Verify the payload preserves the source OMath content.
+        let spliced = omathPayload(of: omathRuns[0]) ?? ""
         XCTAssertTrue(
             spliced.contains("<m:t>t</m:t>"),
             "Spliced OMath should preserve source OMath content; got: \(spliced)"
@@ -182,7 +202,7 @@ final class OMathSpliceTests: XCTestCase {
             "Direct-child OMath should be added to unrecognizedChildren")
 
         // Verify no OMath was wrapped into a Run (carrier preservation).
-        let runWithOMath = resultPara.runs.first { ($0.rawXML ?? "").contains("oMath") }
+        let runWithOMath = resultPara.runs.first { isOMathRun($0) }
         XCTAssertNil(runWithOMath,
             "Direct-child source OMath should NOT be wrapped into a Run on target")
     }
@@ -282,7 +302,7 @@ final class OMathSpliceTests: XCTestCase {
         // [prefix run "所得出的參數進行 ", omath run, suffix run " 檢定："]
         // (At minimum: the prefix text appears before the OMath run, suffix after.)
         let runs = resultPara.runs
-        let omathIdx = runs.firstIndex { ($0.rawXML ?? "").contains("oMath") }
+        let omathIdx = runs.firstIndex { isOMathRun($0) }
         XCTAssertNotNil(omathIdx, "Expected an OMath run in result")
         guard let oi = omathIdx else { return }
 
@@ -344,12 +364,56 @@ final class OMathSpliceTests: XCTestCase {
         )
 
         guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
-        let omathRun = resultPara.runs.first { ($0.rawXML ?? "").contains("oMath") }
+        let omathRun = resultPara.runs.first { isOMathRun($0) }
         XCTAssertNotNil(omathRun)
         XCTAssertEqual(omathRun?.properties.fontName, "Cambria Math",
             "fontName should propagate via rFonts.ascii in .full mode")
         XCTAssertEqual(omathRun?.properties.fontSize, 24,
             "fontSize 24 (12pt) should propagate in .full mode")
+    }
+
+    /// PsychQuant/ooxml-swift#117: `.full` must not just set `Run.properties`
+    /// in memory — the copied rPr must actually be emitted by `Run.toXML()`,
+    /// *before* the OMath body, inside the same `<w:r>` element. Pre-fix,
+    /// `Run.toXML()` returned the OMath carrier immediately and never reached
+    /// the `<w:rPr>` emission code at all.
+    func testRpRModeFullEmitsCopiedRPrInSerializedXML() throws {
+        let sourceXML = """
+        <w:p \(Self.mNS)>
+          <w:r>
+            <w:rPr><w:rFonts w:ascii="Cambria Math"/><w:sz w:val="24"/><w:b/></w:rPr>
+            <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>
+          </w:r>
+        </w:p>
+        """
+        let sourcePara = try parseParagraph(xml: sourceXML)
+        let targetPara = try parseParagraph(xml: Self.targetEmpty)
+        var target = makeDocument(with: targetPara)
+
+        try target.spliceOMath(
+            from: sourcePara,
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            omathIndex: 0,
+            rPrMode: .full
+        )
+
+        guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
+        guard let omathRun = resultPara.runs.first(where: { isOMathRun($0) }) else {
+            XCTFail("Expected an OMath run"); return
+        }
+
+        let runXML = omathRun.toXML()
+        guard let rPrRange = runXML.range(of: "<w:rPr>"),
+              let omathRange = runXML.range(of: "<m:oMath") else {
+            XCTFail("Expected both <w:rPr> and <m:oMath> in serialized run XML; got: \(runXML)")
+            return
+        }
+        XCTAssertTrue(rPrRange.lowerBound < omathRange.lowerBound,
+            "<w:rPr> must be serialized before <m:oMath> within the same <w:r>; got: \(runXML)")
+        XCTAssertTrue(runXML.contains("Cambria Math"), "Expected rFonts to survive serialization; got: \(runXML)")
+        XCTAssertTrue(runXML.contains("w:val=\"24\""), "Expected sz to survive serialization; got: \(runXML)")
+        XCTAssertTrue(runXML.contains("<w:b/>"), "Expected explicit bold to survive serialization; got: \(runXML)")
     }
 
     /// .discard mode resets to default rPr.
@@ -375,10 +439,119 @@ final class OMathSpliceTests: XCTestCase {
         )
 
         guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
-        let omathRun = resultPara.runs.first { ($0.rawXML ?? "").contains("oMath") }
+        let omathRun = resultPara.runs.first { isOMathRun($0) }
         XCTAssertNotNil(omathRun)
         XCTAssertNil(omathRun?.properties.fontName, ".discard should clear fontName")
         XCTAssertNil(omathRun?.properties.fontSize, ".discard should clear fontSize")
+
+        // PsychQuant/ooxml-swift#117: also assert the *serialized* XML — the
+        // run must still exist (with the OMath body) but with no copied rPr
+        // fields leaking through.
+        let runXML = omathRun?.toXML() ?? ""
+        XCTAssertTrue(runXML.contains("<m:oMath"), "Expected OMath body still serialized; got: \(runXML)")
+        XCTAssertFalse(runXML.contains("Cambria Math"), ".discard must not leak source rFonts into serialized XML")
+        XCTAssertFalse(runXML.contains("w:val=\"24\""), ".discard must not leak source sz into serialized XML")
+    }
+
+    /// PsychQuant/ooxml-swift#117: `.omathOnly` emits only the documented
+    /// whitelist (rFonts / sz / szCs / lang / specified bold / specified
+    /// italic) and excludes non-whitelisted fields (rStyle / color), while
+    /// still preserving an explicit-off bold as `<w:b w:val="0"/>` rather than
+    /// silently dropping it (PsychQuant/ooxml-swift#115 tri-state contract).
+    func testRpRModeOmathOnlyEmitsWhitelistOnly() throws {
+        let sourceXML = """
+        <w:p \(Self.mNS)>
+          <w:r>
+            <w:rPr>
+              <w:rStyle w:val="MathChar"/>
+              <w:rFonts w:ascii="Cambria Math"/>
+              <w:b w:val="0"/>
+              <w:color w:val="FF0000"/>
+              <w:sz w:val="24"/>
+            </w:rPr>
+            <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>
+          </w:r>
+        </w:p>
+        """
+        let sourcePara = try parseParagraph(xml: sourceXML)
+        let targetPara = try parseParagraph(xml: Self.targetEmpty)
+        var target = makeDocument(with: targetPara)
+
+        try target.spliceOMath(
+            from: sourcePara,
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            omathIndex: 0,
+            rPrMode: .omathOnly
+        )
+
+        guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
+        guard let omathRun = resultPara.runs.first(where: { isOMathRun($0) }) else {
+            XCTFail("Expected an OMath run"); return
+        }
+
+        XCTAssertEqual(omathRun.properties.fontName, "Cambria Math")
+        XCTAssertEqual(omathRun.properties.fontSize, 24)
+        XCTAssertEqual(omathRun.properties.specifiedBold, false,
+            "Explicit-off bold must survive .omathOnly as false, not absent")
+        XCTAssertNil(omathRun.properties.rStyle, "rStyle is not in the .omathOnly whitelist")
+        XCTAssertNil(omathRun.properties.color, "color is not in the .omathOnly whitelist")
+
+        let runXML = omathRun.toXML()
+        XCTAssertTrue(runXML.contains("Cambria Math"))
+        XCTAssertTrue(runXML.contains("w:val=\"24\""))
+        XCTAssertTrue(runXML.contains("<w:b w:val=\"0\"/>"),
+            "Explicit-off bold must serialize as <w:b w:val=\"0\"/>, not be omitted; got: \(runXML)")
+        XCTAssertFalse(runXML.contains("MathChar"), "rStyle must not leak through .omathOnly; got: \(runXML)")
+        XCTAssertFalse(runXML.contains("FF0000"), "color must not leak through .omathOnly; got: \(runXML)")
+    }
+
+    /// PsychQuant/ooxml-swift#117: rPr correctness must survive a *later*
+    /// dirty resave — i.e. some unrelated mutation forces the whole paragraph
+    /// to regenerate via `Paragraph.toXML()` (not just the freshly-spliced
+    /// `Run.toXML()` in isolation) before the document is saved.
+    func testRpRModeFullSurvivesLaterDirtyResave() throws {
+        let sourceXML = """
+        <w:p \(Self.mNS)>
+          <w:r>
+            <w:rPr><w:rFonts w:ascii="Cambria Math"/><w:sz w:val="24"/></w:rPr>
+            <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>
+          </w:r>
+        </w:p>
+        """
+        let sourcePara = try parseParagraph(xml: sourceXML)
+        let targetPara = try parseParagraph(xml: Self.targetEmpty)
+        var target = makeDocument(with: targetPara)
+
+        try target.spliceOMath(
+            from: sourcePara,
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            omathIndex: 0,
+            rPrMode: .full
+        )
+
+        // Unrelated mutation: append a plain text Run to the same paragraph,
+        // forcing a full paragraph regeneration on next `toXML()`/save.
+        guard case .paragraph(var resultPara) = target.body.children[0] else { XCTFail(); return }
+        resultPara.runs.append(Run(text: "後續文字"))
+        target.body.children[0] = .paragraph(resultPara)
+
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("OMathSpliceTests-dirty-resave-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        try DocxWriter.write(target, to: tempURL)
+        let reloaded = try DocxReader.read(from: tempURL)
+
+        guard case .paragraph(let reloadedPara) = reloaded.body.children[0] else { XCTFail(); return }
+        guard let reloadedOMathRun = reloadedPara.runs.first(where: { isOMathRun($0) }) else {
+            XCTFail("Expected OMath run to survive dirty resave + reload"); return
+        }
+        XCTAssertEqual(reloadedOMathRun.properties.fontName, "Cambria Math",
+            "rPr must survive a later dirty resave, not just the immediate in-memory splice")
+        XCTAssertEqual(reloadedOMathRun.properties.fontSize, 24)
+        XCTAssertTrue(reloadedPara.runs.contains { $0.text == "後續文字" })
     }
 
     // MARK: - Namespace policy tests (6.10)
@@ -453,7 +626,7 @@ final class OMathSpliceTests: XCTestCase {
         XCTAssertEqual(spliced, 3, "Expected all 3 OMath blocks to be spliced")
 
         guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
-        let omathRuns = resultPara.runs.filter { ($0.rawXML ?? "").contains("oMath") }
+        let omathRuns = resultPara.runs.filter { isOMathRun($0) }
         XCTAssertEqual(omathRuns.count, 3, "Expected 3 OMath runs in result")
     }
 
@@ -482,13 +655,15 @@ final class OMathSpliceTests: XCTestCase {
         try DocxWriter.write(target, to: tempURL)
         let reloaded = try DocxReader.read(from: tempURL)
 
-        // After round-trip, inline OMath that was stored as Run.rawXML on the write side
-        // is re-parsed by DocxReader. The exact carrier on the read side depends on whether
-        // DocxWriter emitted the OMath inside <w:r> or as direct child — current Run.toXML
-        // behavior emits Run.rawXML verbatim (without <w:r> wrapper), so the OMath ends
-        // up as direct-child in the round-tripped paragraph's unrecognizedChildren.
-        // The round-trip lossless guarantee is at the **content** level: the OMath glyph
-        // is preserved regardless of which carrier holds it.
+        // PsychQuant/ooxml-swift#117 fix: the spliced Run now serializes as a
+        // proper `<w:r>...<m:oMath>...</m:oMath></w:r>` (rPr wrapper preserved,
+        // OMath carried as a Run child via `rawElements` rather than replacing
+        // the whole run). Re-parsed by DocxReader, this is indistinguishable
+        // from a normal inline OMath run loaded from any other document, so it
+        // round-trips as a `Run` (via the legacy `rawXML` convention on the read
+        // side) — NOT as a direct child of `<w:p>`. Pre-fix, `Run.toXML()`
+        // returned the bare `<m:oMath>` fragment with no `<w:r>` wrapper at
+        // all, so re-parsing misclassified it as a direct child.
         guard case .paragraph(let reloadedPara) = reloaded.body.children[0] else { XCTFail(); return }
 
         let runOMathContent = reloadedPara.runs
@@ -499,12 +674,13 @@ final class OMathSpliceTests: XCTestCase {
             .filter { $0.name == "oMath" || $0.name == "oMathPara" }
             .map { $0.rawXML }
             .joined()
-        let allOMathContent = runOMathContent + directChildOMathContent
 
         XCTAssertTrue(
-            allOMathContent.contains("<m:t>t</m:t>") || allOMathContent.contains("<mml:t>t</mml:t>"),
-            "Round-tripped OMath should contain original glyph regardless of carrier; got: \(allOMathContent)"
+            runOMathContent.contains("<m:t>t</m:t>") || runOMathContent.contains("<mml:t>t</mml:t>"),
+            "Round-tripped OMath should be carried by a Run; got runOMathContent: \(runOMathContent)"
         )
+        XCTAssertTrue(directChildOMathContent.isEmpty,
+            "OMath must round-trip as a Run child, not leak into direct-child unrecognizedChildren; got: \(directChildOMathContent)")
     }
 
     // MARK: - No regression (6.14)
@@ -533,14 +709,14 @@ final class OMathSpliceTests: XCTestCase {
         )
 
         guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
-        let omathRuns = resultPara.runs.filter { ($0.rawXML ?? "").contains("oMath") }
+        let omathRuns = resultPara.runs.filter { isOMathRun($0) }
 
         // Should have α + β (original) + t (spliced) = 3 OMath runs total.
         XCTAssertEqual(omathRuns.count, 3,
             "Expected 3 OMath runs (α, β preserved + t spliced); got \(omathRuns.count)")
 
         // Verify each glyph is present.
-        let allOMathContent = omathRuns.compactMap { $0.rawXML }.joined()
+        let allOMathContent = omathRuns.compactMap { omathPayload(of: $0) }.joined()
         XCTAssertTrue(allOMathContent.contains("<m:t>α</m:t>"), "Expected α preserved")
         XCTAssertTrue(allOMathContent.contains("<m:t>β</m:t>"), "Expected β preserved")
         XCTAssertTrue(allOMathContent.contains("<m:t>t</m:t>"), "Expected t spliced")

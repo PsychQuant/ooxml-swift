@@ -217,7 +217,21 @@ extension WordDocument {
         }
     }
 
-    /// Splice OMath as a new `Run.rawXML` into target paragraph.
+    /// Splice OMath as a new Run into target paragraph.
+    ///
+    /// PsychQuant/ooxml-swift#117: the OMath payload is carried as a verbatim
+    /// `Run.rawElements` child, NOT `Run.rawXML`. `Run.toXML()` treats
+    /// `rawXML` as a complete replacement for the whole `<w:r>...</w:r>`
+    /// element — it returns immediately, before ever reaching the `<w:rPr>`
+    /// emission code below it, so any rPr copied into `omathRun.properties`
+    /// (per `rPrMode`) would be silently dropped from the serialized XML even
+    /// though it was set correctly in memory. `rawElements` is emitted by the
+    /// *normal* Run serializer path — after `<w:rPr>`, in source-document
+    /// order — so the copied rPr and the OMath body both survive, in the
+    /// correct relative order, inside one properly-opened `<w:r>` element.
+    /// Generic non-OMML `rawXML` usage elsewhere (field codes, SDTs) is
+    /// unaffected — this only changes how *this* splice API constructs its
+    /// own new Run.
     private static func spliceAsRun(
         into targetPara: inout Paragraph,
         omath: ExtractedOMath,
@@ -226,7 +240,7 @@ extension WordDocument {
     ) throws {
         // Build the new OMath Run.
         var omathRun = Run(text: "")
-        omathRun.rawXML = omath.xml
+        omathRun.rawElements = [RawElement(name: omath.rootName, xml: omath.xml)]
         if let sourceRpR = omath.sourceRunProperties {
             omathRun.properties = sourceRpR.filteredForOMathSplice(mode: rPrMode)
         } else {
