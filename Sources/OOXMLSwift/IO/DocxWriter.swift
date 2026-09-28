@@ -258,7 +258,7 @@ public struct DocxWriter {
         }
         if !overlayMode || dirty.contains("docProps/core.xml") {
             if !document.treeFreshParts.contains("docProps/core.xml") {
-                try writeCoreProperties(document.properties, to: tempDir)
+                try writeCoreProperties(document.properties, fallback: document.timestampForUnsetProperties ?? Date(), to: tempDir)
                 typedWrittenParts.append(contentsOf: ["docProps/core.xml"])
             }
             try finalizePartFromTree("docProps/core.xml", document: &document, tempDir: tempDir)
@@ -1651,7 +1651,7 @@ public struct DocxWriter {
 
     // MARK: - Core Properties
 
-    private static func writeCoreProperties(_ props: DocumentProperties, to baseURL: URL) throws {
+    private static func writeCoreProperties(_ props: DocumentProperties, fallback: Date, to baseURL: URL) throws {
         let dateFormatter = ISO8601DateFormatter()
 
         var xml = """
@@ -1688,18 +1688,15 @@ public struct DocxWriter {
             xml += "<cp:revision>1</cp:revision>"
         }
 
-        // PsychQuant/ooxml-swift#151: `Date()` (the wall clock at the moment
-        // THIS save happens to run) made two saves of the same document
-        // differ whenever no explicit timestamp was set — a fresh
-        // `create_document` in particular. A document that DOES carry a
-        // `created`/`modified` value (loaded from a real file, or set by the
-        // caller) is completely unaffected: this fallback only ever fires
-        // when there was no real timestamp to preserve in the first place,
-        // so no existing document's docProps get rewritten by this.
-        let created = props.created ?? ZipHelper.reproducibleFallbackTimestamp
+        // PsychQuant/ooxml-swift#151: a document that carries its own
+        // `created`/`modified` keeps them. Otherwise the caller's
+        // `timestampForUnsetProperties` decides: the current time by default
+        // (a new document's properties should say when it was made), or a
+        // fixed value when the caller needs byte-reproducible output.
+        let created = props.created ?? fallback
         xml += "<dcterms:created xsi:type=\"dcterms:W3CDTF\">\(dateFormatter.string(from: created))</dcterms:created>"
 
-        let modified = props.modified ?? ZipHelper.reproducibleFallbackTimestamp
+        let modified = props.modified ?? fallback
         xml += "<dcterms:modified xsi:type=\"dcterms:W3CDTF\">\(dateFormatter.string(from: modified))</dcterms:modified>"
 
         xml += "</cp:coreProperties>"

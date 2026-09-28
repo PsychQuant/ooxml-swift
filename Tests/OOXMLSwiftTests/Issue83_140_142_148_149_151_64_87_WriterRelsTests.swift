@@ -493,42 +493,55 @@ final class Issue83_140_142_148_149_151_64_87_WriterRelsTests: XCTestCase {
 
     // MARK: - #151 — reproducible writer output
 
-    /// #151 body: `props.created ?? Date()` / `props.modified ?? Date()` make
-    /// two saves of the SAME unset-timestamp document differ. This does not
-    /// wait on a clock tick — it calls `writeData` twice in immediate
-    /// succession and requires `docProps/core.xml` to be byte-identical both
-    /// times regardless of timing.
-    func testFreshDocumentWithNoExplicitTimestampsProducesReproducibleCoreProperties() throws {
+    private static let pinnedTimestamp = Date(timeIntervalSince1970: 1_700_000_000)
+
+    /// #151: with the fallback pinned, two saves of the same unset-timestamp
+    /// document produce byte-identical `docProps/core.xml`.
+    func testPinnedTimestampFallbackMakesCorePropertiesReproducible() throws {
         var doc = WordDocument()
         doc.appendParagraph(Paragraph(text: "x"))
         XCTAssertNil(doc.properties.created)
         XCTAssertNil(doc.properties.modified)
+        doc.timestampForUnsetProperties = Self.pinnedTimestamp
 
-        let data1 = try DocxWriter.writeData(doc)
-        let data2 = try DocxWriter.writeData(doc)
-        let dir1 = try ZipHelper.unzip(data: data1)
-        let dir2 = try ZipHelper.unzip(data: data2)
-        defer { ZipHelper.cleanup(dir1); ZipHelper.cleanup(dir2) }
-        let core1 = try Data(contentsOf: dir1.appendingPathComponent("docProps/core.xml"))
-        let core2 = try Data(contentsOf: dir2.appendingPathComponent("docProps/core.xml"))
-        XCTAssertEqual(core1, core2, "docProps/core.xml must not depend on wall-clock time when no timestamp was set")
+        let core1 = try Self.coreXML(DocxWriter.writeData(doc))
+        Thread.sleep(forTimeInterval: 1.1)
+        let core2 = try Self.coreXML(DocxWriter.writeData(doc))
+        XCTAssertEqual(core1, core2, "a pinned fallback must make docProps/core.xml independent of the clock")
+        XCTAssertTrue(core1.contains("2023-11-14"), "the pinned value must be the one written: \(core1)")
     }
 
-    /// #151 second comment (the zip mod-time cause): "`write(_:to:)` 與
-    /// `writeData(_:)` straddle a 2-second tick" is exactly what a tight loop
-    /// usually does NOT do (both calls land in the same wall-clock second by
-    /// luck almost every time — that is precisely why the issue calls the
-    /// existing byte-equality test flaky rather than reliably failing).
-    /// Sleeping past both the zip's 2-second DOS-time resolution and
-    /// `ISO8601DateFormatter`'s 1-second resolution turns the race into a
-    /// deterministic repro instead of relying on scheduler luck.
-    func testWriteDataIsByteEqualAcrossASlowTick() throws {
+    /// The fallback is opt-in. By default a new document's properties record
+    /// when it was actually saved — never a placeholder epoch that Word would
+    /// show as the file's creation date.
+    func testNewDocumentRecordsTheCurrentTimeByDefault() throws {
+        var doc = WordDocument()
+        doc.appendParagraph(Paragraph(text: "x"))
+        let core = try Self.coreXML(DocxWriter.writeData(doc))
+        let year = Calendar(identifier: .gregorian).component(.year, from: Date())
+        XCTAssertTrue(core.contains("<dcterms:created xsi:type=\"dcterms:W3CDTF\">\(year)-"),
+                      "created must be the current time by default: \(core)")
+        XCTAssertFalse(core.contains("1970-"), "must not fall back to the epoch: \(core)")
+    }
+
+    /// The corpus case from #151's comments: a document that carries its own
+    /// timestamps (every real file) must save to identical bytes across a
+    /// clock tick with no option set — the zip entry mod-times are fixed.
+    func testDocumentWithOwnTimestampsIsByteEqualAcrossASlowTick() throws {
         var doc = WordDocument()
         doc.appendParagraph(Paragraph(text: "reproducibility"))
+        doc.properties.created = Self.pinnedTimestamp
+        doc.properties.modified = Self.pinnedTimestamp
         let first = try DocxWriter.writeData(doc)
         Thread.sleep(forTimeInterval: 2.5)
         let second = try DocxWriter.writeData(doc)
         XCTAssertEqual(first, second, "writeData output must not depend on wall-clock time between calls (#151)")
+    }
+
+    private static func coreXML(_ data: Data) throws -> String {
+        let dir = try ZipHelper.unzip(data: data)
+        defer { ZipHelper.cleanup(dir) }
+        return String(decoding: try Data(contentsOf: dir.appendingPathComponent("docProps/core.xml")), as: UTF8.self)
     }
 
     // MARK: - #216 — Content_Types Overrides for commentsExtended / endnotes
