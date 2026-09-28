@@ -875,30 +875,77 @@ public struct DocxWriter {
             originalRelsXML = ""
         }
 
+        // Read the original rels with the inspector's parser, not the overlay's
+        // regex: `rId9` and `rId&#211;` are one id once decoded (#137), and the
+        // decoded form is what the reader — and therefore the model — holds.
+        // Computed BEFORE slot resolution below (#83/#140/#149) so every id the
+        // package already uses — not just the ones the typed model itself
+        // claims — is known before any fixed-identity id is chosen.
+        let originalScan = PackageInspector.scanRels(Data(originalRelsXML.utf8), part: "word/_rels/document.xml.rels")
+        let originalDescriptors: [(id: String, type: String, target: String, targetMode: String?)] =
+            originalRelsExists
+                ? PackageInspector.scanRelsDescriptors(Data(originalRelsXML.utf8), part: "word/_rels/document.xml.rels").descriptors
+                : []
+
         // Build allocator for newly-needed rIds (comments/footnotes/endnotes
-        // when typed model has them but original rels doesn't).
-        var typedReservedIds: [String] = ["rId1", "rId2", "rId3"]
-        if !document.numbering.abstractNums.isEmpty { typedReservedIds.append("rId4") }
-        let fixedSlotCount = typedReservedIds.count          // the writer's own ids end here; the model's follow
-        for header in document.headers { typedReservedIds.append(header.id) }
-        for footer in document.footers { typedReservedIds.append(footer.id) }
-        for image in document.images { typedReservedIds.append(image.id) }
-        for hyperlinkRef in document.hyperlinkReferences { typedReservedIds.append(hyperlinkRef.relationshipId) }
+        // when typed model has them but original rels doesn't), reserving
+        // every id the package or the typed model already uses.
+        var reservedIds = Set(originalScan.allIds)
+        for header in document.headers { reservedIds.insert(header.id) }
+        for footer in document.footers { reservedIds.insert(footer.id) }
+        for image in document.images { reservedIds.insert(image.id) }
+        for hyperlinkRef in document.hyperlinkReferences { reservedIds.insert(hyperlinkRef.relationshipId) }
         let allocator = RelationshipIdAllocator(
             originalRelsXML: originalRelsXML,
-            additionalReservedIds: typedReservedIds
+            additionalReservedIds: Array(reservedIds)
         )
 
-        let typedRels = buildTypedRelationships(document: document, allocator: allocator)
+        // #83 / #140 / #149: the writer's four fixed-identity parts (styles /
+        // settings / fontTable / numbering-when-present) used to hardcode
+        // rId1..rId4 regardless of what the SOURCE package actually used —
+        // #83's own suggested fix. Prefer the source's own relationship for
+        // that managed TYPE (matched by `Type`, never assumed by id — a
+        // python-docx-authored document numbers these differently and #83
+        // reported styles/numbering silently dropped or remapped as a
+        // result); fall back to the historical literal only when nothing
+        // else already claims it; allocate a fresh id only on an actual
+        // collision (#140's image-at-rId1 repro, and its second comment's
+        // insert-image-then-create-numbering repro; #149's fontTable
+        // colliding with an unmanaged original relationship at its
+        // historical slot). None of these four types is ever referenced by
+        // id from `word/document.xml` (Word finds each by relationship
+        // Type), so renumbering one changes nothing else.
+        func resolveFixedSlot(type: String, literalDefault: String, defaultTarget: String) -> RelationshipDescriptor {
+            if let found = originalDescriptors.first(where: { $0.type == type }) {
+                reservedIds.insert(found.id)
+                allocator.reserve(found.id)
+                return RelationshipDescriptor(id: found.id, type: type, target: found.target, targetMode: found.targetMode)
+            }
+            let id = reservedIds.contains(literalDefault) ? allocator.allocate() : literalDefault
+            reservedIds.insert(id)
+            allocator.reserve(id)
+            return RelationshipDescriptor(id: id, type: type, target: defaultTarget, targetMode: nil)
+        }
+        let stylesRel = resolveFixedSlot(type: RelationshipType.styles.rawValue, literalDefault: "rId1", defaultTarget: "styles.xml")
+        let settingsRel = resolveFixedSlot(type: RelationshipType.settings.rawValue, literalDefault: "rId2", defaultTarget: "settings.xml")
+        let fontTableRel = resolveFixedSlot(type: RelationshipType.fontTable.rawValue, literalDefault: "rId3", defaultTarget: "fontTable.xml")
+        let numberingRel: RelationshipDescriptor? = document.numbering.abstractNums.isEmpty ? nil :
+            resolveFixedSlot(type: RelationshipType.numbering.rawValue, literalDefault: "rId4", defaultTarget: "numbering.xml")
+
+        let typedRels = buildTypedRelationships(
+            document: document, allocator: allocator,
+            stylesRel: stylesRel, settingsRel: settingsRel, fontTableRel: fontTableRel, numberingRel: numberingRel
+        )
 
         // #139: OPC scopes relationship ids per part, so `word/_rels/document.xml.rels`
         // may not declare one twice. Refuse loudly instead of emitting a package
         // whose duplicate silently loses a relationship — and instead of the
-        // trap `RelationshipsOverlay.merge` used to hit. Two ways a document
-        // reaches here with duplicates: the model carries the same id twice
-        // (e.g. two images), or a model id collides with the fixed slots this
-        // writer assigns to styles / settings / fontTable / numbering
-        // (rId1–rId4 — see #140, a legitimate package can use rId1 for an image).
+        // trap `RelationshipsOverlay.merge` used to hit. This is now a defensive
+        // backstop rather than the common case: slot resolution above already
+        // avoids the id a legitimate document is using for something else, so
+        // reaching this with a slot collision means the SAME id is independently
+        // claimed by two different typed-model entries (e.g. two images) or by
+        // a pathological direct mutation of the model — not by an ordinary edit.
         var seenRelIds = Set<String>(), flaggedRelIds = Set<String>(), duplicateRelIds: [String] = []
         for rel in typedRels where !seenRelIds.insert(rel.id).inserted && flaggedRelIds.insert(rel.id).inserted {
             duplicateRelIds.append(rel.id)
@@ -908,17 +955,15 @@ public struct DocxWriter {
         // any other duplicate can only be a model id meeting a writer slot.
         // The two causes are not exclusive: two images both using rId1 are a
         // model duplicate AND a slot collision, and both are reported.
-        let modelIds = Array(typedReservedIds.dropFirst(fixedSlotCount))
+        let fixedSlotIds = Set([stylesRel, settingsRel, fontTableRel].map(\.id) + (numberingRel.map { [$0.id] } ?? []))
+        var modelIds: [String] = []
+        for header in document.headers { modelIds.append(header.id) }
+        for footer in document.footers { modelIds.append(footer.id) }
+        for image in document.images { modelIds.append(image.id) }
+        for hyperlinkRef in document.hyperlinkReferences { modelIds.append(hyperlinkRef.relationshipId) }
         var seenModelIds = Set<String>(), modelDuplicateIds = Set<String>()
         for id in modelIds where !seenModelIds.insert(id).inserted { modelDuplicateIds.insert(id) }
-        let slotCollisionIds = Set(modelIds).intersection(typedReservedIds.prefix(fixedSlotCount))
-        // The package's own rels can carry the duplicate too (a third-party
-        // writer, or a file already damaged this way). Merging first-wins over
-        // it would drop a relationship and report success.
-        // Read the original rels with the inspector's parser, not the overlay's
-        // regex: `rId9` and `rId&#211;` are one id once decoded (#137), and the
-        // decoded form is what the reader — and therefore the model — holds.
-        let originalScan = PackageInspector.scanRels(Data(originalRelsXML.utf8), part: "word/_rels/document.xml.rels")
+        let slotCollisionIds = Set(modelIds).intersection(fixedSlotIds)
         if originalRelsExists && !originalScan.parsed {
             // The merge below is a regex over these bytes; a package whose rels
             // the strict scan cannot read is one the merge cannot be trusted on.
@@ -1004,9 +1049,16 @@ public struct DocxWriter {
             if !fromSlots.isEmpty {
                 let plural = fromSlots.count > 1
                 let alsoModelDuplicate = !modelDuplicateIds.isEmpty            // any model duplicate at all, not only on the colliding id (verify R6)
-                causes.append("\(fromSlots.map(Self.displaySpelling).joined(separator: ", ")) \(plural ? "are" : "is") used by the document and \(plural ? "are also the ids" : "is also the id") this writer assigns to its fixed parts (rId1 styles / rId2 settings / rId3 fontTable / rId4 numbering when present). "
-                    + (alsoModelDuplicate ? "That collision on its own is the writer's limitation — it cannot yet renumber its fixed parts (PsychQuant/ooxml-swift#140)"
-                                          : "The document is well-formed; it is the writer that cannot yet renumber its fixed parts (PsychQuant/ooxml-swift#140)"))
+                // PsychQuant/ooxml-swift#83/#140/#149: slot resolution above
+                // already prefers the source's own id for styles/settings/
+                // fontTable/numbering and falls back to allocating a fresh
+                // id rather than forcing the historical rId1..rId4 literal —
+                // reaching this branch means the SAME id is independently
+                // claimed by two different typed-model entries (e.g. two
+                // images sharing an id), not an ordinary slot collision.
+                causes.append("\(fromSlots.map(Self.displaySpelling).joined(separator: ", ")) \(plural ? "are" : "is") used by the document and \(plural ? "also collide" : "also collides") with one of styles/settings/fontTable/numbering's resolved ids. "
+                    + (alsoModelDuplicate ? "That collision on its own is the writer's limitation (PsychQuant/ooxml-swift#140)"
+                                          : "The document is well-formed; it is the writer that could not resolve this collision (PsychQuant/ooxml-swift#140)"))
             }
             let count = duplicateRelIds.count
             throw WordError.invalidDocx(
@@ -1033,33 +1085,22 @@ public struct DocxWriter {
 
     /// Collect all rels the typed model wants to emit. Used by both overlay
     /// merge (where these go through `RelationshipsOverlay`) and scratch mode.
+    ///
+    /// `stylesRel`/`settingsRel`/`fontTableRel`/`numberingRel` are resolved by
+    /// the caller (`documentRelationshipsXML`) — PsychQuant/ooxml-swift#83/
+    /// #140/#149: these four ids are no longer hardcoded literals here, so
+    /// this function stays a pure "what does the typed model want" collector.
     private static func buildTypedRelationships(
         document: WordDocument,
-        allocator: RelationshipIdAllocator
+        allocator: RelationshipIdAllocator,
+        stylesRel: RelationshipDescriptor,
+        settingsRel: RelationshipDescriptor,
+        fontTableRel: RelationshipDescriptor,
+        numberingRel: RelationshipDescriptor?
     ) -> [RelationshipDescriptor] {
-        var rels: [RelationshipDescriptor] = [
-            RelationshipDescriptor(
-                id: "rId1",
-                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",
-                target: "styles.xml", targetMode: nil
-            ),
-            RelationshipDescriptor(
-                id: "rId2",
-                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings",
-                target: "settings.xml", targetMode: nil
-            ),
-            RelationshipDescriptor(
-                id: "rId3",
-                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable",
-                target: "fontTable.xml", targetMode: nil
-            ),
-        ]
-        if !document.numbering.abstractNums.isEmpty {
-            rels.append(RelationshipDescriptor(
-                id: "rId4",
-                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
-                target: "numbering.xml", targetMode: nil
-            ))
+        var rels: [RelationshipDescriptor] = [stylesRel, settingsRel, fontTableRel]
+        if let numberingRel {
+            rels.append(numberingRel)
         }
         for header in document.headers {
             rels.append(RelationshipDescriptor(
