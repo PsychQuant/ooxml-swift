@@ -163,7 +163,71 @@ public struct DocxWriter {
     ///     `ContentTypesOverlay` to preserve original Override entries for
     ///     unknown parts (theme, webSettings, etc.). When `false`, all
     ///     part XMLs are emitted from typed model only (scratch mode).
+    /// PsychQuant/ooxml-swift#196: scans every location that serializes
+    /// tables — body, headers, footers, footnotes, endnotes — for a table
+    /// whose OWN nesting depth (`Table.measuredNestingDepth()`) exceeds
+    /// `Table.maxSerializationDepth`, and throws BEFORE any bytes are
+    /// written if one is found. Read-only; zero side effects either way.
+    ///
+    /// `Table.toXML(depth:)`'s own guard (added by #195) stays in place as
+    /// a last-resort defense against stack overflow — it silently
+    /// truncates the excess nesting rather than throwing, because by the
+    /// time it runs mid-serialization there is no way to fail loud without
+    /// leaving a half-written package. This scan is the loud version: it
+    /// runs first, reads only, and either refuses cleanly or lets the
+    /// write proceed exactly as before. Before this scan existed, a table
+    /// built past the limit produced a package that silently dropped the
+    /// excess nested tables while `DocxWriter.write` still reported
+    /// success — the exact silent-data-loss shape #196 exists to close.
+    ///
+    /// Only reachable via a table built directly through the public struct
+    /// API (`TableCell.nestedTables` is a plain array setter with no depth
+    /// validation of its own) or `resyncBodyFromDocumentTree()` (re-types
+    /// `Table(xmlNode:)` values straight from a live tree, bypassing
+    /// `parseTable` entirely) — `DocxReader.parseTable`'s own
+    /// `MAX_TABLE_NEST_DEPTH = 5` guard means anything read from disk
+    /// through the normal reader path can never arrive here already too
+    /// deep (5 < `Table.maxSerializationDepth` == 10).
+    ///
+    /// `word/comments.xml` is not scanned: `Comment.text` is a plain
+    /// `String` (see `Comment.swift`) — `CommentsCollection` has no
+    /// `[BodyChild]`/`Table` surface to walk, so it cannot carry a table at
+    /// any depth.
+    private static func validateTableNestingDepthBeforeWrite(_ document: WordDocument) throws {
+        var worstDepth = 0
+
+        func scanBodyChildren(_ children: [BodyChild]) {
+            for child in children {
+                switch child {
+                case .table(let table):
+                    worstDepth = max(worstDepth, table.measuredNestingDepth())
+                case .contentControl(_, let inner):
+                    scanBodyChildren(inner)
+                case .paragraph, .bookmarkMarker, .rawBlockElement:
+                    continue
+                }
+            }
+        }
+
+        scanBodyChildren(document.body.children)
+        for header in document.headers { scanBodyChildren(header.bodyChildren) }
+        for footer in document.footers { scanBodyChildren(footer.bodyChildren) }
+        for footnote in document.footnotes.footnotes { scanBodyChildren(footnote.bodyChildren) }
+        for endnote in document.endnotes.endnotes { scanBodyChildren(endnote.bodyChildren) }
+
+        guard worstDepth <= Table.maxSerializationDepth else {
+            throw WordError.nestedTooDeep(depth: worstDepth, max: Table.maxSerializationDepth)
+        }
+    }
+
     private static func writeAllParts(_ source: WordDocument, to tempDir: URL, overlayMode: Bool) throws {
+        // PsychQuant/ooxml-swift#196: depth scan runs BEFORE anything else in
+        // this function — including `createDirectoryStructure` — so a
+        // document that would exceed `Table.maxSerializationDepth` is
+        // refused with zero filesystem side effects, not just zero written
+        // part bytes.
+        try validateTableNestingDepthBeforeWrite(source)
+
         // Local materialization copy: parts emitted through the typed-writer
         // bridge get their fresh tree written back here so every part that
         // reaches the package comes out of serialize(xmlTrees[part]). The
