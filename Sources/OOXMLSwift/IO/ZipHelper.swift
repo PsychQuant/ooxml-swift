@@ -3,6 +3,21 @@ import ZIPFoundation
 
 /// ZIP 壓縮/解壓縮工具
 public struct ZipHelper {
+
+    /// PsychQuant/ooxml-swift#151: a fixed timestamp used wherever this
+    /// library needs "no real timestamp is available" rather than the
+    /// wall-clock `Date()` — the zip entries `zipToData` writes, and (via
+    /// `DocxWriter`) `docProps/core.xml`'s `created`/`modified` fallback when
+    /// the document carries neither. `ZIPFoundation`'s MS-DOS date/time
+    /// encoding floors at 1980-01-01 regardless of the `Date` passed in
+    /// (`Date+ZIP.swift`: `year >= 1980 ? year : 1980`), so the Unix epoch
+    /// reads back as 1980-01-01 in the zip's own local file headers; using
+    /// the SAME constant for docProps keeps one fixed value across both
+    /// mechanisms #151 named, instead of two different arbitrary ones.
+    static let reproducibleFallbackTimestamp = Date(timeIntervalSince1970: 0)
+}
+
+extension ZipHelper {
     /// 解壓縮 ZIP 檔案到臨時目錄
     ///
     /// Refuses an archive that carries a symbolic-link entry, an entry whose
@@ -562,6 +577,14 @@ public struct ZipHelper {
                 with: relativePath,
                 type: .file,
                 uncompressedSize: Int64(fileData.count),
+                // #151: without this, ZIPFoundation defaults to `Date()` —
+                // the current wall-clock time at the moment THIS entry is
+                // written — so the same document's bytes differ between two
+                // calls whenever they straddle the 2-second MS-DOS
+                // resolution, and even within one call when the entries take
+                // long enough to add. A fixed timestamp makes the archive's
+                // bytes depend only on content.
+                modificationDate: reproducibleFallbackTimestamp,
                 compressionMethod: .deflate,
                 provider: { position, size in
                     let startIndex = fileData.startIndex.advanced(by: Int(position))
