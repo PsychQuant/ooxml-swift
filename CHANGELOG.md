@@ -8,6 +8,56 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`SectionProperties` 新增頁面框線（`<w:pgBorders>`）與欄的個別寬度／等寬／分隔線
+  （`w:equalWidth`／`w:sep`／`<w:col>`）的讀寫**（#191）。讀入含這些設定的文件後，任何無關
+  的 typed 編輯不會再讓它們消失；沒有頁面框線、欄寬相等（schema 預設）的文件輸出不變。
+
+### Fixed
+
+- **表格列（`<w:trPr>`）裡未建模的子元素（條件格式、列前後空欄、列層級儲存格間距覆寫、
+  列的追蹤修訂標記）不再被任何 typed 編輯連帶清除**（#184）。這些子元素會原樣保留並依
+  ECMA-376 schema 順序與其他列屬性一起輸出。
+- **段落與 run 自身的 rsid 屬性（`w:rsidR`／`w:rsidRPr`／`w:rsidRDefault`／`w:rsidP`）不再被
+  任何 typed 編輯連帶清除**（#185）。這些屬性是 Word 用於文件比對／合併修訂的識別碼，過去
+  一次無關的 typed 編輯就會讓整份文件的段落與 run 幾乎全數遺失這些屬性。
+- **表格儲存格底色使用 theme 色（`w:themeFill` 等）時不再被任何 typed 編輯連帶清除**
+  （#188）。讀取路徑補上與段落底色相同的六個 theme 屬性。
+- **關閉底線現在真的會關閉，不再被樣式的底線透過**（#189）。過去關閉底線（`setUnderline(false)`／`format.underline = false`）會直接移除 `<w:u>`；若段落或字元樣式本身有底線，底線會經由樣式繼承透出來，等於關閉沒有效果。現在改為寫出明確的 `<w:u w:val="none"/>` 覆蓋樣式的底線，與 3.15.0 對 `setBold(false)` 的修法一致。
+- **`DocxWriter` 不再把 styles／settings／fontTable／numbering 的關係 id 寫死成
+  `rId1`–`rId4`**（#83、#140、#149）。overlay 模式下，這四個固定身分的 part 一律優先沿用
+  來源封裝裡「同一個 relationship Type」既有的 id 與 Target（例如 python-docx 或其他工具
+  把 styles 編在 `rId9`、fontTable 編在 `rId11`），只有來源沒有該 part 時才配新 id；配新 id
+  時會避開文件裡任何既有的 id（包含 headers／footers／images／hyperlinks 與來源封裝其他
+  relationship），不再無條件套用歷史上的 `rId1`／`rId2`／`rId3`／`rId4`。三個具體後果：
+  來源用非標準 id 編號這四個 part 時，舊版會把它們錯誤地丟棄或與其他 relationship 互換（症狀
+  是 `numbering.xml` 憑空消失、或 styles／settings 的 Target 互相對調）；一份合法封裝若把
+  `rId1` 用在圖片，舊版一律拒絕存檔（`WordError.invalidDocx` 具名指向 #140），現在能正常存檔；
+  依「先插入圖片、再建立編號定義」的一般操作順序，圖片與 numbering 的固定插槽在寫出時
+  搶用同一個 id 導致存檔失敗，現在也已排除。這四個 part 本來就只靠 relationship Type
+  被 Word 找到（`word/document.xml` 內文從不用 id 參照它們），改變它們的 id 不影響其他任何
+  部分。真實 Word 產生的文件本來就把這四個 part 編在 `rId1`–`rId4`，沿用來源 id 的規則對它們
+  是恆等變換，既有的 byte-equal round-trip 測試輸出不受影響。
+- **`hasNewTypedRelationships`（決定是否要重寫 `word/_rels/document.xml.rels` 的判斷）
+  改用與 `PackageInspector` 相同、經 XML parser 解碼過的關係 id 集合比對，不再用原始文字
+  的子字串搜尋**（#142）。過去只要來源 rels 裡出現一段「看起來像宣告」的**註解**（例如
+  `<!-- Id="rId9" -->`），或關係 id 用字元／實體參照書寫（`rId&#57;`），子字串比對就會誤判
+  「這個關係已經存在」，於是新插入的圖片／頁首／頁尾／超連結關係完全不會被寫進 rels——存檔
+  仍回報成功，但該關係已靜默消失。現在改成對照解碼後的 id 集合，註解與跳脫寫法都會被正確
+  判斷為「這是新的」；若封裝裡的 rels 含有註解或跳脫寫法而導致合併本身無法安全進行，會改為
+  具名拒絕存檔（而不是像過去那樣悄悄丟掉關係）。
+- **關係合併不再對已經跳脫過的 `Type`／`Target`／`TargetMode` 值重複跳脫**（#148）。
+  overlay 模式下，來源 rels 裡未被型別模型管理的 relationship（theme／webSettings／
+  customXml 等）在合併時會原封不動地帶著原始屬性文字寫回，不再拆解成欄位後重新跳脫——
+  過去若這類欄位含有字元或實體參照（例如 `Target="a&#47;&#62;b.xml"`），每次觸發 rels
+  重寫都會多包一層 `&amp;`，跳脫層數隨儲存次數持續累加。
+- **`DocxWriter` 的輸出可以逐位元組重現**（#151）。zip entry 的修改時間改為固定值，所以帶有自身 `created`／`modified` 的文件（所有從檔案讀入的文件）不需任何設定，兩次存檔的位元組就相同。沒有時間戳的新文件，`docProps/core.xml` 預設仍記錄存檔當下的時間；需要逐位元組比對時，把新增的 `WordDocument.timestampForUnsetProperties` 設為固定值。
+
+### 升級注意
+
+- 關閉底線後的輸出多了一個 `<w:u w:val="none"/>`（#189）。依賴「關閉底線就是移除 `<w:u>`」的呼叫端或位元組比對工具會看到差異；讀回時 `underline` 為關閉。
+
 ## [3.17.0] - 2026-09-28
 
 ### Added
