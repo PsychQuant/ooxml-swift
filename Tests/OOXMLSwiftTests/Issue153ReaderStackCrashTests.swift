@@ -184,6 +184,154 @@ final class Issue153ReaderStackCrashTests: XCTestCase {
         if let caught { throw caught }
     }
 
+    // MARK: - Modeling the call context the issue's own correction could not isolate
+    //
+    // R2 (independent review follow-up): the issue's own correction comment
+    // narrows the repro to a SPECIFIC call context — "macdoc docx apply
+    // reaches the reader through Executor.apply, inside swift-argument-
+    // parser's async main. Reading the file in isolation is not the same
+    // path, and only the full path crashes... Something about the call
+    // context in Executor.apply (async task stack, or the deeper frame
+    // chain below it) is required." The tests above call `DocxReader.read`
+    // directly at the top of a freshly-started 512KB thread — the FULL
+    // budget is available when `read` starts. They do not model whatever
+    // `Executor.apply` and everything above it (swift-argument-parser's
+    // async main, manifest/argument processing, …) consumes BEFORE ever
+    // calling into `DocxReader.read`.
+    //
+    // `Executor.apply` cannot be invoked from here: it lives in the
+    // downstream `docx-workflow-swift` package (per the issue's own
+    // backtrace: "Executor.apply(manifest:baselineURL:outputURL:warnHandler:)
+    // (docx-workflow-swift)"). `docx-workflow-swift` depends ON ooxml-swift
+    // (this package's `Package.swift` declares exactly one dependency,
+    // ZIPFoundation — there is no `Executor` type anywhere in this
+    // checkout); adding a test-only dependency the other direction would be
+    // circular and is out of this fix's scope regardless.
+    //
+    // Two alternative, constructible-from-here models of the SAME two
+    // hypotheses the issue's correction raises:
+    //
+    // 1. "async task stack" — `testFiveLevelNestingThroughSwiftConcurrencyTaskDoesNotCrash`
+    //    runs the read through a REAL `Task { }` (Swift concurrency's actual
+    //    cooperative-thread-pool mechanism — the same kind of async context
+    //    "swift-argument-parser's async main" is), not a manually-sized
+    //    `Thread`, so it exercises the genuine runtime-determined stack
+    //    Swift concurrency worker threads get, whatever that is on this
+    //    toolchain/OS, rather than the 512KB figure this suite otherwise
+    //    assumes by convention (from #195).
+    // 2. "the deeper frame chain below it" — `withSyntheticCallerFrames`
+    //    below models an UNKNOWN caller chain (whatever `Executor.apply` and
+    //    everything above it does before reaching `DocxReader.read`) as a
+    //    tunable number of additional, genuinely stack-consuming recursive
+    //    frames, run on the SAME 512KB thread BEFORE the read call — so the
+    //    fresh-512KB assumption the other tests make is no longer free.
+    //    `testFiveLevelNestingWithSyntheticCallerOverheadDoesNotCrash` pins
+    //    a frame count comfortably inside the measured safe range (see its
+    //    doc comment for the bisected threshold) as a regression floor.
+
+    /// Recurses `framesRemaining` times, each frame holding a genuinely
+    /// stack-resident ~256-byte local (32 `Double`s — under `-Onone` this is
+    /// not optimized away, the same "frame size is the sum of every local"
+    /// mechanism #153/#195 measured elsewhere), before calling `body` at the
+    /// bottom. A synthetic, tunable stand-in for however much unknown
+    /// caller-chain stack `Executor.apply` (and whatever calls it) actually
+    /// costs in the real crash — a quantity the issue's own correction
+    /// explicitly could not isolate. `@inline(never)` so the compiler cannot
+    /// fold the recursion away or reuse a frame.
+    @inline(never)
+    private func withSyntheticCallerFrames<T>(
+        _ framesRemaining: Int, _ body: () throws -> T
+    ) rethrows -> T {
+        guard framesRemaining > 0 else { return try body() }
+        let filler = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+                      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+                      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0,
+                      25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0)
+        _ = filler.0
+        return try withSyntheticCallerFrames(framesRemaining - 1, body)
+    }
+
+    /// Model 1: the read happens inside a REAL `Task { }` — Swift
+    /// concurrency's actual cooperative-thread-pool mechanism, the same
+    /// KIND of async context `Executor.apply`'s caller (swift-argument-
+    /// parser's async `main()`) runs in — rather than a manually-sized
+    /// `Thread`. This does not let the test choose the stack size (Swift
+    /// concurrency worker threads' stack size is runtime/OS-determined, not
+    /// test-controllable), so it is a complement to, not a replacement for,
+    /// the explicit-512KB tests above: it exercises the genuine mechanism
+    /// the issue names ("async task stack") on whatever this toolchain
+    /// actually provides.
+    ///
+    /// Honest result, checked against the PRE-fix `read()` (the ~830-line
+    /// monolith) on this toolchain/OS: this test passes even without the
+    /// fix — this toolchain's actual cooperative-pool worker stack is
+    /// evidently larger than the 512KB this suite otherwise assumes by
+    /// convention, so "async task stack" alone (on THIS platform) does not
+    /// reproduce the crash; it takes real caller-chain depth too (see
+    /// Model 2 below, which DOES fail pre-fix). Kept anyway: it is the
+    /// actual mechanism the issue names, pins present/future behavior
+    /// under genuine `Task` execution, and would matter on a
+    /// platform/toolchain where the cooperative pool's stack is smaller.
+    func testFiveLevelNestingThroughSwiftConcurrencyTaskDoesNotCrash() throws {
+        let xml = makeNLevelNestedTableXML(levels: 6)
+        let url = try buildFixture(documentXML: xml)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sem = DispatchSemaphore(value: 0)
+        var caught: Error?
+        var readCount: Int?
+        Task {
+            do {
+                var doc = try DocxReader.read(from: url)
+                if case .table(let table) = doc.body.children[1] {
+                    readCount = self.countNestedTables(table)
+                }
+                doc.close()
+            } catch {
+                caught = error
+            }
+            sem.signal()
+        }
+        XCTAssertEqual(sem.wait(timeout: .now() + 30), .success, "timed out (hang)")
+        if let caught { throw caught }
+        XCTAssertEqual(readCount, 6, "all 6 nesting levels must survive a read done inside a real Task")
+    }
+
+    /// Model 2: bisected threshold (debug build, 512KB thread, depth-5
+    /// fixture) — synthetic caller-chain overhead beyond which even the
+    /// FIXED code crashes: safe at 600 frames, crashes at 650 (binary
+    /// search step 50). That is a substantial amount of headroom above the
+    /// ~176KB (512KB total − ~336KB depth-5's own measured floor) this
+    /// suite's other numbers would predict, consistent with each frame
+    /// costing meaningfully less than the naive "32 Doubles = 256 bytes"
+    /// estimate once call overhead and register allocation are accounted
+    /// for. This test pins 400 frames — comfortably (33%) below the
+    /// measured 600-frame safe boundary — as a regression floor: if the
+    /// fix's own frame-splitting ever regresses and the depth-5 margin
+    /// shrinks, this is the test that would catch it FIRST, before the
+    /// plain (no synthetic overhead) variant above does, because it no
+    /// longer assumes the full 512KB is available fresh when
+    /// `DocxReader.read` starts.
+    func testFiveLevelNestingWithSyntheticCallerOverheadDoesNotCrash() throws {
+        let xml = makeNLevelNestedTableXML(levels: 6)
+        let url = try buildFixture(documentXML: xml)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        var doc: WordDocument?
+        try runOnStackConstrainedThread(stackKB: 512) {
+            try self.withSyntheticCallerFrames(400) {
+                doc = try DocxReader.read(from: url)
+            }
+        }
+        var document = try XCTUnwrap(doc)
+        defer { document.close() }
+        guard case .table(let table) = document.body.children[1] else {
+            XCTFail("expected table at body.children[1]")
+            return
+        }
+        XCTAssertEqual(countNestedTables(table), 6)
+    }
+
     // MARK: - Tests
 
     /// The reader's own worst legitimate case: 6 levels of table-in-cell
