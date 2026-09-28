@@ -8,6 +8,168 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **`Table(rowCount:columnCount:)` 建立的空白表格，記憶體用量大幅降低（#180）**：
+  che-word-mcp#234 實測 65536×63 的空白表格建立後常駐約 9.0 GB、存檔峰值 14.2 GB，平均每個
+  空白儲存格約 2.2 KB——即使該表格存出來只有 0.8 MB。量測 `MemoryLayout` 找到根因：
+  `Paragraph` 的 stride 高達 4128 bytes，其中 `ParagraphProperties`（1944 bytes）被內嵌了
+  **兩次**——一次是一定會用到的 `properties` 欄位，一次是幾乎永遠是 `nil` 的
+  `previousProperties: ParagraphProperties?`（Swift 對 struct 的 `Optional` 即使是 `nil`
+  仍保留完整大小的空間）。加上 `TableCell.init()`／`Table.init(rowCount:columnCount:)`
+  每個儲存格、每一列都重新配置一份全新陣列，即使內容完全相同。
+
+  三處修正（皆為儲存層優化，不改變任何公開型別、輸出位元組不變）：
+  1. `Paragraph.previousProperties` 改為透過內部 reference type 間接儲存（boxed），`nil`
+     時只佔 8 bytes 而非 1944 bytes，`Paragraph` 的 stride 因此降到 2192 bytes——這對所有
+     段落都有效，不限空白儲存格。
+  2. `TableCell.init()` 改用共用的靜態預設段落陣列，同一份空白儲存格的段落陣列在多個儲存格
+     間透過 Array 的 copy-on-write 共用，直到真的被個別修改才各自複製。
+  3. `Table.init(rowCount:columnCount:)` 只建立一列的空白儲存格陣列，所有列共用同一份
+     （同樣透過 copy-on-write），不再每列各自配置。
+
+  實測（debug build，20000 列 × 10 欄 = 20 萬格）：建立表格的常駐記憶體增量從約
+  5895 bytes/格降到約 5 bytes/格。序列化輸出、個別儲存格修改後的正確性（copy-on-write
+  不會外漏到其他儲存格／列）均有測試涵蓋。
+
+- **`insertBulletList`／`insertNumberedList` 批次建立清單從 O(N²) 改為攤銷線性（#88）**：
+  每插入一個段落都會呼叫 `withStampedParaId`，而它每次都對整份文件重新掃描一次
+  （`getAllParagraphs()`，遞迴走訪 body、所有表格儲存格、所有 content control）以取得
+  現有 `w14:paraId` 集合，藉此配發不重複的新 id。清單類 API 逐項呼叫這個函式，插入 M 個
+  項目到已有 N 個段落的文件，成本是 O(M×(N+M))——M 主導時等同 O(M²)。新增
+  `withStampedParaIds`（複數）一次掃描現有 id 集合，再從單一遞增的產生器＋集合為整批
+  段落配發 id，`insertBulletList`／`insertNumberedList` 改為呼叫這個批次版本一次，插入
+  迴圈內每項的 `withStampedParaId` 因為段落已經有 id 而直接走現有的快速路徑。實測
+  （反例：250 項對 1000 項的比值 15.86，接近純二次方的 16；修正後同規模比值約 4.2，
+  符合線性）：新增/移除 id 的行為、id 唯一性、呼叫端可預先指定 id 的既有約定皆不變，
+  純屬效能修正。
+
+### Fixed
+
+- **跨文件 OMath splice（`spliceOMath`／`spliceParagraphOMath`）的 `rPrMode`（`.full`／
+  `.omathOnly`／`.discard`）過去只影響記憶體中的 `Run.properties`，實際存檔時完全不會
+  出現**（#117）。根因是新建的公式 Run 用 `Run.rawXML` 承載複製過來的 OMath 內容，而
+  `Run.toXML()` 對 `rawXML` 的處理是「整個 `<w:r>` 直接原樣輸出」，會在跑到 `<w:rPr>`
+  的輸出程式碼之前就整個函式提前 return，因此不管 `rPrMode` 選哪一種，複製過去的字型、
+  大小、語言、粗體/斜體設定實際存檔後全部消失。現在改用 `Run.rawElements`（現有的
+  「原樣保留 Run 子元素」機制）承載公式內容，讓一般的 Run 序列化路徑照常先輸出
+  `<w:rPr>`（若非空）再輸出公式本體。這只改變 splice API 自己新建的 Run 如何承載公式，
+  不影響 `Run.rawXML` 既有的其他用途（如網域碼、內容控制項）。
+- **`spliceOMath`／`spliceParagraphOMath` 的 `.omathOnly` rPr 模式一直沒有複製
+  `lang`（語言標籤）**（#117）。spec.md／design.md 對 `.omathOnly`
+  白名單的文件從一開始就寫明包含 `rFonts`／`sz`／`lang`／`bold`／`italic`，但實作只
+  複製了前後兩組、漏了 `lang`——這個落差比這批 OMath splice 修正本身還早存在，
+  這次一併補上，`.omathOnly` 現在會正確複製來源的 `<w:lang>`（`val`／`eastAsia`／
+  `bidi` 三軸皆是，逐字複製，因為 `LanguageProperties` 沒有布林欄位，不像
+  bold/italic 需要處理「未指定 vs 明確關閉」）。
+- **跨文件 OMath splice：`.atStart`／`.atEnd` 不再只看 Run 的位置**（#122）。
+  過去計算「插到最前面／最後面」時只看目標段落既有的 Run 位置，忽略段落其餘
+  12 種依位置排序的內容（直接子層公式、超連結、書籤等）。兩個實際後果：
+  (1) 目標段落若含 API 建立、尚未指定位置的 Run（`position == nil`），
+  `.atEnd` 會把新公式插到該 Run **之前**而非之後；(2) 目標段落若含位置較高的
+  直接子層公式（例如既有 `<m:oMath>` 在 position 100），`.atEnd` 算出的新
+  位置可能小於 100，導致新公式被插到既有公式**之前**。現在 `.atStart`／
+  `.atEnd` 一律考量全部 13 種依位置排序的內容決定邊界，且 `.atEnd` 在插入前
+  會先把段落內任何「尚未指定位置」的內容依現有輸出順序賦予明確位置，確保新
+  公式真的排在最後面（而不是被结构性地插到那些內容前面）。
+- **跨文件 OMath splice：直接子層 `oMathPara` 不再被記成 `oMath`**（#124）。
+  `spliceOMath`／`spliceParagraphOMath` 把來源段落裡當作 `<w:p>` 直接子元素的公式
+  （非包在 Run 裡）複製到目標段落時，過去無論來源根元素是 `<m:oMath>` 還是
+  `<m:oMathPara>`，一律把目標的 `unrecognizedChildren` 項目命名為 `"oMath"`，導致
+  型別中繼資料與實際承載的 XML 根元素不一致。現在改為沿用來源自己的根元素名稱，
+  `oMathPara` splice 後仍是 `oMathPara`。
+- **`spliceParagraphOMath`（整段批次 splice）的自動定位在兩種情況會算錯位置**
+  （#125）。(1) 來源段落最前面就是公式、前面沒有任何文字時，過去會被當成「找不到
+  對應內容」而退化成插在目標段落最後面，而不是插在最前面；(2) 判斷「這個公式對應
+  到來源哪個 Run」時是逐位元組比對，但擷取公式時可能會補上原本沒有明講的命名空間
+  宣告，導致比對永遠失敗、每個公式都被誤判成「對應不到」，全部退化成插在最後面
+  ——公式數量看起來還是對的（所以只檢查數量的測試看不出來），但公式在段落裡的
+  相對位置整個錯亂，不再與原文交錯。現在正確區分「對應到來源、但前面沒有文字」
+  （正確地插到最前面）與「真的對應不到來源」（丟出明確錯誤，不再猜一個位置），
+  且比對命名空間時套用與擷取階段相同的正規化。
+
+- **`DocxReader.read` 在 debug build 讀取巢狀表格文件時可能堆疊溢位當掉（#153）**：
+  根因有兩處，皆為 `-Onone` debug build「函式堆疊框大小＝函式內所有區域變數大小總和、
+  不隨執行進度縮小」的已知模式（與 #195 的寫入端根因同類）：(1) `read(from:
+  wireTreeBackedViews:)` 原本是單一約 830 行函式，headers／footers／footnotes／
+  endnotes／core.xml／comments.xml／commentsExtended.xml 等全部依序內嵌在同一函式
+  本體，即使文件完全沒有這些可選 part，對應區域變數仍佔用堆疊空間；(2) `parseTable`／
+  `parseTableCell` 逐層遞迴時，段落解析迴圈與表格屬性解析區塊的區域變數會跨越遞迴呼叫
+  持續留在堆疊上。兩處皆拆成多個 `@inline(never)` 輔助函式，讓區域變數在該階段/該層
+  返回後立即釋放。以 512 KB 執行緒（比照 Swift concurrency 協作執行緒池的堆疊大小，
+  與 #195 相同量測基準）實測：讀取單一表格（無巢狀、無其他可選 part）所需堆疊由約
+  320 KB 降到約 210 KB；讀取到 reader 自身巢狀深度上限（5 層）所需堆疊由約 496 KB
+  （在假設的 512 KB 生產環境堆疊下僅餘約 4% 餘裕）降到約 336 KB（餘裕約 34%）。
+  純讀取行為不變，只改變其堆疊使用量。
+
+- **巢狀表格超過序列化深度上限時，寫入端改為在寫出任何位元組之前偵測並拒絕，不再靜默略過
+  多出的層（#196）**：`#195` 為 `TableCell.toXML(depth:)` 加上的遞迴深度上限
+  （`Table.maxSerializationDepth = 10`）超過時只是在迴圈裡 `continue` 跳過多出的巢狀表格，
+  存出去的檔案就這樣少了內容，`DocxWriter.write`／`writeData` 卻仍回報成功。現在寫入前會先
+  掃描整份文件（body、header／footer、footnote／endnote，含巢狀在 content control 內的表格）
+  量測每個表格自身的巢狀深度，只要有任何一個超過上限就直接丟出既有的
+  `WordError.nestedTooDeep(depth:max:)`（不新增錯誤型別），不寫入任何位元組、不留下部分寫入
+  的檔案或半殘留的目標檔。`toXML(depth:)` 內的截斷防護保留作為最後一道防線（避免萬一繞過此
+  掃描時仍可能發生的堆疊溢位），行為不變。只有直接透過公開 API（`TableCell.nestedTables`
+  沒有深度檢查的設值器）建構的巢狀表格才可能觸發此錯誤——目前沒有已知的一般使用路徑會踩到，
+  `word/comments.xml` 沒有表格序列化的介面，故不在掃描範圍。
+
+- **巢狀內容控制項（`<w:sdt>`）讀取時新增深度上限，補齊與表格深度防護不一致的缺口（#55）**：
+  巢狀表格早就有讀取端深度上限（`DocxReader.MAX_TABLE_NEST_DEPTH = 5`），但巢狀
+  content control（Word 稱「結構化文件標籤」／內容控制項）完全沒有對應的深度檢查——刻意構造的
+  深度巢狀 SDT-in-SDT 文件理論上可以耗盡呼叫堆疊，且沒有任何上限攔截。現在三個獨立的巢狀
+  SDT 解析路徑（段落內 SDT、body 層級的區塊 SDT、header／footer／footnote／endnote 容器
+  內的區塊 SDT）都套用同一個上限（`SDTParser.MAX_SDT_NEST_DEPTH = 5`，比照表格深度上限的
+  數值與理由），超過時丟出既有的 `WordError.invalidDocx`，清楚拒絕而非當機或卡住。一般文件
+  的內容控制項巢狀通常只有一兩層，此變更不影響任何正常使用情境。
+
+- **像素轉 EMU 沒有範圍檢查，極端值會讓整個呼叫端行程當掉（#178）**：`Drawing.from`、
+  `Drawing.anchorFromPixels`、`WordDocument.updateImage` 換算像素到 EMU（乘以 9525）時，
+  像素值大於約 `Int.max / 9525`（約 9.7×10¹⁴）就會觸發整數溢位 trap，直接讓整個宿主行程
+  當掉——任何把外部輸入（MCP 參數、CLI 引數、不受信任檔案讀到的值）轉交給這些 API 的呼叫端
+  都可能被單一參數打掛。負值與 0 先前也不會被擋下。
+
+  **新增 `Drawing.validated(widthPx:heightPx:imageId:name:)` 與
+  `Drawing.anchorValidated(widthPx:heightPx:imageId:position:name:)`**：換算前驗證，非正值或
+  換算後超出 `wp:extent/@cx`／`@cy`（`ST_PositiveCoordinate`，0 至 27273042316900）範圍一律
+  拋出新的 `ImageError.dimensionOutOfRange`，不當機。`WordDocument.updateImage` 本來就會
+  `throws`，直接補上同一套驗證。
+
+
+### 升級注意
+
+- **`.atEnd` splice 可能改寫目標段落既有內容的 `.position` 欄位**（#122）。若目標
+  段落原本就有任何「尚未指定位置」（`position == nil`／`0`，通常是純 API 建立、
+  從未經過任何 position-aware 操作的 Run／hyperlink 等）的內容，`.atEnd` 插入前
+  會先把這些內容依現有輸出順序賦予遞增的正數位置，讓新公式能真正排在它們後面。
+  若呼叫端在 splice 之後直接檢查這些既有內容的 `.position` 欄位，會看到從 `nil`
+  變成一個具體正整數；但序列化順序本身不變（只是把原本靠隱含順序決定的東西變成
+  顯式數值）。**已知限制**：`Paragraph.footnoteIds`／`endnoteIds`（透過
+  `insertFootnote`／`insertEndnote` 設定）不是這 13 種依位置排序的內容之一、沒有
+  `position` 欄位可以賦值，`.atEnd` 因此**不保證**排在既有腳註／尾註參照之後——
+  詳見 spec.md 對應 Scope note 與實作報告的殘留風險段落。
+
+- **`spliceParagraphOMath` 對「真的對應不到來源 Run」的公式，行為由「靜默插到最後面」
+  改為「丟出 `OMathSpliceError.contextAnchorNotFound`」**（#125）。過去這種情況因為
+  命名空間比對的缺陷會被誤判成「對應不到」，因此靜默發生、呼叫端從未見過對應的錯誤；
+  修正比對邏輯後，這類誤判在絕大多數情況下已經不會再發生（公式能正確對應回來源），
+  但若真的遇到公式與 Run 對應失敗的邊界情況，呼叫端現在會收到明確錯誤而非過去那種
+  「呼叫成功但公式位置全部跑掉」的結果。
+
+- **`spliceOMath`／`spliceParagraphOMath` 新建的公式 Run，其記憶體內部承載方式改變**
+  （#117）。呼叫這兩個 API 後、**存檔重讀之前**，若你的程式直接檢查剛建立的公式 Run，
+  過去會讀到 `Run.rawXML` 非 nil；現在 `Run.rawXML` 為 nil，公式改放在
+  `Run.rawElements`（`RawElement(name: "oMath" 或 "oMathPara", xml: ...)`）。這只影響
+  **存檔前、記憶體內**直接讀 `rawXML` 的程式；一旦呼叫 `DocxWriter.write` 存檔、再用
+  `DocxReader.read` 讀回，公式一律回到讀取器慣用的 `Run.rawXML` 表示，與這次修改前後
+  完全一致。若你的程式只在存檔重讀後檢查內容（一般用法），這個改變不可見。
+
+- `DocxWriter.write`／`writeData` 遇到巢狀超過 10 層的表格，改為在寫出任何位元組之前丟出 `WordError.nestedTooDeep(depth:max:)`（#196）。過去會靜默略過多出的層並回報成功。讀取端上限是 5 層，只有直接用公開 API 建構超過 10 層結構的呼叫端會遇到。
+
+- 讀入內容控制項（`<w:sdt>`）巢狀超過 5 層的文件，改為丟出 `WordError.invalidDocx`（#55），與表格的讀取深度上限一致。一般文件的內容控制項只有一兩層。
+
+- `Drawing.from`／`Drawing.anchorFromPixels` 標記為 deprecated（#178）：保留原簽名以維持相容，極端值改為截斷到 `Drawing.maxPositiveCoordinateEMU`（非正值截斷為 0）而不再讓行程當掉，但無法回報錯誤；新程式請改用會拋出 `ImageError.dimensionOutOfRange` 的 `Drawing.validated`／`anchorValidated`。函式庫內部的三個 `insertImage` 多載與 `WordDocument.updateImage` 已改用驗證版本，遇到非正值或超出 `ST_PositiveCoordinate` 範圍的尺寸會丟錯。
+
 ## [3.18.1] - 2026-09-28
 
 ### Security
