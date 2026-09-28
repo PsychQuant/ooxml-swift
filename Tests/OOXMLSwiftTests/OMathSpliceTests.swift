@@ -675,6 +675,71 @@ final class OMathSpliceTests: XCTestCase {
             ".atStart must precede a lower-positioned direct-child carrier, not just lower-positioned Runs; got: \(xml)")
     }
 
+    /// R2 (independent review Finding #1): documents a KNOWN, NOT-FIXED
+    /// limitation of the #122 fix. `Paragraph.footnoteIds` / `endnoteIds`
+    /// (populated by the public `WordDocument.insertFootnote(text:paragraphIndex:)`
+    /// / `insertEndnote(text:paragraphIndex:)` APIs, which can target any
+    /// existing paragraph — including one about to receive a spliced OMath)
+    /// are NOT one of the 13 position-indexed carriers `Paragraph` sorts by
+    /// position. `Paragraph.sortByPositionPostContentXML()` emits them via a
+    /// dedicated, unconditional loop at the very end of the function — after
+    /// every positioned entry AND after every other post-content entry, with
+    /// no `position` field to materialize them into (they are a bare `[Int]`,
+    /// not a struct with a `position` property like every other carrier
+    /// `materializeZeroPositionCarriers` promotes). There is currently no
+    /// position-based mechanism by which ANY content — however large a
+    /// position it is given — can be placed after a footnote/endnote
+    /// reference: doing so would require changing how `Paragraph`'s core
+    /// serializer represents footnote/endnote references (e.g. giving them a
+    /// position field the way bookmarks have both legacy `bookmarks` and
+    /// positioned `bookmarkMarkers`), which is a change to the paragraph
+    /// model used throughout the library, not something scoped to the OMath
+    /// splice API. This is deliberately NOT fixed in this pass — see spec.md's
+    /// Scope note and the implementation report's residual-risk section for
+    /// #122. This test PINS the current (documented-as-limited) behavior so
+    /// a future change either fixes it deliberately (and updates this test)
+    /// or is caught if it accidentally changes in either direction.
+    func testAtEndDoesNotGuaranteeOrderRelativeToLegacyFootnoteReference() throws {
+        let sourcePara = try parseParagraph(xml: Self.sourceInlineRunOMath)  // contains 't'
+        let targetPara = try parseParagraph(xml: """
+            <w:p \(Self.mNS)><w:r><w:t>正文</w:t></w:r></w:p>
+            """)
+        var target = makeDocument(with: targetPara)
+        _ = try target.insertFootnote(text: "註解", paragraphIndex: 0)
+
+        try target.spliceOMath(
+            from: sourcePara,
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            omathIndex: 0
+        )
+
+        guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
+        let xml = resultPara.toXML()
+        guard let bodyTextRange = xml.range(of: "正文"),
+              let splicedRange = xml.range(of: "<m:t>t</m:t>"),
+              let footnoteRange = xml.range(of: "w:footnoteReference") else {
+            XCTFail("Expected body text, spliced OMath, and footnote reference all present; got: \(xml)")
+            return
+        }
+        // What #122 DOES guarantee: after the body text.
+        XCTAssertTrue(bodyTextRange.lowerBound < splicedRange.lowerBound,
+            ".atEnd must still serialize after ordinary body text; got: \(xml)")
+        // What #122 does NOT guarantee (known limitation, not a regression
+        // introduced by #122 — pre-#122 behavior was equally unable to place
+        // anything after a footnote reference): the spliced OMath ends up
+        // BEFORE the footnote reference, not after it, despite #122's
+        // Expected literally saying ".atEnd serializes after every existing
+        // paragraph carrier". `footnoteIds`/`endnoteIds` are not one of the
+        // 13 carriers that Expected was written against.
+        XCTAssertTrue(splicedRange.lowerBound < footnoteRange.lowerBound,
+            "Known limitation: .atEnd cannot serialize after a legacy footnoteIds/endnoteIds " +
+            "reference (no position field exists to materialize them into — see spec.md Scope " +
+            "note). If this assertion ever fails because the ordering flipped, the limitation " +
+            "described above no longer applies and this test (and the Scope note / residual risk " +
+            "docs) should be updated to reflect the new, better behavior; got: \(xml)")
+    }
+
     // MARK: - Namespace policy tests (6.10)
 
     /// .lenient (default) accepts prefix mismatch when URI is the same.
