@@ -289,11 +289,47 @@ has. `.atStart` / `.atEnd` SHALL account for all of this, not just
 - **WHEN** caller invokes `spliceOMath(from: source, ..., position: .atStart, ...)` with an inline source OMath
 - **THEN** the spliced inline OMath Run SHALL serialize before the direct-child carrier (boundary computation's minimum SHALL span all 13 carriers, not `targetPara.runs` alone)
 
+#### Scenario (known limitation, NOT guaranteed): `.atEnd` relative to legacy `footnoteIds`/`endnoteIds`
+
+R2 (independent review of this change, Finding #1): `Paragraph.footnoteIds` /
+`endnoteIds` (populated by the public `WordDocument.insertFootnote(text:paragraphIndex:)`
+/ `insertEndnote(text:paragraphIndex:)` APIs, which can target any existing
+paragraph) are NOT one of the 13 position-indexed carriers this requirement
+covers. `Paragraph.sortByPositionPostContentXML()` emits them via a
+dedicated, unconditional loop at the very end of the function — structurally
+after every positioned entry and every other post-content entry, with no
+`position` field on `footnoteIds`/`endnoteIds` (a bare `[Int]`) to
+materialize them into the way `materializeZeroPositionCarriers` promotes
+every other zero-position carrier.
+
+- **GIVEN** target paragraph containing body text and a footnote reference added via `insertFootnote(text:paragraphIndex:)`
+- **WHEN** caller invokes `spliceOMath(..., position: .atEnd, ...)`
+- **THEN** the spliced OMath SHALL serialize after the body text (guaranteed)
+- **BUT** the spliced OMath is NOT guaranteed to serialize after the footnote reference — it currently does not, and this requirement's "after every existing paragraph carrier" wording does NOT extend to `footnoteIds`/`endnoteIds` (or, by the same unconditional-tail-loop structure, `endnoteIds`)
+
 ##### Scope note
 
 This requirement covers exactly the reproductions above (API-built Runs;
-mixed Run / direct-child carriers). It does NOT cover negative positions,
-`Int.max` collisions, or paragraphs in tree-backed mode
-(`Paragraph.xmlNode != nil`) — none of `DocxReader.parseParagraph`'s output
-is tree-backed, so tree-backed splice target support remains a pre-existing,
-unaffected gap rather than something this requirement guarantees.
+mixed Run / direct-child carriers; the 13 position-indexed carriers listed in
+this Requirement's opening paragraph). It does NOT cover:
+
+- negative positions or `Int.max` collisions;
+- paragraphs in tree-backed mode (`Paragraph.xmlNode != nil`) — none of
+  `DocxReader.parseParagraph`'s output is tree-backed, so tree-backed splice
+  target support remains a pre-existing, unaffected gap rather than something
+  this requirement guarantees;
+- `Paragraph.footnoteIds` / `endnoteIds` (see the scenario immediately above)
+  or, symmetrically, `hasPageBreak` (a page-break `<w:br>` is likewise emitted
+  by a dedicated unconditional loop, in `sortByPositionPreContentXML()`,
+  structurally BEFORE the entire positioned section — so `.atStart` is
+  correspondingly not guaranteed to precede it either; not separately
+  reproduced with a test, but the same code-structure argument applies by
+  symmetry).
+
+Making `.atEnd`/`.atStart` genuinely account for these legacy, position-less
+fields would require changing how `Paragraph`'s core serializer represents
+footnote/endnote references and page breaks (e.g. giving them a position
+field the way bookmarks have both legacy `bookmarks` and positioned
+`bookmarkMarkers`) — a change to the paragraph model used throughout the
+library, not something scoped to the OMath splice API. Deliberately not
+attempted in this change.
