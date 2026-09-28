@@ -4036,6 +4036,27 @@ public struct DocxReader {
     /// so read and write are symmetric. Both attributes this note used to
     /// list as unexpressible — `<w:docGrid w:type>` and a non-720
     /// `<w:cols w:space>` — are now modelled and round-trip.
+    /// PsychQuant/ooxml-swift#191: `ST_OnOff` string-attribute parser (as
+    /// opposed to `parseOnOff(_:)` above, which reads an element's `w:val`
+    /// child attribute) — same off-value vocabulary as `parseOnOff`
+    /// ("0"/"false"/"off"/"no"), used for `w:equalWidth`/`w:sep` on
+    /// `<w:cols>`, which are themselves boolean-valued attributes rather
+    /// than child elements with a `w:val`.
+    private static func parseOnOffString(_ raw: String) -> Bool {
+        !["0", "false", "off", "no"].contains(raw.lowercased())
+    }
+
+    /// PsychQuant/ooxml-swift#191: one `<w:top|left|bottom|right>` child of
+    /// `<w:pgBorders>`. Returns `nil` when absent or missing `w:val` (a
+    /// `<w:pgBorders>` side with no style isn't a meaningful border).
+    private static func parsePageBorderSide(_ element: XMLElement?) -> PageBorderSide? {
+        guard let el = element, let style = el.attribute(forName: "w:val")?.stringValue else { return nil }
+        let size = Int(el.attribute(forName: "w:sz")?.stringValue ?? "") ?? 0
+        let color = el.attribute(forName: "w:color")?.stringValue ?? "auto"
+        let space = Int(el.attribute(forName: "w:space")?.stringValue ?? "") ?? 0
+        return PageBorderSide(style: style, size: size, color: color, space: space)
+    }
+
     static func parseSectionProperties(_ element: XMLElement) -> SectionProperties {
         var props = SectionProperties()
 
@@ -4105,6 +4126,21 @@ public struct DocxReader {
             props.pageMargins = m
         }
 
+        // PsychQuant/ooxml-swift#191: page border. `nil` on any side stays
+        // `nil` if the source omitted it — `parsePageBorderSide` only
+        // constructs a side when it has a `w:val`.
+        if let pgBorders = element.elements(forName: "w:pgBorders").first {
+            var pb = PageBorders()
+            pb.top = parsePageBorderSide(pgBorders.elements(forName: "w:top").first)
+            pb.left = parsePageBorderSide(pgBorders.elements(forName: "w:left").first)
+            pb.bottom = parsePageBorderSide(pgBorders.elements(forName: "w:bottom").first)
+            pb.right = parsePageBorderSide(pgBorders.elements(forName: "w:right").first)
+            pb.offsetFrom = pgBorders.attribute(forName: "w:offsetFrom")?.stringValue
+            pb.display = pgBorders.attribute(forName: "w:display")?.stringValue
+            pb.zOrder = pgBorders.attribute(forName: "w:zOrder")?.stringValue
+            props.pageBorders = pb
+        }
+
         // Page numbering.
         if let pgNum = element.elements(forName: "w:pgNumType").first {
             props.pageNumberStartValue = intAttr(pgNum, "w:start")
@@ -4116,9 +4152,25 @@ public struct DocxReader {
         // Columns. `w:num` and `w:space` are read independently: a section may
         // carry a gutter without stating a count (one column is the default),
         // and reading them together would drop the gutter in that shape.
+        //
+        // PsychQuant/ooxml-swift#191: `w:equalWidth`/`w:sep` (`ST_OnOff`
+        // attributes — accept "1"/"true"/"on" as true, everything else as
+        // false) and individual `<w:col>` children for unequal-width layouts.
         if let cols = element.elements(forName: "w:cols").first {
             if let num = intAttr(cols, "w:num") { props.columns = num }
             if let space = intAttr(cols, "w:space") { props.columnSpacing = space }
+            if let equalWidth = cols.attribute(forName: "w:equalWidth")?.stringValue {
+                props.columnsEqualWidth = parseOnOffString(equalWidth)
+            }
+            if let sep = cols.attribute(forName: "w:sep")?.stringValue {
+                props.columnSeparator = parseOnOffString(sep)
+            }
+            let colElements = cols.elements(forName: "w:col")
+            if !colElements.isEmpty {
+                props.individualColumnWidths = colElements.map { col in
+                    ColumnDefinition(width: intAttr(col, "w:w") ?? 0, spacing: intAttr(col, "w:space"))
+                }
+            }
         }
 
         // Line numbering.
