@@ -34,7 +34,11 @@ final class DocxWriterWriteDataTests: XCTestCase {
     // MARK: - Task 1.4: writeData and write produce identical bytes
 
     func testWriteDataAndWriteProduceByteEqualOutput() throws {
-        let document = WordDocument()
+        var document = WordDocument()
+        // A fresh document has no docProps timestamps; pin the fallback so
+        // this compares the two write paths, not two readings of the clock
+        // (PsychQuant/ooxml-swift#151).
+        document.timestampForUnsetProperties = Date(timeIntervalSince1970: 1_700_000_000)
 
         let writeURL = tempDir.appendingPathComponent("via-write.docx")
         try DocxWriter.write(document, to: writeURL)

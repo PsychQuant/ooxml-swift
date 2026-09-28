@@ -21,6 +21,14 @@ public struct WordDocument: Equatable {
     public var styles: [Style]
     internal var formattingState: DocumentFormattingState?
     public var properties: DocumentProperties
+    /// Timestamp `DocxWriter` writes into `docProps/core.xml` when
+    /// `properties.created` / `properties.modified` are unset (a freshly
+    /// created document, typically). `nil`, the default, uses the current time,
+    /// so a new document's file properties show when it was actually made.
+    /// Set a fixed value when two saves of the same document must produce the
+    /// same bytes (a byte-level regression oracle, PsychQuant/ooxml-swift#151).
+    /// A writer setting, not document content: not part of `==`.
+    public var timestampForUnsetProperties: Date? = nil
     public var numbering: Numbering
     public var sectionProperties: SectionProperties
     public var headers: [Header]
