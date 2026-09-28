@@ -398,6 +398,44 @@ public struct WordDocument: Equatable {
         return stamped
     }
 
+    /// PsychQuant/ooxml-swift#88: `withStampedParaId(_:)` above is O(current
+    /// document size) per call — `getAllParagraphs()` walks body + every
+    /// table cell + every content control, every single time, to build the
+    /// exclusion set fresh. Fine for one paragraph. Bulk-authoring call
+    /// sites (`insertBulletList`, `insertNumberedList` — each item a
+    /// separate `insertParagraph`/`appendParagraph` call, each of THOSE
+    /// calling `withStampedParaId` internally) turned that into O(M ×
+    /// (N + M)) for M new items into an N-paragraph document: effectively
+    /// O(M²) when M dominates, since each of the M items re-scans a
+    /// document that itself just grew by the previous M - 1 items.
+    ///
+    /// This is the amortized version the issue asks for: scan the
+    /// CURRENT document's existing ids exactly ONCE, then allocate every
+    /// new paragraph's id from a single running generator + growing
+    /// exclusion set (so ids stay unique against both the document AND
+    /// each other within this batch, without re-walking the document
+    /// again for every item) — O(N + M) total.
+    ///
+    /// A bulk caller should call this ONCE on the full batch of
+    /// paragraphs it is about to insert/append, BEFORE handing them one
+    /// at a time to `insertParagraph`/`appendParagraph`. Those functions'
+    /// own `withStampedParaId` call then hits its `w14ParaId == nil` fast
+    /// path (already stamped here) instead of re-scanning per item.
+    /// Paragraphs that already carry a caller-preset `w14ParaId` are left
+    /// untouched, exactly like the single-paragraph version.
+    func withStampedParaIds(_ paragraphs: [Paragraph]) -> [Paragraph] {
+        var existing = Set(getAllParagraphs().compactMap(\.w14ParaId))
+        var generator = ParaIdGenerator()
+        return paragraphs.map { paragraph in
+            guard paragraph.w14ParaId == nil else { return paragraph }
+            var stamped = paragraph
+            let newId = generator.next(excluding: existing)
+            stamped.w14ParaId = newId
+            existing.insert(newId)
+            return stamped
+        }
+    }
+
     /// #175 (PsychQuant/macdoc#175) — the op-emission fast path in
     /// `appendParagraph` projects the paragraph into `ParagraphPayload` +
     /// `RunPayload`. Those payloads speak a deliberately small vocabulary;
@@ -1391,13 +1429,25 @@ public struct WordDocument: Equatable {
     // MARK: - List Operations
 
     /// 插入項目符號清單
+    ///
+    /// PsychQuant/ooxml-swift#88: paragraphs are pre-stamped with
+    /// `w14:paraId` in ONE batch (`withStampedParaIds`) before the
+    /// per-item `insertParagraph`/`appendParagraph` loop, so each of
+    /// those calls' own `withStampedParaId` hits its already-has-an-id
+    /// fast path instead of re-walking the whole document per item — see
+    /// `withStampedParaIds`'s doc comment for the full O(M²) → O(N+M)
+    /// story. Purely a performance change: the ids themselves, and every
+    /// other observable behavior, are unchanged.
     public mutating func insertBulletList(items: [String], at index: Int? = nil) -> Int {
         let numId = numbering.createBulletList()
 
-        for (itemIndex, text) in items.enumerated() {
+        let paragraphs = withStampedParaIds(items.map { text in
             var para = Paragraph(text: text)
             para.properties.numbering = NumberingInfo(numId: numId, level: 0)
+            return para
+        })
 
+        for (itemIndex, para) in paragraphs.enumerated() {
             if let index = index {
                 insertParagraph(para, at: index + itemIndex)
             } else {
@@ -1411,13 +1461,19 @@ public struct WordDocument: Equatable {
     }
 
     /// 插入編號清單
+    ///
+    /// PsychQuant/ooxml-swift#88: see `insertBulletList`'s doc comment —
+    /// same pre-stamp-in-one-batch fix, same rationale.
     public mutating func insertNumberedList(items: [String], at index: Int? = nil) -> Int {
         let numId = numbering.createNumberedList()
 
-        for (itemIndex, text) in items.enumerated() {
+        let paragraphs = withStampedParaIds(items.map { text in
             var para = Paragraph(text: text)
             para.properties.numbering = NumberingInfo(numId: numId, level: 0)
+            return para
+        })
 
+        for (itemIndex, para) in paragraphs.enumerated() {
             if let index = index {
                 insertParagraph(para, at: index + itemIndex)
             } else {
