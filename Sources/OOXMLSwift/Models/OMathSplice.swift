@@ -68,6 +68,11 @@ internal struct ExtractedOMath {
     /// For `.inRun` kind, the source Run's properties (used for `.full` / `.omathOnly` rPr propagation).
     /// For `.directChild`, nil (no enclosing Run).
     let sourceRunProperties: RunProperties?
+    /// PsychQuant/ooxml-swift#124: the OMath root element's local name (`"oMath"` or
+    /// `"oMathPara"`), read directly off `xml`'s opening tag rather than assumed. Used
+    /// by `spliceAsDirectChild` so a direct-child `oMathPara` round-trips as
+    /// `oMathPara`, not a hardcoded `"oMath"`.
+    let rootName: String
 
     enum Kind: Equatable {
         case inRun
@@ -102,11 +107,13 @@ internal enum OMathExtractor {
                 || raw.contains("<oMath")
                 || raw.contains("<oMathPara")
             guard hasOMath else { continue }
+            let normalized = ensureXmlnsDeclared(in: raw)
             collected.append(ExtractedOMath(
-                xml: ensureXmlnsDeclared(in: raw),
+                xml: normalized,
                 kind: .inRun,
                 sourcePosition: run.position,
-                sourceRunProperties: run.properties
+                sourceRunProperties: run.properties,
+                rootName: rootLocalName(of: normalized)
             ))
         }
 
@@ -116,7 +123,12 @@ internal enum OMathExtractor {
                 xml: ensureXmlnsDeclared(in: child.rawXML),
                 kind: .directChild,
                 sourcePosition: child.position,
-                sourceRunProperties: nil
+                sourceRunProperties: nil,
+                // PsychQuant/ooxml-swift#124: preserve the *source* local name
+                // (`child.name`) rather than re-deriving it from `xml` — both
+                // agree in the normal case, but `child.name` is the value the
+                // reader already trusted, so prefer it as source of truth.
+                rootName: child.name
             ))
         }
 
@@ -154,6 +166,28 @@ internal enum OMathExtractor {
         let standardURI = "http://schemas.openxmlformats.org/officeDocument/2006/math"
         let injection = " xmlns:\(prefix)=\"\(standardURI)\""
         return String(xml[..<nameEnd]) + injection + String(xml[nameEnd...])
+    }
+
+    /// PsychQuant/ooxml-swift#124: reads the OMath root element's local name
+    /// (e.g. `"oMath"` or `"oMathPara"`) directly off the opening tag, stripping
+    /// any namespace prefix. Falls back to `"oMath"` only when the fragment has
+    /// no recognizable opening tag at all (defensive default; extraction already
+    /// guarantees `hasOMath` matched before this is called).
+    static func rootLocalName(of xml: String) -> String {
+        guard let lessThan = xml.firstIndex(of: "<") else { return "oMath" }
+        var idx = xml.index(after: lessThan)
+        var qname = ""
+        while idx < xml.endIndex,
+              !xml[idx].isWhitespace,
+              xml[idx] != ">",
+              xml[idx] != "/" {
+            qname.append(xml[idx])
+            idx = xml.index(after: idx)
+        }
+        if let colonIdx = qname.firstIndex(of: ":") {
+            return String(qname[qname.index(after: colonIdx)...])
+        }
+        return qname.isEmpty ? "oMath" : qname
     }
 }
 

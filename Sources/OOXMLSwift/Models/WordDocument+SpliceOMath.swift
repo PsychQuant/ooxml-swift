@@ -471,8 +471,11 @@ extension WordDocument {
             newPos = (allPositions.max() ?? 0) + 1
         }
 
+        // PsychQuant/ooxml-swift#124: reuse the extracted root's own local name
+        // (`oMath` or `oMathPara`) instead of hardcoding `"oMath"` — a spliced
+        // `oMathPara` must keep disagreeing typed metadata from ever existing.
         targetPara.unrecognizedChildren.append(
-            UnrecognizedChild(name: "oMath", rawXML: omath.xml, position: newPos)
+            UnrecognizedChild(name: omath.rootName, rawXML: omath.xml, position: newPos)
         )
     }
 
