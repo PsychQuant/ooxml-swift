@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.18.1] - 2026-09-28
+
 ### Security
 
 - **`DocxReader` 讀入 `.docx` 內嵌圖片時不再受路徑穿越攻擊影響**。過去 `word/_rels/document.xml.rels`
