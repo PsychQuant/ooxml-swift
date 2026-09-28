@@ -1,5 +1,17 @@
 import Foundation
 
+/// PsychQuant/ooxml-swift#180: reference-type box for `Paragraph
+/// .previousProperties` — see that property's doc comment for the
+/// rationale (a directly-embedded `ParagraphProperties?` costs every
+/// `Paragraph` value the full struct size even when `nil`; a class
+/// reference costs 8 bytes, nil or not).
+final class ParagraphPropertiesBox {
+    let value: ParagraphProperties
+    init(_ value: ParagraphProperties) {
+        self.value = value
+    }
+}
+
 /// 段落 (Paragraph) - Word 文件的基本結構單元
 public struct Paragraph: Equatable {
     /// v0.31.0+ (Spectra `paragraph-tree-projection-impl`, `word-aligned-state-sync`
@@ -37,7 +49,26 @@ public struct Paragraph: Equatable {
     /// v0.18.0+ (che-word-mcp#45): pre-mutation paragraph properties for a
     /// tracked `<w:pPrChange>` revision. Paired with
     /// `paragraphFormatChangeRevisionId`.
-    public var previousProperties: ParagraphProperties?
+    ///
+    /// PsychQuant/ooxml-swift#180: boxed (indirect, via the private
+    /// `_previousPropertiesBox` reference below) instead of a directly
+    /// embedded `ParagraphProperties?` — this field is `nil` in the
+    /// overwhelming majority of paragraphs (only set for a tracked
+    /// `<w:pPrChange>` revision), so storing it inline cost EVERY
+    /// `Paragraph` value `ParagraphProperties`'s own stride (~1944 bytes on
+    /// 64-bit) whether or not it was ever used, since Swift reserves the
+    /// full payload size for an `Optional<T>` of a struct `T` even when
+    /// the value is `nil`. Boxing collapses that to a single 8-byte
+    /// pointer (nil = no allocation at all) — this was the single largest
+    /// contributor to the ~2.2 KB-per-blank-cell footprint #180 reports
+    /// (`TableCell`'s default paragraph is exactly this shape). The public
+    /// type and every existing call site are unchanged; only the internal
+    /// storage representation moved.
+    public var previousProperties: ParagraphProperties? {
+        get { _previousPropertiesBox?.value }
+        set { _previousPropertiesBox = newValue.map(ParagraphPropertiesBox.init) }
+    }
+    private var _previousPropertiesBox: ParagraphPropertiesBox?
 
     /// v0.15.0+ (che-word-mcp#44, task 3.0): structured Content Controls
     /// (SDTs) appearing as siblings of runs inside this paragraph. Emitted
