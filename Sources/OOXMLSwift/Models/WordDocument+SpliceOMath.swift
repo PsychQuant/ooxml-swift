@@ -250,16 +250,26 @@ extension WordDocument {
 
         switch position {
         case .atStart:
-            // Position 0 routes through the post-content legacy path and emits at end.
-            // To get "atStart" semantically, give it a position smaller than any existing.
-            let minPos = targetPara.runs.compactMap { $0.position }.min() ?? 1
+            // PsychQuant/ooxml-swift#122: "true start" must precede every
+            // positioned carrier in the paragraph, not just other Runs — a
+            // low-positioned direct-child OMath, hyperlink, etc. must not
+            // sort ahead of a `.atStart`-inserted Run just because this
+            // computation only looked at `targetPara.runs`.
+            let minPos = paragraphAllPositions(targetPara).min() ?? 1
             omathRun.position = max(1, minPos - 1)
             targetPara.runs.insert(omathRun, at: 0)
 
         case .atEnd:
-            // Place after all current content. Use max existing position + 1.
-            let maxPos = targetPara.runs.compactMap { $0.position }.max() ?? 0
-            omathRun.position = maxPos + 1
+            // PsychQuant/ooxml-swift#122: a positive position is ALWAYS
+            // serialized before any nil/zero-position ("API-built") carrier
+            // — `Paragraph.toXMLSortedByPosition()` emits its whole sorted
+            // section first, then a fixed post-content section for
+            // position-0 entries, unconditionally. So "after every existing
+            // carrier" cannot be achieved by just picking a larger positive
+            // number; any zero-position carriers must first be materialized
+            // into positive positions (see `materializeZeroPositionCarriers`).
+            let materializedMax = Self.materializeZeroPositionCarriers(in: &targetPara)
+            omathRun.position = materializedMax + 1
             targetPara.runs.append(omathRun)
 
         case .afterText(let anchor, let instance, let options):
@@ -473,16 +483,16 @@ extension WordDocument {
             let allPositions = paragraphAllPositions(targetPara)
             newPos = max(1, (allPositions.min() ?? 1) - 1)
 
-        case .atEnd:
-            let allPositions = paragraphAllPositions(targetPara)
-            newPos = (allPositions.max() ?? 0) + 1
-
-        case .afterText, .beforeText:
-            // For direct-child OMath splice with anchor, insert at end as a v0.1 simplification.
-            // (Direct-child OMath is rarely mid-paragraph in practice — typically Pandoc
-            // display equations stand alone in their paragraph.)
-            let allPositions = paragraphAllPositions(targetPara)
-            newPos = (allPositions.max() ?? 0) + 1
+        case .atEnd, .afterText, .beforeText:
+            // PsychQuant/ooxml-swift#122: `.afterText`/`.beforeText` on a
+            // direct-child OMath fall back to end-of-paragraph as a v0.1
+            // simplification (direct-child OMath is rarely mid-paragraph in
+            // practice), so all three cases share the same "true end" rule
+            // as `.atEnd` — see `materializeZeroPositionCarriers`'s doc
+            // comment for why a plain `max(positions) + 1` is insufficient
+            // whenever the paragraph has any nil/zero-position carrier.
+            let materializedMax = Self.materializeZeroPositionCarriers(in: &targetPara)
+            newPos = materializedMax + 1
         }
 
         // PsychQuant/ooxml-swift#124: reuse the extracted root's own local name
@@ -505,7 +515,102 @@ extension WordDocument {
         positions += para.customXmlBlocks.compactMap { $0.position }
         positions += para.bidiOverrides.compactMap { $0.position }
         positions += para.contentControls.compactMap { $0.position }
+        // PsychQuant/ooxml-swift#122: these three collections are also part
+        // of `Paragraph`'s 13 position-indexed carriers (see
+        // `Paragraph.sortByPositionEntries()`), but were missing from this
+        // sweep — an existing positive-position hyperlink / fieldSimple /
+        // alternateContent was invisible to `.atStart`/`.atEnd` boundary
+        // computation before this fix.
+        positions += para.hyperlinks.compactMap { $0.position }
+        positions += para.fieldSimples.compactMap { $0.position }
+        positions += para.alternateContents.compactMap { $0.position }
         return positions
+    }
+
+    /// PsychQuant/ooxml-swift#122: assigns positive positions (continuing
+    /// from the current maximum across all 13 position-indexed carriers) to
+    /// any nil/zero-position ("API-built") entries, in the same relative
+    /// order `Paragraph.sortByPositionPostContentXML()` currently emits them
+    /// — preserving their existing serialization order while making them
+    /// addressable by a strictly larger position than anything else in the
+    /// paragraph. Returns the new maximum position across all carriers
+    /// after materialization (0 if the paragraph has no positioned content
+    /// at all).
+    ///
+    /// This exists because `Paragraph.toXMLSortedByPosition()` always emits
+    /// its whole sorted section (any positive-position entry) BEFORE its
+    /// fixed post-content section (any nil/zero-position entry) — no
+    /// positive position, however large, can serialize after a
+    /// zero-position entry. A true "insert after everything" therefore
+    /// cannot be achieved by just picking `max(existingPositions) + 1`; any
+    /// zero-position entries must first be promoted into the sorted section
+    /// so the new entry can be placed after them too.
+    ///
+    /// Scope note: this handles the reproductions in the issue (API-built
+    /// text Runs, and mixed Run / direct-child / wrapper carriers). It does
+    /// NOT attempt to handle negative positions, `Int.max` collisions, or
+    /// paragraphs in tree-backed mode (`Paragraph.xmlNode != nil`) — none of
+    /// `DocxReader.parseParagraph`'s output (used throughout this splice API
+    /// and its test suite) is tree-backed, so this is an existing,
+    /// unaffected limitation, not a regression.
+    private static func materializeZeroPositionCarriers(in para: inout Paragraph) -> Int {
+        var next = paragraphAllPositions(para).max() ?? 0
+
+        // Same relative order as `Paragraph.sortByPositionPostContentXML()`.
+        for i in para.contentControls.indices where (para.contentControls[i].position ?? 0) == 0 {
+            next += 1
+            para.contentControls[i].position = next
+        }
+        for i in para.runs.indices where (para.runs[i].position ?? 0) == 0 {
+            next += 1
+            para.runs[i].position = next
+        }
+        for i in para.hyperlinks.indices where (para.hyperlinks[i].position ?? 0) == 0 {
+            next += 1
+            para.hyperlinks[i].position = next
+        }
+        for i in para.fieldSimples.indices where (para.fieldSimples[i].position ?? 0) == 0 {
+            next += 1
+            para.fieldSimples[i].position = next
+        }
+        for i in para.alternateContents.indices where (para.alternateContents[i].position ?? 0) == 0 {
+            next += 1
+            para.alternateContents[i].position = next
+        }
+        for i in para.bookmarkMarkers.indices where (para.bookmarkMarkers[i].position ?? 0) == 0 {
+            next += 1
+            para.bookmarkMarkers[i].position = next
+        }
+        for i in para.commentRangeMarkers.indices where (para.commentRangeMarkers[i].position ?? 0) == 0 {
+            next += 1
+            para.commentRangeMarkers[i].position = next
+        }
+        for i in para.permissionRangeMarkers.indices where (para.permissionRangeMarkers[i].position ?? 0) == 0 {
+            next += 1
+            para.permissionRangeMarkers[i].position = next
+        }
+        for i in para.proofErrorMarkers.indices where (para.proofErrorMarkers[i].position ?? 0) == 0 {
+            next += 1
+            para.proofErrorMarkers[i].position = next
+        }
+        for i in para.smartTags.indices where (para.smartTags[i].position ?? 0) == 0 {
+            next += 1
+            para.smartTags[i].position = next
+        }
+        for i in para.customXmlBlocks.indices where (para.customXmlBlocks[i].position ?? 0) == 0 {
+            next += 1
+            para.customXmlBlocks[i].position = next
+        }
+        for i in para.bidiOverrides.indices where (para.bidiOverrides[i].position ?? 0) == 0 {
+            next += 1
+            para.bidiOverrides[i].position = next
+        }
+        for i in para.unrecognizedChildren.indices where (para.unrecognizedChildren[i].position ?? 0) == 0 {
+            next += 1
+            para.unrecognizedChildren[i].position = next
+        }
+
+        return next
     }
 
     /// For each extracted OMath in source order, derive a context anchor (~N chars of
