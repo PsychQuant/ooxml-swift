@@ -171,6 +171,24 @@ public struct WordDocument: Equatable {
     /// (same rationale as `xmlTrees`).
     public internal(set) var xmlTreeLoadFailures: [String: String] = [:]
 
+    /// Security baseline (che-word-mcp `export_all_images` path-traversal
+    /// report, PsychQuant/ooxml-swift `ox-image-target-containment`): image
+    /// relationships from `word/_rels/document.xml.rels` whose `Target`
+    /// (after OPC-correct relative resolution, symlink resolution, and a
+    /// containment check against the extraction root — see
+    /// `resolveContainedOOXMLTarget` in `PathValidator.swift`) did NOT name a
+    /// regular file strictly inside the extracted package. Keyed by
+    /// relationship `Id`, value is a human-readable reason. Same
+    /// loud-diagnostic contract as `xmlTreeLoadFailures`: the read does not
+    /// abort and `document.images` simply omits the rejected entry, but the
+    /// rejection is not silently swallowed either — a malicious or malformed
+    /// `Target` (path traversal, `TargetMode="External"`, a directory, a
+    /// symlink escaping the package, an orphan naming nothing) is always
+    /// visible here instead of quietly reading host filesystem content into
+    /// `document.images`. Excluded from `Equatable` (same rationale as
+    /// `xmlTreeLoadFailures`).
+    public internal(set) var imageTargetContainmentFailures: [String: String] = [:]
+
     /// format-alignment-engine Phase A (task 1.2): verbatim raw bytes of XML
     /// parts carried by `Operation.carryPart` — the byte-equal floor of the
     /// dual-track rebuild contract (`format-alignment-pipeline`, Decision 2).
