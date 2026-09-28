@@ -156,6 +156,31 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 - **THEN** the system SHALL throw `OMathSpliceError.contextAnchorNotFound(omathIndex: <N>, snippet: "大小效果")`
 - **AND** any OMath blocks that were already spliced before this failure SHALL remain in target (partial-success state; caller can inspect target paragraph)
 
+#### Scenario: Source-leading OMath maps to the start of the target paragraph
+
+PsychQuant/ooxml-swift#125: an extracted OMath's derived anchor is one of
+three distinct states, which SHALL NOT be collapsed into each other:
+
+1. **Matched, non-empty prefix** — the common case, routes to `.afterText(prefix, ...)`.
+2. **Matched, empty prefix** — the source paragraph literally starts with this OMath (no preceding prose). Only meaningful for the first extracted OMath (index 0).
+3. **Unmatched** — the OMath could not be paired back to its source Run at all (an extraction bug, e.g. a namespace-normalization mismatch). This SHALL throw, per the "Context anchor not found" scenario above, NOT silently degrade to any boundary.
+
+- **WHEN** source paragraph's first OMath (index 0) has no preceding prose (state 2 above)
+- **AND** caller invokes `spliceParagraphOMath(...)`
+- **THEN** the system SHALL splice that OMath via `.atStart` of the target paragraph
+- **AND** this SHALL NOT be conflated with state 3 (unmatched) merely because both states share an empty derived string internally — the implementation SHALL distinguish them (e.g. via an optional anchor type) before choosing a position
+
+#### Scenario: Namespace self-containment does not prevent matching an extracted OMath back to its source Run
+
+- **GIVEN** a source Run's `rawXML` lacks an explicit `xmlns:m` declaration (inherited from an ancestor `<w:p>` instead) and `OMathExtractor.extract` therefore injects a self-contained `xmlns:m="..."` onto the corresponding `ExtractedOMath.xml`
+- **WHEN** `spliceParagraphOMath` derives that OMath's context anchor
+- **THEN** the matching step SHALL apply the same namespace-normalization the extractor itself applied before comparing, so this OMath is correctly recognized as matched (not misclassified as unmatched due to a byte-for-byte comparison against the un-normalized original)
+
+#### Scenario: Batch splice order is asserted, not just count
+
+- **WHEN** a batch splice test verifies `spliceParagraphOMath`'s result
+- **THEN** it SHALL assert the serialized prefix/OMath/suffix ORDER for every equation (e.g. via `Paragraph.toXML()` substring-index comparison), not merely the returned equation count — a wrong-boundary bug can still return the correct count while visually misplacing every equation
+
 ### Requirement: Round-trip lossless guarantee
 
 PsychQuant/ooxml-swift#123: reload fidelity is **canonical semantic XML
