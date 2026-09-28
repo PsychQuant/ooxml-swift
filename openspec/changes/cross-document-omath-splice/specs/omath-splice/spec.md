@@ -214,3 +214,43 @@ The introduction of `spliceOMath` / `spliceParagraphOMath` APIs SHALL NOT alter 
 
 - **WHEN** the `Issue85InlineMathFlattenTests`, `Issue92OMMLWalkSurfaceCoverageTests`, and `Issue99FlattenReplaceOMMLBilateralTests` test suites run after this change merges
 - **THEN** all tests SHALL pass without modification (additive feature does not affect existing OMath behavior)
+
+### Requirement: `.atStart` / `.atEnd` serialize relative to every paragraph carrier, not just Runs
+
+PsychQuant/ooxml-swift#122: `Paragraph.toXMLSortedByPosition()` interleaves
+13 position-indexed carriers (runs, hyperlinks, fieldSimples,
+alternateContents, bookmarkMarkers, commentRangeMarkers,
+permissionRangeMarkers, proofErrorMarkers, smartTags, customXmlBlocks,
+bidiOverrides, unrecognizedChildren, contentControls) by `position`, and
+additionally emits any nil/zero-position ("API-built") entry in a fixed
+post-content section that always renders AFTER the entire positioned
+section — regardless of how large a positive position a competing entry
+has. `.atStart` / `.atEnd` SHALL account for all of this, not just
+`Run.position` values.
+
+#### Scenario: `.atEnd` serializes after an API-built (nil-position) Run
+
+- **GIVEN** target paragraph containing exactly one API-built `Run` (`position == nil`, e.g. `Run(text: "existing")` never touched by a positioning API)
+- **WHEN** caller invokes `spliceOMath(..., position: .atEnd, ...)`
+- **THEN** the spliced OMath Run SHALL serialize after that existing Run's text in `Paragraph.toXML()` output
+
+#### Scenario: `.atEnd` serializes after a high-position direct-child carrier
+
+- **GIVEN** target paragraph containing a direct-child OMath (`unrecognizedChildren`) at `position: 100`
+- **WHEN** caller invokes `spliceOMath(from: source, ..., position: .atEnd, ...)` with an inline (Run-carried) source OMath
+- **THEN** the spliced inline OMath Run SHALL serialize after that direct-child carrier, not before it (boundary computation SHALL consider all 13 carriers' positions, not `targetPara.runs` alone)
+
+#### Scenario: `.atStart` precedes a lower-positioned non-Run carrier
+
+- **GIVEN** target paragraph containing a direct-child OMath at `position: 1` and a Run at `position: 5`
+- **WHEN** caller invokes `spliceOMath(from: source, ..., position: .atStart, ...)` with an inline source OMath
+- **THEN** the spliced inline OMath Run SHALL serialize before the direct-child carrier (boundary computation's minimum SHALL span all 13 carriers, not `targetPara.runs` alone)
+
+##### Scope note
+
+This requirement covers exactly the reproductions above (API-built Runs;
+mixed Run / direct-child carriers). It does NOT cover negative positions,
+`Int.max` collisions, or paragraphs in tree-backed mode
+(`Paragraph.xmlNode != nil`) — none of `DocxReader.parseParagraph`'s output
+is tree-backed, so tree-backed splice target support remains a pre-existing,
+unaffected gap rather than something this requirement guarantees.
