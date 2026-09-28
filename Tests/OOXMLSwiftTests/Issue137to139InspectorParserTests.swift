@@ -709,14 +709,20 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     }
 
     func testImageIdCollidingWithAFixedSlotThrowsAndNamesTheCause() throws {
-        // A legitimate package may number an image `rId1`; this writer reserves
-        // rId1–rId3 for styles / settings / fontTable. Until #140 that document
-        // cannot be serialized — but it must say so, not trap.
-        var thrown: Error?
-        XCTAssertThrowsError(try DocxWriter.writeData(documentWithImages(["rId1"]))) { thrown = $0 }
-        let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
-        XCTAssertTrue(message.contains("rId1"), message)
-        XCTAssertTrue(message.contains("#140"), message)
+        // A legitimate package may number an image `rId1`. Before
+        // PsychQuant/ooxml-swift#140 was fixed, this writer's hardcoded
+        // rId1-for-styles slot made that document unserializable (loudly,
+        // not a trap — that was the state this test used to pin). #140's
+        // own fix is precisely that the writer no longer forces the literal
+        // when something else already holds it: styles now resolves to a
+        // fresh id instead, and the image keeps rId1 — the document saves.
+        let data = try DocxWriter.writeData(documentWithImages(["rId1"]))
+        let dir = try ZipHelper.unzip(data: data)
+        defer { ZipHelper.cleanup(dir) }
+        let relsData = try Data(contentsOf: dir.appendingPathComponent("word/_rels/document.xml.rels"))
+        let scan = PackageInspector.scanRels(relsData)
+        XCTAssertEqual(scan.duplicateIds, [])
+        XCTAssertTrue(scan.imageIds.contains("rId1"), "the image must keep its id rId1")
     }
 
     func testDistinctIdsStillSerialize() throws {
@@ -1023,8 +1029,12 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     }
 
     func testFixedSlotCollisionIsReportedEvenWhenTheSameIdIsAlsoAModelDuplicate() throws {
-        // codex R4-B8: the two causes are not a partition. Two images both on
-        // rId1 are a model duplicate AND a collision with the styles slot.
+        // codex R4-B8, updated for PsychQuant/ooxml-swift#83/#140/#149: two
+        // images both on rId1 are STILL refused as a genuine model duplicate
+        // (OPC cannot declare the same id twice regardless of anything
+        // else) — but slot resolution now moves styles OFF rId1 the moment
+        // anything else claims it, so this is no longer ALSO a fixed-slot
+        // collision the way it was pre-fix. Only one cause remains.
         var doc = WordDocument()
         doc.body.children.append(.paragraph(Paragraph(runs: [Run(text: "x")])))
         doc.images = [ImageReference(id: "rId1", fileName: "a.png", contentType: "image/png", data: Data([0x89, 0x50])),
@@ -1033,7 +1043,6 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         XCTAssertThrowsError(try DocxWriter.writeData(doc)) { thrown = $0 }
         let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
         XCTAssertTrue(message.contains("more than once"), message)
-        XCTAssertTrue(message.contains("#140"), message)
         XCTAssertFalse(message.contains("well-formed"), "a document that carries the id twice is not called well-formed: \(message)")
     }
 
@@ -1242,8 +1251,13 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     }
 
     func testAnyModelDuplicateMeansTheDocumentIsNotCalledWellFormed() throws {
-        // codex R6-6: the model duplicate (rId5) and the slot collision (rId1)
-        // are different ids; the document is still not well-formed.
+        // codex R6-6, updated for PsychQuant/ooxml-swift#83/#140/#149: the
+        // model duplicate (rId5) is still refused regardless of anything
+        // else. The third image (rId1) used to ALSO collide with the
+        // styles slot pre-fix; slot resolution now moves styles off rId1
+        // instead, so rId1 is an ordinary, unique, unproblematic id here —
+        // it must NOT be named as a cause, and it must not stop the
+        // document from being written on its own (asserted separately below).
         var doc = WordDocument()
         doc.body.children.append(.paragraph(Paragraph(runs: [Run(text: "x")])))
         doc.images = [ImageReference(id: "rId5", fileName: "a.png", contentType: "image/png", data: Data([0x89, 0x50])),
@@ -1252,10 +1266,16 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         var thrown: Error?
         XCTAssertThrowsError(try DocxWriter.writeData(doc)) { thrown = $0 }
         let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
-        XCTAssertTrue(message.contains("rId5") && message.contains("rId1") && message.contains("#140"), message)
+        XCTAssertTrue(message.contains("rId5"), message)
         XCTAssertFalse(message.contains("well-formed"), message)
         XCTAssertFalse(message.contains("RId"), "an id is never capitalized by sentence-casing (logic N-L2-R6): \(message)")
         XCTAssertTrue(message.contains(". The document model carries"), "a cause sentence starts capitalized (logic N-L5-R7): \(message)")
+
+        // The third image (rId1) on its own no longer collides with anything.
+        var solo = WordDocument()
+        solo.body.children.append(.paragraph(Paragraph(runs: [Run(text: "x")])))
+        solo.images = [ImageReference(id: "rId1", fileName: "c.png", contentType: "image/png", data: Data([0x89, 0x50]))]
+        XCTAssertNoThrow(try DocxWriter.writeData(solo))
     }
 
     func testThousandsOfMismatchedIdsAreRefusedInLinearTime() throws {

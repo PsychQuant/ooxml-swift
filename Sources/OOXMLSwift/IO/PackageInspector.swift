@@ -559,6 +559,25 @@ public enum PackageInspector {
         return (delegate.imageIds, dupes, parsed, delegate.allIds, delegate.structure)
     }
 
+    /// Every `<Relationship>` declaration in `relsXML`, decoded via the same
+    /// namespace-aware `XMLParser` as `scanRels` — id, Type, Target and
+    /// TargetMode, in document order. `duplicateIds`-style de-duplication is
+    /// deliberately NOT done here: a caller matching by `type` (e.g. "find
+    /// THE styles relationship") must see every declaration to judge that
+    /// for itself.
+    ///
+    /// Added for PsychQuant/ooxml-swift#83 / #140 / #149: the writer's own
+    /// fixed-identity parts (styles/settings/fontTable/numbering) used to
+    /// hardcode `rId1`…`rId4` instead of asking "what id does THIS package
+    /// already use for styles" — the same class of question `scanRels`
+    /// answers for ids alone, extended to the whole declaration.
+    static func scanRelsDescriptors(_ relsXML: Data, part: String = "") -> (descriptors: [(id: String, type: String, target: String, targetMode: String?)], parsed: Bool) {
+        guard admissible(relsXML, part: part) else { return ([], false) }
+        let delegate = RelsDescriptorScanner()
+        let parsed = makeParser(relsXML, delegate: delegate).parse() && !delegate.sawUndeclaredPrefix
+        return (delegate.descriptors, parsed)
+    }
+
     static func scanPart(_ partXML: Data, part: String = "", countDrawingsAsIn countDrawings: Bool = false) -> (referenced: Set<String>, drawingCount: Int, parsed: Bool) {
         guard admissible(partXML, part: part) else { return ([], 0, false) }
         let delegate = PartScanner(countsDrawings: countDrawings)
@@ -708,6 +727,22 @@ private final class RelsScanner: NamespaceTrackingScanner {
         // two predicates are now one: whatever the reader treats as an image is
         // exactly what this declares as one.
         if let type = attributes["Type"], type == RelationshipType.image.rawValue { imageIds.append(id) }
+    }
+}
+
+/// Collects every `<Relationship>` declaration's full attribute set (id,
+/// Type, Target, TargetMode), decoded — the counterpart of `RelsScanner`
+/// for callers that need more than ids (PsychQuant/ooxml-swift#83/#140/#149).
+private final class RelsDescriptorScanner: NamespaceTrackingScanner {
+    var descriptors: [(id: String, type: String, target: String, targetMode: String?)] = []
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
+                qualifiedName: String?, attributes: [String: String]) {
+        guard namespacesWellFormed(parser, qualifiedName: qualifiedName, namespaceURI: namespaceURI, attributes: attributes) else { return }
+        guard elementName == "Relationship",
+              let id = attributes["Id"], let type = attributes["Type"], let target = attributes["Target"]
+        else { return }
+        descriptors.append((id: id, type: type, target: target, targetMode: attributes["TargetMode"]))
     }
 }
 
