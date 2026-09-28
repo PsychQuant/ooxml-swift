@@ -43,11 +43,22 @@ public struct Table: Equatable {
     }
 
     /// 便利初始化器：建立指定行列的空表格
+    ///
+    /// PsychQuant/ooxml-swift#180: builds ONE blank row's cells array and
+    /// shares it (via `Array`'s copy-on-write semantics) across every row,
+    /// instead of calling `TableCell()` `rowCount * columnCount` times into
+    /// `rowCount` separate freshly-allocated arrays. `TableRow.init(cells:)`
+    /// does a plain assignment (no defensive copy), so all `rowCount` rows
+    /// retain the SAME underlying `[TableCell]` buffer until a specific
+    /// row's cells are individually replaced. Combined with `TableCell`'s
+    /// own shared default paragraph (see `TableCell.defaultParagraphs`), a
+    /// freshly-built blank table's cell storage is a small, mostly-shared
+    /// footprint independent of `rowCount * columnCount` — the exact
+    /// "shared defaults" fix #180 asked for.
     public init(rowCount: Int, columnCount: Int, properties: TableProperties = TableProperties()) {
         self.properties = properties
-        self._legacyRows = (0..<rowCount).map { _ in
-            TableRow(cells: (0..<columnCount).map { _ in TableCell() })
-        }
+        let blankRowCells = (0..<columnCount).map { _ in TableCell() }
+        self._legacyRows = (0..<rowCount).map { _ in TableRow(cells: blankRowCells) }
     }
 
     /// v0.31.1+ Tree-backed initializer. Wraps an existing `<w:tbl>` xmlNode
@@ -340,8 +351,20 @@ public struct TableCell: Equatable {
     /// so the writer can emit `<w:tbl>` siblings of `<w:p>` correctly.
     internal var _legacyNestedTables: [Table] = []
 
+    /// PsychQuant/ooxml-swift#180: shared default backing for the
+    /// placeholder paragraph an empty `TableCell()` needs (OOXML requires
+    /// every `<w:tc>` have at least one `<w:p>`). `Array` is copy-on-write,
+    /// so every `TableCell()` constructed via `init()` below points at this
+    /// SAME underlying heap buffer — retained, not copied — until some
+    /// specific cell's paragraphs are actually replaced (`paragraphs =`
+    /// fully replaces `_legacyParagraphs`, so even that doesn't force a
+    /// copy of the shared buffer; it just stops referencing it). A blank
+    /// `Table(rowCount:columnCount:)` template therefore pays for this one
+    /// array ONCE for the whole table, not once per cell.
+    private static let defaultParagraphs: [Paragraph] = [Paragraph()]
+
     public init() {
-        self._legacyParagraphs = [Paragraph()]
+        self._legacyParagraphs = Self.defaultParagraphs
         self.properties = TableCellProperties()
     }
 
