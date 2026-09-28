@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.19.0] - 2026-09-28
+
 ### Changed
 
 - **`Table(rowCount:columnCount:)` 建立的空白表格，記憶體用量大幅降低（#180）**：
