@@ -468,6 +468,7 @@ final class OMathSpliceTests: XCTestCase {
               <w:b w:val="0"/>
               <w:color w:val="FF0000"/>
               <w:sz w:val="24"/>
+              <w:lang w:val="de-DE" w:eastAsia="ja-JP"/>
             </w:rPr>
             <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>
           </w:r>
@@ -496,6 +497,12 @@ final class OMathSpliceTests: XCTestCase {
             "Explicit-off bold must survive .omathOnly as false, not absent")
         XCTAssertNil(omathRun.properties.rStyle, "rStyle is not in the .omathOnly whitelist")
         XCTAssertNil(omathRun.properties.color, "color is not in the .omathOnly whitelist")
+        // R2 fix (independent review Finding #2): `lang` is documented in
+        // spec.md/design.md's .omathOnly whitelist but was never actually
+        // copied — a pre-existing gap predating this splice feature.
+        XCTAssertEqual(omathRun.properties.lang?.val, "de-DE",
+            "lang is in the documented .omathOnly whitelist (spec.md/design.md) and must propagate")
+        XCTAssertEqual(omathRun.properties.lang?.eastAsia, "ja-JP")
 
         let runXML = omathRun.toXML()
         XCTAssertTrue(runXML.contains("Cambria Math"))
@@ -504,6 +511,8 @@ final class OMathSpliceTests: XCTestCase {
             "Explicit-off bold must serialize as <w:b w:val=\"0\"/>, not be omitted; got: \(runXML)")
         XCTAssertFalse(runXML.contains("MathChar"), "rStyle must not leak through .omathOnly; got: \(runXML)")
         XCTAssertFalse(runXML.contains("FF0000"), "color must not leak through .omathOnly; got: \(runXML)")
+        XCTAssertTrue(runXML.contains("<w:lang") && runXML.contains("de-DE"),
+            "lang must serialize through .omathOnly; got: \(runXML)")
     }
 
     /// PsychQuant/ooxml-swift#117: rPr correctness must survive a *later*
