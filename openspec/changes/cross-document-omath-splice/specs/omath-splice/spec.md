@@ -224,6 +224,24 @@ equivalent when, after namespace resolution:
 - **THEN** the reloaded OMath text node is `<m:t>α</m:t>`
 - **AND** this SHALL be treated as a passing round trip (semantically equal), not a byte-equality failure
 
+##### Example: Attribute order is not significant
+
+- **GIVEN** two source OMath fragments that are semantically identical except for the order two attributes appear on the root element (e.g. `data-a="1" data-b="2"` vs `data-b="2" data-a="1"`)
+- **WHEN** each is spliced, saved, and reloaded independently
+- **THEN** both reloads SHALL be treated as semantically equal to their respective sources (each attribute's resolved value present, regardless of position)
+
+##### Example: Namespace declaration placement is not significant
+
+- **GIVEN** one source OMath fragment declares `xmlns:m` on the `<m:oMath>` element itself, and another relies entirely on an ancestor `<w:p>`'s `xmlns:m` declaration being in scope (the ordinary shape `DocxReader.parseRun`'s `.xmlString` extraction produces before `ensureXmlnsDeclared` normalizes it)
+- **WHEN** each is spliced, saved, and reloaded independently
+- **THEN** both reloads SHALL preserve the same glyph content — where the `xmlns:m` declaration appeared in the source is not part of the equivalence comparison
+
+##### Example: Namespace prefix variant is not significant
+
+- **GIVEN** source OMath using the `mml:` prefix (same OMML URI as the target's `m:` convention)
+- **WHEN** spliced with `namespacePolicy: .lenient`, saved, and reloaded
+- **THEN** the reloaded content preserves the glyph regardless of which prefix spelling (`m:` or `mml:`) the reload happens to use
+
 ### Requirement: No regression on existing OMath round-trip behavior
 
 The introduction of `spliceOMath` / `spliceParagraphOMath` APIs SHALL NOT alter the round-trip behavior of OMath blocks that were not spliced.
