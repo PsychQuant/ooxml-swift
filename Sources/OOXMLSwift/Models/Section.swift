@@ -35,6 +35,31 @@ public struct SectionProperties {
     /// other gutter was replaced with 720 the moment a section was
     /// re-serialized — silently, on edits that never touched layout.
     public var columnSpacing: Int = 720
+
+    /// PsychQuant/ooxml-swift#191: `<w:cols w:equalWidth>` — whether every
+    /// column shares `columns`/`columnSpacing` uniformly (schema default
+    /// `true`, matching this field's default so absence-of-attribute
+    /// documents keep emitting the pre-#191 plain `<w:cols w:num w:space/>`
+    /// form exactly). `false` requires `individualColumnWidths` to describe
+    /// each column — Word itself always pairs `w:equalWidth="0"` with
+    /// explicit `<w:col>` children.
+    public var columnsEqualWidth: Bool = true
+
+    /// PsychQuant/ooxml-swift#191: `<w:cols w:sep>` — whether a vertical
+    /// separator line is drawn between columns. Schema default `false`.
+    public var columnSeparator: Bool = false
+
+    /// PsychQuant/ooxml-swift#191: individual `<w:col>` children of
+    /// `<w:cols>` — populated only for unequal-width column layouts
+    /// (`columnsEqualWidth == false`). Empty means "use `columns` /
+    /// `columnSpacing` uniformly", matching pre-#191 behavior exactly.
+    public var individualColumnWidths: [ColumnDefinition] = []
+
+    /// PsychQuant/ooxml-swift#191: page border (`<w:pgBorders>`). `nil`
+    /// means the section has no page border — matches pre-#191 behavior
+    /// (the field didn't exist, so `toXML()` never emitted `<w:pgBorders>`).
+    public var pageBorders: PageBorders?
+
     public var docGrid: DocumentGrid?       // 文件格線
 
     /// v0.16.0+ (#44 §4): per-type header/footer references
@@ -162,6 +187,11 @@ extension SectionProperties: Equatable {
             && lhs.titlePageDistinct == rhs.titlePageDistinct
             && lhs.sectionBreakType == rhs.sectionBreakType
             && lhs.rsidAttributes == rhs.rsidAttributes
+            && lhs.columnSpacing == rhs.columnSpacing
+            && lhs.columnsEqualWidth == rhs.columnsEqualWidth
+            && lhs.columnSeparator == rhs.columnSeparator
+            && lhs.individualColumnWidths == rhs.individualColumnWidths
+            && lhs.pageBorders == rhs.pageBorders
     }
 }
 
@@ -368,6 +398,77 @@ public struct DocumentGrid: Equatable {
     }
 }
 
+// MARK: - Columns
+
+/// PsychQuant/ooxml-swift#191: one `<w:col>` child of `<w:cols>` — an
+/// individual column's width and (optionally) the gutter after it. Only
+/// meaningful when `SectionProperties.columnsEqualWidth == false`; `nil`
+/// `spacing` means "omit `w:space`" (inherits no explicit gutter for this
+/// column), matching the source exactly rather than inventing one.
+public struct ColumnDefinition: Equatable {
+    public var width: Int      // w:w — twips
+    public var spacing: Int?   // w:space — twips
+
+    public init(width: Int, spacing: Int? = nil) {
+        self.width = width
+        self.spacing = spacing
+    }
+}
+
+// MARK: - Page Borders
+
+/// PsychQuant/ooxml-swift#191: one side of `<w:pgBorders>` (`<w:top>`,
+/// `<w:left>`, `<w:bottom>`, `<w:right>`). `style` is kept as the raw
+/// `w:val` string rather than a constrained enum: page borders support a
+/// much larger style vocabulary than table/paragraph borders (the ~150
+/// named "art" border styles in addition to `single`/`double`/…), and
+/// constraining it to a small enum would silently coerce any unrecognized
+/// value to a default, losing fidelity for exactly the case this field
+/// exists to preserve.
+public struct PageBorderSide: Equatable {
+    public var style: String   // w:val (ST_Border)
+    public var size: Int       // w:sz — 1/8 pt (or art-border point size)
+    public var color: String   // w:color
+    public var space: Int      // w:space — distance from the page edge, points
+
+    public init(style: String, size: Int, color: String, space: Int) {
+        self.style = style
+        self.size = size
+        self.color = color
+        self.space = space
+    }
+}
+
+/// PsychQuant/ooxml-swift#191: `<w:pgBorders>` — a page border drawn around
+/// every page (or a subset, per `display`) in the section. `nil` on
+/// `SectionProperties.pageBorders` means the section has no page border.
+public struct PageBorders: Equatable {
+    public var top: PageBorderSide?
+    public var left: PageBorderSide?
+    public var bottom: PageBorderSide?
+    public var right: PageBorderSide?
+
+    /// `w:offsetFrom` — "page" (measure `space` from the page edge) or
+    /// "text" (measure from the text margin).
+    public var offsetFrom: String?
+    /// `w:display` — "allPages", "firstPage", or "notFirstPage".
+    public var display: String?
+    /// `w:zOrder` — "front" or "back" relative to document content.
+    public var zOrder: String?
+
+    public init(top: PageBorderSide? = nil, left: PageBorderSide? = nil,
+                bottom: PageBorderSide? = nil, right: PageBorderSide? = nil,
+                offsetFrom: String? = nil, display: String? = nil, zOrder: String? = nil) {
+        self.top = top
+        self.left = left
+        self.bottom = bottom
+        self.right = right
+        self.offsetFrom = offsetFrom
+        self.display = display
+        self.zOrder = zOrder
+    }
+}
+
 // MARK: - Section Break
 
 /// 分節符類型
@@ -387,6 +488,15 @@ public struct PageBreak: Equatable {
 }
 
 // MARK: - XML Generation
+
+extension PageBorderSide {
+    /// PsychQuant/ooxml-swift#191: renders one `<w:top|left|bottom|right>`
+    /// child of `<w:pgBorders>`.
+    func toXML(name: String) -> String {
+        "<w:\(name) w:val=\"\(escapeXMLAttribute(style))\" w:sz=\"\(size)\" "
+            + "w:space=\"\(space)\" w:color=\"\(escapeXMLAttribute(color))\"/>"
+    }
+}
 
 extension SectionProperties {
     /// PsychQuant/ooxml-swift#112: renders `rsidAttributes` as the opening
@@ -457,6 +567,25 @@ extension SectionProperties {
         // 頁邊距
         xml += "<w:pgMar w:top=\"\(pageMargins.top)\" w:right=\"\(pageMargins.right)\" w:bottom=\"\(pageMargins.bottom)\" w:left=\"\(pageMargins.left)\" w:header=\"\(pageMargins.header)\" w:footer=\"\(pageMargins.footer)\" w:gutter=\"\(pageMargins.gutter)\"/>"
 
+        // PsychQuant/ooxml-swift#191: page border. Schema position is right
+        // after `pgMar` (there is no `paperSrc` field modeled between them)
+        // and before `pgNumType` — `EG_SectPrContents`' sequence is …, pgSz,
+        // pgMar, paperSrc, pgBorders, lnNumType, pgNumType, cols, ….
+        if let pb = pageBorders {
+            var pgBordersAttrs: [String] = []
+            if let zOrder = pb.zOrder { pgBordersAttrs.append("w:zOrder=\"\(escapeXMLAttribute(zOrder))\"") }
+            if let display = pb.display { pgBordersAttrs.append("w:display=\"\(escapeXMLAttribute(display))\"") }
+            if let offsetFrom = pb.offsetFrom { pgBordersAttrs.append("w:offsetFrom=\"\(escapeXMLAttribute(offsetFrom))\"") }
+            let attrsXML = pgBordersAttrs.isEmpty ? "" : " " + pgBordersAttrs.joined(separator: " ")
+            xml += "<w:pgBorders\(attrsXML)>"
+            // CT_PageBorders sequence: top, left, bottom, right.
+            if let top = pb.top { xml += top.toXML(name: "top") }
+            if let left = pb.left { xml += left.toXML(name: "left") }
+            if let bottom = pb.bottom { xml += bottom.toXML(name: "bottom") }
+            if let right = pb.right { xml += right.toXML(name: "right") }
+            xml += "</w:pgBorders>"
+        }
+
         // v0.16.0+ (#44 §4): pgNumType — both start and fmt go on one element
         if let fmt = pageNumberFormat {
             var pgNumAttrs = ""
@@ -470,7 +599,25 @@ extension SectionProperties {
         // 欄設定 — attribute order w:num before w:space matches the reducer's
         // canonical <w:cols> emit (authoring-canonical-conformance, design D1:
         // the authoring side conforms to the frozen transcoder form).
-        xml += "<w:cols w:num=\"\(columns)\" w:space=\"\(columnSpacing)\"/>"
+        //
+        // PsychQuant/ooxml-swift#191: `w:equalWidth`/`w:sep` appended after
+        // num/space (only when non-default, so the common equal-width /
+        // no-separator case keeps emitting the exact pre-#191 tag), and
+        // individual `<w:col>` children when the columns are unequal width.
+        var colsAttrs = "w:num=\"\(columns)\" w:space=\"\(columnSpacing)\""
+        if !columnsEqualWidth { colsAttrs += " w:equalWidth=\"0\"" }
+        if columnSeparator { colsAttrs += " w:sep=\"1\"" }
+        if individualColumnWidths.isEmpty {
+            xml += "<w:cols \(colsAttrs)/>"
+        } else {
+            xml += "<w:cols \(colsAttrs)>"
+            for col in individualColumnWidths {
+                var colAttrs = "w:w=\"\(col.width)\""
+                if let spacing = col.spacing { colAttrs += " w:space=\"\(spacing)\"" }
+                xml += "<w:col \(colAttrs)/>"
+            }
+            xml += "</w:cols>"
+        }
 
         // v0.16.0+ (#44 §4): line numbering
         if let ln = lineNumbers {
