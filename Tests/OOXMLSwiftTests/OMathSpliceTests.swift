@@ -66,6 +66,16 @@ final class OMathSpliceTests: XCTestCase {
     </w:p>
     """
 
+    /// Source paragraph with one direct-child `oMathPara` (display-math wrapper,
+    /// distinct from bare `oMath`). Used by PsychQuant/ooxml-swift#124.
+    private static let sourceDirectChildOMathPara = """
+    <w:p \(mNS)>
+      <w:r><w:t>before</w:t></w:r>
+      <m:oMathPara><m:oMath><m:r><m:t>γ</m:t></m:r></m:oMath></m:oMathPara>
+      <w:r><w:t>after</w:t></w:r>
+    </w:p>
+    """
+
     /// Source paragraph with three inline OMath blocks at different positions for batch tests.
     private static let sourceMultipleOMath = """
     <w:p \(mNS)>
@@ -175,6 +185,32 @@ final class OMathSpliceTests: XCTestCase {
         let runWithOMath = resultPara.runs.first { ($0.rawXML ?? "").contains("oMath") }
         XCTAssertNil(runWithOMath,
             "Direct-child source OMath should NOT be wrapped into a Run on target")
+    }
+
+    /// PsychQuant/ooxml-swift#124: a direct-child `oMathPara` must round-trip as
+    /// `oMathPara`, not be hardcoded to `oMath` — typed metadata (`name`) and the
+    /// verbatim payload (`rawXML`, whose root is literally `<m:oMathPara>`) must agree.
+    func testDirectChildOMathParaPreservesElementName() throws {
+        let sourcePara = try parseParagraph(xml: Self.sourceDirectChildOMathPara)
+        let targetPara = try parseParagraph(xml: Self.targetEmpty)
+        var target = makeDocument(with: targetPara)
+
+        try target.spliceOMath(
+            from: sourcePara,
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            omathIndex: 0
+        )
+
+        guard case .paragraph(let resultPara) = target.body.children[0] else {
+            XCTFail("Expected paragraph"); return
+        }
+
+        let spliced = resultPara.unrecognizedChildren.filter { $0.rawXML.contains("γ") }
+        XCTAssertEqual(spliced.count, 1, "Expected exactly one spliced oMathPara child")
+        XCTAssertEqual(spliced.first?.name, "oMathPara",
+            "Typed name must agree with the payload root <m:oMathPara>, not hardcode 'oMath'")
+        XCTAssertTrue(spliced.first?.rawXML.contains("<m:oMathPara") ?? false)
     }
 
     /// Test 6.4: Source paragraph has no OMath → throws .sourceHasNoOMath.
