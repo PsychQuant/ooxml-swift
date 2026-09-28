@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.18.0] - 2026-09-28
+
 ### Added
 
 - **`SectionProperties` 新增頁面框線（`<w:pgBorders>`）與欄的個別寬度／等寬／分隔線
