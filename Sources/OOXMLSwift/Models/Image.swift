@@ -74,6 +74,11 @@ public enum ImageError: Error, LocalizedError {
     case unsupportedFormat(String)
     case dimensionRequired
 
+    /// PsychQuant/ooxml-swift#178: a pixel dimension that either converts to
+    /// an EMU value outside `ST_PositiveCoordinate`'s valid range (`0` to
+    /// `Drawing.maxPositiveCoordinateEMU`) or is non-positive.
+    case dimensionOutOfRange(String)
+
     public var errorDescription: String? {
         switch self {
         case .invalidBase64:
@@ -84,6 +89,8 @@ public enum ImageError: Error, LocalizedError {
             return "Unsupported image format: \(format)"
         case .dimensionRequired:
             return "Image dimensions (width/height) are required"
+        case .dimensionOutOfRange(let reason):
+            return "Image dimension out of range: \(reason)"
         }
     }
 }
@@ -131,18 +138,105 @@ public struct Drawing: Equatable {
         return drawing
     }
 
+    /// PsychQuant/ooxml-swift#178: 1 pixel = 9525 EMU @ 96 DPI.
+    static let emuPerPixel = 9525
+
+    /// PsychQuant/ooxml-swift#178: `wp:extent/@cx`/`@cy`'s XSD type
+    /// (`ST_PositiveCoordinate`) only allows `0` through this value
+    /// (`27273042316900`). A pixel value that converts to more than this —
+    /// or that overflows `Int` before the range check can even run,
+    /// starting around `Int.max / emuPerPixel` ≈ 9.7×10¹⁴ — is invalid
+    /// OOXML regardless of whether the multiplication traps.
+    static let maxPositiveCoordinateEMU = 27_273_042_316_900
+
+    /// PsychQuant/ooxml-swift#178: pixel → EMU conversion that validates
+    /// BEFORE converting, throwing `ImageError.dimensionOutOfRange` for any
+    /// `px` that is non-positive, or whose EMU equivalent would overflow
+    /// `Int` or exceed `ST_PositiveCoordinate`'s range — instead of the
+    /// bare `px * emuPerPixel` multiplication `from`/`anchorFromPixels`
+    /// used to do unconditionally, which TRAPS (crashing the whole host
+    /// process, not just failing this one call) for `px` beyond roughly
+    /// `Int.max / emuPerPixel`. Any caller that forwards external input
+    /// (an MCP server, a CLI argument, a value read from an untrusted file)
+    /// to a pixel-dimension API was one crafted parameter away from taking
+    /// down the entire process — including every other open document's
+    /// unsaved edits in a session that holds more than one.
+    static func validatedEMU(fromPixels px: Int) throws -> Int {
+        guard px > 0 else {
+            throw ImageError.dimensionOutOfRange(
+                "pixel value \(px) must be positive")
+        }
+        let (emu, overflow) = px.multipliedReportingOverflow(by: emuPerPixel)
+        guard !overflow, emu <= maxPositiveCoordinateEMU else {
+            throw ImageError.dimensionOutOfRange(
+                "pixel value \(px) converts to an EMU value outside ST_PositiveCoordinate's range (0...\(maxPositiveCoordinateEMU))")
+        }
+        return emu
+    }
+
+    /// PsychQuant/ooxml-swift#178: same conversion as `validatedEMU(fromPixels:)`
+    /// but NEVER throws and NEVER traps — clamps to `maxPositiveCoordinateEMU`
+    /// (or `0` for non-positive input) instead. Backs the deprecated
+    /// non-throwing `from`/`anchorFromPixels` overloads below, which cannot
+    /// throw without breaking every existing call site (a source-breaking,
+    /// major-version change this fix deliberately avoids — see those
+    /// overloads' deprecation messages). Prefer `validatedEMU(fromPixels:)`
+    /// (or the `validated`/`anchorValidated` constructors) in new code: this
+    /// silently produces a DIFFERENT size than requested for out-of-range
+    /// input rather than surfacing the problem to the caller.
+    private static func clampedEMU(fromPixels px: Int) -> Int {
+        guard px > 0 else { return 0 }
+        let (emu, overflow) = px.multipliedReportingOverflow(by: emuPerPixel)
+        return (overflow || emu > maxPositiveCoordinateEMU) ? maxPositiveCoordinateEMU : emu
+    }
+
+    /// 從像素建立浮動圖片（驗證版本；超出 `ST_PositiveCoordinate` 範圍會拋錯，不當機）
+    public static func anchorValidated(widthPx: Int, heightPx: Int, imageId: String,
+                                 position: AnchorPosition = AnchorPosition(),
+                                 name: String = "Picture") throws -> Drawing {
+        return anchor(
+            width: try validatedEMU(fromPixels: widthPx),
+            height: try validatedEMU(fromPixels: heightPx),
+            imageId: imageId, position: position, name: name)
+    }
+
+    /// 從像素建立（驗證版本；1 像素 = 9525 EMU @ 96 DPI；超出 `ST_PositiveCoordinate`
+    /// 範圍會拋錯，不當機）
+    public static func validated(widthPx: Int, heightPx: Int, imageId: String, name: String = "Picture") throws -> Drawing {
+        return Drawing(
+            width: try validatedEMU(fromPixels: widthPx),
+            height: try validatedEMU(fromPixels: heightPx),
+            imageId: imageId,
+            name: name
+        )
+    }
+
     /// 從像素建立浮動圖片
+    ///
+    /// PsychQuant/ooxml-swift#178: kept for source compatibility (changing
+    /// this to `throws` would break every existing call site). Extreme
+    /// `widthPx`/`heightPx` values no longer TRAP — they clamp to
+    /// `Drawing.maxPositiveCoordinateEMU` instead, silently — but still do
+    /// not validate against real OOXML bounds the way a caller checking for
+    /// an error would expect. Use `anchorValidated(widthPx:heightPx:imageId:position:name:)`
+    /// in new code, which throws `ImageError.dimensionOutOfRange` instead.
+    @available(*, deprecated, message: "Silently clamps out-of-range pixel values instead of reporting them. Use anchorValidated(widthPx:heightPx:imageId:position:name:) to get a thrown ImageError.dimensionOutOfRange instead.")
     public static func anchorFromPixels(widthPx: Int, heightPx: Int, imageId: String,
                                  position: AnchorPosition = AnchorPosition(),
                                  name: String = "Picture") -> Drawing {
-        return anchor(width: widthPx * 9525, height: heightPx * 9525, imageId: imageId, position: position, name: name)
+        return anchor(width: clampedEMU(fromPixels: widthPx), height: clampedEMU(fromPixels: heightPx), imageId: imageId, position: position, name: name)
     }
 
     /// 從像素建立（1 像素 = 9525 EMU @ 96 DPI）
+    ///
+    /// PsychQuant/ooxml-swift#178: kept for source compatibility — see
+    /// `anchorFromPixels`'s doc comment for the full rationale. Use
+    /// `validated(widthPx:heightPx:imageId:name:)` in new code.
+    @available(*, deprecated, message: "Silently clamps out-of-range pixel values instead of reporting them. Use validated(widthPx:heightPx:imageId:name:) to get a thrown ImageError.dimensionOutOfRange instead.")
     public static func from(widthPx: Int, heightPx: Int, imageId: String, name: String = "Picture") -> Drawing {
         return Drawing(
-            width: widthPx * 9525,
-            height: heightPx * 9525,
+            width: clampedEMU(fromPixels: widthPx),
+            height: clampedEMU(fromPixels: heightPx),
             imageId: imageId,
             name: name
         )
@@ -170,12 +264,12 @@ public struct Drawing: Equatable {
 
     /// 取得寬度（像素）
     public var widthInPixels: Int {
-        width / 9525
+        width / Drawing.emuPerPixel
     }
 
     /// 取得高度（像素）
     public var heightInPixels: Int {
-        height / 9525
+        height / Drawing.emuPerPixel
     }
 }
 
