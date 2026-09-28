@@ -8,6 +8,22 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **`DocxReader` 讀入 `.docx` 內嵌圖片時不再受路徑穿越攻擊影響**。過去 `word/_rels/document.xml.rels`
+  的圖片關係 `Target` 屬性會直接與解壓目錄組成路徑後讀取，沒有任何範圍檢查；只要 `Target` 帶足夠的
+  `../`（或以反覆出現的子字串製造出等效的 `../`），讀入端就會把呼叫端主機上、封裝之外的任意檔案內容
+  讀進 `document.images`，並可能經由匯出或存檔再寫出。影響範圍是所有讀入不受信任 `.docx` 的呼叫端
+  （含 che-word-mcp 的 `export_all_images` 等匯出工具）。
+- 圖片關係 `Target` 現在依 OPC（ECMA-376 Part 2 §9.3）規則正確解析：相對路徑以其所屬 `.rels` 對應
+  part 的目錄為基準（`word/_rels/document.xml.rels` 的基準是 `word/`），以 `/` 開頭者以封裝根目錄
+  為基準（不是檔案系統根）；解析、正規化並解開符號連結後，結果必須落在解壓目錄之內且是一般檔案，
+  否則不讀取。`TargetMode="External"` 一律不讀。合法但走訪上層再回到手足目錄的 Target（例如
+  `../media/image1.png`）仍可正常解析，不受影響。
+- 新增 `WordDocument.imageTargetContainmentFailures`（唯讀公開欄位）：記錄因路徑穿越、
+  `TargetMode="External"`、目標為目錄、符號連結逃逸或找不到目標而被拒絕讀取的圖片關係，
+  以關係 `Id` 為鍵。讀入本身不會因此中止，只是該圖片不會出現在 `document.images` 中。
+
 ## [3.18.0] - 2026-09-28
 
 ### Added

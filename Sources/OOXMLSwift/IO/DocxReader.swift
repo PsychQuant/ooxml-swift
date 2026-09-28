@@ -229,7 +229,7 @@ public struct DocxReader {
         }
 
         // 3. 提取圖片資源
-        let images = try extractImages(from: tempDir, relationships: relationships)
+        let imageExtraction = try extractImages(from: tempDir, relationships: relationships)
 
         // 4. 讀取 document.xml
         let documentURL = tempDir.appendingPathComponent("word/document.xml")
@@ -417,7 +417,8 @@ public struct DocxReader {
             document.sectionProperties = Self.parseSectionProperties(sectPrEl)
         }
 
-        document.images = images
+        document.images = imageExtraction.images
+        document.imageTargetContainmentFailures = imageExtraction.containmentFailures
 
         // v0.19.4+ (#56 R3-NEW-5): nextBookmarkId calibration moved AFTER
         // all parts (body + headers + footers + footnotes + endnotes) load.
@@ -438,7 +439,12 @@ public struct DocxReader {
         // block path traversal at the read sink (the property setter on
         // Header.originalFileName is defense-in-depth for post-load mutation).
         for rel in relationships.relationships where rel.type == .header {
-            guard isSafeRelativeOOXMLPath(rel.target) else {
+            // ox-image-target-containment audit: `TargetMode="External"` is
+            // never legitimate for a header part (it is an internal XML
+            // part, not a hyperlink) — reject it explicitly alongside the
+            // pre-existing #55 traversal guard rather than relying on the
+            // resulting bogus path simply not existing.
+            guard isSafeRelativeOOXMLPath(rel.target), rel.targetMode != "External" else {
                 FileHandle.standardError.write(
                     Data("Warning: DocxReader skipped header rel '\(rel.id)' with unsafe target '\(rel.target)' (#55 security baseline)\n".utf8)
                 )
@@ -503,7 +509,9 @@ public struct DocxReader {
         // v0.13.0+: see headers comment above re: originalFileName preservation.
         // v0.13.5+ (#55): same path-traversal guard as headers.
         for rel in relationships.relationships where rel.type == .footer {
-            guard isSafeRelativeOOXMLPath(rel.target) else {
+            // ox-image-target-containment audit: see the matching header
+            // comment above — External is never legitimate for a footer part.
+            guard isSafeRelativeOOXMLPath(rel.target), rel.targetMode != "External" else {
                 FileHandle.standardError.write(
                     Data("Warning: DocxReader skipped footer rel '\(rel.id)' with unsafe target '\(rel.target)' (#55 security baseline)\n".utf8)
                 )
@@ -1291,26 +1299,54 @@ public struct DocxReader {
     /// file. If the file isn't found, skip the rel rather than forge an id.
     /// Orphan files in `word/media/` not referenced by any rel are dropped
     /// (they're unreferenced anyway).
-    private static func extractImages(from tempDir: URL, relationships: RelationshipsCollection) throws -> [ImageReference] {
+    /// Security baseline (che-word-mcp `export_all_images` path-traversal
+    /// report; `ox-image-target-containment`). Every candidate here used to
+    /// be built by joining `rel.target` — an attacker-controlled string from
+    /// `word/_rels/document.xml.rels` — directly onto `wordDir`/`tempDir`
+    /// with `URL.appendingPathComponent`, which does NOT collapse `..`; the
+    /// OS resolves it at `Data(contentsOf:)` time instead, with no boundary
+    /// at the extraction root. A `Target` of `../../../../<path>` walked
+    /// straight out of the temporary directory and onto the real filesystem,
+    /// and a second "sanitizing" candidate that stripped the literal
+    /// substring `"../"` was itself bypassable (`"..././".replacingOccurrences(
+    /// of: "../", with: "")` leaves `"../"` behind — removing the middle
+    /// occurrence makes the untouched first and last characters adjacent
+    /// into a new match a single left-to-right scan never re-examines).
+    /// Both candidate shapes are gone; `resolveContainedOOXMLTarget` (see
+    /// `PathValidator.swift`) is now the only path from a `Target` string to
+    /// a file read, and it resolves OPC-correctly (so a legitimate `Target`
+    /// that climbs out of `word/` and back into a sibling directory, e.g.
+    /// `../media/image1.png`, still works) while refusing anything whose
+    /// resolved, symlink-resolved candidate is not a regular file strictly
+    /// inside `tempDir`. Rejections are recorded in
+    /// `imageTargetContainmentFailures`, never thrown — an unreadable or
+    /// unsafe image relationship is an orphan for this general reader,
+    /// exactly like one naming a part that does not exist.
+    private static func extractImages(
+        from tempDir: URL,
+        relationships: RelationshipsCollection
+    ) throws -> (images: [ImageReference], containmentFailures: [String: String]) {
         var images: [ImageReference] = []
+        var containmentFailures: [String: String] = [:]
 
         let wordDir = tempDir.appendingPathComponent("word")
         guard FileManager.default.fileExists(atPath: wordDir.path) else {
-            return images
+            return (images, containmentFailures)
         }
 
         for rel in relationships.imageRelationships {
-            // Try multiple normalizations: media/X, ../media/X (rels file is
-            // at word/_rels/, so ../media/X → word/media/X), word/media/X.
-            // Also try the rel.target verbatim relative to word/.
-            let candidates: [URL] = [
-                wordDir.appendingPathComponent(rel.target),
-                wordDir.appendingPathComponent(rel.target.replacingOccurrences(of: "../", with: "")),
-                tempDir.appendingPathComponent(rel.target),
-                tempDir.appendingPathComponent(rel.target.replacingOccurrences(of: "../", with: "")),
-            ]
-            guard let fileURL = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
-                // Skip orphan rel — can't materialize without the actual file.
+            guard let fileURL = resolveContainedOOXMLTarget(
+                rel.target,
+                targetMode: rel.targetMode,
+                relativeToPartDirectory: "/word/",
+                packageRoot: tempDir
+            ) else {
+                let reason = "image relationship '\(rel.id)' target '\(rel.target.prefix(200))' did not resolve to a "
+                    + "regular file inside the package (path traversal, TargetMode=\"External\", a directory, a "
+                    + "symlink escaping the package, or an orphan target); skipped — security baseline, "
+                    + "PsychQuant/ooxml-swift ox-image-target-containment."
+                containmentFailures[rel.id] = reason
+                FileHandle.standardError.write(Data("Warning: DocxReader skipped \(reason)\n".utf8))
                 continue
             }
             let data = try Data(contentsOf: fileURL)
@@ -1325,7 +1361,7 @@ public struct DocxReader {
             ))
         }
 
-        return images
+        return (images, containmentFailures)
     }
 
     /// 取得副檔名對應的 MIME 類型
