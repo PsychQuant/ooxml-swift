@@ -650,7 +650,7 @@ extension Paragraph {
         // relative order `SectionProperties`'s `AG_SectPrAttributes`-style
         // rsid emission uses, base schema attributes before the w14:
         // extension-namespace ones below.
-        let canonicalOrder = ["rsidRPr", "rsidDel", "rsidR", "rsidP", "rsidRDefault"]
+        let canonicalOrder = ["rsidRPr", "rsidR", "rsidDel", "rsidP", "rsidRDefault"]
         for name in canonicalOrder {
             if let value = rsidAttributes[name] {
                 attrs.append("w:\(name)=\"\(escapeXMLAttribute(value))\"")
