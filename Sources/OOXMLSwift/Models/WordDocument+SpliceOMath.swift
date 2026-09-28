@@ -124,12 +124,25 @@ extension WordDocument {
         )
 
         var spliced = 0
-        for (i, omath) in extracted.enumerated() {
-            let snippet = prefixContexts[i]
-            // Empty prefix → fall back to .atEnd (OMath at start of paragraph).
-            let position: OMathSplicePosition = snippet.isEmpty
-                ? .atEnd
-                : .afterText(snippet, instance: 1, options: AnchorLookupOptions())
+        for i in extracted.indices {
+            // PsychQuant/ooxml-swift#125: `nil` means this OMath could not be
+            // matched back to a source Run at all (extraction/normalization
+            // mismatch) — that MUST fail loudly, not silently guess a
+            // boundary. `""` means "matched, no preceding prose" — only
+            // meaningful as "the source paragraph starts with this OMath"
+            // for the FIRST extracted equation (`i == 0`); any other index
+            // with an empty-but-matched prefix falls back to the pre-#125
+            // `.atEnd` behavior (undefined/rare case, out of this fix's
+            // scope — see spec Scope note).
+            guard let snippet = prefixContexts[i] else {
+                throw OMathSpliceError.contextAnchorNotFound(omathIndex: i, snippet: "")
+            }
+            let position: OMathSplicePosition
+            if snippet.isEmpty {
+                position = i == 0 ? .atStart : .atEnd
+            } else {
+                position = .afterText(snippet, instance: 1, options: AnchorLookupOptions())
+            }
 
             do {
                 try self.spliceOMath(
@@ -619,12 +632,21 @@ extension WordDocument {
     /// Walks runs in array order, accumulating text. When we hit a Run whose rawXML
     /// matches `extracted[i].xml`, we capture the `charsBefore`-trailing chars of the
     /// concatenated prose so far.
+    ///
+    /// PsychQuant/ooxml-swift#125: returns `[String?]`, not `[String]`. `nil`
+    /// means "this extracted OMath could not be matched back to a source Run
+    /// at all" (an extraction/normalization bug, or a structural mismatch);
+    /// `""` means "matched, and there was no preceding prose" (the OMath is
+    /// the first thing in the paragraph). Collapsing both into the same `""`
+    /// sentinel was the root cause of #125's leading-OMath misplacement —
+    /// callers could not tell "genuinely at the start" from "we lost track
+    /// of this equation".
     internal static func deriveContextAnchors(
         from sourceParagraph: Paragraph,
         forExtracted extracted: [ExtractedOMath],
         charsBefore: Int
-    ) -> [String] {
-        var anchors = [String](repeating: "", count: extracted.count)
+    ) -> [String?] {
+        var anchors = [String?](repeating: nil, count: extracted.count)
         var matchedExtractedIndices = Set<Int>()
         var proseAccumulator = ""
 
@@ -633,9 +655,16 @@ extension WordDocument {
         for run in sourceParagraph.runs {
             if let raw = run.rawXML,
                (raw.contains(":oMath") || raw.contains("<oMath") || raw.contains(":oMathPara") || raw.contains("<oMathPara")) {
-                // Find which extracted index this run corresponds to (by xml byte equality).
+                // Find which extracted index this run corresponds to. Compare
+                // after the SAME `ensureXmlnsDeclared` normalization extraction
+                // itself applied to `ex.xml` (PsychQuant/ooxml-swift#125):
+                // extraction may inject a self-contained root `xmlns:` onto
+                // `ex.xml` that the original Run's `rawXML` never had, so a
+                // raw byte comparison (`ex.xml == raw`) could spuriously fail
+                // to match a run to its own extracted entry.
+                let normalizedRaw = OMathExtractor.ensureXmlnsDeclared(in: raw)
                 for (i, ex) in extracted.enumerated() where !matchedExtractedIndices.contains(i) {
-                    if ex.kind == .inRun && ex.xml == raw {
+                    if ex.kind == .inRun && ex.xml == normalizedRaw {
                         let trailing = String(proseAccumulator.suffix(charsBefore)).trimmingCharacters(in: .whitespaces)
                         anchors[i] = trailing
                         matchedExtractedIndices.insert(i)
