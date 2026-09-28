@@ -719,6 +719,18 @@ final class OMathSpliceTests: XCTestCase {
 
     /// All OMath blocks spliced in source order via spliceParagraphOMath.
     /// Covers: All OMath blocks spliced in source order scenario.
+    ///
+    /// PsychQuant/ooxml-swift#125: pre-fix, `deriveContextAnchors` compared
+    /// `ex.xml == raw` byte-for-byte, but `ex.xml` had already been passed
+    /// through `ensureXmlnsDeclared` (which injects a self-contained root
+    /// `xmlns:` the original Run's `rawXML` never had) — so this comparison
+    /// could fail to match ANY equation back to its source Run, silently
+    /// treating every equation as "unmatched" and falling back to `.atEnd`
+    /// for all of them. The equation COUNT still came out right (all 3
+    /// still got spliced somewhere), which is why a count-only assertion
+    /// missed this — the equations all piled up at the paragraph's end
+    /// instead of interleaving with their corresponding prose. This test
+    /// asserts the actual serialized ORDER, not just the count.
     func testParagraphBatchSpliceAllOMath() throws {
         let sourcePara = try parseParagraph(xml: Self.sourceMultipleOMath)
         // Target with all 3 anchors but no OMath (the typical rescue scenario).
@@ -740,6 +752,62 @@ final class OMathSpliceTests: XCTestCase {
         guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
         let omathRuns = resultPara.runs.filter { isOMathRun($0) }
         XCTAssertEqual(omathRuns.count, 3, "Expected 3 OMath runs in result")
+
+        let xml = resultPara.toXML()
+        guard let prefixRange = xml.range(of: "進行"),
+              let tRange = xml.range(of: "<m:t>t</m:t>"),
+              let midRange = xml.range(of: "檢定，係數"),
+              let alphaRange = xml.range(of: "<m:t>α</m:t>"),
+              let midRange2 = xml.range(of: "與"),
+              let betaRange = xml.range(of: "<m:t>β</m:t>"),
+              let suffixRange = xml.range(of: "。") else {
+            XCTFail("Expected every prose/OMath fragment in output; got: \(xml)")
+            return
+        }
+        XCTAssertTrue(prefixRange.lowerBound < tRange.lowerBound, "t must follow '進行'; got: \(xml)")
+        XCTAssertTrue(tRange.lowerBound < midRange.lowerBound, "'檢定，係數' must follow t; got: \(xml)")
+        XCTAssertTrue(midRange.lowerBound < alphaRange.lowerBound, "α must follow '檢定，係數'; got: \(xml)")
+        XCTAssertTrue(alphaRange.lowerBound < midRange2.lowerBound, "'與' must follow α; got: \(xml)")
+        XCTAssertTrue(midRange2.lowerBound < betaRange.lowerBound, "β must follow '與'; got: \(xml)")
+        XCTAssertTrue(betaRange.lowerBound < suffixRange.lowerBound, "'。' must follow β; got: \(xml)")
+    }
+
+    /// PsychQuant/ooxml-swift#125: an OMath at the very start of the source
+    /// paragraph (no preceding prose at all) must map to `.atStart` of the
+    /// target paragraph — not `.atEnd`. Pre-fix, `spliceParagraphOMath`
+    /// collapsed "matched, empty prefix" (this case) and "unmatched" into
+    /// the same empty-string sentinel and mapped both to `.atEnd`.
+    func testParagraphBatchSpliceLeadingOMathMapsToAtStart() throws {
+        let sourceXML = """
+        <w:p \(Self.mNS)>
+          <w:r><m:oMath><m:r><m:t>t</m:t></m:r></m:oMath></w:r>
+          <w:r><w:t> 之後文字</w:t></w:r>
+        </w:p>
+        """
+        let sourcePara = try parseParagraph(xml: sourceXML)
+        let targetXML = """
+        <w:p \(Self.mNS)>
+          <w:r><w:t>之後文字</w:t></w:r>
+        </w:p>
+        """
+        let targetPara = try parseParagraph(xml: targetXML)
+        var target = makeDocument(with: targetPara)
+
+        let spliced = try target.spliceParagraphOMath(
+            from: sourcePara,
+            toBodyParagraphIndex: 0
+        )
+        XCTAssertEqual(spliced, 1)
+
+        guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
+        let xml = resultPara.toXML()
+        guard let omathRange = xml.range(of: "<m:t>t</m:t>"),
+              let textRange = xml.range(of: "之後文字") else {
+            XCTFail("Expected both the OMath and the existing text; got: \(xml)")
+            return
+        }
+        XCTAssertTrue(omathRange.lowerBound < textRange.lowerBound,
+            "A source-leading OMath (no preceding prose) must splice to the start of the target paragraph; got: \(xml)")
     }
 
     // MARK: - Round-trip lossless guarantee (6.13)
