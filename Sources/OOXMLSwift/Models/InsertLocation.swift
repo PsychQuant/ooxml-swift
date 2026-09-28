@@ -189,7 +189,10 @@ extension WordDocument {
         let imageRef = try ImageReference.from(path: path, id: imageId)
         images.append(imageRef)
 
-        var drawing = Drawing.from(widthPx: widthPx, heightPx: heightPx, imageId: imageId, name: name)
+        // PsychQuant/ooxml-swift#178: `validated` throws `ImageError.dimensionOutOfRange`
+        // for pixel values the deprecated `from` would have silently clamped
+        // (or, before the fix, trapped on). This function already throws.
+        var drawing = try Drawing.validated(widthPx: widthPx, heightPx: heightPx, imageId: imageId, name: name)
         drawing.description = description
         let run = Run.withDrawing(drawing)
         let para = Paragraph(runs: [run])
