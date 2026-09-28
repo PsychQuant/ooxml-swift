@@ -4,24 +4,42 @@
 
 The system SHALL provide `WordDocument.spliceOMath(from:toBodyParagraphIndex:position:omathIndex:rPrMode:namespacePolicy:)` that copies a single `<m:oMath>` XML block verbatim from a source `Paragraph` to a target body paragraph at a caller-specified position.
 
-#### Scenario: Inline OMath spliced from source Run.rawXML to target paragraph end
+#### Scenario: Inline OMath spliced from source Run to target paragraph end
 
 - **WHEN** caller invokes `target.spliceOMath(from: sourceParagraph, toBodyParagraphIndex: 5, position: .atEnd, omathIndex: 0)` with `sourceParagraph` containing one OMath stored in `Run.rawXML`
-- **THEN** the system SHALL append a new `Run` with `rawXML` byte-equal to the source OMath block to `target.body.children[5].runs`
+- **THEN** the system SHALL append a new `Run` carrying the source OMath block verbatim as a `Run.rawElements` child (NOT `Run.rawXML` — see rationale below) to `target.body.children[5].runs`
 - **AND** the spliced Run's `properties` SHALL match the source Run's properties when `rPrMode == .full`
+- **AND** `Run.toXML()` of the spliced Run SHALL serialize `<w:rPr>` (when `properties` is non-empty) *before* the OMath body, inside one properly-opened `<w:r>...</w:r>` element
 - **AND** the call SHALL return `1` indicating one OMath block was spliced
+
+PsychQuant/ooxml-swift#117: the spliced Run intentionally does NOT use
+`Run.rawXML` for its own OMath payload, even though the *source* Run being
+read from disk uses that convention. `Run.toXML()` treats `rawXML` as a
+verbatim replacement for the entire `<w:r>...</w:r>` element — it returns
+before ever reaching the `<w:rPr>` emission code — so a Run built with
+`rawXML` set can never also emit a copied `<w:rPr>`. `rawElements` is a
+Run *child* carrier: `Run.toXML()` emits `<w:rPr>` (from `properties`) first,
+then walks `rawElements` in order, so both survive together. This is a
+construction-time distinction only; after the target document is saved and
+reloaded, `DocxReader` re-parses the resulting `<w:r><w:rPr>...</w:rPr>
+<m:oMath>...</m:oMath></w:r>` the same way it parses any other OMath run —
+splitting the parsed `<w:rPr>` into typed `Run.properties` and storing just
+the `<m:oMath>` fragment back into `Run.rawXML`, per the reader's normal
+(unchanged) convention.
 
 ##### Example: Greek-letter inline math splice
 
 - **GIVEN** source paragraph with run containing `rawXML = "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:r><m:t>α</m:t></m:r></m:oMath>"` and rPr `{ rFonts: { ascii: "Cambria Math" }, sz: 24 }`
 - **WHEN** caller invokes `target.spliceOMath(from: source, toBodyParagraphIndex: 5, position: .atEnd, omathIndex: 0, rPrMode: .full)`
-- **THEN** target.body.children[5].runs gains one Run whose `rawXML` equals the source OMath XML byte-for-byte
+- **THEN** target.body.children[5].runs gains one Run whose `rawElements` contains one entry (`name: "oMath"`) whose `xml` equals the source OMath XML byte-for-byte
 - **AND** that Run's `properties` equals `{ rFonts: { ascii: "Cambria Math" }, sz: 24 }`
+- **AND** that Run's `toXML()` output contains `<w:rPr>` before `<m:oMath`
 
 #### Scenario: Direct-child OMath spliced preserving carrier
 
 - **WHEN** caller invokes `target.spliceOMath(...)` with `sourceParagraph` containing OMath stored in `unrecognizedChildren` (i.e., `<m:oMath>` is direct child of `<w:p>`, not inside a Run)
-- **THEN** the system SHALL append an `UnrecognizedChild(name: "oMath", rawXML: <source OMath XML>, position: <appropriate>)` to `target.body.children[targetIdx].unrecognizedChildren`
+- **THEN** the system SHALL append an `UnrecognizedChild(name: <source root local name>, rawXML: <source OMath XML>, position: <appropriate>)` to `target.body.children[targetIdx].unrecognizedChildren`
+- **AND** `name` SHALL be `"oMath"` when the source root is `<m:oMath>` and `"oMathPara"` when the source root is `<m:oMathPara>` (PsychQuant/ooxml-swift#124 — `name` MUST NOT be hardcoded independently of the payload's actual root element)
 - **AND** the spliced OMath SHALL NOT be placed inside a `Run` (carrier shape is preserved)
 
 #### Scenario: Source paragraph has no OMath
@@ -57,10 +75,10 @@ The system SHALL support `OMathSplicePosition.afterText(_, instance:, options:)`
 - **GIVEN** target paragraph with one run `text = "所得出的參數進行 檢定：", properties = { rFonts: { eastAsia: "DFKai-SB" } }, position = 3`
 - **WHEN** caller calls `spliceOMath(from: source, toBodyParagraphIndex: 5, position: .afterText("進行 "), omathIndex: 0)` with source providing inline OMath `<m:oMath>...t...</m:oMath>`
 - **THEN** target paragraph runs after splice:
-  | Index | text | rawXML | position |
-  |-------|------|--------|----------|
+  | Index | text | OMath payload (`rawElements`) | position |
+  |-------|------|--------------------------------|----------|
   | 0 | "所得出的參數進行 " | nil | 3 |
-  | 1 | "" | "<m:oMath>...t...</m:oMath>" | 3 |
+  | 1 | "" | `[RawElement(name: "oMath", xml: "<m:oMath>...t...</m:oMath>")]` | 3 |
   | 2 | "檢定：" | nil | 3 |
 - **AND** rPr `{ rFonts: { eastAsia: "DFKai-SB" } }` is copied to runs at indices 0 and 2
 
@@ -140,12 +158,46 @@ The system SHALL provide `WordDocument.spliceParagraphOMath(from:toBodyParagraph
 
 ### Requirement: Round-trip lossless guarantee
 
-The OMath XML written into the target paragraph by `spliceOMath` or `spliceParagraphOMath` SHALL be byte-equal to the source OMath XML when the target document is subsequently saved with `DocxWriter.write` and reloaded with `DocxReader.read`.
+PsychQuant/ooxml-swift#123: reload fidelity is **canonical semantic XML
+equivalence**, not lexical byte identity. Foundation's `XMLDocument` parser
+normalizes legal lexical variants during `DocxReader.read` — for example, a
+character reference such as `&#x3B1;` reloads as the literal character `α`.
+The reloaded XML is semantically equivalent to the source but not
+byte-for-byte identical, so a byte-equality requirement is unsatisfiable by
+the typed reader architecture (achieving it would require a separate
+raw-byte overlay/provenance channel disproportionate to this splice API).
+This requirement was previously worded as a byte-equality guarantee; that
+wording was the stale artifact, not the implementation.
 
-#### Scenario: Saved target reloads with spliced OMath byte-equal to source
+The OMath XML written into the target paragraph by `spliceOMath` or
+`spliceParagraphOMath` SHALL be semantically equivalent to the source OMath
+XML when the target document is subsequently saved with `DocxWriter.write`
+and reloaded with `DocxReader.read`. Two XML fragments are semantically
+equivalent when, after namespace resolution:
+
+- every element and attribute name resolves to the same namespace URI + local
+  name (prefix spelling and namespace-declaration placement are NOT
+  significant — `<m:oMath>` and `<mml:oMath>` bound to the same URI are the
+  same element);
+- every attribute has the same resolved value, regardless of attribute order
+  or quote style (`"` vs `'`);
+- child elements appear in the same order with the same recursively-resolved
+  structure;
+- text content is equal after entity/character-reference resolution (e.g.
+  `&#x3B1;` and `α` are the same text).
+
+#### Scenario: Saved target reloads with spliced OMath semantically equal to source
 
 - **WHEN** caller splices OMath block X from source, calls `DocxWriter.write(target, to: tempURL)`, and reads `let reloaded = try DocxReader.read(from: tempURL)`
-- **THEN** the corresponding `Run.rawXML` (or `unrecognizedChildren[].rawXML`) in `reloaded` SHALL equal source's OMath XML byte-for-byte
+- **THEN** the corresponding `Run.rawXML` (PsychQuant/ooxml-swift#117: after a save/reload round trip, the reloaded Run always uses the reader's normal `rawXML` convention, regardless of whether the in-memory pre-save Run used `rawXML` or `rawElements`) in `reloaded` SHALL be semantically equivalent to source's OMath XML per the definition above
+- **AND** the comparison SHALL tolerate differing entity spelling, attribute order, attribute quote style, namespace-declaration placement, and namespace-prefix spelling (same URI)
+
+##### Example: Character reference resolves to literal glyph
+
+- **GIVEN** source OMath text node `<m:t>&#x3B1;</m:t>`
+- **WHEN** the target document is saved and reloaded
+- **THEN** the reloaded OMath text node is `<m:t>α</m:t>`
+- **AND** this SHALL be treated as a passing round trip (semantically equal), not a byte-equality failure
 
 ### Requirement: No regression on existing OMath round-trip behavior
 
