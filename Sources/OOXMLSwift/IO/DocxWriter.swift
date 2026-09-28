@@ -434,25 +434,37 @@ public struct DocxWriter {
     /// True when the typed model has relationships not declared in the source
     /// archive's `word/_rels/document.xml.rels` — used to gate
     /// `writeDocumentRelationships` in overlay mode.
+    ///
+    /// PsychQuant/ooxml-swift#142: this used to be a raw substring search
+    /// (`originalRels.contains("Id=\"\(id)\"")`), which a commented-out decoy
+    /// declaration (`<!-- Id="rId9" -->`) satisfies without there being any
+    /// real relationship — the rels part was then never rewritten and the
+    /// new relationship silently never got declared (macdoc#175's failure
+    /// shape). Membership is now checked against `PackageInspector.scanRels`'s
+    /// decoded id set, the same XML-parser-based scan `documentRelationshipsXML`
+    /// already trusts elsewhere in this file — comments/CDATA are structure,
+    /// not text, to it, and an entity-escaped id (`rId&#211;`) decodes before
+    /// comparison instead of needing to match byte-for-byte.
     private static func hasNewTypedRelationships(_ document: WordDocument) -> Bool {
         guard let tempDir = document.archiveTempDir else { return false }
-        let originalRels: String
-        do {
-            originalRels = try String(contentsOf: tempDir.appendingPathComponent("word/_rels/document.xml.rels"), encoding: .utf8)
-        } catch {
+        let relsURL = tempDir.appendingPathComponent("word/_rels/document.xml.rels")
+        guard let originalRelsData = try? Data(contentsOf: relsURL) else {
             return true  // No source rels — emit fresh
         }
-        for header in document.headers where !originalRels.contains("Id=\"\(header.id)\"") {
+        let scan = PackageInspector.scanRels(originalRelsData, part: "word/_rels/document.xml.rels")
+        guard scan.parsed else { return true }  // let the stricter checks downstream name the exact reason
+        let declaredIds = Set(scan.allIds)
+        for header in document.headers where !declaredIds.contains(header.id) {
             return true
         }
-        for footer in document.footers where !originalRels.contains("Id=\"\(footer.id)\"") {
+        for footer in document.footers where !declaredIds.contains(footer.id) {
             return true
         }
-        for image in document.images where !originalRels.contains("Id=\"\(image.id)\"") {
+        for image in document.images where !declaredIds.contains(image.id) {
             return true
         }
         for hyperlinkRef in document.hyperlinkReferences
-        where !originalRels.contains("Id=\"\(hyperlinkRef.relationshipId)\"") {
+        where !declaredIds.contains(hyperlinkRef.relationshipId) {
             return true
         }
         return false
