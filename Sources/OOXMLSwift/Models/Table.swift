@@ -915,6 +915,33 @@ extension Table {
     /// same pattern for the (smaller) `firstRow`/`cell` locals.
     static let maxSerializationDepth = 10
 
+    /// This table's own maximum nesting depth: 0 if it has no nested
+    /// tables, else `1 + ` the deepest of its nested tables' own measured
+    /// depths. Mirrors `toXML(depth:)`'s counting convention exactly (a
+    /// table one level nested inside a cell measures 1, not 0), so a
+    /// result greater than `maxSerializationDepth` is precisely the
+    /// condition `toXML(depth:)`'s guard (`depth + 1 <= maxSerializationDepth`)
+    /// would truncate on.
+    ///
+    /// PsychQuant/ooxml-swift#196: used by the pre-write depth scan
+    /// (`DocxWriter`'s `validateTableNestingDepthBeforeWrite`) so a
+    /// document containing a table built purely through the public struct
+    /// API (bypassing `DocxReader.parseTable`'s own, separate depth guard)
+    /// is refused with a named error BEFORE any bytes are written, instead
+    /// of `toXML(depth:)` silently dropping the excess nesting while
+    /// `DocxWriter.write` still reports success.
+    func measuredNestingDepth() -> Int {
+        var maxDepth = 0
+        for row in rows {
+            for cell in row.cells {
+                for nested in cell.nestedTables {
+                    maxDepth = max(maxDepth, 1 + nested.measuredNestingDepth())
+                }
+            }
+        }
+        return maxDepth
+    }
+
     /// 轉換為 OOXML XML 字串
     public func toXML() -> String {
         toXML(depth: 0)
