@@ -291,6 +291,74 @@ public struct DocxReader {
         // the root open tag from raw bytes instead of relying on the DOM.
         document.documentRootAttributes = try Self.parseDocumentRootAttributes(from: projectedDocumentData)
 
+        try Self.readStylesPart(mainRelsTree: mainRelsTree, tempDir: tempDir, document: &document)
+
+        try Self.readNumberingPart(mainRelsTree: mainRelsTree, tempDir: tempDir, document: &document)
+
+        try Self.readSettingsPart(tempDir: tempDir, document: &document)
+
+        try Self.parseBodyAndSectionProperties(documentXML: documentXML, relationships: relationships, documentTree: documentTree, document: &document)
+
+        document.images = imageExtraction.images
+        document.imageTargetContainmentFailures = imageExtraction.containmentFailures
+
+        // v0.19.4+ (#56 R3-NEW-5): nextBookmarkId calibration moved AFTER
+        // all parts (body + headers + footers + footnotes + endnotes) load.
+        // Pre-v0.19.4 (R2 P1-1) calibration scanned only body.children's
+        // top-level `.paragraph` cases — missed table cells, block-level SDT
+        // children, and ran BEFORE headers/footers/footnotes/endnotes were
+        // even parsed. A document with bookmark id 99 inside a table cell or
+        // any header would false-succeed at calibration → subsequent
+        // insertBookmark allocates id 1 → collision with source id 99 →
+        // silent overwrite or Word schema reject. The post-load scan below
+        // walks every part recursively. See R3-NEW-5 in spectra change
+        // `che-word-mcp-issue-56-r3-stack-completion`.
+
+        try Self.readHeaders(relationships: relationships, tempDir: tempDir, document: &document)
+
+        try Self.readFooters(relationships: relationships, tempDir: tempDir, document: &document)
+
+        try Self.readFootnotesPart(relationships: relationships, tempDir: tempDir, document: &document)
+
+        try Self.readEndnotesPart(relationships: relationships, tempDir: tempDir, document: &document)
+
+        try Self.readCorePropertiesPart(tempDir: tempDir, document: &document)
+
+        try Self.readCommentsPart(tempDir: tempDir, document: &document)
+
+        Self.linkCommentParagraphIndices(document: &document)
+
+        Self.propagateAllRevisions(document: &document)
+        try Self.readCommentsExtendedPart(tempDir: tempDir, document: &document)
+
+        Self.calibrateNextBookmarkId(document: &document)
+
+        // Hand tempDir ownership to the returned WordDocument. Caller MUST call
+        // `doc.close()` when finished to release it (otherwise the tempDir leaks
+        // until process exit; macOS reclaims `/tmp` on reboot).
+        document.preservedArchive = PreservedArchive(tempDir: tempDir)
+        transferOwnership = true
+
+        Self.wireTreeBackedBodyViews(wireTreeBackedViews: wireTreeBackedViews, document: &document)
+
+        Self.sweepRemainingXMLParts(tempDir: tempDir, document: &document)
+
+        // v0.13.0+: clear modifiedParts to empty as the final step before returning.
+        // Guarantees freshly loaded documents start with `modifiedParts.isEmpty == true`,
+        // so DocxWriter overlay mode skips every typed-part writer until the caller
+        // mutates the typed model.
+        document.modifiedParts.removeAll()
+
+        return document
+    }
+
+
+    @inline(never)
+    private static func readStylesPart(
+        mainRelsTree: XmlNode?,
+        tempDir: URL,
+        document: inout WordDocument
+    ) throws {
         // PsychQuant/ooxml-swift#173: read the part the main part's
         // `styles` relationship names, not a fixed default path. Falls
         // back to `word/styles.xml` when there is no such relationship
@@ -348,7 +416,14 @@ public struct DocxReader {
                 themeData: try optionalData(themePath), fontsData: try optionalData(fontsPath),
                 explicitlyApplied: false)
         }
+    }
 
+    @inline(never)
+    private static func readNumberingPart(
+        mainRelsTree: XmlNode?,
+        tempDir: URL,
+        document: inout WordDocument
+    ) throws {
         // 6. 讀取 numbering.xml（可選，用於清單語義標註）
         // PsychQuant/ooxml-swift#173: same relationship resolution as styles.
         let numberingPath = Self.resolvedFormattingPart(type: "numbering", defaultPath: "word/numbering.xml", relationships: mainRelsTree, tempDir: tempDir)
@@ -361,7 +436,13 @@ public struct DocxReader {
             let numberingXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: numberingTree), options: [])
             document.numbering = try parseNumbering(from: numberingXML)
         }
+    }
 
+    @inline(never)
+    private static func readSettingsPart(
+        tempDir: URL,
+        document: inout WordDocument
+    ) throws {
         // v0.31.2+ Settings.xml — loaded into xmlTrees so Phase 2's op log can
         // address settings elements by id, and (task 2.5, #221) so the writer
         // can serialize dirty settings from the tree instead of a template.
@@ -385,7 +466,15 @@ public struct DocxReader {
                 }
             }
         }
+    }
 
+    @inline(never)
+    private static func parseBodyAndSectionProperties(
+        documentXML: XMLDocument,
+        relationships: RelationshipsCollection,
+        documentTree: XmlTree,
+        document: inout WordDocument
+    ) throws {
         // 7. 解析文件內容（傳入 styles 和 numbering 用於語義標註）
         // v0.19.10+ (#59 sub-stack B): wrap body parse in WhitespaceContext so
         // parseRun can recover whitespace-only `<w:t>` content that Foundation's
@@ -416,22 +505,52 @@ public struct DocxReader {
            let sectPrEl = bodyEl.elements(forName: "w:sectPr").last {
             document.sectionProperties = Self.parseSectionProperties(sectPrEl)
         }
+    }
 
-        document.images = imageExtraction.images
-        document.imageTargetContainmentFailures = imageExtraction.containmentFailures
+    // MARK: - PsychQuant/ooxml-swift#153 R: read() phase extraction
+    //
+    // `read(from:wireTreeBackedViews:)` used to be one ~830-line function.
+    // Under `-Onone` (debug builds), every local variable declared ANYWHERE
+    // in a function body gets its own permanent stack slot for the entire
+    // duration of that function call — the compiler does not reclaim a
+    // slot when its variable goes dead, and it does not matter whether the
+    // branch that declares it ever actually runs (an `if let ... =
+    // FileManager...fileExists` guard that is false at runtime still
+    // reserves the `if` body's locals in the enclosing frame). A function
+    // with a dozen sequential "read this optional part, parse it, append
+    // it" phases therefore carries the SUM of every phase's locals for its
+    // entire body, even for a minimal document that has none of
+    // headers/footers/footnotes/endnotes/comments/commentsExtended and
+    // hits none of those `if FileManager...fileExists` branches.
+    //
+    // Measured effect (PsychQuant/ooxml-swift#153 fix report): before this
+    // split, reading even a ONE-level, no-optional-parts document on a
+    // 512KB thread (Swift concurrency's cooperative-pool worker stack size
+    // — the same convention #195 established) required stack headroom
+    // above 256KB just for `read()`'s own frame, before any table-nesting
+    // recursion even began. That is the same "-Onone frame is the sum of
+    // every local, not the peak of any one branch" mechanism #195 found in
+    // `Table`/`TableCell`/`Paragraph`'s serializers — here applied to a wide
+    // sequential function instead of a deep recursive one: splitting each
+    // phase into its own `@inline(never)` function means that phase's
+    // locals are freed the moment it returns, instead of staying resident
+    // in `read()`'s own frame for the rest of the read.
+    //
+    // Each helper takes `document` `inout` and mutates the same fields the
+    // original inline block did, in the same order — this is a pure
+    // extract-function refactor, not a behavior change. `@inline(never)`
+    // is required, not decorative: without it the optimizer would be free
+    // to fold the callee back into `read()`'s frame (moot in `-Onone`
+    // builds specifically, but this repo's release builds are unaffected
+    // either way — release stack frames are already small enough that
+    // #153 never reproduced there).
 
-        // v0.19.4+ (#56 R3-NEW-5): nextBookmarkId calibration moved AFTER
-        // all parts (body + headers + footers + footnotes + endnotes) load.
-        // Pre-v0.19.4 (R2 P1-1) calibration scanned only body.children's
-        // top-level `.paragraph` cases — missed table cells, block-level SDT
-        // children, and ran BEFORE headers/footers/footnotes/endnotes were
-        // even parsed. A document with bookmark id 99 inside a table cell or
-        // any header would false-succeed at calibration → subsequent
-        // insertBookmark allocates id 1 → collision with source id 99 →
-        // silent overwrite or Word schema reject. The post-load scan below
-        // walks every part recursively. See R3-NEW-5 in spectra change
-        // `che-word-mcp-issue-56-r3-stack-completion`.
-
+    @inline(never)
+    private static func readHeaders(
+        relationships: RelationshipsCollection,
+        tempDir: URL,
+        document: inout WordDocument
+    ) throws {
         // 7b. 讀取 headers (Part C of ooxml-swift#1)
         // v0.13.0+: preserve `originalFileName` from rel.target so multi-instance
         // same-type headers (header1.xml..header6.xml) don't collapse to a single fileName.
@@ -504,7 +623,14 @@ public struct DocxReader {
             Self.rewriteHyperlinkIdsInBodyChildren(&header.bodyChildren, prefix: rel.target)
             document.headers.append(header)
         }
+    }
 
+    @inline(never)
+    private static func readFooters(
+        relationships: RelationshipsCollection,
+        tempDir: URL,
+        document: inout WordDocument
+    ) throws {
         // 7c. 讀取 footers
         // v0.13.0+: see headers comment above re: originalFileName preservation.
         // v0.13.5+ (#55): same path-traversal guard as headers.
@@ -549,7 +675,14 @@ public struct DocxReader {
             Self.rewriteHyperlinkIdsInBodyChildren(&footer.bodyChildren, prefix: rel.target)
             document.footers.append(footer)
         }
+    }
 
+    @inline(never)
+    private static func readFootnotesPart(
+        relationships: RelationshipsCollection,
+        tempDir: URL,
+        document: inout WordDocument
+    ) throws {
         // 7d. 讀取 footnotes
         let footnotesURL = tempDir.appendingPathComponent("word/footnotes.xml")
         if FileManager.default.fileExists(atPath: footnotesURL.path) {
@@ -605,7 +738,14 @@ public struct DocxReader {
             }
             }  // end withWhitespaceContext (footnotes — #59 sub-stack B)
         }
+    }
 
+    @inline(never)
+    private static func readEndnotesPart(
+        relationships: RelationshipsCollection,
+        tempDir: URL,
+        document: inout WordDocument
+    ) throws {
         // 7e. 讀取 endnotes
         let endnotesURL = tempDir.appendingPathComponent("word/endnotes.xml")
         if FileManager.default.fileExists(atPath: endnotesURL.path) {
@@ -656,7 +796,13 @@ public struct DocxReader {
             }
             }  // end withWhitespaceContext (endnotes — #59 sub-stack B)
         }
+    }
 
+    @inline(never)
+    private static func readCorePropertiesPart(
+        tempDir: URL,
+        document: inout WordDocument
+    ) throws {
         // 8. 讀取 core.xml（可選）
         let coreURL = tempDir.appendingPathComponent("docProps/core.xml")
         if FileManager.default.fileExists(atPath: coreURL.path) {
@@ -667,7 +813,13 @@ public struct DocxReader {
             let coreXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: coreTree), options: [])
             document.properties = try parseCoreProperties(from: coreXML)
         }
+    }
 
+    @inline(never)
+    private static func readCommentsPart(
+        tempDir: URL,
+        document: inout WordDocument
+    ) throws {
         // 8. 讀取 comments.xml（可選）
         // v0.19.10+ (#59 sub-stack B): comments-part-wide whitespace context.
         let commentsURL = tempDir.appendingPathComponent("word/comments.xml")
@@ -682,7 +834,10 @@ public struct DocxReader {
                 try parseComments(from: commentsXML)
             }
         }
+    }
 
+    @inline(never)
+    private static func linkCommentParagraphIndices(document: inout WordDocument) {
         // 9. Link comment paragraphIndex from paragraph commentRangeMarkers
         // v0.21.4+ (#6, F9): Reader no longer populates the deprecated
         // `commentIds` stored field. Source of truth is now the marker list,
@@ -720,7 +875,10 @@ public struct DocxReader {
             }
         }
         for child in document.body.children { walkBodyChildForCommentLinker(child) }
+    }
 
+    @inline(never)
+    private static func propagateAllRevisions(document: inout WordDocument) {
         // 10. 收集段落內的修訂記錄到 document.revisions
         // v0.19.5+ (#56 R5-CONT-2 P0 #1+#5): single call to the shared
         // helper which now uses an internal flat-paragraph counter. Pre-fix
@@ -780,6 +938,13 @@ public struct DocxReader {
             )
         }
 
+    }
+
+    @inline(never)
+    private static func readCommentsExtendedPart(
+        tempDir: URL,
+        document: inout WordDocument
+    ) throws {
         // 11. 讀取 commentsExtended.xml（可選，Word 2012+ 回覆與已解決狀態）
 
         // (helper inlined below in fileprivate section — see propagateRevisionsFromBodyChildren)
@@ -792,7 +957,10 @@ public struct DocxReader {
             let extXML = try XMLDocument(xmlString: Self.typedModelInputXML(from: extTree), options: [])
             try parseCommentsExtended(from: extXML, into: &document.comments)
         }
+    }
 
+    @inline(never)
+    private static func calibrateNextBookmarkId(document: inout WordDocument) {
         // v0.19.4+ (#56 R3-NEW-5): comprehensive nextBookmarkId calibration.
         // Walks every paragraph in body (recursing into tables and content
         // controls), headers, footers, footnotes, and endnotes for the max
@@ -844,13 +1012,14 @@ public struct DocxReader {
         if maxBookmarkId > 0 {
             document.nextBookmarkId = maxBookmarkId + 1
         }
+    }
 
-        // Hand tempDir ownership to the returned WordDocument. Caller MUST call
-        // `doc.close()` when finished to release it (otherwise the tempDir leaks
-        // until process exit; macOS reclaims `/tmp` on reboot).
-        document.preservedArchive = PreservedArchive(tempDir: tempDir)
-        transferOwnership = true
-
+    @inline(never)
+    private static func wireTreeBackedBodyViews(
+        wireTreeBackedViews: Bool,
+        document: inout WordDocument
+    ) {
+        guard wireTreeBackedViews, let docTree = document.xmlTrees["word/document.xml"] else { return }
         // v0.31.2+ (Spectra `reader-tree-loading-impl` task 1.3): opt-in
         // body-level wiring of typed Paragraph / Table values to their
         // corresponding `<w:p>` / `<w:tbl>` xmlNode. Walks `<w:body>` direct
@@ -859,43 +1028,47 @@ public struct DocxReader {
         // unexpected revision wrappers) are skipped without advancing the
         // cursor — the existing parser produces `body.children` entries only
         // for `<w:p>` and `<w:tbl>` so the cursor stays in sync.
-        if wireTreeBackedViews, let docTree = document.xmlTrees["word/document.xml"] {
-            let bodyNode = docTree.root.children.first {
-                $0.kind == .element && $0.localName == "body"
-            }
-            if let bodyNode = bodyNode {
-                var cursor = 0
-                for child in bodyNode.children where child.kind == .element {
-                    switch child.localName {
-                    case "p":
-                        if cursor < document.body.children.count,
-                           case .paragraph(var p) = document.body.children[cursor] {
-                            p.xmlNode = child
-                            document.body.children[cursor] = .paragraph(p)
-                            cursor += 1
-                        } else if cursor < document.body.children.count {
-                            cursor += 1
-                        }
-                    case "tbl":
-                        if cursor < document.body.children.count,
-                           case .table(var t) = document.body.children[cursor] {
-                            t.xmlNode = child
-                            document.body.children[cursor] = .table(t)
-                            cursor += 1
-                        } else if cursor < document.body.children.count {
-                            cursor += 1
-                        }
-                    default:
-                        // sectPr / unknown element kinds: not represented in
-                        // body.children; skip without advancing cursor so the
-                        // next <w:p> / <w:tbl> still matches the next typed
-                        // entry.
-                        continue
+        let bodyNode = docTree.root.children.first {
+            $0.kind == .element && $0.localName == "body"
+        }
+        if let bodyNode = bodyNode {
+            var cursor = 0
+            for child in bodyNode.children where child.kind == .element {
+                switch child.localName {
+                case "p":
+                    if cursor < document.body.children.count,
+                       case .paragraph(var p) = document.body.children[cursor] {
+                        p.xmlNode = child
+                        document.body.children[cursor] = .paragraph(p)
+                        cursor += 1
+                    } else if cursor < document.body.children.count {
+                        cursor += 1
                     }
+                case "tbl":
+                    if cursor < document.body.children.count,
+                       case .table(var t) = document.body.children[cursor] {
+                        t.xmlNode = child
+                        document.body.children[cursor] = .table(t)
+                        cursor += 1
+                    } else if cursor < document.body.children.count {
+                        cursor += 1
+                    }
+                default:
+                    // sectPr / unknown element kinds: not represented in
+                    // body.children; skip without advancing cursor so the
+                    // next <w:p> / <w:tbl> still matches the next typed
+                    // entry.
+                    continue
                 }
             }
         }
+    }
 
+    @inline(never)
+    private static func sweepRemainingXMLParts(
+        tempDir: URL,
+        document: inout WordDocument
+    ) {
         // word-aligned-state-sync Phase 1 task 2.6 (`docx-container-parsing`
         // Requirement "All parts preserved via XmlNode tree alongside typed
         // views"): generic sweep loading every remaining XML part of the
@@ -947,14 +1120,6 @@ public struct DocxReader {
                 }
             }
         }
-
-        // v0.13.0+: clear modifiedParts to empty as the final step before returning.
-        // Guarantees freshly loaded documents start with `modifiedParts.isEmpty == true`,
-        // so DocxWriter overlay mode skips every typed-part writer until the caller
-        // mutates the typed model.
-        document.modifiedParts.removeAll()
-
-        return document
     }
 
     // MARK: - PsychQuant/ooxml-swift#171 encoding consistency
@@ -3386,8 +3551,41 @@ public struct DocxReader {
             throw WordError.invalidDocx("nested table depth exceeds \(MAX_TABLE_NEST_DEPTH)")
         }
 
-        var table = Table()
+        // PsychQuant/ooxml-swift#153 R: table-properties parsing (tblPr,
+        // tblInd, explicit layout, conditional styles — several locals
+        // including a per-`tblStylePr` `TableConditionalStyleProperties`
+        // loop variable) moved into a separate `@inline(never)` helper for
+        // the same reason `parseTableCell`'s paragraph loop was (see that
+        // call site's comment): under `-Onone` these locals would otherwise
+        // sit in THIS function's frame for the entire `for tr in
+        // element.elements(forName: "w:tr")` recursion below — i.e. on
+        // every currently-open nesting level, all the way down. Mirrors
+        // `Table.toXML(depth:)`'s `tblGridXML` extraction on the writer
+        // side (#195), same pattern, same rationale.
+        var table = Self.parseTablePropertiesBlock(from: element)
 
+        // 解析表格行
+        for tr in element.elements(forName: "w:tr") {
+            let row = try parseTableRow(
+                from: tr,
+                relationships: relationships,
+                styles: styles,
+                numbering: numbering,
+                depth: depth
+            )
+            table.rows.append(row)
+        }
+
+        return table
+    }
+
+    /// `@inline(never)`: PsychQuant/ooxml-swift#153 R — see the doc comment
+    /// on the call site in `parseTable`. Returns a `Table` with only its
+    /// properties-related fields populated (`rows` is empty); the caller
+    /// fills `rows` itself.
+    @inline(never)
+    private static func parseTablePropertiesBlock(from element: XMLElement) -> Table {
+        var table = Table()
         // 解析表格屬性 (extended in v0.17.0+ to also pick up tblInd / explicit
         // layout / conditional styles)
         if let tblPr = element.elements(forName: "w:tblPr").first {
@@ -3440,19 +3638,6 @@ public struct DocxReader {
                 explicitLayout: table.explicitLayout,
                 conditionalStyles: table.conditionalStyles)
         }
-
-        // 解析表格行
-        for tr in element.elements(forName: "w:tr") {
-            let row = try parseTableRow(
-                from: tr,
-                relationships: relationships,
-                styles: styles,
-                numbering: numbering,
-                depth: depth
-            )
-            table.rows.append(row)
-        }
-
         return table
     }
 
@@ -3884,23 +4069,22 @@ public struct DocxReader {
         depth: Int = 0
     ) throws -> TableCell {
         var cell = TableCell()
-        cell.paragraphs = []
 
-        // 解析儲存格屬性
-        if let tcPr = element.elements(forName: "w:tcPr").first {
-            cell.properties = parseTableCellProperties(from: tcPr)
-        }
-
-        // 解析段落（傳入 styles 和 numbering 用於語義標註）
-        for p in element.elements(forName: "w:p") {
-            let para = try parseParagraph(
-                from: p,
-                relationships: relationships,
-                styles: styles,
-                numbering: numbering
-            )
-            cell.paragraphs.append(para)
-        }
+        // PsychQuant/ooxml-swift#153 R: cell properties + paragraph parsing
+        // moved into a separate `@inline(never)` helper (`cellPropertiesAndParagraphs`)
+        // for the SAME reason #195 moved `TableCell.toXML(depth:)`'s paragraph
+        // work into `bodyAndTrailingParagraphXML` — the loop variable `para:
+        // Paragraph` in the original inline `for p in element.elements(forName:
+        // "w:p")` loop below is a ~25-stored-property struct that, under
+        // `-Onone`, would otherwise sit in THIS function's frame for the
+        // entire `for nestedEl in element.elements(forName: "w:tbl")`
+        // recursion that follows — i.e., on every currently-open nesting
+        // level's frame, all the way down. Confining it to a helper that
+        // returns already-assembled `TableCellProperties` + `[Paragraph]`
+        // frees that slot before the recursive `parseTable(depth:)` call
+        // below ever runs. Measured effect: see the #153 fix report.
+        (cell.properties, cell.paragraphs) = try Self.cellPropertiesAndParagraphs(
+            from: element, relationships: relationships, styles: styles, numbering: numbering)
 
         // v0.17.0+ (#49): nested tables — recurse into <w:tbl> children of <w:tc>
         for nestedEl in element.elements(forName: "w:tbl") {
@@ -3920,6 +4104,33 @@ public struct DocxReader {
         }
 
         return cell
+    }
+
+    /// `@inline(never)`: PsychQuant/ooxml-swift#153 R — see the doc comment
+    /// on the call site in `parseTableCell`.
+    @inline(never)
+    private static func cellPropertiesAndParagraphs(
+        from element: XMLElement,
+        relationships: RelationshipsCollection,
+        styles: [Style],
+        numbering: Numbering
+    ) throws -> (properties: TableCellProperties, paragraphs: [Paragraph]) {
+        var properties = TableCellProperties()
+        if let tcPr = element.elements(forName: "w:tcPr").first {
+            properties = parseTableCellProperties(from: tcPr)
+        }
+
+        var paragraphs: [Paragraph] = []
+        for p in element.elements(forName: "w:p") {
+            let para = try parseParagraph(
+                from: p,
+                relationships: relationships,
+                styles: styles,
+                numbering: numbering
+            )
+            paragraphs.append(para)
+        }
+        return (properties, paragraphs)
     }
 
     static func parseTableCellProperties(from element: XMLElement) -> TableCellProperties {
