@@ -5,12 +5,39 @@ internal struct RelationshipDescriptor: Equatable {
     /// Relationship id, e.g., `"rId10"`. MUST match `^rId[0-9]+$` per OOXML.
     let id: String
     /// Type URL, e.g., `"http://schemas.openxmlformats.org/officeDocument/2006/relationships/header"`.
+    /// Decoded (PsychQuant/ooxml-swift#148) — used for comparison, e.g.
+    /// `typedManagedTypes.contains(rel.type)`; never re-serialized directly
+    /// when `verbatimAttributesXML` is set (see below).
     let type: String
     /// Target path relative to the rels file, e.g., `"header1.xml"`,
     /// `"theme/theme1.xml"`, `"media/image1.png"`, `"https://example.com"`.
+    /// Decoded, same caveat as `type`.
     let target: String
     /// `"External"` for hyperlinks pointing outside the package, otherwise `nil`.
+    /// Decoded, same caveat as `type`.
     let targetMode: String?
+    /// The exact attribute text (`Id="…" Type="…" Target="…" …`) this row
+    /// had in the ORIGINAL rels file — nil for a descriptor the typed model
+    /// authored fresh. When present, `serialize()` emits it byte-for-byte
+    /// instead of re-escaping `type`/`target`/`targetMode`.
+    ///
+    /// PsychQuant/ooxml-swift#148: `type`/`target`/`targetMode` above are
+    /// decoded once (the same "decode only for comparison" principle #142
+    /// established for `Id`) precisely so `serialize()` does NOT have to
+    /// escape already-escaped source text — that double escape is #148's
+    /// bug (`Target="a&#47;&#214;b.xml"` gained one more `&amp;` layer on
+    /// every save). Preserved (unmanaged-type) rows carry the original
+    /// spelling through here verbatim; rows the typed model builds fresh
+    /// leave this nil and go through the ordinary escape path below.
+    let verbatimAttributesXML: String?
+
+    init(id: String, type: String, target: String, targetMode: String?, verbatimAttributesXML: String? = nil) {
+        self.id = id
+        self.type = type
+        self.target = target
+        self.targetMode = targetMode
+        self.verbatimAttributesXML = verbatimAttributesXML
+    }
 }
 
 /// Merges typed-model relationships with preserved original relationships from
@@ -114,13 +141,26 @@ internal struct RelationshipsOverlay {
         where match.numberOfRanges >= 2 {
             let attrs = nsString.substring(with: match.range(at: 1))
             guard let id = attribute(attrs, name: "Id"),
-                  let type = attribute(attrs, name: "Type"),
-                  let target = attribute(attrs, name: "Target"),
+                  let rawType = attribute(attrs, name: "Type"),
+                  let rawTarget = attribute(attrs, name: "Target"),
                   !isPresentButUnreadable(attrs, name: "TargetMode")     // optional, so the id gate cannot see it (verify R10 DA N-DA10-1)
             else { continue }
-            let targetMode = attribute(attrs, name: "TargetMode")
+            let rawTargetMode = attribute(attrs, name: "TargetMode")
+            // #148: decode Type/Target/TargetMode once here — the same
+            // "decode for comparison" principle #142 applied to `Id` — so
+            // `typedManagedTypes.contains(rel.type)` compares semantics, not
+            // spellings. `verbatimAttributesXML` (the untouched captured
+            // text) is what actually reaches `serialize()` for a preserved
+            // row, so this decode never risks re-escaping already-escaped
+            // source text (`id` itself is deliberately left as the raw
+            // spelling — `rawIds(inRelsXML:)` below depends on comparing
+            // that raw view against the XML parser's decoded view).
+            let type = DocxWriter.decodedAttributeValue(rawType) ?? rawType
+            let target = DocxWriter.decodedAttributeValue(rawTarget) ?? rawTarget
+            let targetMode = rawTargetMode.flatMap { DocxWriter.decodedAttributeValue($0) ?? $0 }
             result.append(RelationshipDescriptor(
-                id: id, type: type, target: target, targetMode: targetMode
+                id: id, type: type, target: target, targetMode: targetMode,
+                verbatimAttributesXML: attrs
             ))
         }
         return result
@@ -206,13 +246,22 @@ internal struct RelationshipsOverlay {
         var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         xml += "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
         for rel in rels {
-            xml += "<Relationship Id=\"\(escape(rel.id))\""
-            xml += " Type=\"\(escape(rel.type))\""
-            xml += " Target=\"\(escape(rel.target))\""
-            if let mode = rel.targetMode {
-                xml += " TargetMode=\"\(escape(mode))\""
+            if let verbatim = rel.verbatimAttributesXML {
+                // #148: reproduce the original row's exact bytes. `type`/
+                // `target`/`targetMode` on this descriptor are DECODED (for
+                // comparison elsewhere) — escaping them again here would
+                // re-escape text that is already escaped in the source file,
+                // corrupting it a little more on every save.
+                xml += "<Relationship \(verbatim)/>"
+            } else {
+                xml += "<Relationship Id=\"\(escape(rel.id))\""
+                xml += " Type=\"\(escape(rel.type))\""
+                xml += " Target=\"\(escape(rel.target))\""
+                if let mode = rel.targetMode {
+                    xml += " TargetMode=\"\(escape(mode))\""
+                }
+                xml += "/>"
             }
-            xml += "/>"
         }
         xml += "</Relationships>"
         return xml
