@@ -54,6 +54,19 @@ final class Issue185ParagraphRunRsidAttributesTests: XCTestCase {
         XCTAssertTrue(xml.hasPrefix("<w:p w:rsidR=\"00AB12CD\" w:rsidRDefault=\"00112233\">"), "got: \(xml)")
     }
 
+    /// CT_P declares its rsid attributes as rsidRPr, rsidR, rsidDel, rsidP,
+    /// rsidRDefault. A paragraph carrying all five must come back in that
+    /// order, so a round trip through the typed model matches Word's own output.
+    func testToXMLEmitsAllFiveParagraphRsidAttributesInSchemaOrder() throws {
+        let p = try parseParagraphFragment(
+            "<w:p w:rsidRDefault=\"00000005\" w:rsidP=\"00000004\" w:rsidDel=\"00000003\""
+            + " w:rsidR=\"00000002\" w:rsidRPr=\"00000001\"><w:r><w:t>x</w:t></w:r></w:p>")
+        let xml = p.toXML()
+        XCTAssertTrue(xml.hasPrefix(
+            "<w:p w:rsidRPr=\"00000001\" w:rsidR=\"00000002\" w:rsidDel=\"00000003\""
+            + " w:rsidP=\"00000004\" w:rsidRDefault=\"00000005\">"), "got: \(xml)")
+    }
+
     func testNoParagraphRsidAttributesEmitsPlainOpeningTag() throws {
         let p = try parseParagraphFragment("<w:p><w:r><w:t>x</w:t></w:r></w:p>")
         XCTAssertTrue(p.rsidAttributes.isEmpty)
