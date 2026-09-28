@@ -5001,6 +5001,12 @@ extension WordDocument {
 
     /// Insert a new table inside the cell at (rowIndex, colIndex) of the
     /// parent table. Throws `nestedTooDeep` when nesting would exceed depth 5.
+    /// PsychQuant/ooxml-swift#55: the same depth=5 ceiling this API-level
+    /// guard enforces for tables is mirrored, independently, by
+    /// `SDTParser.MAX_SDT_NEST_DEPTH` for `<w:sdt>` (content control)
+    /// nesting on the READ side (`SDTParser.parseSDT` and
+    /// `DocxReader.parseBodyChildren`'s block-level SDT recursion) — before
+    /// #55, SDT nesting had no depth guard at all, unlike Table's.
     public mutating func insertNestedTable(
         parentTableIndex: Int,
         rowIndex: Int,
