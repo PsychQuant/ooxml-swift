@@ -1688,10 +1688,18 @@ public struct DocxWriter {
             xml += "<cp:revision>1</cp:revision>"
         }
 
-        let created = props.created ?? Date()
+        // PsychQuant/ooxml-swift#151: `Date()` (the wall clock at the moment
+        // THIS save happens to run) made two saves of the same document
+        // differ whenever no explicit timestamp was set — a fresh
+        // `create_document` in particular. A document that DOES carry a
+        // `created`/`modified` value (loaded from a real file, or set by the
+        // caller) is completely unaffected: this fallback only ever fires
+        // when there was no real timestamp to preserve in the first place,
+        // so no existing document's docProps get rewritten by this.
+        let created = props.created ?? ZipHelper.reproducibleFallbackTimestamp
         xml += "<dcterms:created xsi:type=\"dcterms:W3CDTF\">\(dateFormatter.string(from: created))</dcterms:created>"
 
-        let modified = props.modified ?? Date()
+        let modified = props.modified ?? ZipHelper.reproducibleFallbackTimestamp
         xml += "<dcterms:modified xsi:type=\"dcterms:W3CDTF\">\(dateFormatter.string(from: modified))</dcterms:modified>"
 
         xml += "</cp:coreProperties>"
