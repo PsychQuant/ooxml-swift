@@ -683,6 +683,52 @@ final class OMathSpliceTests: XCTestCase {
             "OMath must round-trip as a Run child, not leak into direct-child unrecognizedChildren; got: \(directChildOMathContent)")
     }
 
+    /// PsychQuant/ooxml-swift#123: reload fidelity is canonical *semantic* XML
+    /// equivalence, not lexical byte identity. Foundation's `XMLDocument`
+    /// parser resolves character references during `DocxReader.read` — a
+    /// source `&#x3B1;` reloads as the literal character `α`. This is a
+    /// legal, expected lexical normalization, not a round-trip failure: the
+    /// reloaded OMath is semantically the same formula. This test documents
+    /// and pins that contract (see the "Round-trip lossless guarantee"
+    /// requirement in the omath-splice spec).
+    func testRoundTripSemanticEquivalenceToleratesEntityReference() throws {
+        let sourceXML = """
+        <w:p \(Self.mNS)>
+          <w:r><m:oMath><m:r><m:t>&#x3B1;</m:t></m:r></m:oMath></w:r>
+        </w:p>
+        """
+        let sourcePara = try parseParagraph(xml: sourceXML)
+        let targetPara = try parseParagraph(xml: Self.targetEmpty)
+        var target = makeDocument(with: targetPara)
+
+        try target.spliceOMath(
+            from: sourcePara,
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            omathIndex: 0
+        )
+
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("OMathSpliceTests-entity-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        try DocxWriter.write(target, to: tempURL)
+        let reloaded = try DocxReader.read(from: tempURL)
+
+        guard case .paragraph(let reloadedPara) = reloaded.body.children[0] else { XCTFail(); return }
+        guard let reloadedOMath = reloadedPara.runs.compactMap({ $0.rawXML }).first(where: { $0.contains("oMath") }) else {
+            XCTFail("Expected a reloaded OMath run"); return
+        }
+
+        // Semantically equivalent: the resolved glyph is present.
+        XCTAssertTrue(reloadedOMath.contains("α"),
+            "Character reference should resolve to the literal glyph on reload; got: \(reloadedOMath)")
+        // NOT byte-equal to the literal source text — this is the documented,
+        // acceptable lexical normalization, not a defect.
+        XCTAssertFalse(reloadedOMath.contains("&#x3B1;"),
+            "Reload is expected to normalize the entity spelling away, not preserve it byte-for-byte")
+    }
+
     // MARK: - No regression (6.14)
 
     /// Pre-existing OMath in target paragraph must be preserved during splice.
