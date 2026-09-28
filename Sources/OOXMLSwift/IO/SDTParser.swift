@@ -11,6 +11,23 @@ import Foundation
 /// and 3.5 (round-trip fidelity) extend this file.
 internal enum SDTParser {
 
+    /// PsychQuant/ooxml-swift#55: hostile-input guard for recursive SDT
+    /// (`<w:sdt>`-in-`<w:sdt>`) nesting — the same shape of protection
+    /// `DocxReader.MAX_TABLE_NEST_DEPTH` (also 5) gives table nesting, and
+    /// cross-linked from `Document.swift`'s `insertNestedTable`
+    /// (`WordError.nestedTooDeep`) doc comment. Before this guard,
+    /// `parseSDT`'s recursive call for nested `<w:sdt>` siblings inside
+    /// `<w:sdtContent>` had no depth tracking at all — a crafted `.docx`
+    /// with a deep SDT-in-SDT-in-SDT chain could exhaust the call stack
+    /// with no bound whatsoever (Table's own recursion at least had a
+    /// stated, if previously unenforced-at-this-layer, ceiling). 5 matches
+    /// `DocxReader.MAX_TABLE_NEST_DEPTH`'s reasoning: real Word documents
+    /// nest content controls at most a couple of levels deep in practice,
+    /// so this leaves generous headroom for legitimate documents while
+    /// refusing pathological chains before they can reach the stack-unsafe
+    /// range #153/#195 hardened against.
+    static let MAX_SDT_NEST_DEPTH = 5
+
     /// Parse a `<w:sdt>` element into a `ContentControl`.
     ///
     /// - Parameters:
@@ -21,10 +38,20 @@ internal enum SDTParser {
     ///               by `Paragraph.toXMLSortedByPosition` to emit the SDT at
     ///               its source position rather than always at end-of-paragraph.
     ///               Defaults to 0 (legacy behavior for non-paragraph callers).
+    ///   - depth: PsychQuant/ooxml-swift#55 — current nesting depth (0 for a
+    ///            top-level SDT); internal recursion bookkeeping, not part
+    ///            of the public parsing contract.
     /// - Returns: A `ContentControl` with metadata populated from `<w:sdtPr>`
     ///   and `content` set to the verbatim XML string of `<w:sdtContent>`'s
     ///   children. Nested SDTs inside `<w:sdtContent>` populate `children`.
-    static func parseSDT(from element: XMLElement, parentSdtId: Int? = nil, position: Int = 0) -> ContentControl {
+    /// - Throws: `WordError.invalidDocx` if nesting exceeds `MAX_SDT_NEST_DEPTH`.
+    static func parseSDT(
+        from element: XMLElement, parentSdtId: Int? = nil, position: Int = 0, depth: Int = 0
+    ) throws -> ContentControl {
+        guard depth <= MAX_SDT_NEST_DEPTH else {
+            throw WordError.invalidDocx("nested SDT depth exceeds \(MAX_SDT_NEST_DEPTH)")
+        }
+
         let sdt = parseSdtPr(from: element)
 
         // <w:sdtContent> — the content region.
@@ -47,7 +74,8 @@ internal enum SDTParser {
             for child in sdtContent.children ?? [] {
                 guard let childEl = child as? XMLElement else { continue }
                 if childEl.localName == "sdt" {
-                    children.append(parseSDT(from: childEl, parentSdtId: sdt.id, position: childPosition))
+                    children.append(try parseSDT(
+                        from: childEl, parentSdtId: sdt.id, position: childPosition, depth: depth + 1))
                     childPosition += 1
                 } else {
                     contentXML += childEl.xmlString

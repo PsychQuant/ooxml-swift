@@ -1591,8 +1591,17 @@ public struct DocxReader {
         relationships: RelationshipsCollection,
         styles: [Style],
         numbering: Numbering,
-        collectingTablesInto tables: inout [Table]
+        collectingTablesInto tables: inout [Table],
+        sdtDepth: Int = 0
     ) throws -> [BodyChild] {
+        // PsychQuant/ooxml-swift#55: block-level (body-level) `<w:sdt>`
+        // nesting recurses through THIS function (not `SDTParser.parseSDT`,
+        // which only handles paragraph-level/inline SDT nesting) — same
+        // underlying DoS shape, same guard, same limit
+        // (`SDTParser.MAX_SDT_NEST_DEPTH`), independent recursion path.
+        guard sdtDepth <= SDTParser.MAX_SDT_NEST_DEPTH else {
+            throw WordError.invalidDocx("nested SDT depth exceeds \(SDTParser.MAX_SDT_NEST_DEPTH)")
+        }
         var children: [BodyChild] = []
         for node in element.children ?? [] {
             guard let el = node as? XMLElement else { continue }
@@ -1630,7 +1639,8 @@ public struct DocxReader {
                         relationships: relationships,
                         styles: styles,
                         numbering: numbering,
-                        collectingTablesInto: &tables
+                        collectingTablesInto: &tables,
+                        sdtDepth: sdtDepth + 1
                     )
                 }
                 children.append(.contentControl(metadata, children: sdtChildren))
@@ -2161,7 +2171,7 @@ public struct DocxReader {
                 // `Paragraph.toXMLSortedByPosition` (otherwise the post-content
                 // legacy emit forces it to end-of-paragraph).
                 paragraph.contentControls.append(
-                    SDTParser.parseSDT(from: childElement, position: childPosition)
+                    try SDTParser.parseSDT(from: childElement, position: childPosition)
                 )
 
             case "hyperlink":
@@ -2511,8 +2521,16 @@ public struct DocxReader {
         in element: XMLElement,
         relationships: RelationshipsCollection,
         styles: [Style],
-        numbering: Numbering
+        numbering: Numbering,
+        sdtDepth: Int = 0
     ) throws -> [BodyChild] {
+        // PsychQuant/ooxml-swift#55: same guard, same limit, same
+        // independent-recursion-path reasoning as `parseBodyChildren`'s —
+        // this is the header/footer/footnote/endnote container analogue of
+        // that body-level recursion, and was equally unguarded before #55.
+        guard sdtDepth <= SDTParser.MAX_SDT_NEST_DEPTH else {
+            throw WordError.invalidDocx("nested SDT depth exceeds \(SDTParser.MAX_SDT_NEST_DEPTH)")
+        }
         var children: [BodyChild] = []
         for child in element.children ?? [] {
             guard let childElement = child as? XMLElement else { continue }
@@ -2557,7 +2575,8 @@ public struct DocxReader {
                         in: sdtContent,
                         relationships: relationships,
                         styles: styles,
-                        numbering: numbering
+                        numbering: numbering,
+                        sdtDepth: sdtDepth + 1
                     )
                 }
                 children.append(.contentControl(metadata, children: sdtChildren))
