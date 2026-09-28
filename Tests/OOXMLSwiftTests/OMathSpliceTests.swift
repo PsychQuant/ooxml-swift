@@ -554,6 +554,118 @@ final class OMathSpliceTests: XCTestCase {
         XCTAssertTrue(reloadedPara.runs.contains { $0.text == "後續文字" })
     }
 
+    // MARK: - Boundary positioning across mixed carriers (PsychQuant/ooxml-swift#122)
+
+    /// PsychQuant/ooxml-swift#122 reproduction 1: `.atEnd` must serialize
+    /// after an API-built (nil/zero-position) text Run — not before it.
+    /// Pre-fix, `.atEnd` computed the new Run's position from existing Runs
+    /// only and always produced a *positive* number, which
+    /// `Paragraph.toXMLSortedByPosition()` always serializes before any
+    /// zero-position ("API-built") entry, regardless of how large that
+    /// positive number is.
+    func testAtEndSerializesAfterAPIBuiltTextRun() throws {
+        let sourcePara = try parseParagraph(xml: Self.sourceInlineRunOMath)
+
+        // API-built target paragraph: a single Run appended via the normal
+        // Swift model API, so its `position` is left at the default `nil`.
+        var targetPara = Paragraph()
+        targetPara.runs = [Run(text: "既有文字")]
+        var target = makeDocument(with: targetPara)
+
+        try target.spliceOMath(
+            from: sourcePara,
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            omathIndex: 0
+        )
+
+        guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
+        let xml = resultPara.toXML()
+        guard let textRange = xml.range(of: "既有文字"),
+              let omathRange = xml.range(of: "<m:t>t</m:t>") else {
+            XCTFail("Expected both the existing text and the spliced OMath in output; got: \(xml)")
+            return
+        }
+        XCTAssertTrue(textRange.lowerBound < omathRange.lowerBound,
+            ".atEnd must serialize after the API-built text Run, not before it; got: \(xml)")
+    }
+
+    /// PsychQuant/ooxml-swift#122 reproduction 2: `.atEnd` must serialize
+    /// after an existing direct-child OMath at a high position — not before
+    /// it. Pre-fix, the new inline Run's position was derived from
+    /// `targetPara.runs` only, ignoring the other 12 position-indexed
+    /// carriers (including `unrecognizedChildren`), so a low run-only max
+    /// could sort before a much-higher-positioned non-Run carrier.
+    func testAtEndSerializesAfterHighPositionDirectChild() throws {
+        let sourcePara = try parseParagraph(xml: Self.sourceInlineRunOMath)  // contains 't'
+
+        var targetPara = Paragraph()
+        targetPara.unrecognizedChildren = [
+            UnrecognizedChild(
+                name: "oMath",
+                rawXML: "<m:oMath \(Self.mNS)><m:r><m:t>既有</m:t></m:r></m:oMath>",
+                position: 100
+            )
+        ]
+        var target = makeDocument(with: targetPara)
+
+        try target.spliceOMath(
+            from: sourcePara,
+            toBodyParagraphIndex: 0,
+            position: .atEnd,
+            omathIndex: 0
+        )
+
+        guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
+        let xml = resultPara.toXML()
+        guard let existingRange = xml.range(of: "<m:t>既有</m:t>"),
+              let splicedRange = xml.range(of: "<m:t>t</m:t>") else {
+            XCTFail("Expected both the existing direct child and the spliced OMath in output; got: \(xml)")
+            return
+        }
+        XCTAssertTrue(existingRange.lowerBound < splicedRange.lowerBound,
+            ".atEnd must serialize after a high-position direct-child carrier, not before it; got: \(xml)")
+    }
+
+    /// PsychQuant/ooxml-swift#122 `.atStart` audit: a low-positioned
+    /// non-Run carrier (direct-child OMath at position 1) must not sort
+    /// ahead of an `.atStart`-inserted Run just because the boundary
+    /// computation only looked at `targetPara.runs`' positions (which, in
+    /// this fixture, bottom out at a higher position).
+    func testAtStartPrecedesLowerPositionedDirectChild() throws {
+        let sourcePara = try parseParagraph(xml: Self.sourceInlineRunOMath)  // contains 't'
+
+        var targetPara = Paragraph()
+        targetPara.unrecognizedChildren = [
+            UnrecognizedChild(
+                name: "oMath",
+                rawXML: "<m:oMath \(Self.mNS)><m:r><m:t>既有</m:t></m:r></m:oMath>",
+                position: 1
+            )
+        ]
+        var trailingRun = Run(text: "後段文字")
+        trailingRun.position = 5
+        targetPara.runs = [trailingRun]
+        var target = makeDocument(with: targetPara)
+
+        try target.spliceOMath(
+            from: sourcePara,
+            toBodyParagraphIndex: 0,
+            position: .atStart,
+            omathIndex: 0
+        )
+
+        guard case .paragraph(let resultPara) = target.body.children[0] else { XCTFail(); return }
+        let xml = resultPara.toXML()
+        guard let splicedRange = xml.range(of: "<m:t>t</m:t>"),
+              let existingRange = xml.range(of: "<m:t>既有</m:t>") else {
+            XCTFail("Expected both the spliced OMath and the existing direct child in output; got: \(xml)")
+            return
+        }
+        XCTAssertTrue(splicedRange.lowerBound < existingRange.lowerBound,
+            ".atStart must precede a lower-positioned direct-child carrier, not just lower-positioned Runs; got: \(xml)")
+    }
+
     // MARK: - Namespace policy tests (6.10)
 
     /// .lenient (default) accepts prefix mismatch when URI is the same.
