@@ -1846,7 +1846,10 @@ public struct WordDocument: Equatable {
         images.append(imageRef)
 
         // 建立 Drawing
-        var drawing = Drawing.from(widthPx: widthPx, heightPx: heightPx, imageId: imageId, name: name)
+        // PsychQuant/ooxml-swift#178: `validated` throws `ImageError.dimensionOutOfRange`
+        // for pixel values the deprecated `from` would have silently clamped
+        // (or, before the fix, trapped on). This function already throws.
+        var drawing = try Drawing.validated(widthPx: widthPx, heightPx: heightPx, imageId: imageId, name: name)
         drawing.description = description
 
         // 建立含圖片的 Run
@@ -1885,7 +1888,10 @@ public struct WordDocument: Equatable {
         images.append(imageRef)
 
         // 建立 Drawing
-        var drawing = Drawing.from(widthPx: widthPx, heightPx: heightPx, imageId: imageId, name: name)
+        // PsychQuant/ooxml-swift#178: `validated` throws `ImageError.dimensionOutOfRange`
+        // for pixel values the deprecated `from` would have silently clamped
+        // (or, before the fix, trapped on). This function already throws.
+        var drawing = try Drawing.validated(widthPx: widthPx, heightPx: heightPx, imageId: imageId, name: name)
         drawing.description = description
 
         // 建立含圖片的 Run
@@ -1908,6 +1914,13 @@ public struct WordDocument: Equatable {
     }
 
     /// 更新圖片大小
+    ///
+    /// PsychQuant/ooxml-swift#178: `widthPx`/`heightPx` are validated via
+    /// `Drawing.validatedEMU(fromPixels:)` before assignment — this
+    /// function already throws, so (unlike `Drawing.from`/`anchorFromPixels`,
+    /// which cannot gain a `throws` without a source-breaking signature
+    /// change) it gets full validation directly, no deprecated/clamped
+    /// fallback needed.
     public mutating func updateImage(imageId: String, widthPx: Int? = nil, heightPx: Int? = nil) throws {
         // 搜尋所有段落找到含有此圖片的 Run
         for i in 0..<body.children.count {
@@ -1915,10 +1928,10 @@ public struct WordDocument: Equatable {
                 for j in 0..<para.runs.count {
                     if var drawing = para.runs[j].drawing, drawing.imageId == imageId {
                         if let w = widthPx {
-                            drawing.width = w * 9525  // 轉換為 EMU
+                            drawing.width = try Drawing.validatedEMU(fromPixels: w)
                         }
                         if let h = heightPx {
-                            drawing.height = h * 9525
+                            drawing.height = try Drawing.validatedEMU(fromPixels: h)
                         }
                         para.runs[j].drawing = drawing
                         body.children[i] = .paragraph(para)
