@@ -918,6 +918,116 @@ final class OMathSpliceTests: XCTestCase {
             "Reload is expected to normalize the entity spelling away, not preserve it byte-for-byte")
     }
 
+    /// R2 (independent review Finding #3): #123's Expected explicitly lists
+    /// attribute order as a dimension the reload-semantic-equivalence
+    /// contract must tolerate. `testNamespaceLenientAcceptsPrefixMismatch`/
+    /// `testNamespaceStrictRejectsPrefixMismatch` do NOT cover this — they
+    /// test `checkNamespacePolicy`, a splice-time decision about whether to
+    /// throw, not what survives a save+reload round trip. This test exercises
+    /// the actual round-trip path with two source fixtures that are
+    /// semantically identical OMath differing only in the order two
+    /// (synthetic, self-authored) attributes appear on the root element.
+    func testRoundTripSemanticEquivalenceToleratesAttributeOrder() throws {
+        let variants: [(label: String, omath: String)] = [
+            ("data-a before data-b", "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\" data-a=\"1\" data-b=\"2\"><m:r><m:t>x</m:t></m:r></m:oMath>"),
+            ("data-b before data-a", "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\" data-b=\"2\" data-a=\"1\"><m:r><m:t>x</m:t></m:r></m:oMath>")
+        ]
+        for (label, omathXML) in variants {
+            let sourceXML = "<w:p \(Self.mNS)><w:r>\(omathXML)</w:r></w:p>"
+            let sourcePara = try parseParagraph(xml: sourceXML)
+            let targetPara = try parseParagraph(xml: Self.targetEmpty)
+            var target = makeDocument(with: targetPara)
+
+            try target.spliceOMath(from: sourcePara, toBodyParagraphIndex: 0, position: .atEnd, omathIndex: 0)
+
+            let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("OMathSpliceTests-attrorder-\(UUID().uuidString).docx")
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+            try DocxWriter.write(target, to: tempURL)
+            let reloaded = try DocxReader.read(from: tempURL)
+
+            guard case .paragraph(let reloadedPara) = reloaded.body.children[0],
+                  let reloadedOMath = reloadedPara.runs.compactMap({ $0.rawXML }).first(where: { $0.contains("oMath") }) else {
+                XCTFail("[\(label)] expected a reloaded OMath run"); return
+            }
+            XCTAssertTrue(reloadedOMath.contains("data-a=\"1\""), "[\(label)] got: \(reloadedOMath)")
+            XCTAssertTrue(reloadedOMath.contains("data-b=\"2\""), "[\(label)] got: \(reloadedOMath)")
+            XCTAssertTrue(reloadedOMath.contains("<m:t>x</m:t>"), "[\(label)] got: \(reloadedOMath)")
+        }
+    }
+
+    /// R2 (independent review Finding #3): #123's Expected lists namespace
+    /// declaration placement as a tolerated dimension. Real documents
+    /// routinely produce a source Run whose `<m:oMath>` element does NOT
+    /// carry its own `xmlns:m` (it relies on the ancestor `<w:p>`'s
+    /// declaration being in scope) — `DocxReader.parseRun`'s `.xmlString`
+    /// extraction does not backfill that inherited declaration, which is
+    /// exactly why `ensureXmlnsDeclared` exists. This test compares a source
+    /// where the OMath element declares `xmlns:m` itself against one that
+    /// relies entirely on the ancestor `<w:p>`'s declaration, and asserts
+    /// both round-trip to semantically equivalent (glyph-preserving) content.
+    func testRoundTripSemanticEquivalenceToleratesNamespaceDeclarationPlacement() throws {
+        let selfDeclared = """
+        <w:p \(Self.mNS)>
+          <w:r><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>y</m:t></m:r></m:oMath></w:r>
+        </w:p>
+        """
+        let ancestorDeclared = """
+        <w:p \(Self.mNS)>
+          <w:r><m:oMath><m:r><m:t>y</m:t></m:r></m:oMath></w:r>
+        </w:p>
+        """
+        for (label, sourceXML) in [("self-declared xmlns:m", selfDeclared), ("ancestor-declared xmlns:m", ancestorDeclared)] {
+            let sourcePara = try parseParagraph(xml: sourceXML)
+            let targetPara = try parseParagraph(xml: Self.targetEmpty)
+            var target = makeDocument(with: targetPara)
+
+            try target.spliceOMath(from: sourcePara, toBodyParagraphIndex: 0, position: .atEnd, omathIndex: 0)
+
+            let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("OMathSpliceTests-nsplacement-\(UUID().uuidString).docx")
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+            try DocxWriter.write(target, to: tempURL)
+            let reloaded = try DocxReader.read(from: tempURL)
+
+            guard case .paragraph(let reloadedPara) = reloaded.body.children[0],
+                  let reloadedOMath = reloadedPara.runs.compactMap({ $0.rawXML }).first(where: { $0.contains("oMath") }) else {
+                XCTFail("[\(label)] expected a reloaded OMath run"); return
+            }
+            XCTAssertTrue(reloadedOMath.contains("<m:t>y</m:t>"),
+                "[\(label)] namespace declaration placement (root-local vs ancestor-inherited) must not affect reloaded content; got: \(reloadedOMath)")
+        }
+    }
+
+    /// R2 (independent review Finding #3): #123's Expected lists namespace
+    /// prefix variants as a tolerated dimension, specifically in the
+    /// *reload* path — distinct from `testNamespaceLenientAcceptsPrefixMismatch`,
+    /// which only asserts that `spliceOMath` does not throw at splice time.
+    /// This test splices an `mml:`-prefixed source (same URI, different
+    /// prefix from the target's `m:` convention) and confirms the
+    /// save+reload round trip preserves the glyph regardless of which
+    /// prefix spelling survives serialization.
+    func testRoundTripSemanticEquivalenceToleratesPrefixVariant() throws {
+        let sourcePara = try parseParagraph(xml: Self.sourceMMLPrefixOMath)  // mml: prefix, contains 'x'
+        let targetPara = try parseParagraph(xml: Self.targetEmpty)          // m: convention
+        var target = makeDocument(with: targetPara)
+
+        try target.spliceOMath(from: sourcePara, toBodyParagraphIndex: 0, position: .atEnd, omathIndex: 0, namespacePolicy: .lenient)
+
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("OMathSpliceTests-prefixvariant-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try DocxWriter.write(target, to: tempURL)
+        let reloaded = try DocxReader.read(from: tempURL)
+
+        guard case .paragraph(let reloadedPara) = reloaded.body.children[0],
+              let reloadedOMath = reloadedPara.runs.compactMap({ $0.rawXML }).first(where: { $0.contains("oMath") }) else {
+            XCTFail("expected a reloaded OMath run"); return
+        }
+        XCTAssertTrue(reloadedOMath.contains("<mml:t>x</mml:t>") || reloadedOMath.contains("<m:t>x</m:t>"),
+            "prefix variant (mml: vs m:, same URI) must not prevent the glyph from surviving reload; got: \(reloadedOMath)")
+    }
+
     // MARK: - No regression (6.14)
 
     /// Pre-existing OMath in target paragraph must be preserved during splice.
