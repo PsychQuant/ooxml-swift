@@ -158,7 +158,7 @@ final class Issue274ThemeAttributeRoundTripTests: XCTestCase {
         </w:body></w:document>
         """
 
-    private func buildFixture() throws -> URL {
+    private func buildFixture(documentXML: String = Issue274ThemeAttributeRoundTripTests.documentXML) throws -> URL {
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue274-staging-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
@@ -185,7 +185,7 @@ final class Issue274ThemeAttributeRoundTripTests: XCTestCase {
                 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
             </Relationships>
             """, to: "_rels/.rels")
-        try write(Self.documentXML, to: "word/document.xml")
+        try write(documentXML, to: "word/document.xml")
 
         let docxURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue274-\(UUID().uuidString).docx")
@@ -280,5 +280,164 @@ final class Issue274ThemeAttributeRoundTripTests: XCTestCase {
                        "every w:themeColor must survive — got: \(untouched)")
         XCTAssertEqual(untouched.components(separatedBy: "<w:rFonts w:eastAsiaTheme=\"minorEastAsia\"/>").count - 1, 2,
                        "every theme-only <w:rFonts> must survive — got: \(untouched)")
+    }
+
+    // MARK: - Section D: the precedence rules live in the model, not only in merge (verify round 1)
+
+    /// che-word-mcp `format_text(as_revision: true)` copies the parsed
+    /// properties, assigns `.color`, and hands the result to
+    /// `applyRunPropertiesAsRevision`, which replaces the rPr without
+    /// merging. A stale theme colour would make the tracked change invisible
+    /// in Word, so assigning `color` itself must drop the theme triple.
+    func testAssigningColorDirectlyClearsTheThemeTriple() throws {
+        let run = try parseRunFragment(
+            "<w:r><w:rPr><w:color w:val=\"000000\" w:themeColor=\"text1\" w:themeTint=\"99\" w:themeShade=\"BF\"/></w:rPr><w:t>a</w:t></w:r>")
+        var props = run.properties
+        props.color = "FF0000"
+        XCTAssertNil(props.themeColor)
+        XCTAssertNil(props.themeTint)
+        XCTAssertNil(props.themeShade)
+        XCTAssertEqual(props.toXML(), "<w:color w:val=\"FF0000\"/>")
+    }
+
+    func testTrackedColourChangeOnAThemeColouredRunTakesEffect() throws {
+        let fixture = try buildFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        var doc = try DocxReader.read(from: fixture)
+        defer { doc.close() }
+        doc.enableTrackChanges(author: "Editor")
+
+        var replacement = doc.getParagraphs()[0].runs[0].properties
+        replacement.color = "FF0000"
+        _ = try doc.applyRunPropertiesAsRevision(atParagraph: 0, atRunIndex: 0, newProperties: replacement)
+
+        let edited = try paragraph(containing: "alpha", in: try savedDocumentXML(doc))
+        XCTAssertTrue(edited.contains("<w:color w:val=\"FF0000\"/>"), "new colour must be explicit — got: \(edited)")
+        XCTAssertFalse(edited.contains("w:val=\"FF0000\" w:themeColor"), "stale theme colour kept — got: \(edited)")
+    }
+
+    /// ECMA-376 §17.3.2.26: a theme font on an axis overrides the named font
+    /// on that axis, so naming a font on one axis drops that axis's theme
+    /// attribute — and only that one.
+    func testAssigningANamedFontOnAnAxisClearsOnlyThatAxisThemeFont() {
+        var fonts = RFontsProperties(asciiTheme: "minorHAnsi", hAnsiTheme: "minorHAnsi",
+                                     eastAsiaTheme: "minorEastAsia", csTheme: "minorBidi")
+        fonts.eastAsia = "PMingLiU"
+        XCTAssertNil(fonts.eastAsiaTheme)
+        XCTAssertEqual(fonts.asciiTheme, "minorHAnsi")
+        XCTAssertEqual(fonts.hAnsiTheme, "minorHAnsi")
+        XCTAssertEqual(fonts.csTheme, "minorBidi")
+
+        fonts.ascii = "Times New Roman"; fonts.hAnsi = "Times New Roman"; fonts.cs = "Mangal"
+        XCTAssertNil(fonts.asciiTheme)
+        XCTAssertNil(fonts.hAnsiTheme)
+        XCTAssertNil(fonts.csTheme)
+    }
+
+    /// A patch that only tints or shades adjusts the existing theme colour;
+    /// it must not drop the theme link.
+    func testTintOrShadeOnlyPatchKeepsTheBaseThemeColor() {
+        var base = RunProperties()
+        base.color = "4472C4"
+        base.themeColor = "accent1"
+
+        var patch = RunProperties()
+        patch.themeShade = "BF"
+        base.merge(with: patch)
+
+        XCTAssertEqual(base.themeColor, "accent1")
+        XCTAssertEqual(base.themeShade, "BF")
+        XCTAssertEqual(base.color, "4472C4")
+    }
+
+    /// A new theme colour replaces the whole triple (stale tint/shade belong
+    /// to the old theme colour) and keeps the existing `w:val` as fallback.
+    func testThemeColorOnlyPatchReplacesTheTripleAndKeepsTheFallbackValue() {
+        var base = RunProperties()
+        base.color = "000000"
+        base.themeColor = "text1"
+        base.themeTint = "99"
+        base.themeShade = "BF"
+
+        var patch = RunProperties()
+        patch.themeColor = "accent2"
+        base.merge(with: patch)
+
+        XCTAssertEqual(base.themeColor, "accent2")
+        XCTAssertNil(base.themeTint)
+        XCTAssertNil(base.themeShade)
+        XCTAssertEqual(base.color, "000000")
+    }
+
+    /// CT_Color requires `w:val`. When a theme colour has no explicit value
+    /// (a theme-only patch on a run without colour, or a source that omitted
+    /// it) the writer emits `w:val="auto"` rather than a schema-invalid element.
+    func testThemeColourWithoutAValueIsWrittenWithAuto() throws {
+        let run = try parseRunFragment("<w:r><w:rPr><w:color w:themeColor=\"text1\"/></w:rPr><w:t>a</w:t></w:r>")
+        XCTAssertNil(run.properties.color)
+        XCTAssertEqual(run.properties.themeColor, "text1")
+        XCTAssertEqual(run.properties.toXML(), "<w:color w:val=\"auto\" w:themeColor=\"text1\"/>")
+
+        var base = RunProperties()
+        var patch = RunProperties()
+        patch.themeColor = "accent1"
+        base.merge(with: patch)
+        XCTAssertEqual(base.toXML(), "<w:color w:val=\"auto\" w:themeColor=\"accent1\"/>")
+    }
+
+    /// Each condition that sends an appended run off the op-log path is
+    /// checked on its own, so deleting one cannot hide behind the other.
+    func testAppendedRunWithOnlyAThemeColourKeepsIt() throws {
+        let fixture = try buildFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        var doc = try DocxReader.read(from: fixture)
+        defer { doc.close() }
+
+        var props = RunProperties()
+        props.color = "000000"
+        props.themeColor = "text1"
+        doc.appendParagraph(Paragraph(runs: [Run(text: "zeta", properties: props)]))
+
+        let appended = try paragraph(containing: "zeta", in: try savedDocumentXML(doc))
+        XCTAssertTrue(appended.contains("w:themeColor=\"text1\""), "got: \(appended)")
+    }
+
+    func testAppendedRunWithOnlyACsThemeKeepsIt() throws {
+        let fixture = try buildFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        var doc = try DocxReader.read(from: fixture)
+        defer { doc.close() }
+
+        var props = RunProperties()
+        props.rFonts = RFontsProperties(csTheme: "minorBidi")
+        doc.appendParagraph(Paragraph(runs: [Run(text: "eta", properties: props)]))
+
+        let appended = try paragraph(containing: "eta", in: try savedDocumentXML(doc))
+        XCTAssertTrue(appended.contains("w:cstheme=\"minorBidi\""), "got: \(appended)")
+    }
+
+    /// The shape #274 reported: the themed run sits inside an existing
+    /// tracked insertion, and the edit is `insertParagraph(.afterText)`.
+    func testInsertAfterTextKeepsThemeAttributesInsideAnExistingInsertion() throws {
+        let xml = """
+            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>\
+            <w:p><w:ins w:id="7" w:author="Author A" w:date="2026-10-01T00:00:00Z">\
+            <w:r><w:rPr>\(Self.themedRPr)</w:rPr><w:t>theta</w:t></w:r></w:ins></w:p>\
+            <w:p><w:r><w:t>gamma</w:t></w:r></w:p>\
+            <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>\
+            </w:body></w:document>
+            """
+        let fixture = try buildFixture(documentXML: xml)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        var doc = try DocxReader.read(from: fixture)
+        defer { doc.close() }
+
+        try doc.insertParagraph(Paragraph(text: "iota"), at: .afterText("gamma", instance: 1))
+
+        let untouched = try paragraph(containing: "theta", in: try savedDocumentXML(doc))
+        XCTAssertTrue(untouched.contains("<w:ins w:id=\"7\""), "existing insertion must survive — got: \(untouched)")
+        XCTAssertTrue(untouched.contains("w:themeColor=\"text1\""), "got: \(untouched)")
+        XCTAssertTrue(untouched.contains("<w:rFonts w:eastAsiaTheme=\"minorEastAsia\"/>"), "got: \(untouched)")
     }
 }

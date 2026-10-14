@@ -285,10 +285,13 @@ extension Run: Equatable {
 /// one value; this struct restores the distinction. `fontName` field kept
 /// for backward compat — when both are set, `rFonts` wins.
 public struct RFontsProperties: Equatable {
-    public var ascii: String?
-    public var hAnsi: String?
-    public var eastAsia: String?
-    public var cs: String?
+    // PsychQuant/che-word-mcp#274: naming a font on an axis drops that
+    // axis's theme font, which would otherwise override it (see below).
+    // Not triggered by `init`, so a parsed element keeps both.
+    public var ascii: String? { didSet { asciiTheme = nil } }
+    public var hAnsi: String? { didSet { hAnsiTheme = nil } }
+    public var eastAsia: String? { didSet { eastAsiaTheme = nil } }
+    public var cs: String? { didSet { csTheme = nil } }
     /// `w:hint` controls which axis is used when text crosses script boundaries
     /// without explicit per-character font. Common values: `default`, `eastAsia`, `cs`.
     public var hint: String?
@@ -298,7 +301,9 @@ public struct RFontsProperties: Equatable {
     /// when an axis's theme attribute is present, the matching named-font
     /// attribute is ignored. Word writes `w:eastAsiaTheme="minorEastAsia"`
     /// on most CJK body text; before these fields existed the attribute was
-    /// read by nothing and lost on every typed re-serialization.
+    /// read by nothing and lost on every typed re-serialization. Assigning
+    /// the named font on an axis clears that axis's theme font, so set a
+    /// theme font after the named one, not before.
     public var asciiTheme: String?
     public var hAnsiTheme: String?
     public var eastAsiaTheme: String?
@@ -354,11 +359,16 @@ public struct RunProperties: Equatable {
         didSet { fontOrigin.generated = false }
     }
     internal var fontOrigin = FontOrigin()
-    public var color: String?              // RGB hex (e.g., "FF0000")
+    /// RGB hex (e.g., "FF0000"). PsychQuant/che-word-mcp#274: assigning it
+    /// clears the theme triple below — Word gives `w:themeColor` precedence
+    /// over `w:val`, so a stale theme colour would make the new colour a
+    /// silent no-op. Direct assignment and `merge(with:)` therefore behave
+    /// the same. Not triggered by `init`; set a theme colour after `color`.
+    public var color: String? {
+        didSet { themeColor = nil; themeTint = nil; themeShade = nil }
+    }
     /// PsychQuant/che-word-mcp#274: theme-colour attributes of `<w:color>`
-    /// (`w:themeColor` / `w:themeTint` / `w:themeShade`). Word gives
-    /// `w:themeColor` precedence over `w:val`, so `merge(with:)` clears
-    /// these when a patch sets `color` without them.
+    /// (`w:themeColor` / `w:themeTint` / `w:themeShade`).
     public var themeColor: String?
     public var themeTint: String?
     public var themeShade: String?
@@ -483,16 +493,19 @@ public struct RunProperties: Equatable {
         if other.isStrikethroughSpecified { self.strikethrough = other.strikethrough }
         if let fontSize = other.fontSize { self.fontSize = fontSize }
         if let fontName = other.fontName { self.fontName = fontName }
+        // PsychQuant/che-word-mcp#274: assigning `color` clears the theme
+        // triple (see `color`). A new theme colour then replaces the triple —
+        // a stale tint / shade belongs to the old one — and keeps `color` as
+        // the `w:val` fallback. A tint or shade alone adjusts the existing
+        // theme colour instead of dropping it.
         if let color = other.color { self.color = color }
-        // PsychQuant/che-word-mcp#274: a patch that touches colour at all
-        // replaces the whole theme triple. Word gives `w:themeColor`
-        // precedence over `w:val`, so keeping a stale theme colour under a
-        // new explicit colour would make the new colour a silent no-op.
-        if other.color != nil || other.themeColor != nil
-            || other.themeTint != nil || other.themeShade != nil {
-            self.themeColor = other.themeColor
+        if let themeColor = other.themeColor {
+            self.themeColor = themeColor
             self.themeTint = other.themeTint
             self.themeShade = other.themeShade
+        } else {
+            if let themeTint = other.themeTint { self.themeTint = themeTint }
+            if let themeShade = other.themeShade { self.themeShade = themeShade }
         }
         if let highlight = other.highlight { self.highlight = highlight }
         if let verticalAlign = other.verticalAlign { self.verticalAlign = verticalAlign }
@@ -774,13 +787,14 @@ extension RunProperties {
 
         // 19. color
         // PsychQuant/che-word-mcp#274: theme attributes ride on the same
-        // element. `w:val` stays first; a source `<w:color>` with theme
-        // attributes but no `w:val` round-trips without inventing one.
+        // element, after `w:val`. CT_Color requires `w:val`, so a theme
+        // colour with no explicit value (a theme-only patch, or a source
+        // that omitted it) is written with `w:val="auto"`.
         if color != nil || themeColor != nil || themeTint != nil || themeShade != nil {
             var attrs: [String] = []
             // v0.19.4+ (#56 R3-NEW-6 audit): color is a hex string in normal
             // use but the field is `String?` so escape defensively.
-            if let color = color { attrs.append("w:val=\"\(escapeXMLAttribute(color))\"") }
+            attrs.append("w:val=\"\(escapeXMLAttribute(color ?? "auto"))\"")
             if let v = themeColor { attrs.append("w:themeColor=\"\(escapeXMLAttribute(v))\"") }
             if let v = themeTint { attrs.append("w:themeTint=\"\(escapeXMLAttribute(v))\"") }
             if let v = themeShade { attrs.append("w:themeShade=\"\(escapeXMLAttribute(v))\"") }

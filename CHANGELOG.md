@@ -17,22 +17,35 @@ All notable changes to ooxml-swift will be documented in this file.
   任何編輯讓 writer 從 typed model 重新產生該 part，`w:themeColor`／`w:themeTint`／
   `w:themeShade` 與 `w:asciiTheme`／`w:hAnsiTheme`／`w:eastAsiaTheme`／`w:cstheme` 就從
   **每一個** run、段落記號 rPr 與樣式 rPr 上消失（同一個 parser 由四處共用）；只有 theme
-  屬性的 `<w:rFonts>` 會整個元素不見。Word 預設的內文格式正是 `w:themeColor="text1"` 加
-  `w:eastAsiaTheme="minorEastAsia"`，所以幾乎每一份 Word 寫的文件都中。
+  屬性的 `<w:rFonts>` 會整個元素不見。Word 在內文 run 上大量寫入
+  `w:themeColor="text1"` 與 `w:eastAsiaTheme="minorEastAsia"`：實測一份 Word 撰寫的稿件，
+  一次 `insert_paragraph` 加存檔讓 `w:themeColor` 從 2225 處掉到 122 處。`styles.xml` 的
+  docDefaults 走另一條保存路徑，不受影響。
 
   現在 `RunProperties` 新增 `themeColor`／`themeTint`／`themeShade`，`RFontsProperties`
   新增 `asciiTheme`／`hAnsiTheme`／`eastAsiaTheme`／`csTheme`（輸出為 `w:cstheme`），讀進、
-  寫回；新欄位排在既有屬性之後，沒有 theme 屬性的檔案輸出位元組不變。`appendParagraph`
-  的 op-log 路徑把 `RunPayload` 有的三個 theme 字型帶過去，帶有 theme 顏色或 `w:cstheme`
-  的 run 則改走 typed 路徑（`RunPayload` 沒有對應欄位，過去在這裡也會被丟掉）。
+  寫回；新欄位排在既有屬性之後，沒有 theme 屬性的檔案輸出位元組不變。CT_Color 規定
+  `w:val` 必填，所以有 theme 顏色但沒有明確值時（只帶 theme 的 patch，或來源本身漏寫）
+  輸出 `w:val="auto"`。`appendParagraph` 的 op-log 路徑把 `RunPayload` 有的三個 theme 字型
+  帶過去；帶有 theme 顏色或 `w:cstheme` 的 run 不走 op-log（`RunPayload` 沒有對應欄位，
+  過去在這裡也會被丟掉），改為嫁接進 live tree、不行再退回 typed 路徑。和既有帶
+  `lang`／`rStyle` 等屬性的 run 一樣，這種 append 之後 undo／redo 沒有 replay base。
 
 ### Changed
 
-- **`RunProperties.merge(with:)`：patch 有指定顏色時，整組 theme 顏色以 patch 為準**
-  （PsychQuant/che-word-mcp#274）。Word 讓 `w:themeColor` 優先於 `w:val`，若沿用舊的 theme
-  顏色，新指定的 `color` 在 Word 裡會完全沒有效果。現在 patch 只要帶了 `color` 或任何一個
-  theme 欄位，舊的 `themeColor`／`themeTint`／`themeShade` 就換成 patch 的值（patch 沒給就
-  清掉）；不碰顏色的 patch 不受影響。對過去「改了顏色卻沒變」的呼叫端，這是行為改變。
+- **直接指定 `RunProperties.color` 會清掉 theme 顏色三欄；指定 `RFontsProperties` 某一軸的
+  具名字型會清掉該軸的 theme 字型**（PsychQuant/che-word-mcp#274）。Word 讓 theme 屬性
+  優先於 `w:val` 與同一軸的具名字型（ECMA-376 §17.3.2.6、§17.3.2.26）。這個版本開始讀進
+  theme 屬性之後，若不清除，任何「複製既有 rPr 再改一個欄位」的呼叫端在帶 theme 的 run 上
+  改色或改字型都不會生效，例如 che-word-mcp 的 `format_text(as_revision: true)`，它把複製來的
+  rPr 交給 `applyRunPropertiesAsRevision`，中間不經過 merge。3.19.0 時這些呼叫反而有效，
+  因為 theme 屬性根本沒被讀進來。清除寫在屬性的 `didSet`，`init` 不會觸發；要同時設定
+  兩者時，先設 `color` 或具名字型，再設 theme 屬性，順序反過來 theme 會被清掉。
+- **`RunProperties.merge(with:)` 的顏色規則**（PsychQuant/che-word-mcp#274）：patch 帶
+  `color` 時，theme 顏色三欄清掉（同上）；帶 `themeColor` 時，三欄整組換成 patch 的值，
+  舊的 tint／shade 屬於舊的 theme 顏色，一併換掉，`color` 保留作 `w:val` 的 fallback；
+  只帶 `themeTint`／`themeShade` 時只調整這兩欄，既有的 `themeColor` 保留。不碰顏色的
+  patch 不受影響。tree／op-log 路徑的改色目前仍只改 `w:val`（既有行為，見 #225）。
 
 ## [3.19.0] - 2026-09-28
 
