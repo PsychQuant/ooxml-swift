@@ -8,6 +8,69 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`insertParagraphAsRevision(_:at:author:date:)`：以追蹤修訂插入段落**（PsychQuant/che-word-mcp#275）。
+  過去沒有任何追蹤式的段落插入：`insertParagraph(_:at:)` 照原樣插入，所以在修訂模式下為
+  別人的稿子加一段，讀起來像是原作者寫的。Word 對插入的段落記兩次——run 外的 `<w:ins>`，
+  以及段落記號上的 `<w:pPr><w:rPr><w:ins …/></w:rPr></w:pPr>`；模型過去沒有欄位表達後者。
+  新 API 對兩者使用同一個修訂 id，支援所有 `InsertLocation`，修訂模式關閉時丟出
+  `trackChangesNotEnabled`（未追蹤的插入仍走原本的 `insertParagraph(_:at:)`，行為不變）。
+  附加到最後（`.paragraphIndex(body.children.count)`）走 `appendParagraph` 的 graft 路徑，
+  文件其他部分不會從 typed model 重新序列化（那會丟掉中段分節符號等，見 #228）。
+  段落含有超連結、欄位、alternate content 或 content control 時拒絕（這些內容帶不了
+  修訂 id，插進去會變成追蹤段落裡的未追蹤內容）。
+- **`Paragraph.markRevisionId`**：段落記號的插入修訂，輸出為段落記號 `<w:rPr>` 的第一個
+  子元素（CT_ParaRPr 的 track-change 群組在 EG_RPrBase 之前），段落沒有段落記號格式時一併建立
+  `<w:rPr>`。讀檔時 `DocxReader` 也把段落記號上的 `<w:ins>` 讀成這個欄位（Word 給它獨立的
+  id，che-word-mcp 寫的與 run 共用），並移除 raw 副本，存檔時只寫一次；刪除或搬移的段落記號
+  仍保留為 raw。
+
+### Fixed
+
+- **`acceptRevision`／`rejectRevision` 依修訂 id 找目標，不再依記錄下來的段落索引與文字比對**
+  （PsychQuant/che-word-mcp#280，併入 #275）。過去兩者用 `Revision.paragraphIndex` 找段落——
+  只在建立時記一次、之後插入或刪除段落就過時，`insertTextAsRevision`／`deleteTextAsRevision`
+  甚至一律記成 0——再用修訂的文字快照對該段每個 run 做 `replacingOccurrences`。結果：在修訂
+  上方插一段之後，接受或拒絕會作用在別的段落；接受「刪除 the」會刪掉同段所有的 "the"；
+  拒絕一個多 run 的插入段落時，文字會沒有修訂標記地併進下一段。現在掃描修訂所屬 part 中
+  帶有該 id 的段落（run 的插入／刪除／搬移與格式修訂、段落記號、段落格式修訂、段落的修訂
+  清單）。退回原本的索引與文字比對只發生在不是讀檔、也不是產生器建立的修訂上（直接透過公開
+  model 建立，即使帶有標記）。讀進來或產生器建立的修訂若已沒有任何段落帶著它（例如段落被
+  `deleteParagraph` 刪掉），視為孤兒：只移除這筆記錄，不動任何文字；包著超連結等內容、以 raw
+  XML 保存的修訂也一樣。`Revision` 以不參與 `==` 的 `isAnchored` 記錄這個差別。
+- **讀檔時，不同種類的修訂共用同一個 id 會被重新編號**（che-word-mcp#275 verify round 3）。run 只帶
+  修訂 id、不帶型別，所以兩筆不同型別的修訂共用一個 id 時，所有只看 id 的查找（寫回時的修訂包裝、
+  段落內的 accept／reject、文件層的修訂清單）都會解析到先出現的那一筆：與段落記號插入共用 id 的
+  run 刪除，存檔後變成包著 `<w:delText>` 的 `<w:ins>`，一次 accept 或 reject 也同時作用在兩筆上。
+  Word 不會寫出這種檔案，其他工具與刻意構造的檔案會。現在讀檔時每筆修訂依種類登記它的 id，後出現、
+  種類不同的那筆改用新的 id（包著超連結等內容、以 raw XML 保存的修訂，新 id 也寫進它的 raw XML）；
+  同種類共用 id 仍視為同一筆修訂（che-word-mcp 寫的段落記號與其 run、被標記切開的同一筆刪除）。
+  新 id 避開檔案中所有修訂 id。
+- **`allocateRevisionId()` 避開只以 raw XML 保存的修訂 id**（刪除或搬移的段落記號、表格列的修訂
+  等）：讀檔時記在不參與 `==` 的 `RevisionsCollection.reservedIds`。過去新修訂可能拿到與它們相同的
+  id。移除沒有呼叫者的 `RevisionsCollection.nextRevisionId()`。
+- **拒絕段落記號插入時不再刪除未追蹤的內容，也不會悄悄變成接受**。Word 自己的 `_GoBack` 書籤
+  與拼字標記不算內容，直接捨棄；段落裡還有其他非 run 內容（書籤、註解範圍——含本 session 以
+  `insertComment` 加的——超連結、欄位、content control、註腳參照等）時，Word 會把它們併進下一段，
+  這還不支援，所以拒絕會在改動任何東西之前丟出 `RevisionError.cannotReject`。只剩 run 時才併進
+  下一段，併入的 run 帶著它們所屬修訂的定義，並排在下一段原有內容之前（模型與存檔順序一致）。
+  header／footer／註腳中的段落記號照同一套規則處理（該 part 至少保留一段）。讀進來的段落記號
+  修訂排在該段修訂清單最前面，`tryRejectAllRevisions`（由後往前）因此先處理內容、最後處理記號。
+  移除插入的 run 之後段落仍留有文字、卻沒有可併入的下一段時（它是該容器的最後一段，或後面接著
+  表格、content control）——例如在表格前的段落中間按 Enter——拒絕同樣丟出 `cannotReject`，而不是
+  只清掉記號（等於接受）。分頁符號（`hasPageBreak`）也算非 run 內容。
+- **段落記號上以 raw 保存的 `<w:del>`／`<w:moveFrom>`／`<w:moveTo>` 緊接在插入記號之後輸出**，
+  不再排在格式之後（CT_ParaRPr 的 track-change 群組在 EG_RPrBase 之前）。
+- **`insertTextAsRevision`／`deleteTextAsRevision` 拒絕在追蹤修訂內部編輯**：把追蹤插入的段落裡的
+  字標成刪除，會把它移出那筆插入，之後拒絕該段落插入時它被併進下一段。巢狀修訂見 che-word-mcp#293。
+- **`allocateRevisionId()` 不再因檔案中的極大 id 而 trap**：id 來自檔案，`Int.max` 會讓
+  `+ 1` 溢位、整個 MCP server 崩潰。最大 id 超過 `Int.max / 2` 時改用最小的、而且下一個 id 也
+  未被使用的正整數（move 會用 id 與 id + 1）。`insertParagraphAsRevision` 內原本的
+  `preconditionFailure` 也改為丟出錯誤；`.paragraphIndex` 超出範圍時與 `insertParagraph` 一樣丟出
+  錯誤；段落含任何非 run 內容都拒收。
+- 新增 `RunProperties.hasDirectFormatting`。
+
 ## [3.19.0] - 2026-09-28
 
 ### Changed

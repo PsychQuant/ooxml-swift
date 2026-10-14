@@ -452,6 +452,10 @@ public struct RunProperties: Equatable {
         self.rStyle = rStyle
     }
 
+    /// PsychQuant/che-word-mcp#275: true when these properties would write
+    /// anything inside `<w:rPr>` (typed or preserved raw children).
+    public var hasDirectFormatting: Bool { !toXML().isEmpty }
+
     /// 合併格式。未指定的欄位維持原值；明確 false／nil 代表移除。
     mutating func merge(with other: RunProperties) {
         if other.isBoldSpecified { self.bold = other.bold }

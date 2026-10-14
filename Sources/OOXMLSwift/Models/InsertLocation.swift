@@ -262,6 +262,75 @@ extension WordDocument {
         markTypedDirty("word/document.xml")
     }
 
+    /// PsychQuant/che-word-mcp#275: insert `paragraph` at `location` as a
+    /// **tracked insertion** — the way Word records a paragraph added under
+    /// track changes: `<w:ins>` around every run and `<w:ins/>` on the
+    /// paragraph mark, both carrying one revision id. Returns that id.
+    ///
+    /// The recorded `Revision.paragraphIndex` is the paragraph's real flat
+    /// index (for display; `acceptRevision` / `rejectRevision` find the
+    /// paragraph by the revision id). Accepting keeps the paragraph and drops
+    /// both markers; rejecting removes it, or — when untracked content was
+    /// added to it since — keeps that content (see `rejectRevision`).
+    /// `paragraph` must be a detached value (built with an initializer, not
+    /// read from a file) holding runs only. Appending (`.paragraphIndex` at
+    /// the end of the body) uses `appendParagraph`'s graft path.
+    ///
+    /// Throws `WordError.trackChangesNotEnabled` when track changes is off —
+    /// the untracked path is `insertParagraph(_:at:)`, unchanged.
+    @discardableResult
+    public mutating func insertParagraphAsRevision(
+        _ paragraph: Paragraph,
+        at location: InsertLocation,
+        author: String? = nil,
+        date: Date? = nil
+    ) throws -> Int {
+        guard isTrackChangesEnabled() else {
+            throw WordError.trackChangesNotEnabled
+        }
+        guard paragraph.xmlNode == nil else {
+            throw WordError.invalidParameter(
+                "paragraph", "must be a detached Paragraph value; a tree-backed one cannot carry revision ids on its runs")
+        }
+        // Only runs carry the insertion's id; anything else would be written
+        // untracked inside a tracked paragraph (che-word-mcp#275 R2/R3).
+        guard !paragraph.hasNonRunContent else {
+            throw WordError.invalidParameter(
+                "paragraph", "holds content other than runs (hyperlinks, fields, bookmarks, comments, content controls, …), which cannot carry the insertion's revision id")
+        }
+
+        let revisionId = allocateRevisionId()
+        var para = paragraph
+        for index in para.runs.indices {
+            para.runs[index].revisionId = revisionId
+        }
+        para.markRevisionId = revisionId
+        let text = para.runs.map(\.text).joined()
+        var revision = Revision(
+            id: revisionId, type: .insertion, author: resolveAuthor(author),
+            paragraphIndex: 0, newText: text.isEmpty ? nil : text, date: date ?? Date())
+        revision.source = .body
+        para.revisions.append(revision)
+
+        if case .paragraphIndex(let index) = location, index > body.children.count {
+            throw InsertLocationError.invalidParagraphIndex(index)
+        }
+        if case .paragraphIndex(let index) = location, index == body.children.count {
+            // Appending goes through appendParagraph's graft path, so the rest
+            // of the part is not re-serialized from the (lossy) typed model.
+            appendParagraph(para)
+        } else {
+            try insertParagraph(para, at: location)
+        }
+
+        guard let flatIndex = Self.flatParagraphIndex(in: body.children, where: { $0.markRevisionId == revisionId }) else {
+            throw WordError.invalidParameter("paragraph", "tracked paragraph \(revisionId) not found after insertion")
+        }
+        revision.paragraphIndex = flatIndex
+        revisions.revisions.append(revision.anchored())
+        return revisionId
+    }
+
     // MARK: Resolution helpers
 
     /// Return the index in `body.children` of the paragraph whose runs contain
