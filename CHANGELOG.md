@@ -26,7 +26,26 @@ All notable changes to ooxml-swift will be documented in this file.
   id，che-word-mcp 寫的與 run 共用），並移除 raw 副本，存檔時只寫一次；刪除或搬移的段落記號
   仍保留為 raw。
 
+- **`replaceTextAsRevision(atParagraph:start:end:with:author:date:)` 與 `replaceAllAsRevision(find:with:matchCase:author:date:)`：
+  追蹤式取代**（PsychQuant/che-word-mcp#276）。範圍寫成 `<w:del>`，緊接著的 `<w:ins>` 放新字並沿用第一個被刪字元的格式
+  （Word 的順序與行為）。`replaceAllAsRevision` 處理所有頂層內文段落的符合處、由後往前套用；符合處落在表格、
+  content control、超連結、欄位或 alternate content，或與另一筆追蹤插入／搬移重疊時，整個呼叫在改動任何內容前丟出
+  錯誤——不會靜默地留下未追蹤或被略過的取代。回傳 `TrackedReplacement`（段落、刪除 id、插入 id）。
+- `insertTextAsRevision` 新增 `properties:` 參數（新 run 的格式，預設無）。
+
 ### Fixed
+
+- **`insertTextAsRevision` 的新字寫在指定位置並包在 `<w:ins>` 內**（PsychQuant/che-word-mcp#276）。新 run 在
+  `paragraph.runs` 裡的位置一直是對的，但從檔案讀進來的段落依來源位置輸出，新 run 沒有來源位置，於是被放到段尾、
+  在修訂分組之外輸出——沒有 `<w:ins>`，存檔重開後修訂也不見。現在新 run 取相鄰 run 的位置，穩定排序把它留在原處。
+- **兩個修訂產生器使用同一套偏移規則：已插入的字算、已刪除／搬出的字不算**（che-word-mcp#276 決定 2，與讀取工具
+  顯示的文字一致）。過去檔案讀進來的刪除 run 不帶文字、同一 session 內做的刪除卻帶，存檔重開前後同一偏移指向不同
+  位置。插在刪除邊界時，新字放在刪除之後。
+- **位置或範圍落在另一筆追蹤插入或搬移內部時，`insertTextAsRevision`／`deleteTextAsRevision` 改為丟出錯誤**，
+  不再把別人插入的字搬出他的修訂（`<w:del B/><w:ins A/>` 而非 Word 的巢狀 `<w:ins A><w:del B/></w:ins>`）。
+  巢狀修訂留待 che-word-mcp#276 Stage 2；邊界仍可插入。
+- 兩個產生器記錄的 `Revision.paragraphIndex` 是段落的扁平索引（過去一律 0；accept／reject 已改依 id 找段落，
+  這個值現在用於顯示）。
 
 - **`acceptRevision`／`rejectRevision` 依修訂 id 找目標，不再依記錄下來的段落索引與文字比對**
   （PsychQuant/che-word-mcp#280，併入 #275）。過去兩者用 `Revision.paragraphIndex` 找段落——
