@@ -196,6 +196,22 @@ extension Revision {
         }
     }
 
+    /// PsychQuant/che-word-mcp#275: self-closing marker for a revised
+    /// paragraph mark — `<w:pPr><w:rPr><w:ins …/></w:rPr></w:pPr>`. Only
+    /// insertion and deletion apply to a paragraph mark (CT_ParaRPr's
+    /// track-change group); other types return nil.
+    func toMarkerXML() -> String? {
+        let dateString = ISO8601DateFormatter().string(from: date)
+        switch type {
+        case .insertion:
+            return "<w:ins w:id=\"\(id)\" w:author=\"\(escapeXML(author))\" w:date=\"\(dateString)\"/>"
+        case .deletion:
+            return "<w:del w:id=\"\(id)\" w:author=\"\(escapeXML(author))\" w:date=\"\(dateString)\"/>"
+        default:
+            return nil
+        }
+    }
+
     /// 產生修訂結束標籤
     func toClosingXML() -> String {
         switch type {

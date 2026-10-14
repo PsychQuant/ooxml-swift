@@ -262,6 +262,58 @@ extension WordDocument {
         markTypedDirty("word/document.xml")
     }
 
+    /// PsychQuant/che-word-mcp#275: insert `paragraph` at `location` as a
+    /// **tracked insertion** — the way Word records a paragraph added under
+    /// track changes: `<w:ins>` around every run and `<w:ins/>` on the
+    /// paragraph mark, both carrying one revision id. Returns that id.
+    ///
+    /// The recorded `Revision` points at the paragraph's real flat index (the
+    /// one `acceptRevision` / `rejectRevision` resolve through), not the
+    /// default 0. Accepting keeps the paragraph and drops both markers;
+    /// rejecting removes it. `paragraph` must be a detached value (built with
+    /// an initializer, not read from a file).
+    ///
+    /// Throws `WordError.trackChangesNotEnabled` when track changes is off —
+    /// the untracked path is `insertParagraph(_:at:)`, unchanged.
+    @discardableResult
+    public mutating func insertParagraphAsRevision(
+        _ paragraph: Paragraph,
+        at location: InsertLocation,
+        author: String? = nil,
+        date: Date? = nil
+    ) throws -> Int {
+        guard isTrackChangesEnabled() else {
+            throw WordError.trackChangesNotEnabled
+        }
+        guard paragraph.xmlNode == nil else {
+            throw WordError.invalidParameter(
+                "paragraph", "must be a detached Paragraph value; a tree-backed one cannot carry revision ids on its runs")
+        }
+
+        let revisionId = allocateRevisionId()
+        var para = paragraph
+        for index in para.runs.indices {
+            para.runs[index].revisionId = revisionId
+        }
+        para.markRevisionId = revisionId
+        let text = para.runs.map(\.text).joined()
+        var revision = Revision(
+            id: revisionId, type: .insertion, author: resolveAuthor(author),
+            paragraphIndex: 0, newText: text.isEmpty ? nil : text, date: date ?? Date())
+        revision.source = .body
+        para.revisions.append(revision)
+
+        try insertParagraph(para, at: location)
+
+        guard let flatIndex = Self.flatParagraphIndex(in: body.children, where: { $0.markRevisionId == revisionId }) else {
+            // insertParagraph succeeded, so the paragraph is in the body.
+            preconditionFailure("tracked paragraph \(revisionId) not found after insertion")
+        }
+        revision.paragraphIndex = flatIndex
+        revisions.revisions.append(revision)
+        return revisionId
+    }
+
     // MARK: Resolution helpers
 
     /// Return the index in `body.children` of the paragraph whose runs contain

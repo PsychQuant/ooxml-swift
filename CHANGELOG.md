@@ -8,6 +8,22 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`insertParagraphAsRevision(_:at:author:date:)`：以追蹤修訂插入段落**（PsychQuant/che-word-mcp#275）。
+  過去沒有任何追蹤式的段落插入：`insertParagraph(_:at:)` 照原樣插入，所以在修訂模式下為
+  別人的稿子加一段，讀起來像是原作者寫的。Word 對插入的段落記兩次——run 外的 `<w:ins>`，
+  以及段落記號上的 `<w:pPr><w:rPr><w:ins …/></w:rPr></w:pPr>`；模型過去沒有欄位表達後者。
+  新 API 對兩者使用同一個修訂 id，支援所有 `InsertLocation`，修訂模式關閉時丟出
+  `trackChangesNotEnabled`（未追蹤的插入仍走原本的 `insertParagraph(_:at:)`，行為不變）。
+  記錄的 `Revision.paragraphIndex` 是該段落實際的扁平索引（與 `acceptRevision`／
+  `rejectRevision` 解析時的走訪順序相同），不是預設的 0。
+- **`Paragraph.markRevisionId`**：段落記號的插入／刪除修訂，輸出為段落記號 `<w:rPr>` 的第一個
+  子元素（CT_ParaRPr 的 track-change 群組在 EG_RPrBase 之前），段落沒有段落記號格式時一併建立
+  `<w:rPr>`。從檔案讀進來的 Word 段落記號修訂仍照舊保留在 `markRunProperties.rawChildren`。
+- `acceptRevision` 接受此類插入時保留段落、移除兩處標記；`rejectRevision` 在段落已無剩餘內容時
+  移除整段，否則把剩下的內容併到下一段（Word 對被拒絕的段落記號的處理）；表格儲存格至少保留一段。
+
 ## [3.19.0] - 2026-09-28
 
 ### Changed

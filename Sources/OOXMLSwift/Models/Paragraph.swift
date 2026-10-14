@@ -46,6 +46,16 @@ public struct Paragraph: Equatable {
     /// `<w:pPrChange>` inside this paragraph's `<w:pPr>` block.
     public var paragraphFormatChangeRevisionId: Int?
 
+    /// PsychQuant/che-word-mcp#275: id of a `Revision` (insertion or
+    /// deletion) in `revisions` that marks this paragraph's **mark** as
+    /// revised. Word records an inserted paragraph twice — `<w:ins>` around
+    /// its runs and `<w:ins/>` on the paragraph mark; this is the second half.
+    /// Emitted as the first child of the paragraph-mark `<w:rPr>`.
+    /// (Word-authored markers read from a file still ride in
+    /// `properties.markRunProperties.rawChildren`; only paragraphs created by
+    /// `insertParagraphAsRevision` set this field.)
+    public var markRevisionId: Int?
+
     /// v0.18.0+ (che-word-mcp#45): pre-mutation paragraph properties for a
     /// tracked `<w:pPrChange>` revision. Paired with
     /// `paragraphFormatChangeRevisionId`.
@@ -362,6 +372,7 @@ extension Paragraph {
             && lhs.revisions == rhs.revisions
             && lhs.semantic == rhs.semantic
             && lhs.paragraphFormatChangeRevisionId == rhs.paragraphFormatChangeRevisionId
+            && lhs.markRevisionId == rhs.markRevisionId
             && lhs.previousProperties == rhs.previousProperties
             && lhs.contentControls == rhs.contentControls
             && lhs.bookmarkMarkers == rhs.bookmarkMarkers
@@ -727,7 +738,12 @@ extension Paragraph {
     /// comment and the R2 section of the fix report for the measurements.
     @inline(never)
     private func pPrBlockXML() -> String {
-        let propsXML = properties.toXML()
+        // PsychQuant/che-word-mcp#275: a revised paragraph mark rides inside
+        // the paragraph-mark rPr, so ParagraphProperties emits it.
+        let markRevisionXML: String? = markRevisionId.flatMap { id in
+            revisions.first { $0.id == id }?.toMarkerXML()
+        }
+        let propsXML = properties.toXML(paragraphMarkRevisionXML: markRevisionXML)
         let formatChangeRevision: Revision? = {
             guard let id = paragraphFormatChangeRevisionId else { return nil }
             return revisions.first { $0.id == id }
@@ -1379,6 +1395,16 @@ extension ParagraphProperties {
     /// 依錨定規則放置。修正前的固定順序是 pStyle → numPr → jc → spacing → ind →
     /// keepNext → keepLines → pageBreakBefore → pBdr → shd → rawChildren → rPr。
     public func toXML() -> String {
+        toXML(paragraphMarkRevisionXML: nil)
+    }
+
+    /// PsychQuant/che-word-mcp#275: `paragraphMarkRevisionXML` is a
+    /// self-closing `<w:ins/>` / `<w:del/>` for a revised paragraph mark
+    /// (supplied by `Paragraph`, which owns the revision). CT_ParaRPr puts
+    /// the track-change group before EG_RPrBase, so it is the first child of
+    /// the mark `<w:rPr>`; the `<w:rPr>` is created when there are no mark
+    /// properties.
+    internal func toXML(paragraphMarkRevisionXML: String?) -> String {
         // (position, tier, sequence, xml)：tier 0 = schema 已知元素，tier 1 =
         // 錨定在該位置之後的表外元素；sequence 保持同位置內的加入順序。
         var slots: [(position: Int, tier: Int, sequence: Int, xml: String)] = []
@@ -1471,11 +1497,9 @@ extension ParagraphProperties {
         // we wrap with <w:rPr>...</w:rPr> here. Skip emission when nil OR
         // when the inner content is empty — matches the "no synthetic empty
         // <w:rPr/>" gate discipline established in sub-stack B-CONT-2.
-        if let markProps = markRunProperties {
-            let inner = markProps.toXML()
-            if !inner.isEmpty {
-                add("rPr", "<w:rPr>\(inner)</w:rPr>")
-            }
+        let markInner = (paragraphMarkRevisionXML ?? "") + (markRunProperties?.toXML() ?? "")
+        if !markInner.isEmpty {
+            add("rPr", "<w:rPr>\(markInner)</w:rPr>")
         }
 
         // v3.12.0+ (#168) / v3.13.0+ (#175): pPr children the typed model

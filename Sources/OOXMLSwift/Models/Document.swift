@@ -3072,7 +3072,9 @@ public struct WordDocument: Equatable {
     /// 3-tier author resolution: explicit arg (when non-nil and non-empty)
     /// wins; otherwise fall back to the track-changes settings author; finally
     /// "Unknown". Used by all v0.18.0 revision-generating mutations.
-    fileprivate func resolveAuthor(_ explicit: String?) -> String {
+    // Internal (was fileprivate) so `insertParagraphAsRevision` in
+    // InsertLocation.swift resolves authors the same way (che-word-mcp#275).
+    func resolveAuthor(_ explicit: String?) -> String {
         if let explicit = explicit, !explicit.isEmpty {
             return explicit
         }
@@ -3758,6 +3760,11 @@ public struct WordDocument: Equatable {
             if para.paragraphFormatChangeRevisionId == revisionId_ {
                 para.paragraphFormatChangeRevisionId = nil
             }
+            // che-word-mcp#275: accepting an inserted paragraph keeps the
+            // paragraph and drops the paragraph-mark marker too.
+            if para.markRevisionId == revisionId_ {
+                para.markRevisionId = nil
+            }
             for j in 0..<para.runs.count {
                 if para.runs[j].revisionId == revisionId_ {
                     para.runs[j].revisionId = nil
@@ -3908,6 +3915,145 @@ public struct WordDocument: Equatable {
         return hit ? partKey : nil
     }
 
+    /// PsychQuant/che-word-mcp#275: flat paragraph index of the first
+    /// paragraph matching `predicate`, counted in EXACTLY the order
+    /// `applyToFlatParagraphRecursive` counts (body paragraphs, table-cell
+    /// paragraphs then nested tables, content-control children; markers and
+    /// raw block elements skipped) — the index a `Revision` must record for
+    /// accept / reject to find its paragraph again.
+    static func flatParagraphIndex(
+        in children: [BodyChild],
+        where predicate: (Paragraph) -> Bool
+    ) -> Int? {
+        var counter = 0
+        func walk(_ children: [BodyChild]) -> Int? {
+            for child in children {
+                switch child {
+                case .bookmarkMarker, .rawBlockElement:
+                    continue
+                case .paragraph(let para):
+                    if predicate(para) { return counter }
+                    counter += 1
+                case .table(let table):
+                    for row in table.rows {
+                        for cell in row.cells {
+                            for para in cell.paragraphs {
+                                if predicate(para) { return counter }
+                                counter += 1
+                            }
+                            for nested in cell.nestedTables {
+                                if let hit = walk([.table(nested)]) { return hit }
+                            }
+                        }
+                    }
+                case .contentControl(_, let inner):
+                    if let hit = walk(inner) { return hit }
+                }
+            }
+            return nil
+        }
+        return walk(children)
+    }
+
+    /// PsychQuant/che-word-mcp#275: after rejecting the insertion of a
+    /// paragraph MARK, that mark no longer exists. Word drops the paragraph
+    /// when nothing of it is left, and otherwise joins what is left onto the
+    /// following paragraph (whose mark survives). A cell keeps at least one
+    /// paragraph; a join only happens into a detached paragraph (a
+    /// tree-backed one cannot take new runs through `runs`), otherwise the
+    /// paragraph stays and only its marker is cleared. Same traversal order
+    /// as `applyToFlatParagraphRecursive`. Returns true once `target` is
+    /// reached.
+    @discardableResult
+    static func rejectInsertedParagraphMark(
+        in children: inout [BodyChild],
+        target: Int,
+        counter: inout Int,
+        revisionId: Int
+    ) -> Bool {
+        func nothingLeft(_ para: Paragraph) -> Bool {
+            para.runs.allSatisfy {
+                $0.text.isEmpty && $0.drawing == nil && $0.rawXML == nil && ($0.rawElements ?? []).isEmpty
+            }
+        }
+        /// Shared remove-or-join on one sibling array of paragraphs.
+        func resolve(_ paras: inout [Paragraph], at p: Int, keepAtLeastOne: Bool) {
+            var para = paras[p]
+            para.markRevisionId = nil
+            if nothingLeft(para) {
+                if !keepAtLeastOne || paras.count > 1 {
+                    paras.remove(at: p)
+                } else {
+                    paras[p] = para
+                }
+            } else if p + 1 < paras.count, paras[p + 1].xmlNode == nil {
+                paras[p + 1].runs = para.runs + paras[p + 1].runs
+                paras.remove(at: p)
+            } else {
+                paras[p] = para
+            }
+        }
+
+        var i = 0
+        while i < children.count {
+            switch children[i] {
+            case .bookmarkMarker, .rawBlockElement:
+                break
+            case .paragraph(let para):
+                if counter == target {
+                    guard para.markRevisionId == revisionId else { return true }
+                    // Body level: the "siblings" are the paragraphs directly in
+                    // `children`; join only into an immediately following one.
+                    var mark = para
+                    mark.markRevisionId = nil
+                    if nothingLeft(mark) {
+                        children.remove(at: i)
+                    } else if i + 1 < children.count, case .paragraph(var next) = children[i + 1], next.xmlNode == nil {
+                        next.runs = mark.runs + next.runs
+                        children[i + 1] = .paragraph(next)
+                        children.remove(at: i)
+                    } else {
+                        children[i] = .paragraph(mark)
+                    }
+                    return true
+                }
+                counter += 1
+            case .table(var table):
+                for r in 0..<table.rows.count {
+                    for c in 0..<table.rows[r].cells.count {
+                        let count = table.rows[r].cells[c].paragraphs.count
+                        if counter + count > target {
+                            let p = target - counter
+                            if table.rows[r].cells[c].paragraphs[p].markRevisionId == revisionId {
+                                resolve(&table.rows[r].cells[c].paragraphs, at: p, keepAtLeastOne: true)
+                                children[i] = .table(table)
+                            }
+                            return true
+                        }
+                        counter += count
+                        for nt in 0..<table.rows[r].cells[c].nestedTables.count {
+                            var nestedChildren: [BodyChild] = [.table(table.rows[r].cells[c].nestedTables[nt])]
+                            if rejectInsertedParagraphMark(in: &nestedChildren, target: target, counter: &counter, revisionId: revisionId) {
+                                if case .table(let updated) = nestedChildren[0] {
+                                    table.rows[r].cells[c].nestedTables[nt] = updated
+                                }
+                                children[i] = .table(table)
+                                return true
+                            }
+                        }
+                    }
+                }
+            case .contentControl(let cc, var inner):
+                if rejectInsertedParagraphMark(in: &inner, target: target, counter: &counter, revisionId: revisionId) {
+                    children[i] = .contentControl(cc, children: inner)
+                    return true
+                }
+            }
+            i += 1
+        }
+        return false
+    }
+
     private static func applyToFlatParagraphRecursive(
         in children: inout [BodyChild],
         target: Int,
@@ -4048,10 +4194,30 @@ public struct WordDocument: Equatable {
                     }
                 }
             }
+            // che-word-mcp#275: did this revision also insert the paragraph
+            // mark? Read before mutating so the answer is the pre-reject one.
+            var hadMarkInsertion = false
+            _ = applyToParagraph(at: revision.paragraphIndex, in: revision.source) { para in
+                hadMarkInsertion = (para.markRevisionId == revisionId)
+            }
             if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: removeAndClear) {
                 partKeyForDirty = key
             } else {
                 throw RevisionError.notFound(revisionId)
+            }
+            if hadMarkInsertion {
+                if case .body = revision.source {
+                    var counter = 0
+                    Self.rejectInsertedParagraphMark(
+                        in: &body.children, target: revision.paragraphIndex,
+                        counter: &counter, revisionId: revisionId)
+                } else {
+                    // Headers / footers / notes: no tracked paragraph
+                    // insertion is generated there; clear the marker only.
+                    _ = applyToParagraph(at: revision.paragraphIndex, in: revision.source) { para in
+                        para.markRevisionId = nil
+                    }
+                }
             }
         case .deletion:
             // Reject deletion: restore the deleted text by clearing the
