@@ -293,10 +293,26 @@ public struct RFontsProperties: Equatable {
     /// without explicit per-character font. Common values: `default`, `eastAsia`, `cs`.
     public var hint: String?
 
+    /// PsychQuant/che-word-mcp#274: theme-font references (`w:asciiTheme`,
+    /// `w:hAnsiTheme`, `w:eastAsiaTheme`, `w:cstheme`). ECMA-376 §17.3.2.26:
+    /// when an axis's theme attribute is present, the matching named-font
+    /// attribute is ignored. Word writes `w:eastAsiaTheme="minorEastAsia"`
+    /// on most CJK body text; before these fields existed the attribute was
+    /// read by nothing and lost on every typed re-serialization.
+    public var asciiTheme: String?
+    public var hAnsiTheme: String?
+    public var eastAsiaTheme: String?
+    /// Emitted as `w:cstheme` (lower-case `t`, per the schema).
+    public var csTheme: String?
+
     public init(ascii: String? = nil, hAnsi: String? = nil,
-                eastAsia: String? = nil, cs: String? = nil, hint: String? = nil) {
+                eastAsia: String? = nil, cs: String? = nil, hint: String? = nil,
+                asciiTheme: String? = nil, hAnsiTheme: String? = nil,
+                eastAsiaTheme: String? = nil, csTheme: String? = nil) {
         self.ascii = ascii; self.hAnsi = hAnsi
         self.eastAsia = eastAsia; self.cs = cs; self.hint = hint
+        self.asciiTheme = asciiTheme; self.hAnsiTheme = hAnsiTheme
+        self.eastAsiaTheme = eastAsiaTheme; self.csTheme = csTheme
     }
 }
 
@@ -339,6 +355,13 @@ public struct RunProperties: Equatable {
     }
     internal var fontOrigin = FontOrigin()
     public var color: String?              // RGB hex (e.g., "FF0000")
+    /// PsychQuant/che-word-mcp#274: theme-colour attributes of `<w:color>`
+    /// (`w:themeColor` / `w:themeTint` / `w:themeShade`). Word gives
+    /// `w:themeColor` precedence over `w:val`, so `merge(with:)` clears
+    /// these when a patch sets `color` without them.
+    public var themeColor: String?
+    public var themeTint: String?
+    public var themeShade: String?
     public var highlight: HighlightColor?
     public var verticalAlign: VerticalAlign?
     public var characterSpacing: CharacterSpacing?  // 字元間距
@@ -461,6 +484,16 @@ public struct RunProperties: Equatable {
         if let fontSize = other.fontSize { self.fontSize = fontSize }
         if let fontName = other.fontName { self.fontName = fontName }
         if let color = other.color { self.color = color }
+        // PsychQuant/che-word-mcp#274: a patch that touches colour at all
+        // replaces the whole theme triple. Word gives `w:themeColor`
+        // precedence over `w:val`, so keeping a stale theme colour under a
+        // new explicit colour would make the new colour a silent no-op.
+        if other.color != nil || other.themeColor != nil
+            || other.themeTint != nil || other.themeShade != nil {
+            self.themeColor = other.themeColor
+            self.themeTint = other.themeTint
+            self.themeShade = other.themeShade
+        }
         if let highlight = other.highlight { self.highlight = highlight }
         if let verticalAlign = other.verticalAlign { self.verticalAlign = verticalAlign }
         if let characterSpacing = other.characterSpacing { self.characterSpacing = characterSpacing }
@@ -706,6 +739,14 @@ extension RunProperties {
             if let eastAsia = rFonts.eastAsia { attrs.append("w:eastAsia=\"\(escapeXMLAttribute(eastAsia))\"") }
             if let cs = rFonts.cs { attrs.append("w:cs=\"\(escapeXMLAttribute(cs))\"") }
             if let hint = rFonts.hint { attrs.append("w:hint=\"\(escapeXMLAttribute(hint))\"") }
+            // PsychQuant/che-word-mcp#274: theme-font attributes after the
+            // existing five, so output for files without them is unchanged.
+            // A theme-only `<w:rFonts>` now has a non-empty attribute list
+            // and is emitted instead of skipped.
+            if let v = rFonts.asciiTheme { attrs.append("w:asciiTheme=\"\(escapeXMLAttribute(v))\"") }
+            if let v = rFonts.hAnsiTheme { attrs.append("w:hAnsiTheme=\"\(escapeXMLAttribute(v))\"") }
+            if let v = rFonts.eastAsiaTheme { attrs.append("w:eastAsiaTheme=\"\(escapeXMLAttribute(v))\"") }
+            if let v = rFonts.csTheme { attrs.append("w:cstheme=\"\(escapeXMLAttribute(v))\"") }
             if !attrs.isEmpty {
                 add(2, "<w:rFonts \(attrs.joined(separator: " "))/>")
             }
@@ -732,10 +773,18 @@ extension RunProperties {
         }
 
         // 19. color
-        if let color = color {
+        // PsychQuant/che-word-mcp#274: theme attributes ride on the same
+        // element. `w:val` stays first; a source `<w:color>` with theme
+        // attributes but no `w:val` round-trips without inventing one.
+        if color != nil || themeColor != nil || themeTint != nil || themeShade != nil {
+            var attrs: [String] = []
             // v0.19.4+ (#56 R3-NEW-6 audit): color is a hex string in normal
             // use but the field is `String?` so escape defensively.
-            add(19, "<w:color w:val=\"\(escapeXMLAttribute(color))\"/>")
+            if let color = color { attrs.append("w:val=\"\(escapeXMLAttribute(color))\"") }
+            if let v = themeColor { attrs.append("w:themeColor=\"\(escapeXMLAttribute(v))\"") }
+            if let v = themeTint { attrs.append("w:themeTint=\"\(escapeXMLAttribute(v))\"") }
+            if let v = themeShade { attrs.append("w:themeShade=\"\(escapeXMLAttribute(v))\"") }
+            add(19, "<w:color \(attrs.joined(separator: " "))/>")
         }
 
         // 20-23. CharacterSpacing block (spacing/w/kern/position)

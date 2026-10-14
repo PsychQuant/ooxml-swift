@@ -521,7 +521,12 @@ public struct WordDocument: Equatable {
                   !rp.noProof,
                   rp.kern == nil,
                   rp.lang == nil,
-                  rp.rFonts?.cs == nil          // RunPayload has no complex-script font slot
+                  rp.rFonts?.cs == nil,         // RunPayload has no complex-script font slot
+                  // PsychQuant/che-word-mcp#274: RunPayload has no colour-theme
+                  // slots and no `w:cstheme` slot — such a run must take the
+                  // typed path, which emits them, instead of losing them here.
+                  rp.themeColor == nil, rp.themeTint == nil, rp.themeShade == nil,
+                  rp.rFonts?.csTheme == nil
             else { return false }
         }
         return true
@@ -565,6 +570,11 @@ public struct WordDocument: Equatable {
                     vertAlign: rp.verticalAlign?.rawValue,
                     fontHAnsi: rp.rFonts?.hAnsi ?? rp.fontName,
                     fontHint: rp.rFonts?.hint)
+                // PsychQuant/che-word-mcp#274: the three theme fonts RunPayload
+                // does model are carried through, not dropped.
+                runPayload.fontAsciiTheme = rp.rFonts?.asciiTheme
+                runPayload.fontHAnsiTheme = rp.rFonts?.hAnsiTheme
+                runPayload.fontEastAsiaTheme = rp.rFonts?.eastAsiaTheme
                 // Same rule the typed serializer uses for xml:space="preserve";
                 // without it the reducer emitted <w:t> bare and Word ate the whitespace.
                 runPayload.preserveSpace = Run.needsXMLSpacePreserve(run.text) ? true : nil

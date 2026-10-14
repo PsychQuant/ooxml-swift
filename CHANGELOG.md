@@ -8,6 +8,32 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`<w:color>` 的 theme 屬性與 `<w:rFonts>` 的 theme 字型，在任何編輯後存檔不再整份文件消失**（PsychQuant/che-word-mcp#274）：
+  `DocxReader.parseRunProperties` 過去只讀 `<w:color>` 的 `w:val`，以及 `<w:rFonts>` 的
+  `ascii`／`hAnsi`／`eastAsia`／`cs`／`hint`；這兩個元素又列在已辨識的 rPr 子元素集合裡，
+  不會被當原文保留到 `rawChildren`。只存檔不改時原檔位元組直接沿用，所以無損；但只要有
+  任何編輯讓 writer 從 typed model 重新產生該 part，`w:themeColor`／`w:themeTint`／
+  `w:themeShade` 與 `w:asciiTheme`／`w:hAnsiTheme`／`w:eastAsiaTheme`／`w:cstheme` 就從
+  **每一個** run、段落記號 rPr 與樣式 rPr 上消失（同一個 parser 由四處共用）；只有 theme
+  屬性的 `<w:rFonts>` 會整個元素不見。Word 預設的內文格式正是 `w:themeColor="text1"` 加
+  `w:eastAsiaTheme="minorEastAsia"`，所以幾乎每一份 Word 寫的文件都中。
+
+  現在 `RunProperties` 新增 `themeColor`／`themeTint`／`themeShade`，`RFontsProperties`
+  新增 `asciiTheme`／`hAnsiTheme`／`eastAsiaTheme`／`csTheme`（輸出為 `w:cstheme`），讀進、
+  寫回；新欄位排在既有屬性之後，沒有 theme 屬性的檔案輸出位元組不變。`appendParagraph`
+  的 op-log 路徑把 `RunPayload` 有的三個 theme 字型帶過去，帶有 theme 顏色或 `w:cstheme`
+  的 run 則改走 typed 路徑（`RunPayload` 沒有對應欄位，過去在這裡也會被丟掉）。
+
+### Changed
+
+- **`RunProperties.merge(with:)`：patch 有指定顏色時，整組 theme 顏色以 patch 為準**
+  （PsychQuant/che-word-mcp#274）。Word 讓 `w:themeColor` 優先於 `w:val`，若沿用舊的 theme
+  顏色，新指定的 `color` 在 Word 裡會完全沒有效果。現在 patch 只要帶了 `color` 或任何一個
+  theme 欄位，舊的 `themeColor`／`themeTint`／`themeShade` 就換成 patch 的值（patch 沒給就
+  清掉）；不碰顏色的 patch 不受影響。對過去「改了顏色卻沒變」的呼叫端，這是行為改變。
+
 ## [3.19.0] - 2026-09-28
 
 ### Changed
