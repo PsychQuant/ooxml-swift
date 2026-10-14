@@ -511,4 +511,169 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
         XCTAssertThrowsError(try doc.insertParagraphAsRevision(Paragraph(text: "X"), at: .paragraphIndex(doc.body.children.count + 5)))
     }
+
+
+    // MARK: - Verify round 3 (che-word-mcp#275 round 4)
+
+    private func reviewerA(_ tag: String, _ id: Int) -> String {
+        "<w:\(tag) w:id=\"\(id)\" w:author=\"A\" w:date=\"2026-10-01T00:00:00Z\">"
+    }
+
+    /// A run carries only an id, so two revisions of different types sharing
+    /// one id could never be told apart. The reader gives the later one a
+    /// fresh id; same-type sharing (che-word-mcp's mark + runs) stays one
+    /// revision.
+    func testAMarkAndARunDeletionSharingAnIdAreSeparatedOnRead() throws {
+        let body = """
+            <w:p><w:r><w:t>Alpha.</w:t></w:r></w:p>\
+            <w:p><w:pPr><w:rPr><w:ins w:id="7" w:author="A" w:date="2026-10-01T00:00:00Z"/></w:rPr></w:pPr>\
+            \(reviewerA("del", 7))<w:r><w:delText>x</w:delText></w:r></w:del><w:r><w:t>y</w:t></w:r></w:p>
+            """
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        let deletion = try XCTUnwrap(doc.revisions.revisions.first { $0.type == .deletion })
+        XCTAssertNotEqual(deletion.id, 7)
+        try doc.updateParagraph(at: 0, text: "ALPHA.")   // force typed re-serialization
+
+        let p = try XCTUnwrap(paragraph(containing: ">y<", in: try savedDocumentXML(doc)))
+        XCTAssertTrue(p.contains("<w:pPr><w:rPr><w:ins w:id=\"7\""), "got: \(p)")
+        XCTAssertTrue(p.contains("<w:del w:id=\"\(deletion.id)\""), "the deletion keeps its wrapper — got: \(p)")
+        XCTAssertFalse(p.contains("<w:ins w:id=\"7\" w:author=\"A\" w:date=\"2026-10-01T00:00:00Z\"><w:r>"), "got: \(p)")
+
+        try doc.acceptRevision(revisionId: 7)
+        XCTAssertEqual(doc.revisions.revisions.map(\.id), [deletion.id], "accepting the mark leaves the deletion pending")
+        try doc.rejectRevision(revisionId: deletion.id)
+        XCTAssertTrue(doc.revisions.revisions.isEmpty)
+        // Restoring the text of a deletion read from a file is che-word-mcp#291.
+    }
+
+    func testAnInsertionAndADeletionSharingAnIdInOneParagraphAreSeparate() throws {
+        let body = "<w:p>\(reviewerA("ins", 7))<w:r><w:t>new</w:t></w:r></w:ins>\(reviewerA("del", 7))<w:r><w:delText>old</w:delText></w:r></w:del></w:p>"
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        XCTAssertEqual(Set(doc.revisions.revisions.map(\.id)).count, 2)
+
+        try doc.rejectRevision(revisionId: 7)
+        XCTAssertEqual(doc.revisions.revisions.map(\.type), [.deletion], "only the insertion is rejected")
+        XCTAssertFalse(doc.getParagraphs()[0].getText().contains("new"))
+        let p = try XCTUnwrap(paragraph(containing: "old", in: try savedDocumentXML(doc)))
+        XCTAssertTrue(p.contains("<w:del w:id=\"\(doc.revisions.revisions[0].id)\""), "the deletion is still tracked — got: \(p)")
+    }
+
+    func testRevisionsSharingAnIdAcrossParagraphsAreBothAddressable() throws {
+        let body = "<w:p>\(reviewerA("ins", 7))<w:r><w:t>new</w:t></w:r></w:ins></w:p><w:p>\(reviewerA("del", 7))<w:r><w:delText>old</w:delText></w:r></w:del></w:p>"
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        let ids = doc.revisions.revisions.map(\.id)
+        XCTAssertEqual(Set(ids).count, 2, "got: \(ids)")
+    }
+
+    /// A mark sharing its id with a mixed-content wrapper (a hyperlink inside
+    /// `<w:ins>`): the wrapper gets its own id, written into its raw XML too.
+    func testAMarkSharingItsIdWithAMixedWrapperIsSeparate() throws {
+        let body = Self.wordInsertedParagraph("""
+            <w:ins w:id="5" w:author="Reviewer A" w:date="2026-10-01T00:00:00Z"><w:hyperlink w:anchor="x"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:ins>
+            """)
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        let mixed = try XCTUnwrap(doc.revisions.revisions.first { $0.isMixedContentWrapper })
+        XCTAssertNotEqual(mixed.id, 5)
+        try doc.updateParagraph(at: 0, text: "ALPHA.")   // force typed re-serialization
+        XCTAssertTrue(try savedDocumentXML(doc).contains("<w:ins w:id=\"\(mixed.id)\" w:author=\"Reviewer A\""))
+        try doc.updateParagraph(at: 0, text: "Alpha.")
+
+        try doc.tryRejectAllRevisions()
+        XCTAssertEqual(doc.getParagraphs().map { $0.getText() }, ["Alpha.", "Omega."])
+    }
+
+    /// Ids the model does not type (a deleted paragraph mark stays raw) are
+    /// still taken: a new revision never reuses one.
+    func testNewRevisionIdsAvoidIdsKeptOnlyAsRawXML() throws {
+        let body = """
+            <w:p><w:pPr><w:rPr><w:del w:id="40" w:author="A" w:date="2026-10-01T00:00:00Z"/></w:rPr></w:pPr><w:r><w:t>Alpha.</w:t></w:r></w:p>\
+            <w:p>\(reviewerA("ins", 3))<w:r><w:t>Omega.</w:t></w:r></w:ins></w:p>
+            """
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        XCTAssertGreaterThan(doc.allocateRevisionId(), 40)
+    }
+
+    /// Deleting text inside a tracked inserted paragraph would move it out of
+    /// the insertion (reject then joins it into the next paragraph); refused
+    /// until nested revisions exist (che-word-mcp#293).
+    func testEditingInsideATrackedInsertionIsRefused() throws {
+        var (doc, fixture) = try openTracked()
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        _ = try doc.insertParagraphAsRevision(
+            Paragraph(text: "Inserted paragraph."), at: .afterText("Alpha.", instance: 1, options: .exact))
+
+        XCTAssertThrowsError(try doc.deleteTextAsRevision(atParagraph: 1, start: 0, end: 9))
+        XCTAssertThrowsError(try doc.insertTextAsRevision(text: "X", atParagraph: 1, position: 4))
+        XCTAssertEqual(doc.revisions.revisions.count, 1)
+    }
+
+    /// Word's Enter in mid-paragraph before a table: untracked runs, an
+    /// inserted mark, and nothing to join them into. Refused, not accepted.
+    func testRejectingAMarkWithLeftoverTextBeforeATableRefuses() throws {
+        let body = """
+            <w:p><w:pPr><w:rPr><w:ins w:id="5" w:author="A" w:date="2026-10-01T00:00:00Z"/></w:rPr></w:pPr><w:r><w:t>AB</w:t></w:r></w:p>\
+            <w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>CD</w:t></w:r></w:p>
+            """
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+
+        XCTAssertThrowsError(try doc.rejectRevision(revisionId: 5))
+        XCTAssertTrue(doc.revisions.revisions.contains { $0.id == 5 })
+        XCTAssertTrue(try savedDocumentXML(doc).contains("<w:ins w:id=\"5\""))
+    }
+
+    func testRejectingAMarkWithLeftoverTextAtTheEndOfTheBodyRefuses() throws {
+        let body = """
+            <w:p><w:r><w:t>Alpha.</w:t></w:r></w:p>\
+            <w:p><w:pPr><w:rPr><w:ins w:id="5" w:author="A" w:date="2026-10-01T00:00:00Z"/></w:rPr></w:pPr><w:r><w:t>Last.</w:t></w:r></w:p>
+            """
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+
+        XCTAssertThrowsError(try doc.rejectRevision(revisionId: 5))
+        XCTAssertTrue(doc.revisions.revisions.contains { $0.id == 5 })
+    }
+
+    func testAPageBreakCountsAsNonRunContent() throws {
+        var (doc, fixture) = try openTracked()
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        var para = Paragraph(text: "Inserted.")
+        para.hasPageBreak = true
+        XCTAssertThrowsError(try doc.insertParagraphAsRevision(para, at: .afterText("Alpha.", instance: 1, options: .exact)))
+    }
+
+    /// A mixed-content wrapper whose paragraph is gone is an orphan like any
+    /// other: its entry is removed, nothing else changes.
+    func testAnOrphanedMixedWrapperRevisionIsRemoved() throws {
+        let body = """
+            <w:p>\(reviewerA("ins", 3))<w:hyperlink w:anchor="x"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:ins></w:p>\
+            <w:p><w:r><w:t>Omega.</w:t></w:r></w:p>
+            """
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        try doc.deleteParagraph(at: 0)
+
+        XCTAssertNoThrow(try doc.acceptRevision(revisionId: 3))
+        XCTAssertTrue(doc.revisions.revisions.isEmpty)
+        XCTAssertEqual(doc.getParagraphs().map { $0.getText() }, ["Omega."])
+    }
+
+    /// CT_ParaRPr puts every track-change element before the formatting.
+    func testRawTrackChangesOnAMarkComeRightAfterTheInsertion() throws {
+        let body = """
+            <w:p><w:r><w:t>Alpha.</w:t></w:r></w:p>\
+            <w:p><w:pPr><w:rPr><w:ins w:id="5" w:author="A" w:date="2026-10-01T00:00:00Z"/><w:del w:id="8" w:author="B" w:date="2026-10-02T00:00:00Z"/><w:b/></w:rPr></w:pPr><w:r><w:t>y</w:t></w:r></w:p>
+            """
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        try doc.updateParagraph(at: 0, text: "ALPHA.")
+
+        let p = try XCTUnwrap(paragraph(containing: ">y<", in: try savedDocumentXML(doc)))
+        XCTAssertNotNil(p.range(of: #"<w:rPr><w:ins w:id="5"[^>]*/><w:del w:id="8"[^>]*/><w:b/>"#, options: .regularExpression), "got: \(p)")
+    }
 }

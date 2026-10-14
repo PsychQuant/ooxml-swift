@@ -646,6 +646,7 @@ extension Paragraph {
             || !smartTags.isEmpty || !customXmlBlocks.isEmpty || !bidiOverrides.isEmpty
             || !footnoteIds.isEmpty || !endnoteIds.isEmpty || !unrecognizedChildren.isEmpty
             || !commentIds.isEmpty   // written by insertComment in the session (deprecated, still emitted)
+            || hasPageBreak          // emitted as its own untracked <w:r><w:br w:type="page"/></w:r>
     }
 
     /// PsychQuant/che-word-mcp#275: lowest source position among this
@@ -1528,7 +1529,18 @@ extension ParagraphProperties {
         // we wrap with <w:rPr>...</w:rPr> here. Skip emission when nil OR
         // when the inner content is empty — matches the "no synthetic empty
         // <w:rPr/>" gate discipline established in sub-stack B-CONT-2.
-        let markInner = (paragraphMarkRevisionXML ?? "") + (markRunProperties?.toXML() ?? "")
+        //
+        // CT_ParaRPr: the track-change group (ins, del, moveFrom, moveTo)
+        // comes before the formatting. A deleted or moved mark stays raw, so
+        // those raw children move up next to the typed insertion
+        // (che-word-mcp#275 round 4).
+        let markTrackChanges: Set<String> = ["del", "moveFrom", "moveTo"]
+        var markProperties = markRunProperties
+        let rawMarkTrackChanges = markProperties?.rawChildren?.filter { markTrackChanges.contains($0.name) } ?? []
+        markProperties?.rawChildren?.removeAll { markTrackChanges.contains($0.name) }
+        if markProperties?.rawChildren?.isEmpty == true { markProperties?.rawChildren = nil }
+        let markInner = (paragraphMarkRevisionXML ?? "") + rawMarkTrackChanges.map(\.xml).joined()
+            + (markProperties?.toXML() ?? "")
         if !markInner.isEmpty {
             add("rPr", "<w:rPr>\(markInner)</w:rPr>")
         }

@@ -111,6 +111,27 @@ public struct DocxReader {
     /// (e.g., during `parseStyles`, where whitespace-significance doesn't apply).
     internal static var currentWhitespaceContext: WhitespaceParseContext?
 
+    /// PsychQuant/che-word-mcp#275 round 4: the registry that keeps revision
+    /// ids unique per kind while a package is read (nil for parser-only
+    /// callers, which keep the ids they read).
+    internal static var currentRevisionIdRegistry: RevisionIdRegistry?
+
+    /// The id a revision read as `id` keeps (see `RevisionIdRegistry`).
+    static func claimRevisionId(_ id: Int, _ type: RevisionType, mixed: Bool = false) -> Int {
+        currentRevisionIdRegistry?.claim(id, type, mixed: mixed) ?? id
+    }
+
+    /// `claimRevisionId` for an `<w:ins>` / `<w:del>` / move wrapper. A
+    /// wrapper kept as raw XML gets a fresh id written into its element too,
+    /// since its raw copy is what the writer emits.
+    static func claimWrapperRevisionId(_ element: XMLElement, _ type: RevisionType) -> Int {
+        let read = Int(element.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+        let mixed = hasNonRunChild(element)
+        let id = claimRevisionId(read, type, mixed: mixed)
+        if mixed, id != read { element.attribute(forName: "w:id")?.stringValue = String(id) }
+        return id
+    }
+
     /// Set the whitespace context for the duration of `block`, then restore
     /// the previous context. Use at part-parse boundaries (one per
     /// `XMLDocument(data:)` for `<w:t>`-bearing parts: document, header*, footer*,
@@ -231,6 +252,13 @@ public struct DocxReader {
         // 3. 提取圖片資源
         let imageExtraction = try extractImages(from: tempDir, relationships: relationships)
 
+        // PsychQuant/che-word-mcp#275 round 4: revision ids unique per kind
+        // across every part; fresh ids avoid every id in the file.
+        let revisionIdRegistry = RevisionIdRegistry(fileIds: RevisionIdRegistry.revisionIds(inPackageAt: tempDir))
+        let previousRevisionIdRegistry = currentRevisionIdRegistry
+        currentRevisionIdRegistry = revisionIdRegistry
+        defer { currentRevisionIdRegistry = previousRevisionIdRegistry }
+
         // 4. 讀取 document.xml
         let documentURL = tempDir.appendingPathComponent("word/document.xml")
         guard FileManager.default.fileExists(atPath: documentURL.path) else {
@@ -348,6 +376,10 @@ public struct DocxReader {
         // so DocxWriter overlay mode skips every typed-part writer until the caller
         // mutates the typed model.
         document.modifiedParts.removeAll()
+
+        // New revision ids must not reuse an id the model does not type
+        // (deleted paragraph marks, table-row revisions stay raw).
+        document.revisions.reservedIds = revisionIdRegistry.used
 
         return document
     }
@@ -1771,7 +1803,8 @@ public struct DocxReader {
             // is dropped so the writer emits it once. Deleted / moved marks
             // are not modelled and stay raw.
             if let markIns = pPr.elements(forName: "w:rPr").first?.elements(forName: "w:ins").first,
-               let markId = Int(markIns.attribute(forName: "w:id")?.stringValue ?? "") {
+               let rawMarkId = Int(markIns.attribute(forName: "w:id")?.stringValue ?? "") {
+                let markId = Self.claimRevisionId(rawMarkId, .insertion)
                 paragraph.markRevisionId = markId
                 if var mark = paragraph.properties.markRunProperties {
                     mark.rawChildren?.removeAll { $0.name == "ins" }
@@ -1788,7 +1821,8 @@ public struct DocxReader {
 
             // Part B: detect <w:pPrChange> inside <w:pPr> for paragraph property change tracking
             if let pPrChange = pPr.elements(forName: "w:pPrChange").first {
-                let revId = Int(pPrChange.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+                let revId = Self.claimRevisionId(
+                    Int(pPrChange.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0, .paragraphChange)
                 let author = pPrChange.attribute(forName: "w:author")?.stringValue ?? "Unknown"
                 let date = pPrChange.attribute(forName: "w:date")?.stringValue
                     .flatMap { isoFormatter.date(from: $0) } ?? Date()
@@ -1863,13 +1897,14 @@ public struct DocxReader {
                 parsedRun.position = childPosition
                 paragraph.runs.append(parsedRun)
                 // Part B: detect <w:rPrChange> inside <w:rPr> for run formatting change tracking
-                if let rPrChangeRev = Self.detectRPrChangeRevision(in: childElement, isoFormatter: isoFormatter) {
+                if var rPrChangeRev = Self.detectRPrChangeRevision(in: childElement, isoFormatter: isoFormatter) {
+                    rPrChangeRev.id = Self.claimRevisionId(rPrChangeRev.id, .formatChange)
                     paragraph.revisions.append(rPrChangeRev)
                 }
 
             case "ins":
                 // 插入修訂：提取 w:r 並建立 Revision
-                let revId = Int(childElement.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+                let revId = Self.claimWrapperRevisionId(childElement, .insertion)
                 let author = childElement.attribute(forName: "w:author")?.stringValue ?? "Unknown"
                 let date = childElement.attribute(forName: "w:date")?.stringValue
                     .flatMap { isoFormatter.date(from: $0) } ?? Date()
@@ -1934,7 +1969,7 @@ public struct DocxReader {
 
             case "del":
                 // 刪除修訂：提取 w:delText 並建立 Revision
-                let revId = Int(childElement.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+                let revId = Self.claimWrapperRevisionId(childElement, .deletion)
                 let author = childElement.attribute(forName: "w:author")?.stringValue ?? "Unknown"
                 let date = childElement.attribute(forName: "w:date")?.stringValue
                     .flatMap { isoFormatter.date(from: $0) } ?? Date()
@@ -1993,7 +2028,7 @@ public struct DocxReader {
 
             case "moveFrom":
                 // 移動來源修訂（mirrors w:del）：抽取 w:r 並建立 Revision
-                let revId = Int(childElement.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+                let revId = Self.claimWrapperRevisionId(childElement, .moveFrom)
                 let author = childElement.attribute(forName: "w:author")?.stringValue ?? "Unknown"
                 let date = childElement.attribute(forName: "w:date")?.stringValue
                     .flatMap { isoFormatter.date(from: $0) } ?? Date()
@@ -2033,7 +2068,7 @@ public struct DocxReader {
 
             case "moveTo":
                 // 移動目標修訂（mirrors w:ins）：抽取 w:r 並建立 Revision
-                let revId = Int(childElement.attribute(forName: "w:id")?.stringValue ?? "0") ?? 0
+                let revId = Self.claimWrapperRevisionId(childElement, .moveTo)
                 let author = childElement.attribute(forName: "w:author")?.stringValue ?? "Unknown"
                 let date = childElement.attribute(forName: "w:date")?.stringValue
                     .flatMap { isoFormatter.date(from: $0) } ?? Date()

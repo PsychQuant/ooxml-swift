@@ -485,9 +485,8 @@ public struct RevisionsCollection: Equatable {
     public var revisions: [Revision] = []
     public var settings: TrackChangesSettings = TrackChangesSettings()
 
-    /// 取得下一個修訂 ID
-    mutating func nextRevisionId() -> Int {
-        let maxId = revisions.map { $0.id }.max() ?? 0
-        return maxId + 1
-    }
+    /// PsychQuant/che-word-mcp#275 round 4: every revision id in the file the
+    /// document was read from, including ones the model keeps only as raw
+    /// XML. `allocateRevisionId` never hands one out. Not part of `==`.
+    @EqualityIgnored public internal(set) var reservedIds: Set<Int> = []
 }
