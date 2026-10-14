@@ -3072,9 +3072,10 @@ public struct WordDocument: Equatable {
         // made `+ 1` trap and took the MCP server down; callers also add 1
         // (move pairs). Near the ceiling, take the smallest unused positive id.
         if maxId < Int.max / 2 { return maxId + 1 }
+        // The successor must be free too: a move takes `id` and `id + 1`.
         let used = Set(ids)
         var candidate = 1
-        while used.contains(candidate) { candidate += 1 }
+        while used.contains(candidate) || used.contains(candidate + 1) { candidate += 1 }
         return candidate
     }
 
@@ -3185,7 +3186,7 @@ public struct WordDocument: Equatable {
             content: text
         )
         paragraph.revisions.append(revision)
-        revisions.revisions.append(revision)
+        revisions.revisions.append(revision.anchored())
 
         body.children[bodyIdx] = .paragraph(paragraph)
         markTypedDirty("word/document.xml")
@@ -3275,7 +3276,7 @@ public struct WordDocument: Equatable {
         )
         revision.originalText = deletedText
         paragraph.revisions.append(revision)
-        revisions.revisions.append(revision)
+        revisions.revisions.append(revision.anchored())
 
         body.children[bodyIdx] = .paragraph(paragraph)
         markTypedDirty("word/document.xml")
@@ -3406,7 +3407,7 @@ public struct WordDocument: Equatable {
         )
         fromRevision.originalText = movedText
         fromPara.revisions.append(fromRevision)
-        revisions.revisions.append(fromRevision)
+        revisions.revisions.append(fromRevision.anchored())
 
         var toRevision = Revision(
             id: toId, type: .moveTo, author: resolvedAuthor,
@@ -3414,7 +3415,7 @@ public struct WordDocument: Equatable {
         )
         toRevision.newText = movedText
         toPara.revisions.append(toRevision)
-        revisions.revisions.append(toRevision)
+        revisions.revisions.append(toRevision.anchored())
 
         body.children[fromBodyIdx] = .paragraph(fromPara)
         body.children[toBodyIdx] = .paragraph(toPara)
@@ -3459,7 +3460,7 @@ public struct WordDocument: Equatable {
         )
         revision.previousFormatDescription = "ParagraphProperties change"
         paragraph.revisions.append(revision)
-        revisions.revisions.append(revision)
+        revisions.revisions.append(revision.anchored())
 
         body.children[bodyIdx] = .paragraph(paragraph)
         markTypedDirty("word/document.xml")
@@ -3509,7 +3510,7 @@ public struct WordDocument: Equatable {
         )
         revision.previousFormat = previousProperties
         paragraph.revisions.append(revision)
-        revisions.revisions.append(revision)
+        revisions.revisions.append(revision.anchored())
 
         body.children[bodyIdx] = .paragraph(paragraph)
         markTypedDirty("word/document.xml")
@@ -3790,8 +3791,8 @@ public struct WordDocument: Equatable {
             // 接受插入：移除標記，保留文字（文字已在文件中）。
             // R5-CONT-4 P0 #1: ALSO clear paragraph + run revision-id
             // refs so Paragraph.toXML stops wrapping runs in <w:ins>.
-            if let key = applyToParagraphs(carrying: revisionId_, in: revision.source, mutate: clearAllMarkers)
-                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
+            if let key = applyToParagraphs(carrying: revisionId_, type: revision.type, in: revision.source, mutate: clearAllMarkers)
+                ?? (revision.isAnchored ? nil : applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers)) {
                 partKeyForDirty = key
             } else {
                 // Soft-fail: the typed Revision exists but no matching
@@ -3821,12 +3822,18 @@ public struct WordDocument: Equatable {
                 }
                 clearAllMarkers(&para)
             }
-            if let key = applyToParagraphs(carrying: revisionId_, in: revision.source, mutate: removeAndClear)
-                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: legacyRemoveAndClear) {
+            if let key = applyToParagraphs(carrying: revisionId_, type: revision.type, in: revision.source, mutate: removeAndClear)
+                ?? (revision.isAnchored ? nil : applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: legacyRemoveAndClear)) {
                 partKeyForDirty = key
             } else {
                 // No matching paragraph in the source part — surface the
                 // failure instead of silently dropping the typed Revision.
+                if revision.isAnchored {
+                    // Orphan (che-word-mcp#275 round 3): nothing carries it any
+                    // more — its paragraph was removed. Drop the entry; touch no text.
+                    revisions.revisions.remove(at: index)
+                    return
+                }
                 throw RevisionError.notFound(revisionId)
             }
         case .formatting, .paragraphChange, .formatChange, .moveFrom, .moveTo:
@@ -3834,8 +3841,8 @@ public struct WordDocument: Equatable {
             // (rPrChange / pPrChange / move-from/to wrapper emit) so
             // toXML stops wrapping. Soft-fail on miss (legitimate
             // already-cleared state).
-            if let key = applyToParagraphs(carrying: revisionId_, in: revision.source, mutate: clearAllMarkers)
-                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
+            if let key = applyToParagraphs(carrying: revisionId_, type: revision.type, in: revision.source, mutate: clearAllMarkers)
+                ?? (revision.isAnchored ? nil : applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers)) {
                 partKeyForDirty = key
             } else {
                 partKeyForDirty = try sourceToPartKey(revision.source, revisionId: revisionId)
@@ -3917,11 +3924,18 @@ public struct WordDocument: Equatable {
     /// writer emits it — a run's insertion / deletion / move wrapper or format
     /// change, the paragraph mark, the paragraph-format change, or the
     /// paragraph's own revision list.
-    static func carriesRevision(_ para: Paragraph, id: Int) -> Bool {
-        para.markRevisionId == id
-            || para.paragraphFormatChangeRevisionId == id
-            || para.revisions.contains { $0.id == id }
-            || para.runs.contains { $0.revisionId == id || $0.formatChangeRevisionId == id }
+    ///
+    /// Round 3: matched by id AND type, so a file whose ids are not unique
+    /// (non-Word producers, crafted files) cannot make one accept / reject
+    /// act on another revision that happens to share the id.
+    static func carriesRevision(_ para: Paragraph, id: Int, type: RevisionType) -> Bool {
+        if para.revisions.contains(where: { $0.id == id && $0.type == type }) { return true }
+        switch type {
+        case .insertion: return para.markRevisionId == id
+        case .paragraphChange: return para.paragraphFormatChangeRevisionId == id
+        case .formatChange, .formatting: return para.runs.contains { $0.formatChangeRevisionId == id }
+        default: return false
+        }
     }
 
     /// PsychQuant/che-word-mcp#280: applies `mutate` to every paragraph of
@@ -3934,29 +3948,37 @@ public struct WordDocument: Equatable {
     /// revision built directly through the public model).
     private mutating func applyToParagraphs(
         carrying revisionId: Int,
+        type: RevisionType,
         in source: RevisionSource,
         mutate: (inout Paragraph) -> Void
     ) -> String? {
+        withPartChildren(source) { children in
+            Self.applyToCarriers(in: &children, revisionId: revisionId, type: type, mutate: mutate)
+        }.flatMap { hit, key in hit ? key : nil }
+    }
+
+    /// The body children of the part `source` names, with its dirty-tracking
+    /// key; nil when that part no longer exists.
+    private mutating func withPartChildren<T>(
+        _ source: RevisionSource, _ work: (inout [BodyChild]) -> T
+    ) -> (T, String)? {
         switch source {
         case .body:
-            return Self.applyToCarriers(in: &body.children, revisionId: revisionId, mutate: mutate)
-                ? "word/document.xml" : nil
+            return (work(&body.children), "word/document.xml")
         case .header(let id):
             guard let hi = headers.firstIndex(where: { $0.id == id }) else { return nil }
             let key = DocumentWalker.headerPartKey(for: headers[hi])
-            return Self.applyToCarriers(in: &headers[hi].bodyChildren, revisionId: revisionId, mutate: mutate) ? key : nil
+            return (work(&headers[hi].bodyChildren), key)
         case .footer(let id):
             guard let fi = footers.firstIndex(where: { $0.id == id }) else { return nil }
             let key = DocumentWalker.footerPartKey(for: footers[fi])
-            return Self.applyToCarriers(in: &footers[fi].bodyChildren, revisionId: revisionId, mutate: mutate) ? key : nil
+            return (work(&footers[fi].bodyChildren), key)
         case .footnote(let id):
             guard let fni = footnotes.footnotes.firstIndex(where: { $0.id == id }) else { return nil }
-            return Self.applyToCarriers(in: &footnotes.footnotes[fni].bodyChildren, revisionId: revisionId, mutate: mutate)
-                ? DocumentWalker.footnotesPartKey : nil
+            return (work(&footnotes.footnotes[fni].bodyChildren), DocumentWalker.footnotesPartKey)
         case .endnote(let id):
             guard let eni = endnotes.endnotes.firstIndex(where: { $0.id == id }) else { return nil }
-            return Self.applyToCarriers(in: &endnotes.endnotes[eni].bodyChildren, revisionId: revisionId, mutate: mutate)
-                ? DocumentWalker.endnotesPartKey : nil
+            return (work(&endnotes.endnotes[eni].bodyChildren), DocumentWalker.endnotesPartKey)
         }
     }
 
@@ -3966,6 +3988,7 @@ public struct WordDocument: Equatable {
     private static func applyToCarriers(
         in children: inout [BodyChild],
         revisionId: Int,
+        type: RevisionType,
         mutate: (inout Paragraph) -> Void
     ) -> Bool {
         var hit = false
@@ -3974,7 +3997,7 @@ public struct WordDocument: Equatable {
             case .bookmarkMarker, .rawBlockElement:
                 continue
             case .paragraph(var para):
-                if carriesRevision(para, id: revisionId) {
+                if carriesRevision(para, id: revisionId, type: type) {
                     mutate(&para)
                     children[i] = .paragraph(para)
                     hit = true
@@ -3984,13 +4007,13 @@ public struct WordDocument: Equatable {
                 for r in 0..<table.rows.count {
                     for c in 0..<table.rows[r].cells.count {
                         for p in 0..<table.rows[r].cells[c].paragraphs.count
-                        where carriesRevision(table.rows[r].cells[c].paragraphs[p], id: revisionId) {
+                        where carriesRevision(table.rows[r].cells[c].paragraphs[p], id: revisionId, type: type) {
                             mutate(&table.rows[r].cells[c].paragraphs[p])
                             changed = true
                         }
                         for nt in 0..<table.rows[r].cells[c].nestedTables.count {
                             var nested: [BodyChild] = [.table(table.rows[r].cells[c].nestedTables[nt])]
-                            if applyToCarriers(in: &nested, revisionId: revisionId, mutate: mutate),
+                            if applyToCarriers(in: &nested, revisionId: revisionId, type: type, mutate: mutate),
                                case .table(let updated) = nested[0] {
                                 table.rows[r].cells[c].nestedTables[nt] = updated
                                 changed = true
@@ -4003,7 +4026,7 @@ public struct WordDocument: Equatable {
                     hit = true
                 }
             case .contentControl(let cc, var inner):
-                if applyToCarriers(in: &inner, revisionId: revisionId, mutate: mutate) {
+                if applyToCarriers(in: &inner, revisionId: revisionId, type: type, mutate: mutate) {
                     children[i] = .contentControl(cc, children: inner)
                     hit = true
                 }
@@ -4034,6 +4057,46 @@ public struct WordDocument: Equatable {
             mutate: mutate
         )
         return hit ? partKey : nil
+    }
+
+    /// The paragraph at flat index `index`, counted like `flatParagraphIndex`.
+    static func paragraph(atFlat index: Int, in children: [BodyChild]) -> Paragraph? {
+        var counter = 0
+        var found: Paragraph?
+        _ = flatParagraphIndex(in: children) { para in
+            if counter == index { found = para; return true }
+            counter += 1
+            return false
+        }
+        return found
+    }
+
+    /// PsychQuant/che-word-mcp#275 round 3: why rejecting the paragraph-mark
+    /// insertion `revisionId` on `para` cannot be done faithfully, or nil.
+    /// Once the revision's own runs go and Word's transient markers are
+    /// dropped, anything that is not a run would have to move into the next
+    /// paragraph (Word merges the two). That is not supported yet, so the
+    /// reject refuses — it used to keep the paragraph and drop only the
+    /// mark, a silent accept.
+    static func markRejectionBlocker(_ para: Paragraph, revisionId: Int) -> String? {
+        var rest = droppingTransientMarkers(para)
+        rest.runs.removeAll { $0.revisionId == revisionId }
+        guard rest.hasNonRunContent else { return nil }
+        return "revision \(revisionId) inserted a paragraph whose paragraph mark cannot be rejected yet: the paragraph still holds content other than text (bookmarks, comment ranges, hyperlinks, fields, content controls or note references) that Word would merge into the next paragraph — reject or remove that content first"
+    }
+
+    /// Word's own `_GoBack` bookmark (the last edit position) and proofing
+    /// markers carry no content; a rejected paragraph does not keep them.
+    static func droppingTransientMarkers(_ para: Paragraph) -> Paragraph {
+        var p = para
+        let goBack = Set(p.bookmarks.filter { $0.name == "_GoBack" }.map(\.id))
+            .union(p.bookmarkMarkers.filter { $0.kind == .start && $0.name == "_GoBack" }.map(\.id))
+        if !goBack.isEmpty {
+            p.bookmarks.removeAll { goBack.contains($0.id) }
+            p.bookmarkMarkers.removeAll { goBack.contains($0.id) }
+        }
+        p.proofErrorMarkers.removeAll()
+        return p
     }
 
     /// PsychQuant/che-word-mcp#275: flat paragraph index of the first
@@ -4090,7 +4153,8 @@ public struct WordDocument: Equatable {
         in children: inout [BodyChild],
         target: Int,
         counter: inout Int,
-        revisionId: Int
+        revisionId: Int,
+        keepLastParagraph: Bool = false
     ) -> Bool {
         func nothingLeft(_ para: Paragraph) -> Bool {
             !para.hasNonRunContent && para.runs.allSatisfy {
@@ -4117,7 +4181,7 @@ public struct WordDocument: Equatable {
         }
         /// Shared remove-or-join on one sibling array of paragraphs.
         func resolve(_ paras: inout [Paragraph], at p: Int, keepAtLeastOne: Bool) {
-            var para = paras[p]
+            var para = droppingTransientMarkers(paras[p])
             para.markRevisionId = nil
             para.revisions.removeAll { $0.id == revisionId }
             if nothingLeft(para) {
@@ -4144,10 +4208,11 @@ public struct WordDocument: Equatable {
                     guard para.markRevisionId == revisionId else { return true }
                     // Body level: the "siblings" are the paragraphs directly in
                     // `children`; join only into an immediately following one.
-                    var mark = para
+                    var mark = droppingTransientMarkers(para)
                     mark.markRevisionId = nil
                     mark.revisions.removeAll { $0.id == revisionId }
-                    if nothingLeft(mark) {
+                    let paragraphsHere = children.filter { if case .paragraph = $0 { return true } else { return false } }.count
+                    if nothingLeft(mark), !keepLastParagraph || paragraphsHere > 1 {
                         children.remove(at: i)
                     } else if i + 1 < children.count, case .paragraph(var next) = children[i + 1], canJoin(mark, into: next) {
                         join(mark, into: &next)
@@ -4174,7 +4239,7 @@ public struct WordDocument: Equatable {
                         counter += count
                         for nt in 0..<table.rows[r].cells[c].nestedTables.count {
                             var nestedChildren: [BodyChild] = [.table(table.rows[r].cells[c].nestedTables[nt])]
-                            if rejectInsertedParagraphMark(in: &nestedChildren, target: target, counter: &counter, revisionId: revisionId) {
+                            if rejectInsertedParagraphMark(in: &nestedChildren, target: target, counter: &counter, revisionId: revisionId, keepLastParagraph: true) {
                                 if case .table(let updated) = nestedChildren[0] {
                                     table.rows[r].cells[c].nestedTables[nt] = updated
                                 }
@@ -4185,7 +4250,7 @@ public struct WordDocument: Equatable {
                     }
                 }
             case .contentControl(let cc, var inner):
-                if rejectInsertedParagraphMark(in: &inner, target: target, counter: &counter, revisionId: revisionId) {
+                if rejectInsertedParagraphMark(in: &inner, target: target, counter: &counter, revisionId: revisionId, keepLastParagraph: keepLastParagraph) {
                     children[i] = .contentControl(cc, children: inner)
                     return true
                 }
@@ -4329,11 +4394,19 @@ public struct WordDocument: Equatable {
                 para.runs.removeAll { $0.revisionId == revisionId }
                 para.revisions.removeAll { $0.id == revisionId }
             }
-            // che-word-mcp#275: did this revision also insert a body paragraph
-            // mark? Located by the marker itself, before mutating.
-            var markTarget: Int?
-            if case .body = revision.source {
-                markTarget = Self.flatParagraphIndex(in: body.children) { $0.markRevisionId == revisionId }
+            // che-word-mcp#275: did this revision also insert a paragraph mark?
+            // Located by the marker itself, in the revision's own part. Round 3:
+            // refuse before changing anything when the mark's paragraph holds
+            // content the rejection cannot carry along.
+            let markTarget: Int? = withPartChildren(revision.source) { children in
+                Self.flatParagraphIndex(in: children) { $0.markRevisionId == revisionId }
+            }?.0 ?? nil
+            if let markTarget,
+               let blocker = withPartChildren(revision.source, { children in
+                   Self.paragraph(atFlat: markTarget, in: children)
+                       .flatMap { Self.markRejectionBlocker($0, revisionId: revisionId) }
+               })?.0 ?? nil {
+                throw RevisionError.cannotReject(blocker)
             }
             // Marker-less revision (built directly through the public model):
             // only its recorded index and text locate it.
@@ -4346,22 +4419,26 @@ public struct WordDocument: Equatable {
                 }
                 para.revisions.removeAll { $0.id == revisionId }
             }
-            if let key = applyToParagraphs(carrying: revisionId, in: revision.source, mutate: removeAndClear)
-                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: legacyRemoveAndClear) {
+            if let key = applyToParagraphs(carrying: revisionId, type: revision.type, in: revision.source, mutate: removeAndClear)
+                ?? (revision.isAnchored ? nil : applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: legacyRemoveAndClear)) {
                 partKeyForDirty = key
             } else {
+                if revision.isAnchored {
+                    // Orphan (che-word-mcp#275 round 3): nothing carries it any
+                    // more — its paragraph was removed. Drop the entry; touch no text.
+                    revisions.revisions.remove(at: index)
+                    return
+                }
                 throw RevisionError.notFound(revisionId)
             }
-            if let target = markTarget {
-                var counter = 0
-                Self.rejectInsertedParagraphMark(
-                    in: &body.children, target: target,
-                    counter: &counter, revisionId: revisionId)
-            } else {
-                // Headers / footers / notes: no tracked paragraph insertion
-                // is generated there; clear any marker only.
-                _ = applyToParagraphs(carrying: revisionId, in: revision.source) { para in
-                    if para.markRevisionId == revisionId { para.markRevisionId = nil }
+            if let markTarget {
+                var isBody = false
+                if case .body = revision.source { isBody = true }
+                _ = withPartChildren(revision.source) { children in
+                    var counter = 0
+                    Self.rejectInsertedParagraphMark(
+                        in: &children, target: markTarget, counter: &counter,
+                        revisionId: revisionId, keepLastParagraph: !isBody)
                 }
             }
         case .deletion:
@@ -4389,10 +4466,16 @@ public struct WordDocument: Equatable {
                     }
                 }
             }
-            if let key = applyToParagraphs(carrying: revisionId, in: revision.source, mutate: clearMarker)
-                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearMarker) {
+            if let key = applyToParagraphs(carrying: revisionId, type: revision.type, in: revision.source, mutate: clearMarker)
+                ?? (revision.isAnchored ? nil : applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearMarker)) {
                 partKeyForDirty = key
             } else {
+                if revision.isAnchored {
+                    // Orphan (che-word-mcp#275 round 3): nothing carries it any
+                    // more — its paragraph was removed. Drop the entry; touch no text.
+                    revisions.revisions.remove(at: index)
+                    return
+                }
                 throw RevisionError.notFound(revisionId)
             }
         case .formatting, .paragraphChange, .formatChange, .moveFrom, .moveTo:
@@ -4418,8 +4501,8 @@ public struct WordDocument: Equatable {
                     }
                 }
             }
-            if let key = applyToParagraphs(carrying: revisionId, in: revision.source, mutate: clearAllMarkers)
-                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
+            if let key = applyToParagraphs(carrying: revisionId, type: revision.type, in: revision.source, mutate: clearAllMarkers)
+                ?? (revision.isAnchored ? nil : applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers)) {
                 partKeyForDirty = key
             } else {
                 // For format/move types where the typed Revision exists but

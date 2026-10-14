@@ -645,6 +645,7 @@ extension Paragraph {
             || !commentRangeMarkers.isEmpty || !permissionRangeMarkers.isEmpty
             || !smartTags.isEmpty || !customXmlBlocks.isEmpty || !bidiOverrides.isEmpty
             || !footnoteIds.isEmpty || !endnoteIds.isEmpty || !unrecognizedChildren.isEmpty
+            || !commentIds.isEmpty   // written by insertComment in the session (deprecated, still emitted)
     }
 
     /// PsychQuant/che-word-mcp#275: lowest source position among this
@@ -768,8 +769,10 @@ extension Paragraph {
     private func pPrBlockXML() -> String {
         // PsychQuant/che-word-mcp#275: a revised paragraph mark rides inside
         // the paragraph-mark rPr, so ParagraphProperties emits it.
+        // Prefer the insertion: an id can also belong to a run deletion in
+        // files whose ids are not unique.
         let markRevisionXML: String? = markRevisionId.flatMap { id in
-            revisions.first { $0.id == id }?.toMarkerXML()
+            (revisions.first { $0.id == id && $0.type == .insertion } ?? revisions.first { $0.id == id })?.toMarkerXML()
         }
         let propsXML = properties.toXML(paragraphMarkRevisionXML: markRevisionXML)
         let formatChangeRevision: Revision? = {

@@ -314,9 +314,12 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
         XCTAssertEqual(doc.getParagraphs().map { $0.getText() }, ["ALPHA.", "Omega."])
     }
 
-    /// Rejecting never deletes content that is not part of the insertion: a
-    /// hyperlink added later keeps the paragraph (only the mark is cleared).
-    func testRejectKeepsAParagraphThatGainedUntrackedNonRunContent() throws {
+    /// Rejecting never deletes content that is not part of the insertion. A
+    /// hyperlink added later would have to merge into the next paragraph,
+    /// which is not supported yet: the reject refuses and nothing changes
+    /// (round 3 — round 2 kept the paragraph and dropped only the mark, a
+    /// silent accept).
+    func testRejectRefusesWhenTheParagraphGainedUntrackedNonRunContent() throws {
         var (doc, fixture) = try openTracked()
         defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
         let id = try doc.insertParagraphAsRevision(
@@ -328,11 +331,11 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
         inserted.hyperlinks.append(Hyperlink(id: "h1", text: "LINK", anchor: "target"))
         doc.body.children[bodyIdx] = .paragraph(inserted)
 
-        try doc.rejectRevision(revisionId: id)
+        XCTAssertThrowsError(try doc.rejectRevision(revisionId: id))
         let xml = try savedDocumentXML(doc)
         XCTAssertTrue(xml.contains("LINK"), "untracked hyperlink must survive — got: \(xml)")
-        XCTAssertFalse(xml.contains("Inserted."), "tracked text must be gone — got: \(xml)")
-        XCTAssertFalse(xml.contains("w:author=\"Editor B\""), "no markup of the rejected revision may remain — got: \(xml)")
+        XCTAssertTrue(xml.contains("Inserted."), "nothing changes on a refused reject — got: \(xml)")
+        XCTAssertTrue(doc.revisions.revisions.contains { $0.id == id })
     }
 
     /// A join carries the other revisions' definitions with their runs, and
@@ -389,5 +392,123 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
         XCTAssertTrue(xml.contains("w:orient=\"landscape\""), "mid-body section break must survive — got: \(xml)")
         let appended = try XCTUnwrap(paragraph(containing: "Appended.", in: xml))
         XCTAssertTrue(appended.contains("<w:ins"), "appended paragraph must be tracked — got: \(appended)")
+    }
+
+    // MARK: - Verify round 2 (che-word-mcp#275 round 3)
+
+    private static func wordInsertedParagraph(_ content: String) -> String {
+        """
+        <w:p><w:r><w:t>Alpha.</w:t></w:r></w:p>\
+        <w:p><w:pPr><w:rPr><w:ins w:id="5" w:author="Reviewer A" w:date="2026-10-01T00:00:00Z"/></w:rPr></w:pPr>\
+        \(content)</w:p>\
+        <w:p><w:r><w:t>Omega.</w:t></w:r></w:p>
+        """
+    }
+
+    /// Word's own `_GoBack` bookmark (left where the last edit happened) and
+    /// proofing markers do not keep a rejected paragraph alive.
+    func testRejectAllRemovesAWordParagraphHoldingTheGoBackBookmark() throws {
+        let body = Self.wordInsertedParagraph("""
+            <w:bookmarkStart w:id="0" w:name="_GoBack"/><w:bookmarkEnd w:id="0"/>\
+            <w:ins w:id="6" w:author="Reviewer A" w:date="2026-10-01T00:00:00Z"><w:r><w:t>Word paragraph.</w:t></w:r></w:ins>
+            """)
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+
+        try doc.tryRejectAllRevisions()
+        XCTAssertEqual(doc.getParagraphs().map { $0.getText() }, ["Alpha.", "Omega."])
+    }
+
+    /// Content a rejected mark cannot move (here a comment range) makes the
+    /// reject refuse before anything changes — never a silent accept.
+    func testRejectingAMarkWhoseParagraphHoldsACommentRangeRefuses() throws {
+        let body = Self.wordInsertedParagraph("""
+            <w:commentRangeStart w:id="9"/>\
+            <w:ins w:id="6" w:author="Reviewer A" w:date="2026-10-01T00:00:00Z"><w:r><w:t>Word paragraph.</w:t></w:r></w:ins>\
+            <w:commentRangeEnd w:id="9"/>
+            """)
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+
+        try doc.rejectRevision(revisionId: 6)
+        XCTAssertThrowsError(try doc.rejectRevision(revisionId: 5))
+        XCTAssertTrue(doc.revisions.revisions.contains { $0.id == 5 }, "the refused revision stays pending")
+        XCTAssertEqual(doc.getParagraphs().count, 3)
+    }
+
+    /// A comment added in the session (`commentIds`) is content too.
+    func testRejectingATrackedParagraphThatGainedACommentRefuses() throws {
+        var (doc, fixture) = try openTracked()
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        let id = try doc.insertParagraphAsRevision(
+            Paragraph(text: "Inserted."), at: .afterText("Alpha.", instance: 1, options: .exact))
+        _ = try doc.insertComment(text: "Why?", author: "Editor C", paragraphIndex: 1)
+
+        XCTAssertThrowsError(try doc.rejectRevision(revisionId: id))
+        XCTAssertTrue(doc.getParagraphs().contains { $0.getText() == "Inserted." })
+    }
+
+    /// Reject-all handles a Word paragraph's content before its mark, so a
+    /// paragraph whose content is a mixed-content wrapper (a hyperlink inside
+    /// `<w:ins>`) is removed, not left as an empty `<w:p>`.
+    func testRejectAllRemovesAWordParagraphWhoseContentIsAMixedWrapper() throws {
+        let body = Self.wordInsertedParagraph("""
+            <w:ins w:id="6" w:author="Reviewer A" w:date="2026-10-01T00:00:00Z"><w:hyperlink w:anchor="x"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:ins>
+            """)
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+
+        try doc.tryRejectAllRevisions()
+        XCTAssertEqual(doc.getParagraphs().count, 2, "got: \(doc.getParagraphs().map { $0.getText() })")
+    }
+
+    /// An inserted mark sharing its id with a run deletion is still written
+    /// as an inserted mark.
+    func testAMarkSharingItsIdWithARunDeletionStaysAnInsertion() throws {
+        let body = """
+            <w:p><w:r><w:t>Alpha.</w:t></w:r></w:p>\
+            <w:p><w:pPr><w:rPr><w:ins w:id="7" w:author="A" w:date="2026-10-01T00:00:00Z"/></w:rPr></w:pPr>\
+            <w:del w:id="7" w:author="A" w:date="2026-10-01T00:00:00Z"><w:r><w:delText>x</w:delText></w:r></w:del><w:r><w:t>y</w:t></w:r></w:p>
+            """
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        try doc.updateParagraph(at: 0, text: "ALPHA.")   // force typed re-serialization
+
+        let p = try XCTUnwrap(paragraph(containing: ">y<", in: try savedDocumentXML(doc)))
+        XCTAssertTrue(p.contains("<w:pPr><w:rPr><w:ins w:id=\"7\""), "got: \(p)")
+    }
+
+    /// Outside the body (here a header) a rejected mark is resolved the same
+    /// way: an emptied paragraph is removed, not left behind.
+    func testRejectingAMarkInAHeaderRemovesTheEmptiedParagraph() throws {
+        var doc = WordDocument()
+        doc.enableTrackChanges(author: "Editor B")
+        var marked = Paragraph(text: "Header line.")
+        marked.runs[0].revisionId = 11
+        marked.markRevisionId = 11
+        var rev = Revision(id: 11, type: .insertion, author: "Editor B")
+        rev.source = .header(id: "rIdH1")
+        marked.revisions.append(rev)
+        var header = Header(id: "rIdH1")
+        header.bodyChildren = [.paragraph(Paragraph(text: "Keep.")), .paragraph(marked)]
+        doc.headers = [header]
+        doc.revisions.revisions.append(rev)
+
+        try doc.rejectRevision(revisionId: 11)
+        XCTAssertEqual(doc.headers[0].bodyChildren.count, 1)
+    }
+
+    func testAnyNonRunContentIsRefused() throws {
+        var (doc, fixture) = try openTracked()
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        var para = Paragraph(text: "Inserted.")
+        para.commentIds = [3]
+        XCTAssertThrowsError(try doc.insertParagraphAsRevision(para, at: .afterText("Alpha.", instance: 1, options: .exact)))
+    }
+
+    func testOutOfRangeIndexThrowsLikeTheUntrackedPath() throws {
+        var (doc, fixture) = try openTracked()
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        XCTAssertThrowsError(try doc.insertParagraphAsRevision(Paragraph(text: "X"), at: .paragraphIndex(doc.body.children.count + 5)))
     }
 }

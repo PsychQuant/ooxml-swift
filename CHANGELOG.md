@@ -35,16 +35,25 @@ All notable changes to ooxml-swift will be documented in this file.
   上方插一段之後，接受或拒絕會作用在別的段落；接受「刪除 the」會刪掉同段所有的 "the"；
   拒絕一個多 run 的插入段落時，文字會沒有修訂標記地併進下一段。現在掃描修訂所屬 part 中
   帶有該 id 的段落（run 的插入／刪除／搬移與格式修訂、段落記號、段落格式修訂、段落的修訂
-  清單），並依 id 移除 run。只有完全沒有標記可循的修訂（直接透過公開 model 建立、不是讀進來
-  也不是產生器建立的）才退回原本的索引與文字比對。
-- **拒絕段落記號插入時不再刪除未追蹤的內容**。段落裡還有超連結、書籤、註解範圍、欄位、
-  content control、註腳參照等非 run 內容時，保留段落、只清除段落記號；只剩 run 時才併進
+  清單），並依 id **與型別**移除 run（id 不唯一的檔案中，一次 accept／reject 不會波及另一筆
+  共用 id 的修訂）。退回原本的索引與文字比對只發生在「從來沒有標記」的修訂上——直接透過公開
+  model 建立、不是讀進來也不是產生器建立的。讀進來或產生器建立的修訂若已沒有任何段落帶著它
+  （例如段落被 `deleteParagraph` 刪掉），視為孤兒：只移除這筆記錄，不動任何文字。
+  `Revision` 以不參與 `==` 的 `isAnchored` 記錄這個差別。
+- **拒絕段落記號插入時不再刪除未追蹤的內容，也不會悄悄變成接受**。Word 自己的 `_GoBack` 書籤
+  與拼字標記不算內容，直接捨棄；段落裡還有其他非 run 內容（書籤、註解範圍——含本 session 以
+  `insertComment` 加的——超連結、欄位、content control、註腳參照等）時，Word 會把它們併進下一段，
+  這還不支援，所以拒絕會在改動任何東西之前丟出 `RevisionError.cannotReject`。只剩 run 時才併進
   下一段，併入的 run 帶著它們所屬修訂的定義，並排在下一段原有內容之前（模型與存檔順序一致）。
-  下一段是 tree-backed 時同樣保留段落。
+  header／footer／註腳中的段落記號照同一套規則處理（該 part 至少保留一段）。讀進來的段落記號
+  修訂排在該段修訂清單最前面，`tryRejectAllRevisions`（由後往前）因此先處理內容、最後處理記號。
+  段落記號與另一筆修訂共用 id 時，寫回時仍是插入記號。
 - **`allocateRevisionId()` 不再因檔案中的極大 id 而 trap**：id 來自檔案，`Int.max` 會讓
-  `+ 1` 溢位、整個 MCP server 崩潰。最大 id 超過 `Int.max / 2` 時改用最小的未使用正整數
-  （呼叫端還會再加 1，例如 move 的成對 id）。`insertParagraphAsRevision` 內原本的
-  `preconditionFailure` 也改為丟出錯誤。
+  `+ 1` 溢位、整個 MCP server 崩潰。最大 id 超過 `Int.max / 2` 時改用最小的、而且下一個 id 也
+  未被使用的正整數（move 會用 id 與 id + 1）。`insertParagraphAsRevision` 內原本的
+  `preconditionFailure` 也改為丟出錯誤；`.paragraphIndex` 超出範圍時與 `insertParagraph` 一樣丟出
+  錯誤；段落含任何非 run 內容都拒收。
+- 新增 `RunProperties.hasDirectFormatting`。
 
 ## [3.19.0] - 2026-09-28
 

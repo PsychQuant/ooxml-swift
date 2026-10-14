@@ -2276,8 +2276,12 @@ public struct DocxReader {
 
         // The mark shares its id with the runs when che-word-mcp wrote it
         // (one Revision); Word gives it its own.
-        if let markInsertion, !paragraph.revisions.contains(where: { $0.id == markInsertion.id }) {
-            paragraph.revisions.append(markInsertion)
+        // Round 3: deduplicated only against an insertion with the same id,
+        // and listed first so reject-all (which walks backwards) resolves the
+        // paragraph's content before its mark.
+        if let markInsertion,
+           !paragraph.revisions.contains(where: { $0.id == markInsertion.id && $0.type == .insertion }) {
+            paragraph.revisions.insert(markInsertion, at: 0)
         }
 
         // 🆕 語義標註
@@ -3339,7 +3343,7 @@ public struct DocxReader {
                 if let r = tableRow { revision.tableRow = r }
                 if let c = tableColumn { revision.tableColumn = c }
                 if let cpi = cellParagraphIndex { revision.cellParagraphIndex = cpi }
-                document.revisions.revisions.append(revision)
+                document.revisions.revisions.append(revision.anchored())
             }
             counter += 1
         }

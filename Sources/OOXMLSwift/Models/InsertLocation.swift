@@ -293,11 +293,10 @@ extension WordDocument {
                 "paragraph", "must be a detached Paragraph value; a tree-backed one cannot carry revision ids on its runs")
         }
         // Only runs carry the insertion's id; anything else would be written
-        // untracked inside a tracked paragraph (che-word-mcp#275 R2).
-        guard paragraph.hyperlinks.isEmpty, paragraph.fieldSimples.isEmpty,
-              paragraph.alternateContents.isEmpty, paragraph.contentControls.isEmpty else {
+        // untracked inside a tracked paragraph (che-word-mcp#275 R2/R3).
+        guard !paragraph.hasNonRunContent else {
             throw WordError.invalidParameter(
-                "paragraph", "contains hyperlinks, fields, alternate content or content controls, which cannot carry the insertion's revision id")
+                "paragraph", "holds content other than runs (hyperlinks, fields, bookmarks, comments, content controls, …), which cannot carry the insertion's revision id")
         }
 
         let revisionId = allocateRevisionId()
@@ -313,7 +312,10 @@ extension WordDocument {
         revision.source = .body
         para.revisions.append(revision)
 
-        if case .paragraphIndex(let index) = location, index >= body.children.count {
+        if case .paragraphIndex(let index) = location, index > body.children.count {
+            throw InsertLocationError.invalidParagraphIndex(index)
+        }
+        if case .paragraphIndex(let index) = location, index == body.children.count {
             // Appending goes through appendParagraph's graft path, so the rest
             // of the part is not re-serialized from the (lossy) typed model.
             appendParagraph(para)
@@ -325,7 +327,7 @@ extension WordDocument {
             throw WordError.invalidParameter("paragraph", "tracked paragraph \(revisionId) not found after insertion")
         }
         revision.paragraphIndex = flatIndex
-        revisions.revisions.append(revision)
+        revisions.revisions.append(revision.anchored())
         return revisionId
     }
 

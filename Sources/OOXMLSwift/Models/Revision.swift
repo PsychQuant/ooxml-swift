@@ -36,7 +36,31 @@ public enum RevisionType: String, Codable {
 }
 
 /// 修訂記錄
+/// Wraps a value that does not take part in `==` (synthesized conformances
+/// compare the wrapper, which always reports equal).
+@propertyWrapper
+public struct EqualityIgnored<Value>: Equatable {
+    public var wrappedValue: Value
+    public init(wrappedValue: Value) { self.wrappedValue = wrappedValue }
+    public static func == (lhs: Self, rhs: Self) -> Bool { true }
+}
+
 public struct Revision: Equatable {
+    /// PsychQuant/che-word-mcp#275 round 3: set when the revision came from a
+    /// file or a generator, i.e. its markers live on runs / paragraph marks.
+    /// accept / reject fall back to the recorded index and text only for
+    /// revisions that never had markers (built directly through the model);
+    /// an anchored revision whose markers are gone (its paragraph was
+    /// deleted) is an orphan and touches nothing. Not part of `==`.
+    @EqualityIgnored public internal(set) var isAnchored: Bool = false
+
+    /// A copy marked as anchored.
+    func anchored() -> Revision {
+        var copy = self
+        copy.isAnchored = true
+        return copy
+    }
+
     public var id: Int                     // 修訂 ID
     public var type: RevisionType          // 修訂類型
     public var author: String              // 作者

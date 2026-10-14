@@ -20,8 +20,8 @@ final class Issue280RevisionResolutionByIdTests: XCTestCase {
 
     // MARK: - Fixture
 
-    private func documentXML(_ paragraphs: [String]) -> String {
-        let body = paragraphs.map { "<w:p><w:r><w:t xml:space=\"preserve\">\($0)</w:t></w:r></w:p>" }.joined()
+    private func documentXML(_ paragraphs: [String], rawBody: String? = nil) -> String {
+        let body = rawBody ?? paragraphs.map { "<w:p><w:r><w:t xml:space=\"preserve\">\($0)</w:t></w:r></w:p>" }.joined()
         return """
             <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>\
@@ -31,7 +31,7 @@ final class Issue280RevisionResolutionByIdTests: XCTestCase {
             """
     }
 
-    private func buildFixture(_ paragraphs: [String]) throws -> URL {
+    private func buildFixture(_ paragraphs: [String], rawBody: String? = nil) throws -> URL {
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue280-staging-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
@@ -58,7 +58,7 @@ final class Issue280RevisionResolutionByIdTests: XCTestCase {
                 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
             </Relationships>
             """, to: "_rels/.rels")
-        try write(documentXML(paragraphs), to: "word/document.xml")
+        try write(documentXML(paragraphs, rawBody: rawBody), to: "word/document.xml")
 
         let docxURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue280-\(UUID().uuidString).docx")
@@ -75,8 +75,8 @@ final class Issue280RevisionResolutionByIdTests: XCTestCase {
         return docxURL
     }
 
-    private func openTracked(_ paragraphs: [String] = ["Alpha.", "Beta.", "Gamma."]) throws -> (WordDocument, URL) {
-        let url = try buildFixture(paragraphs)
+    private func openTracked(_ paragraphs: [String] = ["Alpha.", "Beta.", "Gamma."], rawBody: String? = nil) throws -> (WordDocument, URL) {
+        let url = try buildFixture(paragraphs, rawBody: rawBody)
         var doc = try DocxReader.read(from: url)
         doc.enableTrackChanges(author: "Editor B")
         return (doc, url)
@@ -178,5 +178,62 @@ final class Issue280RevisionResolutionByIdTests: XCTestCase {
         try doc.acceptRevision(revisionId: id)
 
         XCTAssertEqual(texts(doc), ["Plain.", "Alpha.", "Beta.", "ma."])
+    }
+
+    // MARK: - Verify round 2 (che-word-mcp#275 round 3)
+
+    /// A revision whose paragraph was deleted has no carrier left. It must
+    /// not fall back to matching its text in whatever paragraph now sits at
+    /// its recorded index — that deleted text from an untouched paragraph.
+    func testAcceptingAnOrphanedDeletionTouchesNoOtherParagraph() throws {
+        var (doc, url) = try openTracked(["Beta Alpha.", "Beta paragraph.", "Gamma."])
+        defer { doc.close(); try? FileManager.default.removeItem(at: url) }
+
+        let id = try doc.deleteTextAsRevision(atParagraph: 1, start: 0, end: 4)
+        try doc.deleteParagraph(at: 1)
+        try doc.acceptRevision(revisionId: id)
+
+        XCTAssertEqual(texts(doc), ["Beta Alpha.", "Gamma."])
+        XCTAssertFalse(doc.revisions.revisions.contains { $0.id == id }, "the orphaned entry is removed")
+    }
+
+    func testRejectingAnOrphanedInsertionTouchesNoOtherParagraph() throws {
+        var (doc, url) = try openTracked(["Alpha.", "Yes. Yes.", "Omega."])
+        defer { doc.close(); try? FileManager.default.removeItem(at: url) }
+
+        let id = try doc.insertParagraphAsRevision(Paragraph(text: "Yes."), at: .afterText("Alpha.", instance: 1))
+        try doc.deleteParagraph(at: 1)
+        try doc.rejectRevision(revisionId: id)
+
+        XCTAssertEqual(texts(doc), ["Alpha.", "Yes. Yes.", "Omega."])
+    }
+
+    /// A move takes the allocated id and the next one; near the ceiling the
+    /// fallback must leave both free.
+    func testCeilingFallbackLeavesRoomForAMovePair() {
+        var doc = WordDocument()
+        for id in [2, Int.max] { doc.revisions.revisions.append(Revision(id: id, type: .insertion, author: "X")) }
+        let id = doc.allocateRevisionId()
+        let used = Set(doc.revisions.revisions.map(\.id))
+        XCTAssertFalse(used.contains(id))
+        XCTAssertFalse(used.contains(id + 1), "the move pair's second id \(id + 1) collides")
+    }
+
+    /// Ids are not unique in every producer's files. One accept must act on
+    /// the revision it names — matched by id AND type — not on another
+    /// revision that happens to share the id.
+    func testDuplicateIdsAreResolvedByType() throws {
+        let body = """
+            <w:p><w:del w:id="1" w:author="A" w:date="2026-10-01T00:00:00Z"><w:r><w:delText xml:space="preserve">old </w:delText></w:r></w:del><w:r><w:t>kept</w:t></w:r></w:p>\
+            <w:p><w:ins w:id="1" w:author="B" w:date="2026-10-01T00:00:00Z"><w:r><w:t>IMPORTANT</w:t></w:r></w:ins></w:p>
+            """
+        var (doc, url) = try openTracked(rawBody: body)
+        defer { doc.close(); try? FileManager.default.removeItem(at: url) }
+
+        try doc.acceptRevision(revisionId: 1)   // the first entry: the deletion
+        XCTAssertEqual(texts(doc), ["kept", "IMPORTANT"])
+        let xml = try savedDocumentXML(doc)
+        XCTAssertTrue(xml.contains("IMPORTANT"), "B's insertion must survive — got: \(xml)")
+        XCTAssertFalse(xml.contains("old"), "A's deletion was accepted — got: \(xml)")
     }
 }
