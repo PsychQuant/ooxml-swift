@@ -50,10 +50,10 @@ public struct Paragraph: Equatable {
     /// deletion) in `revisions` that marks this paragraph's **mark** as
     /// revised. Word records an inserted paragraph twice — `<w:ins>` around
     /// its runs and `<w:ins/>` on the paragraph mark; this is the second half.
-    /// Emitted as the first child of the paragraph-mark `<w:rPr>`.
-    /// (Word-authored markers read from a file still ride in
-    /// `properties.markRunProperties.rawChildren`; only paragraphs created by
-    /// `insertParagraphAsRevision` set this field.)
+    /// Emitted as the first child of the paragraph-mark `<w:rPr>`. Set by
+    /// `insertParagraphAsRevision`, and by `DocxReader` for an inserted mark
+    /// read from a file (round 2 of che-word-mcp#275); deleted / moved marks
+    /// read from a file stay raw in `properties.markRunProperties.rawChildren`.
     public var markRevisionId: Int?
 
     /// v0.18.0+ (che-word-mcp#45): pre-mutation paragraph properties for a
@@ -634,6 +634,34 @@ extension Paragraph {
     /// signals routes the paragraph to `toXMLSortedByPosition`, preserving
     /// source order. API-built paragraphs leave positions at 0 and stay on
     /// the legacy path.
+    /// PsychQuant/che-word-mcp#275: content other than runs — hyperlinks,
+    /// fields, alternate content, content controls, bookmarks, comment /
+    /// permission ranges, smart tags, custom XML, bidi overrides, note
+    /// references, unrecognized children. Rejecting an inserted paragraph
+    /// mark must never delete it.
+    internal var hasNonRunContent: Bool {
+        !hyperlinks.isEmpty || !fieldSimples.isEmpty || !alternateContents.isEmpty
+            || !contentControls.isEmpty || !bookmarks.isEmpty || !bookmarkMarkers.isEmpty
+            || !commentRangeMarkers.isEmpty || !permissionRangeMarkers.isEmpty
+            || !smartTags.isEmpty || !customXmlBlocks.isEmpty || !bidiOverrides.isEmpty
+            || !footnoteIds.isEmpty || !endnoteIds.isEmpty || !unrecognizedChildren.isEmpty
+    }
+
+    /// PsychQuant/che-word-mcp#275: lowest source position among this
+    /// paragraph's positioned children (nil when none is positioned). Runs
+    /// given this position sort ahead of every existing child: the
+    /// positioned list adds runs first and the sort is stable.
+    internal var minimumSourcePosition: Int? {
+        var positions: [Int?] = runs.map(\.position) + hyperlinks.map(\.position)
+        positions += fieldSimples.map(\.position) + alternateContents.map(\.position)
+        positions += bookmarkMarkers.map(\.position) + commentRangeMarkers.map(\.position)
+        positions += permissionRangeMarkers.map(\.position) + proofErrorMarkers.map(\.position)
+        positions += smartTags.map(\.position) + customXmlBlocks.map(\.position)
+        positions += bidiOverrides.map(\.position) + unrecognizedChildren.map(\.position)
+        positions += contentControls.map(\.position)
+        return positions.compactMap { $0 }.filter { $0 > 0 }.min()
+    }
+
     internal var hasSourcePositionedChildren: Bool {
         return !bookmarkMarkers.isEmpty
             || !fieldSimples.isEmpty

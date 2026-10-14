@@ -479,6 +479,7 @@ public struct WordDocument: Equatable {
               paragraph.footnoteIds.isEmpty,
               paragraph.endnoteIds.isEmpty,
               paragraph.revisions.isEmpty,
+              paragraph.markRevisionId == nil,
               paragraph.contentControls.isEmpty,
               paragraph.bookmarkMarkers.isEmpty,
               paragraph.fieldSimples.isEmpty,
@@ -3065,8 +3066,16 @@ public struct WordDocument: Equatable {
     /// The method is idempotent — consecutive calls without appending the
     /// allocated id return the same value (no stale-cache risk).
     public func allocateRevisionId() -> Int {
-        let maxId = revisions.revisions.map { $0.id }.max() ?? 0
-        return maxId + 1
+        let ids = revisions.revisions.map { $0.id }
+        let maxId = ids.max() ?? 0
+        // PsychQuant/che-word-mcp#275: ids come from the file. One at Int.max
+        // made `+ 1` trap and took the MCP server down; callers also add 1
+        // (move pairs). Near the ceiling, take the smallest unused positive id.
+        if maxId < Int.max / 2 { return maxId + 1 }
+        let used = Set(ids)
+        var candidate = 1
+        while used.contains(candidate) { candidate += 1 }
+        return candidate
     }
 
     /// 3-tier author resolution: explicit arg (when non-nil and non-empty)
@@ -3781,7 +3790,8 @@ public struct WordDocument: Equatable {
             // 接受插入：移除標記，保留文字（文字已在文件中）。
             // R5-CONT-4 P0 #1: ALSO clear paragraph + run revision-id
             // refs so Paragraph.toXML stops wrapping runs in <w:ins>.
-            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
+            if let key = applyToParagraphs(carrying: revisionId_, in: revision.source, mutate: clearAllMarkers)
+                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
                 partKeyForDirty = key
             } else {
                 // Soft-fail: the typed Revision exists but no matching
@@ -3792,8 +3802,18 @@ public struct WordDocument: Equatable {
             }
         case .deletion:
             // 接受刪除：實際移除被標記為刪除的文字 AND clear marker.
-            let originalText = revision.originalText
+            // PsychQuant/che-word-mcp#280: remove the runs carrying the id.
+            // Matching `originalText` removed every occurrence of the deleted
+            // text in the paragraph, not just the deleted span.
             let removeAndClear: (inout Paragraph) -> Void = { para in
+                para.runs.removeAll { $0.revisionId == revisionId_ }
+                clearAllMarkers(&para)
+            }
+            // A revision with no marker anywhere (built directly through the
+            // public model rather than read or generated) has nothing to
+            // locate it by except its recorded index and text.
+            let originalText = revision.originalText
+            let legacyRemoveAndClear: (inout Paragraph) -> Void = { para in
                 if let txt = originalText {
                     for j in 0..<para.runs.count {
                         para.runs[j].text = para.runs[j].text.replacingOccurrences(of: txt, with: "")
@@ -3801,7 +3821,8 @@ public struct WordDocument: Equatable {
                 }
                 clearAllMarkers(&para)
             }
-            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: removeAndClear) {
+            if let key = applyToParagraphs(carrying: revisionId_, in: revision.source, mutate: removeAndClear)
+                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: legacyRemoveAndClear) {
                 partKeyForDirty = key
             } else {
                 // No matching paragraph in the source part — surface the
@@ -3813,7 +3834,8 @@ public struct WordDocument: Equatable {
             // (rPrChange / pPrChange / move-from/to wrapper emit) so
             // toXML stops wrapping. Soft-fail on miss (legitimate
             // already-cleared state).
-            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
+            if let key = applyToParagraphs(carrying: revisionId_, in: revision.source, mutate: clearAllMarkers)
+                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
                 partKeyForDirty = key
             } else {
                 partKeyForDirty = try sourceToPartKey(revision.source, revisionId: revisionId)
@@ -3889,6 +3911,105 @@ public struct WordDocument: Equatable {
             guard let eni = endnotes.endnotes.firstIndex(where: { $0.id == id }) else { return nil }
             return Self.applyToFlatParagraph(at: paragraphIndex, in: &endnotes.endnotes[eni].bodyChildren, mutate: mutate, partKey: DocumentWalker.endnotesPartKey)
         }
+    }
+
+    /// PsychQuant/che-word-mcp#280: true when `para` carries `id` anywhere the
+    /// writer emits it — a run's insertion / deletion / move wrapper or format
+    /// change, the paragraph mark, the paragraph-format change, or the
+    /// paragraph's own revision list.
+    static func carriesRevision(_ para: Paragraph, id: Int) -> Bool {
+        para.markRevisionId == id
+            || para.paragraphFormatChangeRevisionId == id
+            || para.revisions.contains { $0.id == id }
+            || para.runs.contains { $0.revisionId == id || $0.formatChangeRevisionId == id }
+    }
+
+    /// PsychQuant/che-word-mcp#280: applies `mutate` to every paragraph of
+    /// `source` that carries `revisionId` and returns the part key, or nil
+    /// when none does. accept / reject used `Revision.paragraphIndex`, which
+    /// is recorded once (and left at 0 by the text-revision generators), so
+    /// any paragraph inserted or removed above a revision sent them to the
+    /// wrong paragraph. The revision's own markers say where it is; callers
+    /// fall back to `paragraphIndex` only when nothing carries the id (a
+    /// revision built directly through the public model).
+    private mutating func applyToParagraphs(
+        carrying revisionId: Int,
+        in source: RevisionSource,
+        mutate: (inout Paragraph) -> Void
+    ) -> String? {
+        switch source {
+        case .body:
+            return Self.applyToCarriers(in: &body.children, revisionId: revisionId, mutate: mutate)
+                ? "word/document.xml" : nil
+        case .header(let id):
+            guard let hi = headers.firstIndex(where: { $0.id == id }) else { return nil }
+            let key = DocumentWalker.headerPartKey(for: headers[hi])
+            return Self.applyToCarriers(in: &headers[hi].bodyChildren, revisionId: revisionId, mutate: mutate) ? key : nil
+        case .footer(let id):
+            guard let fi = footers.firstIndex(where: { $0.id == id }) else { return nil }
+            let key = DocumentWalker.footerPartKey(for: footers[fi])
+            return Self.applyToCarriers(in: &footers[fi].bodyChildren, revisionId: revisionId, mutate: mutate) ? key : nil
+        case .footnote(let id):
+            guard let fni = footnotes.footnotes.firstIndex(where: { $0.id == id }) else { return nil }
+            return Self.applyToCarriers(in: &footnotes.footnotes[fni].bodyChildren, revisionId: revisionId, mutate: mutate)
+                ? DocumentWalker.footnotesPartKey : nil
+        case .endnote(let id):
+            guard let eni = endnotes.endnotes.firstIndex(where: { $0.id == id }) else { return nil }
+            return Self.applyToCarriers(in: &endnotes.endnotes[eni].bodyChildren, revisionId: revisionId, mutate: mutate)
+                ? DocumentWalker.endnotesPartKey : nil
+        }
+    }
+
+    /// Recursive walk for `applyToParagraphs(carrying:)`: the traversal of
+    /// `applyToFlatParagraphRecursive`, visiting every carrier instead of
+    /// stopping at one index. Returns true when at least one paragraph matched.
+    private static func applyToCarriers(
+        in children: inout [BodyChild],
+        revisionId: Int,
+        mutate: (inout Paragraph) -> Void
+    ) -> Bool {
+        var hit = false
+        for i in 0..<children.count {
+            switch children[i] {
+            case .bookmarkMarker, .rawBlockElement:
+                continue
+            case .paragraph(var para):
+                if carriesRevision(para, id: revisionId) {
+                    mutate(&para)
+                    children[i] = .paragraph(para)
+                    hit = true
+                }
+            case .table(var table):
+                var changed = false
+                for r in 0..<table.rows.count {
+                    for c in 0..<table.rows[r].cells.count {
+                        for p in 0..<table.rows[r].cells[c].paragraphs.count
+                        where carriesRevision(table.rows[r].cells[c].paragraphs[p], id: revisionId) {
+                            mutate(&table.rows[r].cells[c].paragraphs[p])
+                            changed = true
+                        }
+                        for nt in 0..<table.rows[r].cells[c].nestedTables.count {
+                            var nested: [BodyChild] = [.table(table.rows[r].cells[c].nestedTables[nt])]
+                            if applyToCarriers(in: &nested, revisionId: revisionId, mutate: mutate),
+                               case .table(let updated) = nested[0] {
+                                table.rows[r].cells[c].nestedTables[nt] = updated
+                                changed = true
+                            }
+                        }
+                    }
+                }
+                if changed {
+                    children[i] = .table(table)
+                    hit = true
+                }
+            case .contentControl(let cc, var inner):
+                if applyToCarriers(in: &inner, revisionId: revisionId, mutate: mutate) {
+                    children[i] = .contentControl(cc, children: inner)
+                    hit = true
+                }
+            }
+        }
+        return hit
     }
 
     /// Static recursive helper for `applyToParagraph`. Walks bodyChildren
@@ -3972,22 +4093,41 @@ public struct WordDocument: Equatable {
         revisionId: Int
     ) -> Bool {
         func nothingLeft(_ para: Paragraph) -> Bool {
-            para.runs.allSatisfy {
+            !para.hasNonRunContent && para.runs.allSatisfy {
                 $0.text.isEmpty && $0.drawing == nil && $0.rawXML == nil && ($0.rawElements ?? []).isEmpty
+            }
+        }
+        /// A join moves runs only. Anything else left in the paragraph keeps
+        /// it (with its mark cleared) — never deleted (che-word-mcp#275 R2).
+        func canJoin(_ para: Paragraph, into next: Paragraph) -> Bool {
+            !para.hasNonRunContent && next.xmlNode == nil
+        }
+        /// Moves `para`'s runs to the front of `next`, carrying the Revision
+        /// definitions they reference. In a source-positioned `next` they take
+        /// its lowest position, so the saved order matches the model.
+        func join(_ para: Paragraph, into next: inout Paragraph) {
+            var moved = para.runs
+            let front = next.minimumSourcePosition
+            for k in moved.indices { moved[k].position = front }
+            next.runs = moved + next.runs
+            let ids = Set(moved.flatMap { [$0.revisionId, $0.formatChangeRevisionId].compactMap { $0 } })
+            for rev in para.revisions where ids.contains(rev.id) && !next.revisions.contains(where: { $0.id == rev.id }) {
+                next.revisions.append(rev)
             }
         }
         /// Shared remove-or-join on one sibling array of paragraphs.
         func resolve(_ paras: inout [Paragraph], at p: Int, keepAtLeastOne: Bool) {
             var para = paras[p]
             para.markRevisionId = nil
+            para.revisions.removeAll { $0.id == revisionId }
             if nothingLeft(para) {
                 if !keepAtLeastOne || paras.count > 1 {
                     paras.remove(at: p)
                 } else {
                     paras[p] = para
                 }
-            } else if p + 1 < paras.count, paras[p + 1].xmlNode == nil {
-                paras[p + 1].runs = para.runs + paras[p + 1].runs
+            } else if p + 1 < paras.count, canJoin(para, into: paras[p + 1]) {
+                join(para, into: &paras[p + 1])
                 paras.remove(at: p)
             } else {
                 paras[p] = para
@@ -4006,10 +4146,11 @@ public struct WordDocument: Equatable {
                     // `children`; join only into an immediately following one.
                     var mark = para
                     mark.markRevisionId = nil
+                    mark.revisions.removeAll { $0.id == revisionId }
                     if nothingLeft(mark) {
                         children.remove(at: i)
-                    } else if i + 1 < children.count, case .paragraph(var next) = children[i + 1], next.xmlNode == nil {
-                        next.runs = mark.runs + next.runs
+                    } else if i + 1 < children.count, case .paragraph(var next) = children[i + 1], canJoin(mark, into: next) {
+                        join(mark, into: &next)
                         children[i + 1] = .paragraph(next)
                         children.remove(at: i)
                     } else {
@@ -4180,43 +4321,47 @@ public struct WordDocument: Equatable {
             // wrapper would re-emit on save with empty text — silent
             // file-state inconsistency. Extends §15.1's clearMarker
             // pattern to the insertion-reject path.
-            let newText = revision.newText
+            // PsychQuant/che-word-mcp#280: remove the runs carrying the id.
+            // Matching `newText` failed as soon as the inserted text spanned
+            // several runs or was edited, and could hit another paragraph's
+            // text through a stale `paragraphIndex`.
             let removeAndClear: (inout Paragraph) -> Void = { para in
+                para.runs.removeAll { $0.revisionId == revisionId }
+                para.revisions.removeAll { $0.id == revisionId }
+            }
+            // che-word-mcp#275: did this revision also insert a body paragraph
+            // mark? Located by the marker itself, before mutating.
+            var markTarget: Int?
+            if case .body = revision.source {
+                markTarget = Self.flatParagraphIndex(in: body.children) { $0.markRevisionId == revisionId }
+            }
+            // Marker-less revision (built directly through the public model):
+            // only its recorded index and text locate it.
+            let newText = revision.newText
+            let legacyRemoveAndClear: (inout Paragraph) -> Void = { para in
                 if let txt = newText {
                     for j in 0..<para.runs.count {
                         para.runs[j].text = para.runs[j].text.replacingOccurrences(of: txt, with: "")
                     }
                 }
                 para.revisions.removeAll { $0.id == revisionId }
-                for j in 0..<para.runs.count {
-                    if para.runs[j].revisionId == revisionId {
-                        para.runs[j].revisionId = nil
-                    }
-                }
             }
-            // che-word-mcp#275: did this revision also insert the paragraph
-            // mark? Read before mutating so the answer is the pre-reject one.
-            var hadMarkInsertion = false
-            _ = applyToParagraph(at: revision.paragraphIndex, in: revision.source) { para in
-                hadMarkInsertion = (para.markRevisionId == revisionId)
-            }
-            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: removeAndClear) {
+            if let key = applyToParagraphs(carrying: revisionId, in: revision.source, mutate: removeAndClear)
+                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: legacyRemoveAndClear) {
                 partKeyForDirty = key
             } else {
                 throw RevisionError.notFound(revisionId)
             }
-            if hadMarkInsertion {
-                if case .body = revision.source {
-                    var counter = 0
-                    Self.rejectInsertedParagraphMark(
-                        in: &body.children, target: revision.paragraphIndex,
-                        counter: &counter, revisionId: revisionId)
-                } else {
-                    // Headers / footers / notes: no tracked paragraph
-                    // insertion is generated there; clear the marker only.
-                    _ = applyToParagraph(at: revision.paragraphIndex, in: revision.source) { para in
-                        para.markRevisionId = nil
-                    }
+            if let target = markTarget {
+                var counter = 0
+                Self.rejectInsertedParagraphMark(
+                    in: &body.children, target: target,
+                    counter: &counter, revisionId: revisionId)
+            } else {
+                // Headers / footers / notes: no tracked paragraph insertion
+                // is generated there; clear any marker only.
+                _ = applyToParagraphs(carrying: revisionId, in: revision.source) { para in
+                    if para.markRevisionId == revisionId { para.markRevisionId = nil }
                 }
             }
         case .deletion:
@@ -4244,7 +4389,8 @@ public struct WordDocument: Equatable {
                     }
                 }
             }
-            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearMarker) {
+            if let key = applyToParagraphs(carrying: revisionId, in: revision.source, mutate: clearMarker)
+                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearMarker) {
                 partKeyForDirty = key
             } else {
                 throw RevisionError.notFound(revisionId)
@@ -4272,7 +4418,8 @@ public struct WordDocument: Equatable {
                     }
                 }
             }
-            if let key = applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
+            if let key = applyToParagraphs(carrying: revisionId, in: revision.source, mutate: clearAllMarkers)
+                ?? applyToParagraph(at: revision.paragraphIndex, in: revision.source, mutate: clearAllMarkers) {
                 partKeyForDirty = key
             } else {
                 // For format/move types where the typed Revision exists but

@@ -1761,8 +1761,30 @@ public struct DocxReader {
         // the conservative response to malformed input. If a real-world doc
         // ever exhibits foreign-ns pPr, switch this to (localName,
         // namespaceURI) pair lookup (Option A from #14 diagnosis).
+        var markInsertion: Revision?
         if let pPr = element.elements(forName: "w:pPr").first {
             paragraph.properties = parseParagraphProperties(from: pPr)
+
+            // PsychQuant/che-word-mcp#275: an inserted paragraph MARK
+            // (`<w:pPr><w:rPr><w:ins …/>`) is typed as `markRevisionId`, so
+            // accept / reject resolve it after a save and reopen; the raw copy
+            // is dropped so the writer emits it once. Deleted / moved marks
+            // are not modelled and stay raw.
+            if let markIns = pPr.elements(forName: "w:rPr").first?.elements(forName: "w:ins").first,
+               let markId = Int(markIns.attribute(forName: "w:id")?.stringValue ?? "") {
+                paragraph.markRevisionId = markId
+                if var mark = paragraph.properties.markRunProperties {
+                    mark.rawChildren?.removeAll { $0.name == "ins" }
+                    if mark.rawChildren?.isEmpty == true { mark.rawChildren = nil }
+                    paragraph.properties.markRunProperties = mark
+                }
+                markInsertion = Revision(
+                    id: markId, type: .insertion,
+                    author: markIns.attribute(forName: "w:author")?.stringValue ?? "Unknown",
+                    paragraphIndex: 0, originalText: nil, newText: nil,
+                    date: markIns.attribute(forName: "w:date")?.stringValue
+                        .flatMap { isoFormatter.date(from: $0) } ?? Date())
+            }
 
             // Part B: detect <w:pPrChange> inside <w:pPr> for paragraph property change tracking
             if let pPrChange = pPr.elements(forName: "w:pPrChange").first {
@@ -2250,6 +2272,12 @@ public struct DocxReader {
                     }
                 }
             }
+        }
+
+        // The mark shares its id with the runs when che-word-mcp wrote it
+        // (one Revision); Word gives it its own.
+        if let markInsertion, !paragraph.revisions.contains(where: { $0.id == markInsertion.id }) {
+            paragraph.revisions.append(markInsertion)
         }
 
         // 🆕 語義標註

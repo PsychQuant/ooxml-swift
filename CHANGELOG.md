@@ -16,13 +16,35 @@ All notable changes to ooxml-swift will be documented in this file.
   以及段落記號上的 `<w:pPr><w:rPr><w:ins …/></w:rPr></w:pPr>`；模型過去沒有欄位表達後者。
   新 API 對兩者使用同一個修訂 id，支援所有 `InsertLocation`，修訂模式關閉時丟出
   `trackChangesNotEnabled`（未追蹤的插入仍走原本的 `insertParagraph(_:at:)`，行為不變）。
-  記錄的 `Revision.paragraphIndex` 是該段落實際的扁平索引（與 `acceptRevision`／
-  `rejectRevision` 解析時的走訪順序相同），不是預設的 0。
-- **`Paragraph.markRevisionId`**：段落記號的插入／刪除修訂，輸出為段落記號 `<w:rPr>` 的第一個
+  附加到最後（`.paragraphIndex(body.children.count)`）走 `appendParagraph` 的 graft 路徑，
+  文件其他部分不會從 typed model 重新序列化（那會丟掉中段分節符號等，見 #228）。
+  段落含有超連結、欄位、alternate content 或 content control 時拒絕（這些內容帶不了
+  修訂 id，插進去會變成追蹤段落裡的未追蹤內容）。
+- **`Paragraph.markRevisionId`**：段落記號的插入修訂，輸出為段落記號 `<w:rPr>` 的第一個
   子元素（CT_ParaRPr 的 track-change 群組在 EG_RPrBase 之前），段落沒有段落記號格式時一併建立
-  `<w:rPr>`。從檔案讀進來的 Word 段落記號修訂仍照舊保留在 `markRunProperties.rawChildren`。
-- `acceptRevision` 接受此類插入時保留段落、移除兩處標記；`rejectRevision` 在段落已無剩餘內容時
-  移除整段，否則把剩下的內容併到下一段（Word 對被拒絕的段落記號的處理）；表格儲存格至少保留一段。
+  `<w:rPr>`。讀檔時 `DocxReader` 也把段落記號上的 `<w:ins>` 讀成這個欄位（Word 給它獨立的
+  id，che-word-mcp 寫的與 run 共用），並移除 raw 副本，存檔時只寫一次；刪除或搬移的段落記號
+  仍保留為 raw。
+
+### Fixed
+
+- **`acceptRevision`／`rejectRevision` 依修訂 id 找目標，不再依記錄下來的段落索引與文字比對**
+  （PsychQuant/che-word-mcp#280，併入 #275）。過去兩者用 `Revision.paragraphIndex` 找段落——
+  只在建立時記一次、之後插入或刪除段落就過時，`insertTextAsRevision`／`deleteTextAsRevision`
+  甚至一律記成 0——再用修訂的文字快照對該段每個 run 做 `replacingOccurrences`。結果：在修訂
+  上方插一段之後，接受或拒絕會作用在別的段落；接受「刪除 the」會刪掉同段所有的 "the"；
+  拒絕一個多 run 的插入段落時，文字會沒有修訂標記地併進下一段。現在掃描修訂所屬 part 中
+  帶有該 id 的段落（run 的插入／刪除／搬移與格式修訂、段落記號、段落格式修訂、段落的修訂
+  清單），並依 id 移除 run。只有完全沒有標記可循的修訂（直接透過公開 model 建立、不是讀進來
+  也不是產生器建立的）才退回原本的索引與文字比對。
+- **拒絕段落記號插入時不再刪除未追蹤的內容**。段落裡還有超連結、書籤、註解範圍、欄位、
+  content control、註腳參照等非 run 內容時，保留段落、只清除段落記號；只剩 run 時才併進
+  下一段，併入的 run 帶著它們所屬修訂的定義，並排在下一段原有內容之前（模型與存檔順序一致）。
+  下一段是 tree-backed 時同樣保留段落。
+- **`allocateRevisionId()` 不再因檔案中的極大 id 而 trap**：id 來自檔案，`Int.max` 會讓
+  `+ 1` 溢位、整個 MCP server 崩潰。最大 id 超過 `Int.max / 2` 時改用最小的未使用正整數
+  （呼叫端還會再加 1，例如 move 的成對 id）。`insertParagraphAsRevision` 內原本的
+  `preconditionFailure` 也改為丟出錯誤。
 
 ## [3.19.0] - 2026-09-28
 

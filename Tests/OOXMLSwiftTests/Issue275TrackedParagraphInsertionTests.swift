@@ -22,7 +22,16 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
 
     /// Optional table first (to exercise the flat paragraph index across
     /// table-cell paragraphs), then "Alpha." and "Omega.".
-    private func documentXML(withLeadingTable: Bool) -> String {
+    private func documentXML(withLeadingTable: Bool, bodyXML: String? = nil) -> String {
+        if let bodyXML {
+            return """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>\
+                \(bodyXML)\
+                <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>\
+                </w:body></w:document>
+                """
+        }
         let table = withLeadingTable
             ? "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
             : ""
@@ -37,7 +46,7 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
             """
     }
 
-    private func buildFixture(withLeadingTable: Bool = false) throws -> URL {
+    private func buildFixture(withLeadingTable: Bool = false, bodyXML: String? = nil) throws -> URL {
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue275-staging-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
@@ -64,7 +73,7 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
                 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
             </Relationships>
             """, to: "_rels/.rels")
-        try write(documentXML(withLeadingTable: withLeadingTable), to: "word/document.xml")
+        try write(documentXML(withLeadingTable: withLeadingTable, bodyXML: bodyXML), to: "word/document.xml")
 
         let docxURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("issue275-\(UUID().uuidString).docx")
@@ -103,8 +112,8 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
         return nil
     }
 
-    private func openTracked(withLeadingTable: Bool = false) throws -> (WordDocument, URL) {
-        let fixture = try buildFixture(withLeadingTable: withLeadingTable)
+    private func openTracked(withLeadingTable: Bool = false, bodyXML: String? = nil) throws -> (WordDocument, URL) {
+        let fixture = try buildFixture(withLeadingTable: withLeadingTable, bodyXML: bodyXML)
         var doc = try DocxReader.read(from: fixture)
         doc.enableTrackChanges(author: "Editor B")
         return (doc, fixture)
@@ -236,5 +245,149 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
         let plain = try XCTUnwrap(paragraph(containing: "Plain.", in: try savedDocumentXML(doc)))
         XCTAssertFalse(plain.contains("<w:ins"), "got: \(plain)")
         XCTAssertFalse(plain.contains("<w:pPr>"), "got: \(plain)")
+    }
+
+    // MARK: - Verify round 1 (che-word-mcp#275 round 2)
+
+    /// Saves `doc` and reads the result back as a fresh document.
+    private func reopened(_ doc: WordDocument) throws -> (WordDocument, URL) {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue275-reopen-\(UUID().uuidString).docx")
+        try DocxWriter.write(doc, to: url)
+        var again = try DocxReader.read(from: url)
+        again.enableTrackChanges(author: "Editor B")
+        return (again, url)
+    }
+
+    /// The paragraph-mark marker is read back, so a tracked paragraph can be
+    /// rejected in a later session (it used to stay as raw XML on the mark).
+    func testTrackedParagraphCanBeRejectedAfterSaveAndReopen() throws {
+        var (doc, fixture) = try openTracked()
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        let id = try doc.insertParagraphAsRevision(
+            Paragraph(text: "Inserted."), at: .afterText("Alpha.", instance: 1, options: .exact))
+
+        var (again, url) = try reopened(doc)
+        defer { try? FileManager.default.removeItem(at: url); again.close() }
+        let marked = try XCTUnwrap(again.getParagraphs().first { $0.getText() == "Inserted." })
+        XCTAssertEqual(marked.markRevisionId, id)
+
+        try again.rejectRevision(revisionId: id)
+        XCTAssertEqual(again.getParagraphs().map { $0.getText() }, ["Alpha.", "Omega."])
+        XCTAssertFalse(try savedDocumentXML(again).contains("<w:ins"))
+    }
+
+    func testTrackedParagraphCanBeAcceptedAfterSaveAndReopen() throws {
+        var (doc, fixture) = try openTracked()
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        let id = try doc.insertParagraphAsRevision(
+            Paragraph(text: "Inserted."), at: .afterText("Alpha.", instance: 1, options: .exact))
+
+        var (again, url) = try reopened(doc)
+        defer { try? FileManager.default.removeItem(at: url); again.close() }
+        try again.acceptRevision(revisionId: id)
+        XCTAssertEqual(again.getParagraphs().map { $0.getText() }, ["Alpha.", "Inserted.", "Omega."])
+        XCTAssertFalse(try savedDocumentXML(again).contains("<w:ins"))
+    }
+
+    /// Word gives the mark its own id. Both are read; re-serializing writes
+    /// the mark once (not once typed and once from the raw copy).
+    func testWordAuthoredParagraphMarkInsertionIsReadAndWrittenOnce() throws {
+        let word = """
+            <w:p><w:r><w:t>Alpha.</w:t></w:r></w:p>\
+            <w:p><w:pPr><w:rPr><w:ins w:id="5" w:author="Reviewer A" w:date="2026-10-01T00:00:00Z"/></w:rPr></w:pPr>\
+            <w:ins w:id="6" w:author="Reviewer A" w:date="2026-10-01T00:00:00Z"><w:r><w:t>Word paragraph.</w:t></w:r></w:ins></w:p>\
+            <w:p><w:r><w:t>Omega.</w:t></w:r></w:p>
+            """
+        var (doc, fixture) = try openTracked(bodyXML: word)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        let marked = try XCTUnwrap(doc.getParagraphs().first { $0.getText() == "Word paragraph." })
+        XCTAssertEqual(marked.markRevisionId, 5)
+        XCTAssertTrue(doc.revisions.revisions.contains { $0.id == 5 && $0.type == .insertion })
+
+        try doc.updateParagraph(at: 0, text: "ALPHA.")   // force typed re-serialization
+        let p = try XCTUnwrap(paragraph(containing: "Word paragraph.", in: try savedDocumentXML(doc)))
+        XCTAssertEqual(p.components(separatedBy: "<w:ins w:id=\"5\"").count - 1, 1, "mark written once — got: \(p)")
+
+        try doc.rejectRevision(revisionId: 6)
+        try doc.rejectRevision(revisionId: 5)
+        XCTAssertEqual(doc.getParagraphs().map { $0.getText() }, ["ALPHA.", "Omega."])
+    }
+
+    /// Rejecting never deletes content that is not part of the insertion: a
+    /// hyperlink added later keeps the paragraph (only the mark is cleared).
+    func testRejectKeepsAParagraphThatGainedUntrackedNonRunContent() throws {
+        var (doc, fixture) = try openTracked()
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        let id = try doc.insertParagraphAsRevision(
+            Paragraph(text: "Inserted."), at: .afterText("Alpha.", instance: 1, options: .exact))
+        // add a hyperlink afterwards, untracked
+        guard let bodyIdx = doc.body.children.firstIndex(where: {
+            if case .paragraph(let p) = $0 { return p.markRevisionId == id } else { return false }
+        }), case .paragraph(var inserted) = doc.body.children[bodyIdx] else { return XCTFail("tracked paragraph not found") }
+        inserted.hyperlinks.append(Hyperlink(id: "h1", text: "LINK", anchor: "target"))
+        doc.body.children[bodyIdx] = .paragraph(inserted)
+
+        try doc.rejectRevision(revisionId: id)
+        let xml = try savedDocumentXML(doc)
+        XCTAssertTrue(xml.contains("LINK"), "untracked hyperlink must survive — got: \(xml)")
+        XCTAssertFalse(xml.contains("Inserted."), "tracked text must be gone — got: \(xml)")
+        XCTAssertFalse(xml.contains("w:author=\"Editor B\""), "no markup of the rejected revision may remain — got: \(xml)")
+    }
+
+    /// A join carries the other revisions' definitions with their runs, and
+    /// the joined text comes first in both the model and the saved file.
+    func testJoinCarriesOtherRevisionsAndKeepsOrder() throws {
+        var (doc, fixture) = try openTracked()
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        let first = try doc.insertParagraphAsRevision(
+            Paragraph(text: "Inserted."), at: .afterText("Alpha.", instance: 1, options: .exact))
+        doc.enableTrackChanges(author: "Editor C")
+        let second = try doc.insertTextAsRevision(text: "More ", atParagraph: 1, position: 0)
+
+        try doc.rejectRevision(revisionId: first)
+        XCTAssertEqual(doc.getParagraphs().map { $0.getText() }, ["Alpha.", "More Omega."])
+        let omega = try XCTUnwrap(paragraph(containing: "Omega.", in: try savedDocumentXML(doc)))
+        XCTAssertTrue(omega.range(of: "<w:ins w:id=\"\(second)\"[^>]*w:author=\"Editor C\"[^>]*><w:r><w:t[^>]*>More </w:t></w:r></w:ins>.*Omega\\.",
+                                  options: .regularExpression) != nil,
+                      "Editor C's insertion must stay tracked and come first — got: \(omega)")
+    }
+
+    /// A crafted id at Int.max must not trap the allocator.
+    func testRevisionIdAllocationAtTheCeilingDoesNotTrap() {
+        var doc = WordDocument()
+        doc.revisions.revisions.append(Revision(id: Int.max, type: .insertion, author: "X"))
+        let id = doc.allocateRevisionId()
+        XCTAssertGreaterThan(id, 0)
+        XCTAssertNotEqual(id, Int.max)
+    }
+
+    /// Content that cannot carry a revision id on its runs is refused rather
+    /// than inserted half-tracked.
+    func testUntaggableContentIsRefused() throws {
+        var (doc, fixture) = try openTracked()
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        var para = Paragraph(text: "Inserted.")
+        para.hyperlinks.append(Hyperlink(id: "h1", text: "LINK", anchor: "target"))
+        XCTAssertThrowsError(try doc.insertParagraphAsRevision(para, at: .afterText("Alpha.", instance: 1, options: .exact)))
+        XCTAssertEqual(doc.getParagraphs().map { $0.getText() }, ["Alpha.", "Omega."])
+    }
+
+    /// Appending a tracked paragraph keeps the graft path, so the rest of
+    /// the document is not re-serialized: a mid-body section break survives.
+    func testTrackedAppendDoesNotReSerializeTheRestOfTheDocument() throws {
+        let twoSections = """
+            <w:p><w:pPr><w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/></w:sectPr></w:pPr>\
+            <w:r><w:t>Landscape section.</w:t></w:r></w:p>\
+            <w:p><w:r><w:t>Portrait section.</w:t></w:r></w:p>
+            """
+        var (doc, fixture) = try openTracked(bodyXML: twoSections)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        _ = try doc.insertParagraphAsRevision(Paragraph(text: "Appended."), at: .paragraphIndex(doc.body.children.count))
+
+        let xml = try savedDocumentXML(doc)
+        XCTAssertTrue(xml.contains("w:orient=\"landscape\""), "mid-body section break must survive — got: \(xml)")
+        let appended = try XCTUnwrap(paragraph(containing: "Appended.", in: xml))
+        XCTAssertTrue(appended.contains("<w:ins"), "appended paragraph must be tracked — got: \(appended)")
     }
 }
