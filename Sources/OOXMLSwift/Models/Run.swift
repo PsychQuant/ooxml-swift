@@ -802,8 +802,10 @@ extension RunProperties {
             // use but the field is `String?` so escape defensively.
             attrs.append("w:val=\"\(escapeXMLAttribute(color ?? "auto"))\"")
             if let v = themeColor { attrs.append("w:themeColor=\"\(escapeXMLAttribute(v))\"") }
-            if let v = themeTint { attrs.append("w:themeTint=\"\(escapeXMLAttribute(v))\"") }
-            if let v = themeShade { attrs.append("w:themeShade=\"\(escapeXMLAttribute(v))\"") }
+            // A tint / shade modifies a theme colour; without one it applies
+            // to nothing, and the op-log path (no slot for it) drops it too.
+            if themeColor != nil, let v = themeTint { attrs.append("w:themeTint=\"\(escapeXMLAttribute(v))\"") }
+            if themeColor != nil, let v = themeShade { attrs.append("w:themeShade=\"\(escapeXMLAttribute(v))\"") }
             add(19, "<w:color \(attrs.joined(separator: " "))/>")
         }
 

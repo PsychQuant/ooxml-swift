@@ -497,4 +497,13 @@ final class Issue274ThemeAttributeRoundTripTests: XCTestCase {
         XCTAssertNil(props.themeShade)
         XCTAssertEqual(props.toXML(), "<w:color w:val=\"000000\" w:themeColor=\"accent2\"/>")
     }
+
+    /// An orphan tint / shade next to an explicit value has no theme colour
+    /// to modify: written by neither the typed writer nor the op-log path,
+    /// so both paths agree (Codex cross-check, round 3).
+    func testOrphanTintNextToAValueIsNotWritten() throws {
+        let run = try parseRunFragment(
+            "<w:r><w:rPr><w:color w:val=\"112233\" w:themeTint=\"80\"/></w:rPr><w:t>a</w:t></w:r>")
+        XCTAssertEqual(run.properties.toXML(), "<w:color w:val=\"112233\"/>")
+    }
 }
