@@ -525,7 +525,7 @@ public struct WordDocument: Equatable {
                   // PsychQuant/che-word-mcp#274: RunPayload has no colour-theme
                   // slots and no `w:cstheme` slot — such a run must take the
                   // typed path, which emits them, instead of losing them here.
-                  rp.themeColor == nil, rp.themeTint == nil, rp.themeShade == nil,
+                  rp.themeColor == nil,
                   rp.rFonts?.csTheme == nil
             else { return false }
         }

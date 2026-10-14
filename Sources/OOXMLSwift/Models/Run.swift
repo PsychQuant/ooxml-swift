@@ -368,8 +368,12 @@ public struct RunProperties: Equatable {
         didSet { themeColor = nil; themeTint = nil; themeShade = nil }
     }
     /// PsychQuant/che-word-mcp#274: theme-colour attributes of `<w:color>`
-    /// (`w:themeColor` / `w:themeTint` / `w:themeShade`).
-    public var themeColor: String?
+    /// (`w:themeColor` / `w:themeTint` / `w:themeShade`). A tint or shade
+    /// modifies its theme colour, so assigning `themeColor` drops them; set
+    /// them after `themeColor`. Not triggered by `init`.
+    public var themeColor: String? {
+        didSet { themeTint = nil; themeShade = nil }
+    }
     public var themeTint: String?
     public var themeShade: String?
     public var highlight: HighlightColor?
@@ -494,16 +498,16 @@ public struct RunProperties: Equatable {
         if let fontSize = other.fontSize { self.fontSize = fontSize }
         if let fontName = other.fontName { self.fontName = fontName }
         // PsychQuant/che-word-mcp#274: assigning `color` clears the theme
-        // triple (see `color`). A new theme colour then replaces the triple —
-        // a stale tint / shade belongs to the old one — and keeps `color` as
-        // the `w:val` fallback. A tint or shade alone adjusts the existing
-        // theme colour instead of dropping it.
+        // triple, assigning `themeColor` clears tint / shade (see both). A
+        // new theme colour therefore replaces the triple and keeps `color` as
+        // the `w:val` fallback. A tint or shade alone adjusts an existing
+        // theme colour; with none to adjust it is a no-op.
         if let color = other.color { self.color = color }
         if let themeColor = other.themeColor {
             self.themeColor = themeColor
             self.themeTint = other.themeTint
             self.themeShade = other.themeShade
-        } else {
+        } else if self.themeColor != nil {
             if let themeTint = other.themeTint { self.themeTint = themeTint }
             if let themeShade = other.themeShade { self.themeShade = themeShade }
         }
@@ -789,8 +793,10 @@ extension RunProperties {
         // PsychQuant/che-word-mcp#274: theme attributes ride on the same
         // element, after `w:val`. CT_Color requires `w:val`, so a theme
         // colour with no explicit value (a theme-only patch, or a source
-        // that omitted it) is written with `w:val="auto"`.
-        if color != nil || themeColor != nil || themeTint != nil || themeShade != nil {
+        // that omitted it) is written with `w:val="auto"`. A tint or shade
+        // with neither a value nor a theme colour applies to nothing and is
+        // not written — an `auto` there would override the style's colour.
+        if color != nil || themeColor != nil {
             var attrs: [String] = []
             // v0.19.4+ (#56 R3-NEW-6 audit): color is a hex string in normal
             // use but the field is `String?` so escape defensively.

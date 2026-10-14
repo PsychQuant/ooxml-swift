@@ -16,9 +16,11 @@ import ZIPFoundation
 /// whose only attribute was a theme attribute vanished entirely.
 ///
 /// After this fix: the theme attributes are typed fields on `RunProperties`
-/// / `RFontsProperties`, parsed and re-emitted, and a patch that sets an
-/// explicit colour clears a stale theme colour (Word gives `w:themeColor`
-/// precedence over `w:val`).
+/// / `RFontsProperties`, parsed and re-emitted, and setting an explicit
+/// colour or named font clears the theme attribute that would override it
+/// (Word gives the theme attribute precedence). A Word-authored
+/// `<w:rPrChange>` is still dropped as a whole on typed re-serialization —
+/// che-word-mcp#279 — so its prior rPr is not restored by this fix.
 final class Issue274ThemeAttributeRoundTripTests: XCTestCase {
 
     // MARK: - Section A: run-level parse/emit (no docx I/O)
@@ -146,8 +148,7 @@ final class Issue274ThemeAttributeRoundTripTests: XCTestCase {
     /// mark rPr and the run rPr. Paragraph 1 ("gamma") is the one the test
     /// edits. (The prior rPr inside `<w:rPrChange>` goes through the same
     /// `parseRunProperties`, but a source `<w:rPrChange>` is itself dropped
-    /// on typed re-serialization — tracked separately, see the sister issue
-    /// filed from che-word-mcp#274's implementation.)
+    /// on typed re-serialization — che-word-mcp#279.)
     private static let documentXML = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>\
@@ -258,11 +259,15 @@ final class Issue274ThemeAttributeRoundTripTests: XCTestCase {
         defer { doc.close() }
 
         var props = RunProperties()
-        props.rFonts = RFontsProperties(eastAsiaTheme: "minorEastAsia")
+        props.rFonts = RFontsProperties(asciiTheme: "majorHAnsi", hAnsiTheme: "majorHAnsi",
+                                        eastAsiaTheme: "minorEastAsia")
         doc.appendParagraph(Paragraph(runs: [Run(text: "epsilon", properties: props)]))
 
         let appended = try paragraph(containing: "epsilon", in: try savedDocumentXML(doc))
-        XCTAssertTrue(appended.contains("w:eastAsiaTheme=\"minorEastAsia\""), "got: \(appended)")
+        for attribute in ["w:asciiTheme=\"majorHAnsi\"", "w:hAnsiTheme=\"majorHAnsi\"",
+                          "w:eastAsiaTheme=\"minorEastAsia\""] {
+            XCTAssertTrue(appended.contains(attribute), "\(attribute) missing — got: \(appended)")
+        }
     }
 
     func testEditingAnotherParagraphKeepsThemeAttributesOnUntouchedParagraph() throws {
@@ -439,5 +444,57 @@ final class Issue274ThemeAttributeRoundTripTests: XCTestCase {
         XCTAssertTrue(untouched.contains("<w:ins w:id=\"7\""), "existing insertion must survive — got: \(untouched)")
         XCTAssertTrue(untouched.contains("w:themeColor=\"text1\""), "got: \(untouched)")
         XCTAssertTrue(untouched.contains("<w:rFonts w:eastAsiaTheme=\"minorEastAsia\"/>"), "got: \(untouched)")
+    }
+
+    // MARK: - Section E: verify round 2 — tint / shade belong to a theme colour
+
+    /// A tint-only patch adjusts the existing theme colour (the shape round-1
+    /// LOW 14 reported; the shade case is covered above).
+    func testTintOnlyPatchKeepsTheBaseThemeColor() {
+        var base = RunProperties()
+        base.color = "000000"
+        base.themeColor = "text1"
+
+        var patch = RunProperties()
+        patch.themeTint = "99"
+        base.merge(with: patch)
+
+        XCTAssertEqual(base.themeColor, "text1")
+        XCTAssertEqual(base.themeTint, "99")
+    }
+
+    /// With no theme colour to adjust, a tint- or shade-only patch is a
+    /// no-op. It used to write `<w:color w:val="auto" …/>`, overriding the
+    /// colour the run inherits from its style.
+    func testTintOrShadeOnlyPatchWithoutAThemeColourWritesNoColour() {
+        var base = RunProperties(bold: true)
+        var patch = RunProperties()
+        patch.themeTint = "66"
+        patch.themeShade = "BF"
+        base.merge(with: patch)
+
+        XCTAssertNil(base.themeTint)
+        XCTAssertNil(base.themeShade)
+        XCTAssertFalse(base.toXML().contains("<w:color"), "got: \(base.toXML())")
+    }
+
+    /// A tint or shade with neither `color` nor `themeColor` has nothing to
+    /// apply to; the writer emits no `<w:color>` for it.
+    func testOrphanTintWithoutColourOrThemeIsNotWritten() {
+        var props = RunProperties()
+        props.themeTint = "66"
+        XCTAssertEqual(props.toXML(), "")
+    }
+
+    /// Assigning `themeColor` directly drops a stale tint / shade — they
+    /// belonged to the old theme colour (same rule as `merge`).
+    func testAssigningThemeColorDirectlyClearsStaleTintAndShade() throws {
+        let run = try parseRunFragment(
+            "<w:r><w:rPr><w:color w:val=\"000000\" w:themeColor=\"text1\" w:themeTint=\"99\" w:themeShade=\"BF\"/></w:rPr><w:t>a</w:t></w:r>")
+        var props = run.properties
+        props.themeColor = "accent2"
+        XCTAssertNil(props.themeTint)
+        XCTAssertNil(props.themeShade)
+        XCTAssertEqual(props.toXML(), "<w:color w:val=\"000000\" w:themeColor=\"accent2\"/>")
     }
 }
