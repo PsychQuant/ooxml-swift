@@ -26,7 +26,33 @@ All notable changes to ooxml-swift will be documented in this file.
   id，che-word-mcp 寫的與 run 共用），並移除 raw 副本，存檔時只寫一次；刪除或搬移的段落記號
   仍保留為 raw。
 
+- **`Paragraph.textRevisionLength`**（PsychQuant/che-word-mcp#276）：文字修訂產生器可定址的文字長度——段落自己的
+  run 在「全部接受」檢視下的文字，行內方程式算可見文字；超連結、欄位、content control 的文字不在內。
+
 ### Fixed
+
+- **`insertTextAsRevision` 的新字寫在指定位置並包在 `<w:ins>` 內**（PsychQuant/che-word-mcp#276）。新 run 在
+  `paragraph.runs` 裡的位置一直是對的，但從檔案讀進來的段落依來源位置輸出，新 run 沒有來源位置，於是被放到段尾、
+  在修訂分組之外輸出——沒有 `<w:ins>`，存檔重開後修訂也不見。現在新 run 取相鄰 run 的位置；附加在最後一個有來源
+  位置的子元素之後時，取比它大的位置。沒有來源位置的 run 走的輸出路徑過去也不分組，現在同樣包進修訂。
+- **三個文字修訂產生器（插入、刪除、搬移）使用同一套偏移規則與拒絕條件**（che-word-mcp#276 決定 2，與讀取工具
+  顯示的文字一致）：已插入的字算、已刪除／搬出的字不算，行內方程式算它的可見文字。過去檔案讀進來的刪除 run 不帶
+  文字、同一 session 內做的刪除卻帶，存檔重開前後同一偏移指向不同位置。插在刪除邊界時新字放在刪除之後；插在欄位
+  結果的結尾時放在欄位之後（放在結果裡，欄位更新時會被清掉）。所有拒絕都在改動任何內容之前決定，段落維持原樣：
+  - 位置或範圍落在追蹤插入或搬移內部（含同一修訂兩個 run 之間的邊界）——不再把別人插入的字搬出他的修訂；巢狀修訂
+    留待 che-word-mcp#293；
+  - 刪除範圍嚴格內含零長度 run（複合欄位的 `fldChar`／`instrText`、註腳與註解參照、tab、換行、另一筆刪除）——
+    過去這些 run 被未追蹤地丟掉，交互參照欄位只剩孤立的 `end`；範圍邊上的零長度 run 照常保留；
+  - 範圍碰到、或位置會切開含非文字內容（tab、換行、欄位字元、圖、方程式）的 run——過去切開會把這些內容複製到每一段；
+    Word 的 `<w:lastRenderedPageBreak/>` 只是排版快取，不擋切開，只留在第一段；
+  - 空範圍（`start == end`）——過去回傳一個存檔後不存在的 id；
+  - 段落含有以 raw XML 保存的追蹤修訂（包著超連結、欄位等）或 run 之外的方程式——它們的文字偏移定址不到。
+- **`moveTextAsRevision` 改用同一套規則**：來源範圍依刪除規則、目標位置依插入規則，兩者都先檢查；搬過去的字保留
+  原本的格式，寫在指定位置的 `<w:moveTo>` 內。
+- **讀取工具在 session 內也顯示「全部接受」的文字**：段落文字（`getText()`／`flattenedDisplayText()`）不含已刪除
+  與已搬出的 run，與檔案讀進來的刪除一致，所以呼叫端讀到的偏移就是產生器使用的偏移。
+- 三個產生器記錄的 `Revision.paragraphIndex` 是段落的扁平索引（過去一律 0；accept／reject 已改依 id 找段落，
+  這個值現在用於顯示）。
 
 - **`acceptRevision`／`rejectRevision` 依修訂 id 找目標，不再依記錄下來的段落索引與文字比對**
   （PsychQuant/che-word-mcp#280，併入 #275）。過去兩者用 `Revision.paragraphIndex` 找段落——

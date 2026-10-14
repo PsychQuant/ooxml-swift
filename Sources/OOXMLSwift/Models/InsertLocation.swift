@@ -528,7 +528,7 @@ extension Paragraph {
         //   `<w:r>see eq </w:r><m:oMath>δ</m:oMath><w:r> here</w:r>`
         //   → "see eq δ here"  (NOT "see eq  here" with δ appended).
         parts.append(Self.flattenRunsAndDirectChildOMML(
-            runs: runs,
+            runs: acceptAllViewRuns,   // PsychQuant/che-word-mcp#276
             unrecognizedChildren: unrecognizedChildren
         ))
         // PsychQuant/che-word-mcp#100 / #102 — direct-child OMML inside

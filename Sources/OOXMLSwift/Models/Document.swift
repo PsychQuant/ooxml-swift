@@ -3109,10 +3109,48 @@ public struct WordDocument: Equatable {
         return nil
     }
 
+    // MARK: Text-revision generators (PsychQuant/che-word-mcp#276)
+    //
+    // Offsets, refusals and emit positions live in TextRevisionSpan.swift,
+    // shared by insert, delete and move.
+
+    /// Number of paragraphs in `children`, counted the way accept / reject
+    /// and `flatParagraphIndex` count them (table cells, nested tables,
+    /// content controls; markers and raw blocks skipped).
+    static func flatParagraphCount(in children: [BodyChild]) -> Int {
+        var count = 0
+        for child in children {
+            switch child {
+            case .bookmarkMarker, .rawBlockElement: continue
+            case .paragraph: count += 1
+            case .table(let table):
+                for row in table.rows {
+                    for cell in row.cells {
+                        count += cell.paragraphs.count
+                        for nested in cell.nestedTables { count += flatParagraphCount(in: [.table(nested)]) }
+                    }
+                }
+            case .contentControl(_, let inner): count += flatParagraphCount(in: inner)
+            }
+        }
+        return count
+    }
+
     /// Insert `text` at character `position` within paragraph `paragraphIndex`,
     /// wrapping the new run with a `<w:ins>` revision. Splits an existing run
     /// when the position falls inside one (preserves the surrounding text +
     /// formatting). Returns the allocated revision id.
+    ///
+    /// PsychQuant/che-word-mcp#276: `position` is an offset in the text the
+    /// read tools show (inserted text counts, deleted text does not); at a
+    /// boundary the new text goes after deleted text there. The new run is
+    /// written in place inside `<w:ins>`, also in a paragraph read from a
+    /// file. Refused, with nothing changed: a position inside a tracked
+    /// insertion or move (nesting is che-word-mcp#293), one that would split a
+    /// run holding a tab, break, field character, image or equation, and a
+    /// paragraph whose text offsets cannot address (raw tracked changes or an
+    /// equation outside a run). The Revision records the paragraph's flat
+    /// index.
     ///
     /// Throws `WordError.trackChangesNotEnabled` when track changes is off
     /// (no auto-enable side effect). Throws `WordError.invalidIndex` for
@@ -3134,69 +3172,19 @@ public struct WordDocument: Equatable {
             throw WordError.invalidIndex(paragraphIndex)
         }
 
-        let totalLength = paragraph.runs.reduce(0) { $0 + $1.text.count }
-        guard position >= 0, position <= totalLength else {
-            throw WordError.invalidIndex(position)
-        }
-        // PsychQuant/che-word-mcp#275 verify round 3: text inside a tracked
-        // insertion or move needs a nested revision (che-word-mcp#293).
-        var seen = 0
-        for run in paragraph.runs {
-            let runEnd = seen + run.text.count
-            if run.revisionId != nil, seen < position, position < runEnd {
-                throw WordError.invalidParameter(
-                    "position", "\(position) is inside a tracked revision; editing inside a revision is not supported yet (che-word-mcp#293)")
-            }
-            seen = runEnd
-        }
-
         let revisionId = allocateRevisionId()
-        let resolvedAuthor = resolveAuthor(author)
-        let resolvedDate = date ?? Date()
-
         var newRun = Run(text: text)
         newRun.revisionId = revisionId
+        paragraph.runs = try paragraph.placing([newRun], at: position)
 
-        if position == 0 {
-            paragraph.runs.insert(newRun, at: 0)
-        } else if position == totalLength {
-            paragraph.runs.append(newRun)
-        } else {
-            // Split the run that contains `position`.
-            var charsSeen = 0
-            for runIdx in 0..<paragraph.runs.count {
-                let runLength = paragraph.runs[runIdx].text.count
-                let charsAfter = charsSeen + runLength
-                if position == charsSeen {
-                    paragraph.runs.insert(newRun, at: runIdx)
-                    break
-                } else if position < charsAfter {
-                    let offsetInRun = position - charsSeen
-                    let original = paragraph.runs[runIdx]
-                    let beforeText = String(original.text.prefix(offsetInRun))
-                    let afterText = String(original.text.suffix(runLength - offsetInRun))
-
-                    var beforeRun = original
-                    beforeRun.text = beforeText
-                    var afterRun = original
-                    afterRun.text = afterText
-
-                    paragraph.runs[runIdx] = beforeRun
-                    paragraph.runs.insert(newRun, at: runIdx + 1)
-                    paragraph.runs.insert(afterRun, at: runIdx + 2)
-                    break
-                }
-                charsSeen = charsAfter
-            }
-        }
-
-        let revision = Revision(
+        var revision = Revision(
             id: revisionId,
             type: .insertion,
-            author: resolvedAuthor,
-            date: resolvedDate,
+            author: resolveAuthor(author),
+            date: date ?? Date(),
             content: text
         )
+        revision.paragraphIndex = Self.flatParagraphCount(in: Array(body.children[..<bodyIdx]))
         paragraph.revisions.append(revision)
         revisions.revisions.append(revision.anchored())
 
@@ -3210,6 +3198,14 @@ public struct WordDocument: Equatable {
     /// deletion. Splits straddling runs at the boundaries so only the deleted
     /// substring carries the revision id; the writer substitutes `<w:t>` with
     /// `<w:delText>` for those runs.
+    ///
+    /// PsychQuant/che-word-mcp#276: offsets as in `insertTextAsRevision`.
+    /// Refused, with nothing changed: an empty span; a span overlapping a
+    /// tracked insertion or move; a span with a zero-length run strictly
+    /// inside it (field characters, tabs, note references, another tracked
+    /// deletion — they used to be dropped, untracked); a span touching a run
+    /// that holds non-text content; a paragraph whose text offsets cannot
+    /// address. The Revision records the paragraph's flat index.
     ///
     /// Cross-paragraph delete is OUT OF SCOPE — `start` and `end` are character
     /// offsets within the named paragraph's text only.
@@ -3230,76 +3226,20 @@ public struct WordDocument: Equatable {
             throw WordError.invalidIndex(paragraphIndex)
         }
 
-        let totalLength = paragraph.runs.reduce(0) { $0 + $1.text.count }
-        guard start >= 0, end >= start, end <= totalLength else {
-            throw WordError.invalidIndex(end)
-        }
-        // PsychQuant/che-word-mcp#275 verify round 3: marking text of a
-        // tracked insertion as deleted took it out of the insertion, so
-        // rejecting the inserted paragraph joined it into the next one.
-        // Nesting is che-word-mcp#293.
-        var seen = 0
-        for run in paragraph.runs {
-            let runEnd = seen + run.text.count
-            if run.revisionId != nil, max(seen, start) < min(runEnd, end) {
-                throw WordError.invalidParameter(
-                    "start", "[\(start), \(end)) overlaps a tracked revision; editing inside a revision is not supported yet (che-word-mcp#293)")
-            }
-            seen = runEnd
-        }
-
         let revisionId = allocateRevisionId()
-        let resolvedAuthor = resolveAuthor(author)
-        let resolvedDate = date ?? Date()
-
-        var newRuns: [Run] = []
-        var charsSeen = 0
-        var deletedText = ""
-
-        for run in paragraph.runs {
-            let runStart = charsSeen
-            let runEnd = charsSeen + run.text.count
-
-            if runEnd <= start || runStart >= end {
-                newRuns.append(run)
-            } else {
-                let preLen = max(0, start - runStart)
-                let postLen = max(0, runEnd - end)
-                let midLen = run.text.count - preLen - postLen
-
-                if preLen > 0 {
-                    var preRun = run
-                    preRun.text = String(run.text.prefix(preLen))
-                    newRuns.append(preRun)
-                }
-                if midLen > 0 {
-                    var midRun = run
-                    let midText = String(run.text.dropFirst(preLen).prefix(midLen))
-                    midRun.text = midText
-                    midRun.revisionId = revisionId
-                    newRuns.append(midRun)
-                    deletedText += midText
-                }
-                if postLen > 0 {
-                    var postRun = run
-                    postRun.text = String(run.text.suffix(postLen))
-                    newRuns.append(postRun)
-                }
-            }
-
-            charsSeen = runEnd
-        }
-
+        let (newRuns, marked) = try paragraph.markingSpan(start: start, end: end, revisionId: revisionId)
         paragraph.runs = newRuns
+        let deletedText = marked.map(\.text).joined()
 
         var revision = Revision(
             id: revisionId,
             type: .deletion,
-            author: resolvedAuthor,
-            date: resolvedDate,
+            author: resolveAuthor(author),
+            date: date ?? Date(),
             content: deletedText
         )
         revision.originalText = deletedText
+        revision.paragraphIndex = Self.flatParagraphCount(in: Array(body.children[..<bodyIdx]))
         paragraph.revisions.append(revision)
         revisions.revisions.append(revision.anchored())
 
@@ -3313,6 +3253,12 @@ public struct WordDocument: Equatable {
     /// `fromParagraph` to `toPosition` in `toParagraph`, recording the action
     /// as a paired `<w:moveFrom>` / `<w:moveTo>` revision. The two halves get
     /// adjacent ids (returned as `(fromId, toId)` where `toId == fromId + 1`).
+    ///
+    /// PsychQuant/che-word-mcp#276: the source span follows the rules of
+    /// `deleteTextAsRevision`, the target position those of
+    /// `insertTextAsRevision`; both are checked before anything changes. The
+    /// moved text keeps its formatting and is written in place inside
+    /// `<w:moveTo>`; each Revision records its paragraph's flat index.
     ///
     /// Single-paragraph moves are rejected (`invalidParameter`) — callers should
     /// model them as a delete + insert pair instead.
@@ -3345,92 +3291,30 @@ public struct WordDocument: Equatable {
             throw WordError.invalidIndex(toParagraph)
         }
 
-        let fromTotal = fromPara.runs.reduce(0) { $0 + $1.text.count }
-        guard fromStart >= 0, fromEnd >= fromStart, fromEnd <= fromTotal else {
-            throw WordError.invalidIndex(fromEnd)
-        }
-        let toTotal = toPara.runs.reduce(0) { $0 + $1.text.count }
-        guard toPosition >= 0, toPosition <= toTotal else {
-            throw WordError.invalidIndex(toPosition)
-        }
-
         let fromId = allocateRevisionId()
         let toId = fromId + 1
+        let (newFromRuns, marked) = try fromPara.markingSpan(start: fromStart, end: fromEnd, revisionId: fromId)
+        // The moved text keeps its formatting; a format-change revision stays
+        // with the original (one id, one place).
+        let movedRuns = marked.map { run -> Run in
+            var copy = run.piece(0..<run.text.count, isFirst: false)
+            copy.revisionId = toId
+            copy.formatChangeRevisionId = nil
+            return copy
+        }
+        let newToRuns = try toPara.placing(movedRuns, at: toPosition)
+        fromPara.runs = newFromRuns
+        toPara.runs = newToRuns
+        let movedText = marked.map(\.text).joined()
+
         let resolvedAuthor = resolveAuthor(author)
         let resolvedDate = date ?? Date()
-
-        // moveFrom side: split runs at [fromStart, fromEnd), tag middle runs.
-        var newFromRuns: [Run] = []
-        var charsSeen = 0
-        var movedText = ""
-        for run in fromPara.runs {
-            let runStart = charsSeen
-            let runEnd = charsSeen + run.text.count
-            if runEnd <= fromStart || runStart >= fromEnd {
-                newFromRuns.append(run)
-            } else {
-                let preLen = max(0, fromStart - runStart)
-                let postLen = max(0, runEnd - fromEnd)
-                let midLen = run.text.count - preLen - postLen
-                if preLen > 0 {
-                    var preRun = run
-                    preRun.text = String(run.text.prefix(preLen))
-                    newFromRuns.append(preRun)
-                }
-                if midLen > 0 {
-                    var midRun = run
-                    let midText = String(run.text.dropFirst(preLen).prefix(midLen))
-                    midRun.text = midText
-                    midRun.revisionId = fromId
-                    newFromRuns.append(midRun)
-                    movedText += midText
-                }
-                if postLen > 0 {
-                    var postRun = run
-                    postRun.text = String(run.text.suffix(postLen))
-                    newFromRuns.append(postRun)
-                }
-            }
-            charsSeen = runEnd
-        }
-        fromPara.runs = newFromRuns
-
-        // moveTo side: insert a new run at toPosition.
-        var newRun = Run(text: movedText)
-        newRun.revisionId = toId
-        if toPosition == 0 {
-            toPara.runs.insert(newRun, at: 0)
-        } else if toPosition == toTotal {
-            toPara.runs.append(newRun)
-        } else {
-            var seen = 0
-            for runIdx in 0..<toPara.runs.count {
-                let length = toPara.runs[runIdx].text.count
-                let after = seen + length
-                if toPosition == seen {
-                    toPara.runs.insert(newRun, at: runIdx)
-                    break
-                } else if toPosition < after {
-                    let offsetInRun = toPosition - seen
-                    let original = toPara.runs[runIdx]
-                    var beforeRun = original
-                    beforeRun.text = String(original.text.prefix(offsetInRun))
-                    var afterRun = original
-                    afterRun.text = String(original.text.suffix(length - offsetInRun))
-                    toPara.runs[runIdx] = beforeRun
-                    toPara.runs.insert(newRun, at: runIdx + 1)
-                    toPara.runs.insert(afterRun, at: runIdx + 2)
-                    break
-                }
-                seen = after
-            }
-        }
-
         var fromRevision = Revision(
             id: fromId, type: .moveFrom, author: resolvedAuthor,
             date: resolvedDate, content: movedText
         )
         fromRevision.originalText = movedText
+        fromRevision.paragraphIndex = Self.flatParagraphCount(in: Array(body.children[..<fromBodyIdx]))
         fromPara.revisions.append(fromRevision)
         revisions.revisions.append(fromRevision.anchored())
 
@@ -3439,6 +3323,7 @@ public struct WordDocument: Equatable {
             date: resolvedDate, content: movedText
         )
         toRevision.newText = movedText
+        toRevision.paragraphIndex = Self.flatParagraphCount(in: Array(body.children[..<toBodyIdx]))
         toPara.revisions.append(toRevision)
         revisions.revisions.append(toRevision.anchored())
 
