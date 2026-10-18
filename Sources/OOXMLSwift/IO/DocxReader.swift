@@ -3408,7 +3408,12 @@ public struct DocxReader {
                 hAnsi: rFontsEl.attribute(forName: "w:hAnsi")?.stringValue,
                 eastAsia: rFontsEl.attribute(forName: "w:eastAsia")?.stringValue,
                 cs: rFontsEl.attribute(forName: "w:cs")?.stringValue,
-                hint: rFontsEl.attribute(forName: "w:hint")?.stringValue
+                hint: rFontsEl.attribute(forName: "w:hint")?.stringValue,
+                // PsychQuant/che-word-mcp#274: theme-font references.
+                asciiTheme: rFontsEl.attribute(forName: "w:asciiTheme")?.stringValue,
+                hAnsiTheme: rFontsEl.attribute(forName: "w:hAnsiTheme")?.stringValue,
+                eastAsiaTheme: rFontsEl.attribute(forName: "w:eastAsiaTheme")?.stringValue,
+                csTheme: rFontsEl.attribute(forName: "w:cstheme")?.stringValue
             )
             props.rFonts = rFonts
             // Legacy mirror — pre-#60 callers reading fontName still work
@@ -3419,9 +3424,15 @@ public struct DocxReader {
         }
 
         // 顏色
-        if let color = element.elements(forName: "w:color").first,
-           let val = color.attribute(forName: "w:val")?.stringValue {
-            props.color = val
+        if let color = element.elements(forName: "w:color").first {
+            if let val = color.attribute(forName: "w:val")?.stringValue {
+                props.color = val
+            }
+            // PsychQuant/che-word-mcp#274: theme-colour attributes. Read
+            // independently of `w:val` so a theme-only `<w:color>` survives.
+            props.themeColor = color.attribute(forName: "w:themeColor")?.stringValue
+            props.themeTint = color.attribute(forName: "w:themeTint")?.stringValue
+            props.themeShade = color.attribute(forName: "w:themeShade")?.stringValue
         }
 
         // 螢光標記
