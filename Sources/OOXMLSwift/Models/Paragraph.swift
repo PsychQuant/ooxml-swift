@@ -46,6 +46,16 @@ public struct Paragraph: Equatable {
     /// `<w:pPrChange>` inside this paragraph's `<w:pPr>` block.
     public var paragraphFormatChangeRevisionId: Int?
 
+    /// PsychQuant/che-word-mcp#275: id of a `Revision` (insertion or
+    /// deletion) in `revisions` that marks this paragraph's **mark** as
+    /// revised. Word records an inserted paragraph twice — `<w:ins>` around
+    /// its runs and `<w:ins/>` on the paragraph mark; this is the second half.
+    /// Emitted as the first child of the paragraph-mark `<w:rPr>`. Set by
+    /// `insertParagraphAsRevision`, and by `DocxReader` for an inserted mark
+    /// read from a file (round 2 of che-word-mcp#275); deleted / moved marks
+    /// read from a file stay raw in `properties.markRunProperties.rawChildren`.
+    public var markRevisionId: Int?
+
     /// v0.18.0+ (che-word-mcp#45): pre-mutation paragraph properties for a
     /// tracked `<w:pPrChange>` revision. Paired with
     /// `paragraphFormatChangeRevisionId`.
@@ -362,6 +372,7 @@ extension Paragraph {
             && lhs.revisions == rhs.revisions
             && lhs.semantic == rhs.semantic
             && lhs.paragraphFormatChangeRevisionId == rhs.paragraphFormatChangeRevisionId
+            && lhs.markRevisionId == rhs.markRevisionId
             && lhs.previousProperties == rhs.previousProperties
             && lhs.contentControls == rhs.contentControls
             && lhs.bookmarkMarkers == rhs.bookmarkMarkers
@@ -623,6 +634,36 @@ extension Paragraph {
     /// signals routes the paragraph to `toXMLSortedByPosition`, preserving
     /// source order. API-built paragraphs leave positions at 0 and stay on
     /// the legacy path.
+    /// PsychQuant/che-word-mcp#275: content other than runs — hyperlinks,
+    /// fields, alternate content, content controls, bookmarks, comment /
+    /// permission ranges, smart tags, custom XML, bidi overrides, note
+    /// references, unrecognized children. Rejecting an inserted paragraph
+    /// mark must never delete it.
+    internal var hasNonRunContent: Bool {
+        !hyperlinks.isEmpty || !fieldSimples.isEmpty || !alternateContents.isEmpty
+            || !contentControls.isEmpty || !bookmarks.isEmpty || !bookmarkMarkers.isEmpty
+            || !commentRangeMarkers.isEmpty || !permissionRangeMarkers.isEmpty
+            || !smartTags.isEmpty || !customXmlBlocks.isEmpty || !bidiOverrides.isEmpty
+            || !footnoteIds.isEmpty || !endnoteIds.isEmpty || !unrecognizedChildren.isEmpty
+            || !commentIds.isEmpty   // written by insertComment in the session (deprecated, still emitted)
+            || hasPageBreak          // emitted as its own untracked <w:r><w:br w:type="page"/></w:r>
+    }
+
+    /// PsychQuant/che-word-mcp#275: lowest source position among this
+    /// paragraph's positioned children (nil when none is positioned). Runs
+    /// given this position sort ahead of every existing child: the
+    /// positioned list adds runs first and the sort is stable.
+    internal var minimumSourcePosition: Int? {
+        var positions: [Int?] = runs.map(\.position) + hyperlinks.map(\.position)
+        positions += fieldSimples.map(\.position) + alternateContents.map(\.position)
+        positions += bookmarkMarkers.map(\.position) + commentRangeMarkers.map(\.position)
+        positions += permissionRangeMarkers.map(\.position) + proofErrorMarkers.map(\.position)
+        positions += smartTags.map(\.position) + customXmlBlocks.map(\.position)
+        positions += bidiOverrides.map(\.position) + unrecognizedChildren.map(\.position)
+        positions += contentControls.map(\.position)
+        return positions.compactMap { $0 }.filter { $0 > 0 }.min()
+    }
+
     internal var hasSourcePositionedChildren: Bool {
         return !bookmarkMarkers.isEmpty
             || !fieldSimples.isEmpty
@@ -727,7 +768,14 @@ extension Paragraph {
     /// comment and the R2 section of the fix report for the measurements.
     @inline(never)
     private func pPrBlockXML() -> String {
-        let propsXML = properties.toXML()
+        // PsychQuant/che-word-mcp#275: a revised paragraph mark rides inside
+        // the paragraph-mark rPr, so ParagraphProperties emits it.
+        // Prefer the insertion: an id can also belong to a run deletion in
+        // files whose ids are not unique.
+        let markRevisionXML: String? = markRevisionId.flatMap { id in
+            (revisions.first { $0.id == id && $0.type == .insertion } ?? revisions.first { $0.id == id })?.toMarkerXML()
+        }
+        let propsXML = properties.toXML(paragraphMarkRevisionXML: markRevisionXML)
         let formatChangeRevision: Revision? = {
             guard let id = paragraphFormatChangeRevisionId else { return nil }
             return revisions.first { $0.id == id }
@@ -1379,6 +1427,16 @@ extension ParagraphProperties {
     /// 依錨定規則放置。修正前的固定順序是 pStyle → numPr → jc → spacing → ind →
     /// keepNext → keepLines → pageBreakBefore → pBdr → shd → rawChildren → rPr。
     public func toXML() -> String {
+        toXML(paragraphMarkRevisionXML: nil)
+    }
+
+    /// PsychQuant/che-word-mcp#275: `paragraphMarkRevisionXML` is a
+    /// self-closing `<w:ins/>` / `<w:del/>` for a revised paragraph mark
+    /// (supplied by `Paragraph`, which owns the revision). CT_ParaRPr puts
+    /// the track-change group before EG_RPrBase, so it is the first child of
+    /// the mark `<w:rPr>`; the `<w:rPr>` is created when there are no mark
+    /// properties.
+    internal func toXML(paragraphMarkRevisionXML: String?) -> String {
         // (position, tier, sequence, xml)：tier 0 = schema 已知元素，tier 1 =
         // 錨定在該位置之後的表外元素；sequence 保持同位置內的加入順序。
         var slots: [(position: Int, tier: Int, sequence: Int, xml: String)] = []
@@ -1471,11 +1529,20 @@ extension ParagraphProperties {
         // we wrap with <w:rPr>...</w:rPr> here. Skip emission when nil OR
         // when the inner content is empty — matches the "no synthetic empty
         // <w:rPr/>" gate discipline established in sub-stack B-CONT-2.
-        if let markProps = markRunProperties {
-            let inner = markProps.toXML()
-            if !inner.isEmpty {
-                add("rPr", "<w:rPr>\(inner)</w:rPr>")
-            }
+        //
+        // CT_ParaRPr: the track-change group (ins, del, moveFrom, moveTo)
+        // comes before the formatting. A deleted or moved mark stays raw, so
+        // those raw children move up next to the typed insertion
+        // (che-word-mcp#275 round 4).
+        let markTrackChanges: Set<String> = ["del", "moveFrom", "moveTo"]
+        var markProperties = markRunProperties
+        let rawMarkTrackChanges = markProperties?.rawChildren?.filter { markTrackChanges.contains($0.name) } ?? []
+        markProperties?.rawChildren?.removeAll { markTrackChanges.contains($0.name) }
+        if markProperties?.rawChildren?.isEmpty == true { markProperties?.rawChildren = nil }
+        let markInner = (paragraphMarkRevisionXML ?? "") + rawMarkTrackChanges.map(\.xml).joined()
+            + (markProperties?.toXML() ?? "")
+        if !markInner.isEmpty {
+            add("rPr", "<w:rPr>\(markInner)</w:rPr>")
         }
 
         // v3.12.0+ (#168) / v3.13.0+ (#175): pPr children the typed model

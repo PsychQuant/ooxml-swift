@@ -36,7 +36,31 @@ public enum RevisionType: String, Codable {
 }
 
 /// 修訂記錄
+/// Wraps a value that does not take part in `==` (synthesized conformances
+/// compare the wrapper, which always reports equal).
+@propertyWrapper
+public struct EqualityIgnored<Value>: Equatable {
+    public var wrappedValue: Value
+    public init(wrappedValue: Value) { self.wrappedValue = wrappedValue }
+    public static func == (lhs: Self, rhs: Self) -> Bool { true }
+}
+
 public struct Revision: Equatable {
+    /// PsychQuant/che-word-mcp#275 round 3: set when the revision came from a
+    /// file or a generator, i.e. its markers live on runs / paragraph marks.
+    /// accept / reject fall back to the recorded index and text only for
+    /// revisions that never had markers (built directly through the model);
+    /// an anchored revision whose markers are gone (its paragraph was
+    /// deleted) is an orphan and touches nothing. Not part of `==`.
+    @EqualityIgnored public internal(set) var isAnchored: Bool = false
+
+    /// A copy marked as anchored.
+    func anchored() -> Revision {
+        var copy = self
+        copy.isAnchored = true
+        return copy
+    }
+
     public var id: Int                     // 修訂 ID
     public var type: RevisionType          // 修訂類型
     public var author: String              // 作者
@@ -193,6 +217,22 @@ extension Revision {
             return "<w:rPrChange w:id=\"\(id)\" w:author=\"\(escapeXML(author))\" w:date=\"\(dateString)\">"
         case .paragraphChange:
             return "<w:pPrChange w:id=\"\(id)\" w:author=\"\(escapeXML(author))\" w:date=\"\(dateString)\">"
+        }
+    }
+
+    /// PsychQuant/che-word-mcp#275: self-closing marker for a revised
+    /// paragraph mark — `<w:pPr><w:rPr><w:ins …/></w:rPr></w:pPr>`. Only
+    /// insertion and deletion apply to a paragraph mark (CT_ParaRPr's
+    /// track-change group); other types return nil.
+    func toMarkerXML() -> String? {
+        let dateString = ISO8601DateFormatter().string(from: date)
+        switch type {
+        case .insertion:
+            return "<w:ins w:id=\"\(id)\" w:author=\"\(escapeXML(author))\" w:date=\"\(dateString)\"/>"
+        case .deletion:
+            return "<w:del w:id=\"\(id)\" w:author=\"\(escapeXML(author))\" w:date=\"\(dateString)\"/>"
+        default:
+            return nil
         }
     }
 
@@ -445,9 +485,8 @@ public struct RevisionsCollection: Equatable {
     public var revisions: [Revision] = []
     public var settings: TrackChangesSettings = TrackChangesSettings()
 
-    /// 取得下一個修訂 ID
-    mutating func nextRevisionId() -> Int {
-        let maxId = revisions.map { $0.id }.max() ?? 0
-        return maxId + 1
-    }
+    /// PsychQuant/che-word-mcp#275 round 4: every revision id in the file the
+    /// document was read from, including ones the model keeps only as raw
+    /// XML. `allocateRevisionId` never hands one out. Not part of `==`.
+    @EqualityIgnored public internal(set) var reservedIds: Set<Int> = []
 }
