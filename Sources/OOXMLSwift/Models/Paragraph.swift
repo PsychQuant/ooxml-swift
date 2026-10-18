@@ -653,7 +653,13 @@ extension Paragraph {
     /// paragraph's positioned children (nil when none is positioned). Runs
     /// given this position sort ahead of every existing child: the
     /// positioned list adds runs first and the sort is stable.
-    internal var minimumSourcePosition: Int? {
+    internal var minimumSourcePosition: Int? { sourcePositions.min() }
+
+    /// PsychQuant/che-word-mcp#276: highest source position (nil when none
+    /// is positioned). A run given a larger one sorts after every child.
+    internal var maximumSourcePosition: Int? { sourcePositions.max() }
+
+    private var sourcePositions: [Int] {
         var positions: [Int?] = runs.map(\.position) + hyperlinks.map(\.position)
         positions += fieldSimples.map(\.position) + alternateContents.map(\.position)
         positions += bookmarkMarkers.map(\.position) + commentRangeMarkers.map(\.position)
@@ -661,7 +667,7 @@ extension Paragraph {
         positions += smartTags.map(\.position) + customXmlBlocks.map(\.position)
         positions += bidiOverrides.map(\.position) + unrecognizedChildren.map(\.position)
         positions += contentControls.map(\.position)
-        return positions.compactMap { $0 }.filter { $0 > 0 }.min()
+        return positions.compactMap { $0 }.filter { $0 > 0 }
     }
 
     internal var hasSourcePositionedChildren: Bool {
@@ -1124,8 +1130,22 @@ extension Paragraph {
         // paragraph silently relocated text to the paragraph head. Now they
         // emit AFTER source-loaded children, matching the append semantics
         // that contentControls (R5 P0 #2) and the legacy emit path use.
-        for run in runs where (run.position ?? 0) == 0 {
-            xml += Self.emitRun(run, asDelText: false, paragraphRevisions: revisions)
+        // PsychQuant/che-word-mcp#276: grouped like the legacy path, so a
+        // tracked run without a source position is still written inside its
+        // revision wrapper (it used to be written bare — untracked).
+        for group in Self.groupRunsByRevisionId(runs.filter { ($0.position ?? 0) == 0 }) {
+            if let revisionId = group.revisionId,
+               let revision = revisions.first(where: { $0.id == revisionId }) {
+                xml += revision.toOpeningXML()
+                for run in group.runs {
+                    xml += Self.emitRun(run, asDelText: revision.type == .deletion, paragraphRevisions: revisions)
+                }
+                xml += revision.toClosingXML()
+            } else {
+                for run in group.runs {
+                    xml += Self.emitRun(run, asDelText: false, paragraphRevisions: revisions)
+                }
+            }
         }
         for hyperlink in hyperlinks where (hyperlink.position ?? 0) == 0 {
             xml += hyperlink.toXML()
