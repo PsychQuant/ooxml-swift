@@ -142,7 +142,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
             "plain":              "rId6",
             "decimal entity":     "rId&#54;",
             "zero-padded hex":    "rId&#x00000036;",
-            "very long decimal":  "rId&#54;",
+            "very long decimal":  "rId&#000000000000000000000054;",
             "literal tab":        "rId\t6",
             "literal LF":         "rId\n6",
             "literal CRLF":       "rId\r\n6",
@@ -763,7 +763,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let dir = try ZipHelper.unzip(url); defer { ZipHelper.cleanup(dir) }
         let relsURL = dir.appendingPathComponent("word/_rels/document.xml.rels")
         var relsXML = try String(contentsOf: relsURL, encoding: .utf8)
-        relsXML = relsXML.replacingOccurrences(of: "</Relationships>", with: #"<Relationship Id="rId9" Type="\#(imageType)" Target="media/a.png"/><Relationship Id="rId&#211;" Type="\#(imageType)" Target="media/b.png"/></Relationships>"#)
+        relsXML = relsXML.replacingOccurrences(of: "</Relationships>", with: #"<Relationship Id="rId9" Type="\#(imageType)" Target="media/a.png"/><Relationship Id="rId&#57;" Type="\#(imageType)" Target="media/b.png"/></Relationships>"#)
         try relsXML.write(to: relsURL, atomically: true, encoding: .utf8)
         let damaged = FileManager.default.temporaryDirectory.appendingPathComponent("i139-dup-\(UUID().uuidString).docx")
         try ZipHelper.zip(dir, to: damaged); defer { try? FileManager.default.removeItem(at: damaged) }
@@ -807,7 +807,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let dir = try ZipHelper.unzip(url); defer { ZipHelper.cleanup(dir) }
         let relsURL = dir.appendingPathComponent("word/_rels/document.xml.rels")
         var relsXML = try String(contentsOf: relsURL, encoding: .utf8)
-        relsXML = relsXML.replacingOccurrences(of: "</Relationships>", with: #"<Relationship Id="rId&#211;" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>"#)
+        relsXML = relsXML.replacingOccurrences(of: "</Relationships>", with: #"<Relationship Id="rId&#57;" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>"#)
         try relsXML.write(to: relsURL, atomically: true, encoding: .utf8)
         let damaged = FileManager.default.temporaryDirectory.appendingPathComponent("i139-ent-\(UUID().uuidString).docx")
         try ZipHelper.zip(dir, to: damaged); defer { try? FileManager.default.removeItem(at: damaged) }
@@ -815,7 +815,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         var thrown: Error?
         XCTAssertThrowsError(try DocxWriter.writeData(read)) { thrown = $0 }
         let message = (thrown as? LocalizedError)?.errorDescription ?? String(describing: thrown)
-        XCTAssertTrue(message.contains("rId&#211;"), message)
+        XCTAssertTrue(message.contains("rId&#57;"), message)
         XCTAssertTrue(message.contains("#142"), message)
         // verify R5 (codex W-R5-1 / req R5-7 / logic L3): the cause is named as
         // what it is — the raw spelling that decodes to the parsed id.
@@ -1200,15 +1200,15 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     }
 
     func testCharacterReferenceCauseIsNamedForQuotedAndSpacedSpellingsAndStaysLinear() throws {
-        // codex R6-7: `Id = 'rId&#211;'` decodes to rId57 like `Id="rId&#211;"` does;
+        // codex R6-7: `Id = 'rId&#57;'` decodes to rId57 like `Id="rId&#57;"` does;
         // codex R6-1: the diagnosis is one pass over the text — 20 000 such ids
         // must not make the refusal quadratic; the message is capped.
         let theme = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme"
         let message = try writerRefusal(mutatingRels: { url in
             let xml = try String(contentsOf: url, encoding: .utf8)
-            try xml.replacingOccurrences(of: "</Relationships>", with: "<Relationship Id = 'rId&#211;' Type='\(theme)' Target='theme/theme1.xml'/></Relationships>").write(to: url, atomically: true, encoding: .utf8)
+            try xml.replacingOccurrences(of: "</Relationships>", with: "<Relationship Id = 'rId&#57;' Type='\(theme)' Target='theme/theme1.xml'/></Relationships>").write(to: url, atomically: true, encoding: .utf8)
         })
-        XCTAssertTrue(message.contains("rId9: written with a character or entity reference (`rId&#211;` in the file)"), message)
+        XCTAssertTrue(message.contains("rId9: written with a character or entity reference (`rId&#57;` in the file)"), message)
         // `rId&#49;<n>` decodes to `rId1<n>`: n distinct ids, every one spelled with a reference.
         func damaged(_ n: Int) throws -> DamagedDocument {
             let many = (1...n).map { #"<Relationship Id="rId&#49;\#($0)" Type="\#(theme)" Target="theme/t\#($0).xml"/>"# }.joined()
@@ -1383,7 +1383,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         try XCTAssertScalesLinearly("data-Id spellings stay linear", baseSize: 1_500, prepare: document) {
             _ = refusalMessage(of: $0)
         }
-        XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: #"<x foo.Id="rId&#211;" data-Id="rId&#211;"/><Relationship r:Id="rId&#211;" Id="rId&#211;"/>"#), ["rId9": ["rId&#211;"]])
+        XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: #"<x foo.Id="rId&#57;" data-Id="rId&#57;"/><Relationship r:Id="rId&#57;" Id="rId&#57;"/>"#), ["rId9": ["rId&#57;"]])
     }
 
     func testSameMultisetInAnotherOrderIsRefusedWithACappedMessage() throws {
@@ -1449,7 +1449,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         let base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
         let cases: [(String, String, String)] = [
             ("single quote, decoy reference in Target",
-             "<Relationship Id='rId9' Type=\"\(base)\" Target=\"https://example.com/?q= Id='rId&#211;'\" TargetMode=\"External\"/>",
+             "<Relationship Id='rId9' Type=\"\(base)\" Target=\"https://example.com/?q= Id='rId&#57;'\" TargetMode=\"External\"/>",
              "rId9: single-quoted attribute values"),
             ("whitespace around =, decoy plain Id in Target",
              "<Relationship Id = \"rId9\" Type=\"\(base)\" Target=\"https://example.com/? Id='rId9'\" TargetMode=\"External\"/>",
@@ -1469,7 +1469,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     func testANamespaceUriIsNotReportedAsARelationshipId() throws {
         // verify R7 logic N-L4-R7: the overlay's own attribute regex reads names
         // at attribute-name position only, so `xmlns:Id="urn:zz"` is not an Id.
-        let relsXML = #"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship xmlns:Id="urn:zz" Id="rId&#211;" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>"#
+        let relsXML = #"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship xmlns:Id="urn:zz" Id="rId&#57;" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>"#
         let message = try writerRefusal { try relsXML.write(to: $0, atomically: true, encoding: .utf8) }
         XCTAssertFalse(message.contains("urn:zz"), message.suffix(300).description)
         XCTAssertTrue(message.contains("both see 1 relationship,"), "singular (logic N-L6-R7): \(message.suffix(300))")
@@ -1713,10 +1713,10 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     func testAPrefixedIdAttributeIsNotTheRelationshipId() throws {
         // logic N-L4-R6: `r:Id="…"` / `xmlns:Id="…"` are not the Id attribute; the
         // spelling map must not attribute a cause to them.
-        let raw = #"<Relationships xmlns="urn:p"><Relationship xmlns:Id="urn:x" r:Id="rId&#211;" Id="rId9" Type="t" Target="a"/></Relationships>"#
+        let raw = #"<Relationships xmlns="urn:p"><Relationship xmlns:Id="urn:x" r:Id="rId&#57;" Id="rId9" Type="t" Target="a"/></Relationships>"#
         XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: raw), [:], "the only real Id is spelled plainly")
-        let raw2 = #"<Relationship r:Id="rId9" Id="rId&#211;" Type="t" Target="a"/>"#
-        XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: raw2), ["rId9": ["rId&#211;"]])
+        let raw2 = #"<Relationship r:Id="rId9" Id="rId&#57;" Type="t" Target="a"/>"#
+        XCTAssertEqual(DocxWriter.rawSpellingsByDecodedId(inRaw: raw2), ["rId9": ["rId&#57;"]])
     }
 
     // MARK: - verify R10 Devil's Advocate: four mutation probes stayed green (N-DA10-2..5) + N-DA10-1
@@ -1725,7 +1725,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
         // N-DA10-4 (mutation M5): with `\b` as the tag boundary, a `<Relationship-2 …/>`
         // decoy placed BEFORE the real tag became an occurrence — the cause named its
         // `-2` "attribute" and a spelling that is not in any real tag was reported.
-        let raw = #"<Relationships xmlns="urn:p"><Relationship-2 Id="rId&#211;" Type="t" Target="a"/><Relationship Id = "rId9" Type="t" Target="b"/></Relationships>"#
+        let raw = #"<Relationships xmlns="urn:p"><Relationship-2 Id="rId&#57;" Type="t" Target="a"/><Relationship Id = "rId9" Type="t" Target="b"/></Relationships>"#
         let occurrences = DocxWriter.relationshipIdOccurrences(inRaw: raw)
         XCTAssertEqual(occurrences["rId9"]?.count, 1, "\(occurrences)")
         XCTAssertEqual(occurrences["rId9"]?.first?.whitespaceAroundEquals, true)

@@ -473,7 +473,7 @@ extension RawChannelSlotTests {
     /// identity shortcut fires for the decoded value.
     func testNumericCharacterReferenceDefaultAndIdentity() throws {
         let xml = Self.tableDocumentXML.replacingOccurrences(
-            of: "<w:t>表單標題</w:t>", with: "<w:t>&#x41;&#218;</w:t>")
+            of: "<w:t>表單標題</w:t>", with: "<w:t>&#x41;&#66;</w:t>")
         let reference = try makeTableReference(documentXML: xml)
         let log = try reverseExpectingRaw(reference)
         let script = try ScriptExporter.exportSwift(log: log, slots: [
