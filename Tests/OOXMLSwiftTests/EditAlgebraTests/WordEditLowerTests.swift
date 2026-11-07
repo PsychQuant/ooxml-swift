@@ -161,13 +161,14 @@ final class WordEditLowerTests: XCTestCase {
         let lowered = edit.lower()
         XCTAssertEqual(lowered.count, 1)
 
-        guard case .insertParagraph(let after, let content, let styleId) = lowered[0] else {
+        guard case .insertParagraph(let after, let content, let styleId, let inherit) = lowered[0] else {
             XCTFail("Expected OOXMLEdit.insertParagraph, got \(lowered[0])")
             return
         }
         XCTAssertEqual(after, paraID, "after: ParagraphRef → ElementID round-trip")
         XCTAssertEqual(content, "Hello world")
         XCTAssertNil(styleId, "WordEdit.applyInsertParagraph doesn't take styleId; lowered styleId == nil")
+        XCTAssertFalse(inherit, "WordEdit lowering keeps the bare-paragraph default (#234)")
     }
 
     func testApplyInsertParagraphEmptyContent() {
@@ -176,7 +177,7 @@ final class WordEditLowerTests: XCTestCase {
         let edit = WordEdit.applyInsertParagraph(after: paraRef, content: "")
 
         let lowered = edit.lower()
-        guard case .insertParagraph(_, let content, _) = lowered[0] else {
+        guard case .insertParagraph(_, let content, _, _) = lowered[0] else {
             XCTFail("Expected OOXMLEdit.insertParagraph")
             return
         }

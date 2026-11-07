@@ -33,16 +33,44 @@ public enum OOXMLEdit: Edit, Equatable, Sendable {
     /// - `after`: ElementID of the existing paragraph to insert AFTER
     /// - `content`: text content of the new paragraph
     /// - `styleId`: optional style ID reference (e.g., "Heading1"); `nil` for default
+    /// - `inheritAnchorFormat`: `true` gives the new paragraph the anchor's
+    ///   format (PsychQuant/ooxml-swift#234). Default `false` inserts a bare
+    ///   paragraph as before.
     ///
     /// Maps to `Operation.insertParagraphAfter(after:paragraph:)` with
-    /// `ParagraphPayload(text: content, styleId: styleId)`.
-    case insertParagraph(after: ElementID, content: String, styleId: String?)
+    /// `ParagraphPayload(text: content, styleId: styleId)`, plus
+    /// `inheritAnchorFormat: true` when the option is set.
+    ///
+    /// **Anchor format** (the same rules as macdoc
+    /// `word form apply --insert-after`, PsychQuant/macdoc#249). The anchor
+    /// must be a `<w:p>`. The reducer copies, at apply time:
+    /// - the anchor's own `<w:pPr>`, without `w:numPr`, `w:sectPr`,
+    ///   `w:pPrChange` and `w:pageBreakBefore`; its paragraph-mark `<w:rPr>`
+    ///   loses `w:ins`, `w:del`, `w:moveFrom`, `w:moveTo` and `w:rPrChange`.
+    ///   A copy left with no children is omitted.
+    /// - the `<w:rPr>` of the anchor's first own run with text — the first
+    ///   `<w:r>` whose nearest enclosing `<w:p>` is the anchor (runs of a
+    ///   text box's paragraphs do not count; runs inside a hyperlink do) and
+    ///   whose direct `<w:t>` children hold non-empty text — without
+    ///   `w:rPrChange`.
+    /// When the anchor ends a section (its pPr holds `w:sectPr`), the
+    /// `w:sectPr` moves from the anchor to the new paragraph, so the new
+    /// text stays in the anchor's section. A non-nil `styleId` replaces the
+    /// copied `w:pStyle`.
+    case insertParagraph(after: ElementID, content: String, styleId: String?,
+                         inheritAnchorFormat: Bool = false)
 
     /// Insert a new paragraph before the specified anchor paragraph.
     ///
     /// Positional variant of `.insertParagraph(after:)`. Maps to
     /// `Operation.insertParagraphBefore(before:paragraph:)`.
-    case insertParagraphBefore(before: ElementID, content: String, styleId: String?)
+    ///
+    /// `inheritAnchorFormat` follows the rules on `.insertParagraph(after:)`
+    /// except for the section break: a paragraph inserted before the anchor
+    /// is already in the anchor's section, so `w:sectPr` is neither copied
+    /// nor moved.
+    case insertParagraphBefore(before: ElementID, content: String, styleId: String?,
+                               inheritAnchorFormat: Bool = false)
 
     /// Toggle bold formatting on the specified Run element.
     ///
