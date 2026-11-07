@@ -1200,7 +1200,7 @@ final class Issue137to139InspectorParserTests: XCTestCase {
     }
 
     func testCharacterReferenceCauseIsNamedForQuotedAndSpacedSpellingsAndStaysLinear() throws {
-        // codex R6-7: `Id = 'rId&#57;'` decodes to rId57 like `Id="rId&#57;"` does;
+        // codex R6-7: `Id = 'rId&#57;'` decodes to rId9 like `Id="rId&#57;"` does;
         // codex R6-1: the diagnosis is one pass over the text — 20 000 such ids
         // must not make the refusal quadratic; the message is capped.
         let theme = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme"

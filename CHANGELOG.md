@@ -29,17 +29,19 @@ All notable changes to ooxml-swift will be documented in this file.
 ### Fixed
 
 - **測試 fixture 的數值字元參照還原成原本的寫法；本機 `swift test` 重新全綠**（#222）。
-  2026-09 底改寫 3.11.0 以前的 git 歷史、依 issue 搬遷重新編號 `#數字` 時，替換也套進了
-  XML 數值字元參照：`&#57;`（`9`）變成 `&#211;`，`&#66;`（`B`）變成 `&#218;`，`&#65;`
-  變成 `&#217;`，`&#000000000000000000000054;` 的前導零也被吃掉。fixture 改為解碼成 `rIdÓ`、
-  `AÚ`，預期值仍是 `rId9`、`AB`，所以 `Issue137to139InspectorParserTests` 與
-  `RawChannelSlotTests` 有 7 個斷言失敗；平台 parser 與 library 程式碼都沒有問題。這次照
-  3.11.0 改寫前的內容逐處還原，連同改寫後被照抄的地方（`DocxWriter` 兩處註解、
-  `RawChannelSlotSurgery` 一處註解，以及本檔兩處）。
-  `testEntityEncodedOriginalIdIsRefusedRatherThanSilentlyMismatched` 的 fixture 也是照抄的：
-  它只檢查訊息指名 `#142`，所以拿 `rIdÓ` 也照樣通過。現在多了一個斷言，確認 fixture 解碼後是
-  `rId9`，fixture 再被改壞就會失敗。CI 只編譯、不執行測試，所以這類損壞上不了 CI 的檯面，
-  另見 #235。
+  2026-09 底改寫 3.19.0 以前的 git 歷史、依 issue 搬遷重新編號 `#數字` 時，替換也套進了
+  XML 數值字元參照：`&#57;`（`9`）變成 `&#211;`，`&#62;`（`>`）變成 `&#214;`，`&#65;`
+  變成 `&#217;`，`&#66;`（`B`）變成 `&#218;`，`&#000000000000000000000054;` 的前導零也被
+  吃掉。fixture 改為解碼成 `rIdÓ`、`AÚ`，預期值仍是 `rId9`、`AB`，所以
+  `Issue137to139InspectorParserTests` 與 `RawChannelSlotTests` 有 7 個斷言失敗；平台 parser
+  與 library 程式碼都沒有問題。3.11.0 以前寫的部分，照改寫前的 3.11.0 內容逐處還原；
+  3.11.0 以後寫的部分本機沒有改寫前的版本，依上下文還原：`rId9` 的預期值，以及 #148
+  重現步驟裡 `Target="a/&gt;b.xml"` 的讀法。這部分包括 `DocxWriter` 與 `RelationshipsOverlay`
+  的註解、本檔兩處，以及 `Issue83_…_WriterRelsTests` 的兩個 fixture。這兩個 WriterRels 測試
+  被改壞後照樣通過：一個只檢查拒絕訊息指名 `#142`，一個只比對三次存檔的位元組相同。所以
+  兩個測試現在都多了一個斷言，確認 fixture 解碼後是預期的值；其他測試的 fixture 被改壞時，
+  會以原本的斷言失敗的形式出現，而不會指名 fixture。CI 只編譯、不執行測試，所以這類損壞
+  在 CI 上看不出來，另見 #235。
 - **`acceptRevision`／`rejectRevision` 依修訂 id 找目標，不再依記錄下來的段落索引與文字比對**
   （PsychQuant/che-word-mcp#280，併入 #275）。過去兩者用 `Revision.paragraphIndex` 找段落——
   只在建立時記一次、之後插入或刪除段落就過時，`insertTextAsRevision`／`deleteTextAsRevision`
@@ -354,7 +356,7 @@ All notable changes to ooxml-swift will be documented in this file.
 - **關係合併不再對已經跳脫過的 `Type`／`Target`／`TargetMode` 值重複跳脫**（#148）。
   overlay 模式下，來源 rels 裡未被型別模型管理的 relationship（theme／webSettings／
   customXml 等）在合併時會原封不動地帶著原始屬性文字寫回，不再拆解成欄位後重新跳脫——
-  過去若這類欄位含有字元或實體參照（例如 `Target="a&#47;&#214;b.xml"`），每次觸發 rels
+  過去若這類欄位含有字元或實體參照（例如 `Target="a&#47;&#62;b.xml"`），每次觸發 rels
   重寫都會多包一層 `&amp;`，跳脫層數隨儲存次數持續累加。
 - **`DocxWriter` 的輸出可以逐位元組重現**（#151）。zip entry 的修改時間改為固定值，所以帶有自身 `created`／`modified` 的文件（所有從檔案讀入的文件）不需任何設定，兩次存檔的位元組就相同。沒有時間戳的新文件，`docProps/core.xml` 預設仍記錄存檔當下的時間；需要逐位元組比對時，把新增的 `WordDocument.timestampForUnsetProperties` 設為固定值。
 

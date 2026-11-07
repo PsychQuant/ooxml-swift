@@ -447,13 +447,17 @@ final class Issue83_140_142_148_149_151_64_87_WriterRelsTests: XCTestCase {
 
     /// #148's own reproduction: a `Target` containing a character reference
     /// survives one merge unchanged, then is corrupted a little more on every
-    /// further save (`&#47;&#214;` → the parser's `/>` reading gets re-escaped
-    /// as literal `&amp;#47;&amp;#214;`, etc.). This test saves the SAME
+    /// further save (`&#47;&#62;` → the parser's `/>` reading gets re-escaped
+    /// as literal `&amp;#47;&amp;#62;`, etc.). This test saves the SAME
     /// unmanaged relationship across three saves (each forced to go through
     /// the merge by touching an unrelated header) and asserts the Target text
     /// is byte-identical every time.
     func testUnmanagedRelationshipWithEntityReferencedTargetIsNotProgressivelyDoubleEscaped() throws {
-        let originalTarget = "a&#47;&#214;b.xml"   // parser reads this as "a/>b.xml"
+        let originalTarget = "a&#47;&#62;b.xml"   // parser reads this as "a/>b.xml"
+        // ooxml-swift#222: the history rewrite turned `&#62;` into `&#214;`, and
+        // the byte-identical assertions below kept passing on "a/Öb.xml".
+        XCTAssertEqual(DocxWriter.decodedAttributeValue(originalTarget), "a/>b.xml",
+                       "fixture spelling \(originalTarget) must decode to a/>b.xml")
         let extra = #"<Relationship Id="rId50" Type="http://example.test/unmanaged" Target="\#(originalTarget)"/>"#
         let data = try syntheticPackage(
             stylesId: "rId1", settingsId: "rId2", fontTableId: "rId3",
