@@ -18,13 +18,18 @@ All notable changes to ooxml-swift will be documented in this file.
     段落標記的 `w:rPr` 再去掉 `w:ins`／`w:del`／`w:moveFrom`／`w:moveTo`／`w:rPrChange`。清完沒有子元素
     就不輸出。
   - 文字格式：錨點第一個有文字的 run（最近的外層 `w:p` 就是錨點、直接的 `w:t` 有文字；文字方塊裡的
-    段落不算，hyperlink 內的 run 算）的 `w:rPr`，去掉 `w:rPrChange`。
+    段落不算，hyperlink 內的 run 算）的 `w:rPr`，去掉 `w:rPrChange`。元素名稱只認 WordprocessingML
+    命名空間：行內數學的 `m:r`／`m:t`／`m:rPr` 不算 run，不會被複製進 `w:r`。
   - 分節符：插在錨點之後、錨點帶 `w:sectPr` 時，`w:sectPr` 從錨點移到新段落，新內容留在錨點那一節；
     插在之前不複製也不移動。
   - 有給 `styleId` 時取代複製來的 `w:pStyle`。
   - 錨點不是 `<w:p>`、payload 另外指定了段落欄位（對齊、間距、縮排、編號、段落標記 rPr、rsid、textId）、
     或 `appendParagraph` 帶這個旗標（它沒有錨點）時，reducer 丟 `malformedOp`，不靜默忽略。
   - 經 op-log 寫進樹，不把 `word/document.xml` 標成 typed-dirty（不走 #133 的 typed 重序列化）。
+  - undo：撤銷這次插入時 `w:sectPr` 會回到錨點（undo 是略過被撤銷的 entry 重播）。與其他結構性 op
+    一樣，插入要包在 `batchBegin`…`batchEnd` 裡才能 undo；reducer 只單獨 undo `setText` 與
+    `setParagraphStyle`。
+  - 帶旗標的 `appendParagraph` 匯出成腳本時走 `// @op` 逃生路徑，旗標不會在 DSL 拼寫裡被丟掉。
   複製出來的元素不沿用錨點的 `libraryUUID`。`ParagraphPayload` 新增 optional 欄位 `inheritAnchorFormat`；
   為 `nil` 時不寫進 JSONL，既有 log 的位元組不變、舊 log 照常解碼。
 

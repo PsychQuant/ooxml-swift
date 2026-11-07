@@ -6,7 +6,11 @@
 // macdoc `word form apply --insert-after` uses (PsychQuant/macdoc#249); the
 // public description lives on `OOXMLEdit.insertParagraph`.
 //
-// Element names are matched by local name, as everywhere else in the reducer.
+// Element names are matched in the WordprocessingML namespace only (verify
+// R1 #1): OMML reuses the local names `r`, `t` and `rPr` (`m:r`, `m:t`,
+// `m:rPr`), so a local-name match would take an inline equation for the first
+// text run and copy its `m:rPr` into a `w:r`. macdoc#249 matches the qualified
+// `w:` names, which is the same rule.
 
 import Foundation
 
@@ -39,7 +43,7 @@ extension OperationReducer {
         movesSectionBreak: Bool,
         opID: UUID
     ) throws -> XmlNode {
-        guard anchor.kind == .element, anchor.localName == "p" else {
+        guard isWordElement(anchor, "p") else {
             throw ReducerError.malformedOp(
                 opID: opID,
                 reason: "inheritAnchorFormat needs a <w:p> anchor, got <\(anchor.localName)>")
@@ -55,15 +59,13 @@ extension OperationReducer {
         let anchorPPr = elementChild(of: anchor, named: "pPr")
         var pPrChildren = copiedParagraphProperties(anchorPPr)
         if let styleId = payload.styleId, !styleId.isEmpty {
-            pPrChildren.removeAll { $0.localName == "pStyle" }
+            pPrChildren.removeAll { isWordElement($0, "pStyle") }
             let pStyle = XmlNode.element(prefix: "w", localName: "pStyle", namespaceURI: wordNamespace)
             pStyle.setAttribute(prefix: "w", localName: "val", value: styleId)
             pPrChildren.insert(pStyle, at: 0)
         }
         if movesSectionBreak, let anchorPPr,
-           let sectIndex = anchorPPr.children.firstIndex(where: {
-               $0.kind == .element && $0.localName == "sectPr"
-           }) {
+           let sectIndex = anchorPPr.children.firstIndex(where: { isWordElement($0, "sectPr") }) {
             // Moved, not copied: the original node keeps its source bytes.
             // CT_PPr puts sectPr after rPr and before pPrChange; the copy has
             // no pPrChange, so it goes last.
@@ -123,12 +125,10 @@ extension OperationReducer {
         guard let pPr else { return [] }
         return pPr.children.compactMap { child -> XmlNode? in
             guard child.kind == .element,
-                  !anchorPPrDroppedChildren.contains(child.localName) else { return nil }
+                  !isWordElement(child, in: anchorPPrDroppedChildren) else { return nil }
             let copy = detachedCopy(child)
-            guard copy.localName == "rPr" else { return copy }
-            copy.children.removeAll {
-                $0.kind == .element && paragraphMarkRevisionMarks.contains($0.localName)
-            }
+            guard isWordElement(copy, "rPr") else { return copy }
+            copy.children.removeAll { isWordElement($0, in: paragraphMarkRevisionMarks) }
             return copy.children.contains(where: { $0.kind == .element }) ? copy : nil
         }
     }
@@ -138,38 +138,53 @@ extension OperationReducer {
     private static func copiedRunProperties(_ run: XmlNode) -> XmlNode? {
         guard let rPr = elementChild(of: run, named: "rPr") else { return nil }
         let copy = detachedCopy(rPr)
-        copy.children.removeAll { $0.kind == .element && $0.localName == "rPrChange" }
+        copy.children.removeAll { isWordElement($0, "rPrChange") }
         return copy.children.contains(where: { $0.kind == .element }) ? copy : nil
     }
 
     /// The first run whose nearest enclosing `w:p` is `paragraph` and whose
     /// direct `w:t` children hold non-empty text, in document order. Nested
     /// paragraphs (text boxes) are skipped; runs inside hyperlinks, fields or
-    /// content controls count.
+    /// content controls count. OMML runs (`m:r`) are not runs here.
     static func firstOwnTextRun(of paragraph: XmlNode) -> XmlNode? {
         for child in paragraph.children where child.kind == .element {
-            switch child.localName {
-            case "p":
-                continue
-            case "r":
+            if isWordElement(child, "p") { continue }
+            if isWordElement(child, "r") {
                 if !directText(of: child).isEmpty { return child }
-            default:
-                if let found = firstOwnTextRun(of: child) { return found }
+                continue
             }
+            if let found = firstOwnTextRun(of: child) { return found }
         }
         return nil
     }
 
     private static func directText(of run: XmlNode) -> String {
         run.children
-            .filter { $0.kind == .element && $0.localName == "t" }
+            .filter { isWordElement($0, "t") }
             .flatMap { $0.children.filter { $0.kind == .text } }
             .map(\.textContent)
             .joined()
     }
 
     private static func elementChild(of node: XmlNode, named localName: String) -> XmlNode? {
-        node.children.first { $0.kind == .element && $0.localName == localName }
+        node.children.first { isWordElement($0, localName) }
+    }
+
+    /// An element named `localName` in the WordprocessingML namespace. A node
+    /// built without a namespace URI (reducer-made nodes) is judged by its
+    /// `w` prefix instead.
+    private static func isWordElement(_ node: XmlNode, _ localName: String) -> Bool {
+        node.localName == localName && isWordElement(node)
+    }
+
+    private static func isWordElement(_ node: XmlNode, in names: Set<String>) -> Bool {
+        names.contains(node.localName) && isWordElement(node)
+    }
+
+    private static func isWordElement(_ node: XmlNode) -> Bool {
+        guard node.kind == .element else { return false }
+        if let uri = node.namespaceURI, !uri.isEmpty { return uri == wordNamespace }
+        return node.prefix == "w"
     }
 
     /// `deepClone()` keeps `libraryUUID`; a copy placed next to its source

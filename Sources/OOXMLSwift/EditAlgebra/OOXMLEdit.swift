@@ -56,7 +56,13 @@ public enum OOXMLEdit: Edit, Equatable, Sendable {
     /// When the anchor ends a section (its pPr holds `w:sectPr`), the
     /// `w:sectPr` moves from the anchor to the new paragraph, so the new
     /// text stays in the anchor's section. A non-nil `styleId` replaces the
-    /// copied `w:pStyle`.
+    /// copied `w:pStyle`. Undoing the insert puts the `w:sectPr` back on the
+    /// anchor, because undo replays the log without the undone entries; as
+    /// for every structural op, the insert is undoable only inside a
+    /// `batchBegin`…`batchEnd` envelope (the reducer undoes `setText` and
+    /// `setParagraphStyle` on their own, nothing else). Element names are
+    /// matched in the WordprocessingML namespace, so inline-equation runs
+    /// (`m:r`) are not candidates for the first run with text.
     case insertParagraph(after: ElementID, content: String, styleId: String?,
                          inheritAnchorFormat: Bool = false)
 

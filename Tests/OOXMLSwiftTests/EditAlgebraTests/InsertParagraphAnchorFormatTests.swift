@@ -21,6 +21,7 @@ final class InsertParagraphAnchorFormatTests: XCTestCase {
     private static let namespaces =
         #"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "# +
         #"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" "# +
+        #"xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" "# +
         #"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#
 
     private static let anchorID = ElementID(rawString: "w14:paraId=0000A001")
@@ -176,6 +177,44 @@ final class InsertParagraphAnchorFormatTests: XCTestCase {
             #"</w:p>"#
         let inserted = bodyParagraphs(try insertAfter(in: anchor))[1]
         XCTAssertEqual(childNames(child(child(inserted, "r"), "rPr")), ["u"])
+    }
+
+    func testFirstTextRunIsNotAMathRun() throws {
+        // verify R1 #1: OMML's m:r / m:t / m:rPr share local names with
+        // WordprocessingML's. An anchor that opens with inline math must not
+        // hand the math run's m:rPr to the new w:r (schema-invalid output).
+        let anchor = #"<w:p w14:paraId="0000A001"><m:oMath><m:r>"# +
+            #"<m:rPr><m:sty m:val="p"/></m:rPr>"# +
+            #"<w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/></w:rPr>"# +
+            #"<m:t>x</m:t></m:r></m:oMath>"# +
+            #"<w:r><w:rPr><w:b/></w:rPr><w:t> is a variable</w:t></w:r></w:p>"#
+        let inserted = bodyParagraphs(try insertAfter(in: anchor))[1]
+        let run = try XCTUnwrap(child(inserted, "r"))
+        XCTAssertEqual(childNames(child(run, "rPr")), ["b"],
+                       "the first WordprocessingML run with text, not the math run")
+        let xml = try serialized(try insertAfter(in: anchor))
+        XCTAssertEqual(occurrences(of: "<m:rPr>", in: xml), 1, "no math rPr is copied")
+    }
+
+    func testFlagKeepsAnExplicitParaIdInBothDirections() throws {
+        for op in [
+            OOXMLSwift.Operation.insertParagraphAfter(
+                after: Self.anchorID,
+                paragraph: ParagraphPayload(text: "x", paraId: "0000B0B0", inheritAnchorFormat: true)),
+            OOXMLSwift.Operation.insertParagraphBefore(
+                before: Self.anchorID,
+                paragraph: ParagraphPayload(text: "x", paraId: "0000B0B0", inheritAnchorFormat: true)),
+        ] {
+            var log = OperationLog()
+            log.append(op, source: .swift)
+            let tree = try OperationReducer.materialize(
+                log: log, base: try XmlTreeReader.parse(documentXML(Self.formattedAnchor)))
+            let inserted = try XCTUnwrap((child(tree.root, "body")?.children ?? []).first {
+                $0.attributeValue(prefix: "w14", localName: "paraId") == "0000B0B0"
+            }, "the new paragraph is addressable by its paraId")
+            XCTAssertEqual(childNames(child(inserted, "pPr")),
+                           ["pStyle", "keepNext", "spacing", "ind", "jc", "rPr"])
+        }
     }
 
     func testAnchorWithoutTextRunGivesUnformattedRun() throws {
@@ -362,6 +401,31 @@ final class InsertParagraphAnchorFormatTests: XCTestCase {
         let line = String(decoding: log.encodeJSONL(), as: UTF8.self)
         XCTAssertFalse(line.contains("inheritAnchorFormat"),
                        "logs written without the option keep their existing bytes")
+    }
+
+    func testLegacyJSONLLineDecodesWithoutTheFlagAndReencodesToTheSameBytes() throws {
+        // verify R1 #2: a line written before the field existed.
+        let line = #"{"op_id":"33333333-3333-4333-8333-333333333333","ts":"2026-07-01T00:00:00Z","source":"swift","op_type":"insertParagraphAfter","after":"w14:paraId=0000A001","paragraph":{"styleId":"Body","text":"hi"}}"#
+        let decoded = try OperationLog.decodeJSONL(Data((line + "\n").utf8))
+        guard case .insertParagraphAfter(let after, let payload) = try XCTUnwrap(decoded.entries.first).op else {
+            return XCTFail("expected insertParagraphAfter")
+        }
+        XCTAssertEqual(after, Self.anchorID)
+        XCTAssertNil(payload.inheritAnchorFormat)
+        XCTAssertEqual(payload, ParagraphPayload(text: "hi", styleId: "Body"))
+        XCTAssertEqual(String(decoding: decoded.encodeJSONL(), as: UTF8.self), line + "\n",
+                       "an existing log keeps its bytes")
+    }
+
+    func testScriptExportKeepsTheFlagOnAnAppendParagraph() throws {
+        // verify R1 #5: the DSL spelling has no place for the flag, so the
+        // exporter must use the op escape instead of dropping it.
+        var log = OperationLog()
+        log.append(.appendParagraph(in: nil, paragraph: ParagraphPayload(
+            text: "x", paraId: "0000C0C0", inheritAnchorFormat: true)), source: .swift)
+        let script = ScriptExporter.exportSwift(log: log)
+        XCTAssertFalse(script.contains(#"Paragraph(id: "0000C0C0")"#))
+        XCTAssertTrue(script.contains("inheritAnchorFormat"))
     }
 
     func testApplyKeepsTheDocumentPartTreeAuthoritative() throws {
