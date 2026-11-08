@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.20.0] - 2026-11-08
+
 ### Added
 
 - **`OOXMLEdit.insertParagraph` 與 `insertParagraphBefore` 可沿用錨點的格式**
