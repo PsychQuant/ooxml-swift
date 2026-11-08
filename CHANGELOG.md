@@ -10,6 +10,29 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ### Added
 
+- **`OOXMLEdit.insertParagraph` 與 `insertParagraphBefore` 可沿用錨點的格式**
+  （PsychQuant/ooxml-swift#234，供 PsychQuant/macdoc#251 的 `docx apply` 使用）。兩個 case 多了
+  `inheritAnchorFormat: Bool = false`；設為 `true` 時，新段落在 reducer 套用時取錨點的格式，規則與
+  macdoc `word form apply --insert-after`（PsychQuant/macdoc#249）一致：
+  - 段落格式：複製錨點自己的 `w:pPr`，去掉 `w:numPr`、`w:sectPr`、`w:pPrChange`、`w:pageBreakBefore`；
+    段落標記的 `w:rPr` 再去掉 `w:ins`／`w:del`／`w:moveFrom`／`w:moveTo`／`w:rPrChange`。清完沒有子元素
+    就不輸出。
+  - 文字格式：錨點第一個有文字的 run（最近的外層 `w:p` 就是錨點、直接的 `w:t` 有文字；文字方塊裡的
+    段落不算，hyperlink 內的 run 算）的 `w:rPr`，去掉 `w:rPrChange`。元素名稱只認 WordprocessingML
+    命名空間：行內數學的 `m:r`／`m:t`／`m:rPr` 不算 run，不會被複製進 `w:r`。
+  - 分節符：插在錨點之後、錨點帶 `w:sectPr` 時，`w:sectPr` 從錨點移到新段落，新內容留在錨點那一節；
+    插在之前不複製也不移動。
+  - 有給 `styleId` 時取代複製來的 `w:pStyle`。
+  - 錨點不是 `<w:p>`、payload 另外指定了段落欄位（對齊、間距、縮排、編號、段落標記 rPr、rsid、textId）、
+    或 `appendParagraph` 帶這個旗標（它沒有錨點）時，reducer 丟 `malformedOp`，不靜默忽略。
+  - 經 op-log 寫進樹，不把 `word/document.xml` 標成 typed-dirty（不走 #133 的 typed 重序列化）。
+  - undo：撤銷這次插入時 `w:sectPr` 會回到錨點（undo 是略過被撤銷的 entry 重播）。與其他結構性 op
+    一樣，插入要包在 `batchBegin`…`batchEnd` 裡才能 undo；reducer 只單獨 undo `setText` 與
+    `setParagraphStyle`。
+  - 帶旗標的 `appendParagraph` 匯出成腳本時走 `// @op` 逃生路徑，旗標不會在 DSL 拼寫裡被丟掉。
+  複製出來的元素不沿用錨點的 `libraryUUID`。`ParagraphPayload` 新增 optional 欄位 `inheritAnchorFormat`；
+  為 `nil` 時不寫進 JSONL，既有 log 的位元組不變、舊 log 照常解碼。
+
 - **`insertParagraphAsRevision(_:at:author:date:)`：以追蹤修訂插入段落**（PsychQuant/che-word-mcp#275）。
   過去沒有任何追蹤式的段落插入：`insertParagraph(_:at:)` 照原樣插入，所以在修訂模式下為
   別人的稿子加一段，讀起來像是原作者寫的。Word 對插入的段落記兩次——run 外的 `<w:ins>`，
@@ -114,6 +137,10 @@ All notable changes to ooxml-swift will be documented in this file.
   未編輯原檔一致的結果（原檔本來就有這些屬性），不是正確性退化。
 
 ### Changed
+
+- **Source 相容性：對 `OOXMLEdit.insertParagraph`／`insertParagraphBefore` 做位置式 pattern match 要多一格**
+  （#234）。建構（`.insertParagraph(after:content:styleId:)`）照樣編譯；但 `case .insertParagraph(let a, let c, let s)`
+  與 `case .insertParagraph(_, let c, _)` 這類 tuple pattern 要補第四個位置（`let inherit` 或 `_`）。
 
 - **直接指定 `RunProperties.color` 會清掉 theme 顏色三欄；指定 `RFontsProperties` 某一軸的
   具名字型會清掉該軸的 theme 字型**（PsychQuant/che-word-mcp#274）。Word 讓 theme 屬性

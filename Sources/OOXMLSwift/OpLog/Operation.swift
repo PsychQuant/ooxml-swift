@@ -319,6 +319,14 @@ public struct ParagraphPayload: Equatable, Sendable, Codable {
     /// a RunPayload whose text is unused; only its rPr fields are stamped as
     /// the pPr's trailing `<w:rPr>`.
     public var paragraphMarkRun: RunPayload?
+    /// PsychQuant/ooxml-swift#234 — `true` asks the reducer to give the new
+    /// paragraph its anchor's format (`insertParagraphAfter` /
+    /// `insertParagraphBefore` only; the anchor is the op's `after` /
+    /// `before` target). `nil` and `false` keep the payload-only behaviour.
+    /// The rules are documented on `OOXMLEdit.insertParagraph`. Absent from
+    /// the JSONL wire when `nil`, so logs written without the option keep
+    /// their bytes.
+    public var inheritAnchorFormat: Bool?
 
     public init(text: String, styleId: String? = nil, paraId: String? = nil,
                 alignment: String? = nil,
@@ -330,7 +338,8 @@ public struct ParagraphPayload: Equatable, Sendable, Codable {
                 textId: String? = nil, rsidR: String? = nil, rsidRPr: String? = nil,
                 rsidRDefault: String? = nil, rsidP: String? = nil,
                 indentFirstLineChars: Int? = nil, indentHangingChars: Int? = nil,
-                paragraphMarkRun: RunPayload? = nil) {
+                paragraphMarkRun: RunPayload? = nil,
+                inheritAnchorFormat: Bool? = nil) {
         self.text = text
         self.styleId = styleId
         self.paraId = paraId
@@ -353,6 +362,7 @@ public struct ParagraphPayload: Equatable, Sendable, Codable {
         self.indentFirstLineChars = indentFirstLineChars
         self.indentHangingChars = indentHangingChars
         self.paragraphMarkRun = paragraphMarkRun
+        self.inheritAnchorFormat = inheritAnchorFormat
     }
 }
 

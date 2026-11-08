@@ -34,16 +34,20 @@ extension OOXMLEdit {
     /// atomicity is enforced upstream by pre-validation in apply).
     public func operations() throws -> [Operation] {
         switch self {
-        case .insertParagraph(let after, let content, let styleId):
+        case .insertParagraph(let after, let content, let styleId, let inherit):
+            // #234: `false` maps to nil so logs written without the option
+            // keep their existing JSONL bytes.
             return [.insertParagraphAfter(
                 after: after,
-                paragraph: ParagraphPayload(text: content, styleId: styleId)
+                paragraph: ParagraphPayload(text: content, styleId: styleId,
+                                            inheritAnchorFormat: inherit ? true : nil)
             )]
 
-        case .insertParagraphBefore(let before, let content, let styleId):
+        case .insertParagraphBefore(let before, let content, let styleId, let inherit):
             return [.insertParagraphBefore(
                 before: before,
-                paragraph: ParagraphPayload(text: content, styleId: styleId)
+                paragraph: ParagraphPayload(text: content, styleId: styleId,
+                                            inheritAnchorFormat: inherit ? true : nil)
             )]
 
         case .setBold(let target, let value):

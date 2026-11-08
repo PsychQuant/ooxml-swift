@@ -462,6 +462,14 @@ public enum OperationReducer {
             // §4b (#128): append as last block-level child of the container
             // (nil = <w:body>). Explicit paraId stamps w14:paraId; absent
             // paraId keeps the opID-derived libraryUUID convention.
+            if payload.inheritAnchorFormat == true {
+                // #234: the option copies an anchor's format; an append has
+                // no anchor, so the flag cannot be honoured — refuse it
+                // rather than drop it.
+                throw ReducerError.malformedOp(
+                    opID: entry.opID,
+                    reason: "inheritAnchorFormat needs an anchor paragraph; appendParagraph has none")
+            }
             let parent: XmlNode
             if let containerID = container {
                 guard let node = findNode(elementID: containerID, in: tree) else {
@@ -757,7 +765,11 @@ public enum OperationReducer {
             guard let (parent, idx) = findParentAndIndex(targetID: after, in: tree.root) else {
                 throw ReducerError.elementNotFound(opID: entry.opID, elementID: after)
             }
-            let newP = makeParagraph(payload: payload)
+            let newP = payload.inheritAnchorFormat == true
+                ? try makeParagraphInheritingFormat(
+                    payload: payload, anchor: parent.children[idx],
+                    movesSectionBreak: true, opID: entry.opID)
+                : makeParagraph(payload: payload)
             // 7.4 verify P0: a payload paraId (e.g. Word-assigned, carried by
             // the import diff) is the paragraph's real identity — stamp it.
             // Only ID-less payloads fall back to the deterministic
@@ -773,7 +785,13 @@ public enum OperationReducer {
             guard let (parent, idx) = findParentAndIndex(targetID: before, in: tree.root) else {
                 throw ReducerError.elementNotFound(opID: entry.opID, elementID: before)
             }
-            let newP = makeParagraph(payload: payload)
+            // #234: a paragraph inserted before the anchor is already in the
+            // anchor's section, so the section break neither copies nor moves.
+            let newP = payload.inheritAnchorFormat == true
+                ? try makeParagraphInheritingFormat(
+                    payload: payload, anchor: parent.children[idx],
+                    movesSectionBreak: false, opID: entry.opID)
+                : makeParagraph(payload: payload)
             if let paraId = payload.paraId, !paraId.isEmpty {
                 newP.setAttribute(prefix: "w14", localName: "paraId", value: paraId)
             } else {

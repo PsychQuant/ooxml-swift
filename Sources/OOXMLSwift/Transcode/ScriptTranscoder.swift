@@ -407,7 +407,10 @@ public enum ScriptExporter {
               payload.textId == nil, payload.rsidR == nil, payload.rsidRPr == nil,
               payload.rsidRDefault == nil, payload.rsidP == nil,
               payload.indentFirstLineChars == nil, payload.indentHangingChars == nil,
-              payload.paragraphMarkRun == nil else { return nil }
+              payload.paragraphMarkRun == nil,
+              // #234: the DSL has no spelling for the anchor-format flag; the
+              // op escape keeps it (the reducer refuses it on an append).
+              payload.inheritAnchorFormat == nil else { return nil }
         let pad = String(repeating: " ", count: indent)
         var head = "\(pad)Paragraph(id: \(quote(paraId))"
         if let styleId = payload.styleId {
