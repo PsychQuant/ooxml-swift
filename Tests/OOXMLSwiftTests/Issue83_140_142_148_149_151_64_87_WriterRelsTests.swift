@@ -387,7 +387,7 @@ final class Issue83_140_142_148_149_151_64_87_WriterRelsTests: XCTestCase {
                         "a refused save must not leave a package on disk with the image silently missing")
     }
 
-    /// #142 body, mechanism 2 (entity-written id): `Id="rId&#211;"` decodes to
+    /// #142 body, mechanism 2 (entity-written id): `Id="rId&#57;"` decodes to
     /// `rId9`, so a raw substring search for `Id="rId9"` never matches it —
     /// the shape `hasNewTypedRelationships` itself would misjudge.
     ///
@@ -413,10 +413,16 @@ final class Issue83_140_142_148_149_151_64_87_WriterRelsTests: XCTestCase {
         let relsURL = dir.appendingPathComponent("word/_rels/document.xml.rels")
         var relsXML = try String(contentsOf: relsURL, encoding: .utf8)
         // A real (not commented) relationship declared with an entity-escaped
-        // id spelling: rId&#211; decodes to rId9.
+        // id spelling: rId&#57; decodes to rId9.
+        let spelledId = "rId&#57;"
+        // The fixture has to decode to rId9, or this test pins a different
+        // shape than the one it names. ooxml-swift#222: a history rewrite once
+        // turned `&#57;` into `&#211;` and this test kept passing on rIdÓ.
+        XCTAssertEqual(DocxWriter.decodedAttributeValue(spelledId), "rId9",
+                       "fixture spelling \(spelledId) must decode to rId9")
         relsXML = relsXML.replacingOccurrences(
             of: "</Relationships>",
-            with: #"<Relationship Id="rId&#211;" Type="\#(webSettingsType)" Target="webSettings.xml"/></Relationships>"#)
+            with: #"<Relationship Id="\#(spelledId)" Type="\#(webSettingsType)" Target="webSettings.xml"/></Relationships>"#)
         try relsXML.write(to: relsURL, atomically: true, encoding: .utf8)
         try #"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:webSettings xmlns:w="\#(wNS)"/>"#
             .write(to: dir.appendingPathComponent("word/webSettings.xml"), atomically: true, encoding: .utf8)
@@ -441,13 +447,17 @@ final class Issue83_140_142_148_149_151_64_87_WriterRelsTests: XCTestCase {
 
     /// #148's own reproduction: a `Target` containing a character reference
     /// survives one merge unchanged, then is corrupted a little more on every
-    /// further save (`&#47;&#214;` → the parser's `/>` reading gets re-escaped
-    /// as literal `&amp;#47;&amp;#214;`, etc.). This test saves the SAME
+    /// further save (`&#47;&#62;` → the parser's `/>` reading gets re-escaped
+    /// as literal `&amp;#47;&amp;#62;`, etc.). This test saves the SAME
     /// unmanaged relationship across three saves (each forced to go through
     /// the merge by touching an unrelated header) and asserts the Target text
     /// is byte-identical every time.
     func testUnmanagedRelationshipWithEntityReferencedTargetIsNotProgressivelyDoubleEscaped() throws {
-        let originalTarget = "a&#47;&#214;b.xml"   // parser reads this as "a/>b.xml"
+        let originalTarget = "a&#47;&#62;b.xml"   // parser reads this as "a/>b.xml"
+        // ooxml-swift#222: the history rewrite turned `&#62;` into `&#214;`, and
+        // the byte-identical assertions below kept passing on "a/Öb.xml".
+        XCTAssertEqual(DocxWriter.decodedAttributeValue(originalTarget), "a/>b.xml",
+                       "fixture spelling \(originalTarget) must decode to a/>b.xml")
         let extra = #"<Relationship Id="rId50" Type="http://example.test/unmanaged" Target="\#(originalTarget)"/>"#
         let data = try syntheticPackage(
             stylesId: "rId1", settingsId: "rId2", fontTableId: "rId3",

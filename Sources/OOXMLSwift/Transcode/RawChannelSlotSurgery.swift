@@ -554,7 +554,7 @@ enum RawChannelSlotSurgery {
 
     /// Single-pass entity decoding: the five named entities plus numeric
     /// character references (`&#dd;` / `&#xhh;`). A decoded `&` is never
-    /// re-scanned, so `&amp;#217;` correctly yields the literal `&#217;`.
+    /// re-scanned, so `&amp;#65;` correctly yields the literal `&#65;`.
     private static func xmlUnescape(_ s: String) -> String {
         guard s.contains("&") else { return s }
         var out = ""

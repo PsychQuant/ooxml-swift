@@ -507,7 +507,7 @@ public struct DocxWriter {
     /// shape). Membership is now checked against `PackageInspector.scanRels`'s
     /// decoded id set, the same XML-parser-based scan `documentRelationshipsXML`
     /// already trusts elsewhere in this file — comments/CDATA are structure,
-    /// not text, to it, and an entity-escaped id (`rId&#211;`) decodes before
+    /// not text, to it, and an entity-escaped id (`rId&#57;`) decodes before
     /// comparison instead of needing to match byte-for-byte.
     private static func hasNewTypedRelationships(_ document: WordDocument) -> Bool {
         guard let tempDir = document.archiveTempDir else { return false }
@@ -940,7 +940,7 @@ public struct DocxWriter {
         }
 
         // Read the original rels with the inspector's parser, not the overlay's
-        // regex: `rId9` and `rId&#211;` are one id once decoded (#137), and the
+        // regex: `rId9` and `rId&#57;` are one id once decoded (#137), and the
         // decoded form is what the reader — and therefore the model — holds.
         // Computed BEFORE slot resolution below (#83/#140/#149) so every id the
         // package already uses — not just the ones the typed model itself

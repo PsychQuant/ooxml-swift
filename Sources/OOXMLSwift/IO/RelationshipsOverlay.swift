@@ -25,7 +25,7 @@ internal struct RelationshipDescriptor: Equatable {
     /// decoded once (the same "decode only for comparison" principle #142
     /// established for `Id`) precisely so `serialize()` does NOT have to
     /// escape already-escaped source text — that double escape is #148's
-    /// bug (`Target="a&#47;&#214;b.xml"` gained one more `&amp;` layer on
+    /// bug (`Target="a&#47;&#62;b.xml"` gained one more `&amp;` layer on
     /// every save). Preserved (unmanaged-type) rows carry the original
     /// spelling through here verbatim; rows the typed model builds fresh
     /// leave this nil and go through the ordinary escape path below.

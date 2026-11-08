@@ -28,6 +28,20 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ### Fixed
 
+- **測試 fixture 的數值字元參照還原成原本的寫法；本機 `swift test` 重新全綠**（#222）。
+  2026-09 底改寫 3.19.0 以前的 git 歷史、依 issue 搬遷重新編號 `#數字` 時，替換也套進了
+  XML 數值字元參照：`&#57;`（`9`）變成 `&#211;`，`&#62;`（`>`）變成 `&#214;`，`&#65;`
+  變成 `&#217;`，`&#66;`（`B`）變成 `&#218;`，`&#000000000000000000000054;` 的前導零也被
+  吃掉。fixture 改為解碼成 `rIdÓ`、`AÚ`，預期值仍是 `rId9`、`AB`，所以
+  `Issue137to139InspectorParserTests` 與 `RawChannelSlotTests` 有 7 個斷言失敗；平台 parser
+  與 library 程式碼都沒有問題。3.11.0 以前寫的部分，照改寫前的 3.11.0 內容逐處還原；
+  3.11.0 以後寫的部分本機沒有改寫前的版本，依上下文還原：`rId9` 的預期值，以及 #148
+  重現步驟裡 `Target="a/&gt;b.xml"` 的讀法。這部分包括 `DocxWriter` 與 `RelationshipsOverlay`
+  的註解、本檔兩處，以及 `Issue83_…_WriterRelsTests` 的兩個 fixture。這兩個 WriterRels 測試
+  被改壞後照樣通過：一個只檢查拒絕訊息指名 `#142`，一個只比對三次存檔的位元組相同。所以
+  兩個測試現在都多了一個斷言，確認 fixture 解碼後是預期的值；其他測試的 fixture 被改壞時，
+  會以原本的斷言失敗的形式出現，而不會指名 fixture。CI 只編譯、不執行測試，所以這類損壞
+  在 CI 上看不出來，另見 #235。
 - **`acceptRevision`／`rejectRevision` 依修訂 id 找目標，不再依記錄下來的段落索引與文字比對**
   （PsychQuant/che-word-mcp#280，併入 #275）。過去兩者用 `Revision.paragraphIndex` 找段落——
   只在建立時記一次、之後插入或刪除段落就過時，`insertTextAsRevision`／`deleteTextAsRevision`
@@ -334,7 +348,7 @@ All notable changes to ooxml-swift will be documented in this file.
 - **`hasNewTypedRelationships`（決定是否要重寫 `word/_rels/document.xml.rels` 的判斷）
   改用與 `PackageInspector` 相同、經 XML parser 解碼過的關係 id 集合比對，不再用原始文字
   的子字串搜尋**（#142）。過去只要來源 rels 裡出現一段「看起來像宣告」的**註解**（例如
-  `<!-- Id="rId9" -->`），或關係 id 用字元／實體參照書寫（`rId&#211;`），子字串比對就會誤判
+  `<!-- Id="rId9" -->`），或關係 id 用字元／實體參照書寫（`rId&#57;`），子字串比對就會誤判
   「這個關係已經存在」，於是新插入的圖片／頁首／頁尾／超連結關係完全不會被寫進 rels——存檔
   仍回報成功，但該關係已靜默消失。現在改成對照解碼後的 id 集合，註解與跳脫寫法都會被正確
   判斷為「這是新的」；若封裝裡的 rels 含有註解或跳脫寫法而導致合併本身無法安全進行，會改為
@@ -342,7 +356,7 @@ All notable changes to ooxml-swift will be documented in this file.
 - **關係合併不再對已經跳脫過的 `Type`／`Target`／`TargetMode` 值重複跳脫**（#148）。
   overlay 模式下，來源 rels 裡未被型別模型管理的 relationship（theme／webSettings／
   customXml 等）在合併時會原封不動地帶著原始屬性文字寫回，不再拆解成欄位後重新跳脫——
-  過去若這類欄位含有字元或實體參照（例如 `Target="a&#47;&#214;b.xml"`），每次觸發 rels
+  過去若這類欄位含有字元或實體參照（例如 `Target="a&#47;&#62;b.xml"`），每次觸發 rels
   重寫都會多包一層 `&amp;`，跳脫層數隨儲存次數持續累加。
 - **`DocxWriter` 的輸出可以逐位元組重現**（#151）。zip entry 的修改時間改為固定值，所以帶有自身 `created`／`modified` 的文件（所有從檔案讀入的文件）不需任何設定，兩次存檔的位元組就相同。沒有時間戳的新文件，`docProps/core.xml` 預設仍記錄存檔當下的時間；需要逐位元組比對時，把新增的 `WordDocument.timestampForUnsetProperties` 設為固定值。
 
@@ -971,7 +985,7 @@ All notable changes to ooxml-swift will be documented in this file.
   merge 兩個 pass 都改 first-wins、永不 trap；**裁決移到 `DocxWriter.writeDocumentRelationships`**：序列化前偵測重複 id
   並拋 `WordError.invalidDocx`——typed model 自身重複、與 writer 固定槽 `rId1`–`rId4` 相撞（#140）、或**原始 rels 本來就宣告
   兩次**（first-wins 會靜默丟一條並「成功」存檔）三種都拒（訊息依成因分句：model 自己帶了兩次是文件的問題；與固定槽相撞則明說文件是好的、是 writer 還不會重編號——#140；兩種成因不互斥，同一個 id 兩者都成立時兩句都印）。原始 rels 的重複用 inspector 的解碼掃描判定（`rId9` 與
-  `rId&#211;` 是同一個），且**原始 rels 讀不到、或其 id 的原始寫法 ≠ 解碼後**（字元參照、空白正規化）也拒絕——merge 用的
+  `rId&#57;` 是同一個），且**原始 rels 讀不到、或其 id 的原始寫法 ≠ 解碼後**（字元參照、空白正規化）也拒絕——merge 用的
   regex 索引的是原始文字，與 model 持有的解碼 id 是兩套視角，硬合會寫出重複或錯接的關係（regex 本身另立 #142）。
   **判斷「rels 存在」看檔案存在而非字串非空**（verify R3）：R2 那版以 `!originalRelsXML.isEmpty` 當閘，零長度的 rels 檔、或
   讀不成 UTF-8 的 rels 檔（`try? … ?? ""`）都會被當成「沒有 rels」而走 scratch 路徑——那條路把 typed model 不管的每一條關係
