@@ -703,8 +703,7 @@ public struct WordDocument: Equatable {
 
     /// Namespace prefixes an element subtree uses on element and attribute
     /// names (`xmlns` declarations and the reserved `xml` prefix excluded).
-    /// Also used by `BodySurgery` for rewritten body blocks (#133).
-    static func prefixesUsed(in node: XmlNode) -> Set<String> {
+    private static func prefixesUsed(in node: XmlNode) -> Set<String> {
         var out: Set<String> = []
         func walk(_ n: XmlNode) {
             guard n.kind == .element else { return }

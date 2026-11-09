@@ -201,7 +201,9 @@ final class Issue133BodySurgeryTests: XCTestCase {
         let xml = try save(doc)
         XCTAssertTrue(xml.contains(secA), xml)
         XCTAssertTrue(xml.contains(secB), xml)
-        XCTAssertEqual(xml.components(separatedBy: "<w:p").count - 1, 5, "one paragraph fewer:\n\(xml)")
+        let paragraphStart = try NSRegularExpression(pattern: "<w:p[ />]")
+        XCTAssertEqual(paragraphStart.numberOfMatches(in: xml, range: NSRange(xml.startIndex..., in: xml)), 5,
+                       "one paragraph fewer:\n\(xml)")
     }
 
     /// Two deletions far apart in a long body: every block between them is
@@ -266,6 +268,27 @@ final class Issue133BodySurgeryTests: XCTestCase {
         let xml = try save(doc)
         XCTAssertTrue(xml.contains(#"xmlns:foo="urn:example:foo""#), xml)
         XCTAssertTrue(xml.contains("新"))
+    }
+
+    /// A rewritten block is written where it stood, so a sibling the typed
+    /// model does not see (here a comment) keeps its place after it.
+    func testARewrittenBlockStaysBeforeTheSiblingThatFollowedIt() throws {
+        var doc = try read(documentXML(body: firstBlock + "<!-- note -->" + keptBlock))
+        defer { doc.close() }
+        try doc.updateParagraph(at: 0, text: "新甲")
+        let xml = try save(doc)
+        let edited = try XCTUnwrap(xml.range(of: "新甲"))
+        let note = try XCTUnwrap(xml.range(of: "<!-- note -->"))
+        XCTAssertLessThan(edited.lowerBound, note.lowerBound, xml)
+        XCTAssertTrue(xml.contains("<!-- note -->" + keptBlock), xml)
+    }
+
+    /// The reader takes the last body-level `sectPr` and the splice assumes
+    /// it ends the body; a body with two gets no baseline (full writer).
+    func testABodyWithTwoSectionPropertiesGetsNoBaseline() throws {
+        let doc = try read(documentXML(body: firstBlock + "<w:sectPr/>" + keptBlock))
+        defer { var d = doc; d.close() }
+        XCTAssertNil(doc.bodySourceBaseline)
     }
 
     // MARK: - Namespace repair of a rewritten block (verify R1)

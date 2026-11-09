@@ -1467,6 +1467,9 @@ public struct RepeatingSectionItem {
 
 /// 內容控制項（通用 SDT 包裝）
 public struct ContentControl: Equatable {
+    /// PsychQuant/ooxml-swift#133: which body block this value was read as
+    /// (stamped by `DocxReader`, carried by copies). Not part of `==`.
+    internal var bodySourceIdentity = BodySourceIdentity()
     public var sdt: StructuredDocumentTag
     public var content: String                     // 內容 XML 或純文字
     public var children: [ContentControl]          // 巢狀子 SDT（Group / RepeatingSection 常用）

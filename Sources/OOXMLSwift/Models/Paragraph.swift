@@ -14,6 +14,9 @@ final class ParagraphPropertiesBox {
 
 /// 段落 (Paragraph) - Word 文件的基本結構單元
 public struct Paragraph: Equatable {
+    /// PsychQuant/ooxml-swift#133: which body block this value was read as
+    /// (stamped by `DocxReader`, carried by copies). Not part of `==`.
+    internal var bodySourceIdentity = BodySourceIdentity()
     /// v0.31.0+ (Spectra `paragraph-tree-projection-impl`, `word-aligned-state-sync`
     /// Phase 1 task 2.1): when non-nil, this Paragraph is a tree-backed view
     /// over the wrapped `<w:p>` element. Getters walk `xmlNode.children` at
