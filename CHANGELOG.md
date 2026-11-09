@@ -8,6 +8,28 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **typed-dirty 的存檔只重寫改過的 body 區塊，沒被碰的區塊沿用原本的 bytes**（#133；#129 的預設讀法那一半；維護者 2026-11-09 決定採 (B) tree 層手術）。過去任何會 `markTypedDirty("word/document.xml")` 的操作（`insertParagraph(at:)`、`updateParagraph`、`deleteParagraph`、`insertTable`、`replaceText`、`setPageSize` 等 83 處）都讓 `DocxWriter` 以 typed model 整份重寫 `document.xml`。typed model 從讀檔起就缺了幾種形態（文字方塊 run 裡的公式、純空白的 `w:t`、儲存格裡巢狀表格之後的段落順序、段落層 `w:pPr/w:sectPr`、`w:gridCol`、`w:hideMark`、核取方塊的 `w:sdtPr` 狀態等），所以一次編輯會連帶損壞沒人碰過的段落與表格。
+  - 做法：`DocxReader`（預設讀法）記下 body 讀進來時的 typed 區塊與各自對應的 live tree 節點。`DocxWriter` 寫 `document.xml` 時，比較每個區塊「讀進來時」與「現在」的 typed 輸出：相同的區塊照抄原節點的 bytes，不同或新增的區塊才用 typed 輸出；`sectPr` 同樣比較。body 以外的內容（prolog、root 起始標籤、`w:background` 等）原樣保留。判斷「沒變」用 typed 輸出字串而不用 `==`，判斷錯了只會退回過去的整份重寫，不會把修改丟掉。
+  - 重寫的區塊用到 root 沒宣告的 namespace prefix 時，宣告加在該區塊自己的起始標籤上（與 #132 的 graft 相同），root 不動。
+  - typed 輸出相同、原始 bytes 卻不同的區塊（例如只有 typed model 沒建模的內容不同）無法分辨是哪一個，這類區塊一律改用 typed 輸出，不借用任何一個的 bytes；否則刪掉其中一個時，可能留下被刪那一個的內容。
+  - 以下情況退回過去的整份重寫：live tree 在讀檔後被動過（op-log、#132 的 graft、`applyFormattingProfile`、`materializeTypedTrees`）、tree-backed 讀法、重寫的區塊用到沒有已知 URI 的 prefix、任一區塊無法序列化。
+  - 用同一批 104 份真實文件重新量測（插入一段後存檔，#133 的量測程序）：正文有損的文件 6 → 0；元素數量變少的文件 53 → 0。
+
+### Changed
+
+- 上面的修正帶來的可觀察變化：
+  - typed-dirty 存檔時，沒被編輯的區塊與 body 以外的內容現在逐位元組保留，不再被 typed 輸出正規化。例如沒被編輯的 run 上 `<w:i w:val="false"/>` 不再被寫成 `w:val="0"`（`RunPropertyOnOffTests` 已改成預期原始寫法）。
+  - `writeData` 對沒有修改的文件，輸出的 `document.xml` 與來源逐位元組相同（104 份全部相同）；過去會經過 typed 整份重寫。
+  - 來源沒有 body 層 `sectPr`、也沒有改過頁面設定時，不再自動補上一個預設的 `sectPr`。
+  - reader 把共用同一個 id 的不同種類修訂分開編號（3.20.0），但沒被編輯的段落在存檔時保留來源的 id。typed model 裡仍是分開的 id，新配的修訂 id 也照舊避開檔案中所有 id。`Issue275TrackedParagraphInsertionTests` 中兩個要檢查 typed writer 輸出的測試，改成先清掉讀檔基準再存檔。
+
+### Known limits
+
+- 被編輯的那一個區塊本身仍走 typed 輸出，區塊內 typed model 沒建模的內容（例如段落層 `w:pPr/w:sectPr`）仍會遺失。
+- tree-backed 讀法（`wireTreeBackedViews: true`）的 `Paragraph.runs` stub 丟失 drawing（#129 的另一半）不在這次範圍，`Issue129TreeBackedDrawingTests` 的 `XCTExpectFailure` guard 不變。
+
 ## [3.21.0] - 2026-11-10
 
 ### Added

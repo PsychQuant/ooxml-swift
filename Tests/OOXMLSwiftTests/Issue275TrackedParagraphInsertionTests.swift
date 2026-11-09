@@ -534,6 +534,10 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
         let deletion = try XCTUnwrap(doc.revisions.revisions.first { $0.type == .deletion })
         XCTAssertNotEqual(deletion.id, 7)
         try doc.updateParagraph(at: 0, text: "ALPHA.")   // force typed re-serialization
+        // #129/#133: a typed-dirty save now keeps the source bytes of the
+        // paragraphs it did not touch; drop the read-time baseline so the
+        // paragraph under test still goes through the typed writer.
+        doc.bodySourceBaseline = nil
 
         let p = try XCTUnwrap(paragraph(containing: ">y<", in: try savedDocumentXML(doc)))
         XCTAssertTrue(p.contains("<w:pPr><w:rPr><w:ins w:id=\"7\""), "got: \(p)")
@@ -579,6 +583,10 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
         let mixed = try XCTUnwrap(doc.revisions.revisions.first { $0.isMixedContentWrapper })
         XCTAssertNotEqual(mixed.id, 5)
         try doc.updateParagraph(at: 0, text: "ALPHA.")   // force typed re-serialization
+        // #129/#133: a typed-dirty save now keeps the source bytes of the
+        // paragraphs it did not touch; drop the read-time baseline so the
+        // paragraph under test still goes through the typed writer.
+        doc.bodySourceBaseline = nil
         XCTAssertTrue(try savedDocumentXML(doc).contains("<w:ins w:id=\"\(mixed.id)\" w:author=\"Reviewer A\""))
         try doc.updateParagraph(at: 0, text: "Alpha.")
 

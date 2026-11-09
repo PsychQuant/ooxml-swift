@@ -127,6 +127,34 @@ final class Issue129133BodySurgeryTests: XCTestCase {
         XCTAssertTrue(xml.contains(#"w:w="11906""#))
     }
 
+    /// Two blocks the typed model serializes identically but whose source
+    /// bytes differ: matching by content cannot tell which one the edit
+    /// removed, so neither may lend its bytes to the block that remains —
+    /// otherwise deleting the first would keep its unmodelled content.
+    func testDeletingOneOfTwoTypedEqualBlocksDoesNotKeepItsBytes() throws {
+        let first = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10001" w:h="14000"/></w:sectPr></w:pPr><w:r><w:t>同文</w:t></w:r></w:p>"#
+        let second = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10002" w:h="14000"/></w:sectPr></w:pPr><w:r><w:t>同文</w:t></w:r></w:p>"#
+        var doc = try read(documentXML(body: first + second))
+        defer { doc.close() }
+        try doc.deleteParagraph(at: 0)
+        let xml = try save(doc)
+        XCTAssertFalse(xml.contains(#"w:w="10001""#), "the deleted block's bytes must not survive:\n\(xml)")
+        XCTAssertEqual(xml.components(separatedBy: "同文").count - 1, 1)
+    }
+
+    /// The same typed-equal pair, but the edit only inserts a new block (a new
+    /// paragraph gets a fresh paraId, so it can never equal either): the pair
+    /// keeps its order and count, so each keeps its own bytes.
+    func testInsertingNextToTypedEqualBlocksKeepsBoth() throws {
+        let first = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10001" w:h="14000"/></w:sectPr></w:pPr></w:p>"#
+        let second = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10002" w:h="14000"/></w:sectPr></w:pPr></w:p>"#
+        var doc = try read(documentXML(body: first + second))
+        defer { doc.close() }
+        doc.insertParagraph(Paragraph(text: "新"), at: 0)
+        let xml = try save(doc)
+        XCTAssertTrue(xml.contains(first + second), "both blocks keep their bytes, in order:\n\(xml)")
+    }
+
     // MARK: - Content outside the blocks
 
     func testContentOutsideTheBodySurvivesATypedEdit() throws {

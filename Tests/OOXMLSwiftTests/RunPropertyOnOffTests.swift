@@ -103,8 +103,11 @@ final class RunPropertyOnOffTests: XCTestCase {
             encoding: .utf8
         )
         XCTAssertTrue(xml.contains(#"<w:b w:val="0"/>"#), "Got: \(xml)")
-        XCTAssertTrue(xml.contains(#"<w:i w:val="0"/>"#), "Got: \(xml)")
-        XCTAssertTrue(xml.contains(#"<w:strike w:val="0"/>"#), "Got: \(xml)")
+        // #129/#133: the run sits in a paragraph the edit did not touch, so
+        // its source spelling is kept byte for byte (it used to be
+        // normalized to "0" by the full typed re-serialization).
+        XCTAssertTrue(xml.contains(#"<w:i w:val="false"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:strike w:val="off"/>"#), "Got: \(xml)")
         XCTAssertTrue(xml.contains(#"<w:noProof w:val="0"/>"#), "Got: \(xml)")
         XCTAssertFalse(xml.contains("<w:b/>"), "Got: \(xml)")
         XCTAssertTrue(xml.contains("GAMMA delta"), "Got: \(xml)")

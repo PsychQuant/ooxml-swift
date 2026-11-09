@@ -115,9 +115,11 @@ enum BodySurgery {
         } catch {
             return nil
         }
-        let matched = align(before, after)
-
         let bytes = tree.sourceBytes
+        let matched = align(unambiguousKeys(before, after, nodeBytes: base.blockNodeIndex.map {
+            bytes.subdata(in: base.bodyChildren[$0].sourceRange!)
+        }), after)
+
         let rootBindings = Dictionary(
             tree.root.attributes.filter { $0.prefix == "xmlns" }.map { ($0.localName, $0.value) },
             uniquingKeysWith: { first, _ in first })
@@ -184,6 +186,37 @@ enum BodySurgery {
         }
         out.append(bytes.subdata(in: nodes[nodes.count - 1].sourceRange!.upperBound..<bytes.count))
         return out
+    }
+
+    /// `before` with every serialization that cannot be attributed to one
+    /// source block replaced by a key nothing in `after` equals, so those
+    /// blocks are rewritten from the typed model instead of borrowing bytes.
+    /// Content equality cannot tell typed-equal blocks apart: if the edit
+    /// deleted one of two such blocks whose source bytes differ, matching the
+    /// survivor to the wrong one would keep the deleted block's unmodelled
+    /// content. Ambiguous means: the serialization occurs more than once as
+    /// read with differing source bytes and its count changed (one of them
+    /// was deleted or rewritten), or once as read but more than once now.
+    /// When the count of a repeated serialization is unchanged, order decides
+    /// the pairing: a new paragraph is stamped with a fresh paraId, so it
+    /// cannot take the place of an existing one. A body that did not change
+    /// at all keeps the identity mapping.
+    static func unambiguousKeys(_ before: [String], _ after: [String], nodeBytes: [Data]) -> [String] {
+        guard before != after else { return before }
+        var bytesByKey: [String: Set<Data>] = [:]
+        var countBefore: [String: Int] = [:]
+        for (k, key) in before.enumerated() {
+            bytesByKey[key, default: []].insert(nodeBytes[k])
+            countBefore[key, default: 0] += 1
+        }
+        var countAfter: [String: Int] = [:]
+        for key in after { countAfter[key, default: 0] += 1 }
+        return before.enumerated().map { k, key in
+            let ambiguous = ((bytesByKey[key]?.count ?? 0) > 1 && countBefore[key] != countAfter[key])
+                || (countBefore[key] == 1 && (countAfter[key] ?? 0) > 1)
+            // U+0000 cannot occur in serialized XML, so this never matches.
+            return ambiguous ? "\u{0}ambiguous-\(k)" : key
+        }
     }
 
     /// For each block as read, the index of the current block it equals
