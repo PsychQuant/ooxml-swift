@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.21.0] - 2026-11-10
+
 ### Added
 
 - **`DocxForm` library product：表單整理，從 macdoc 搬過來**（PsychQuant/ooxml-swift#238）。
