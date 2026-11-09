@@ -10,7 +10,7 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ### Fixed
 
-- **typed-dirty 的存檔只重寫改過的 body 區塊，沒被碰的區塊沿用原本的 bytes**（#133；#129 的預設讀法那一半；維護者 2026-11-09 決定採 (B) tree 層手術）。過去任何會 `markTypedDirty("word/document.xml")` 的操作（`insertParagraph(at:)`、`updateParagraph`、`deleteParagraph`、`insertTable`、`replaceText`、`setPageSize` 等 83 處）都讓 `DocxWriter` 以 typed model 整份重寫 `document.xml`。typed model 從讀檔起就缺了幾種形態（文字方塊 run 裡的公式、純空白的 `w:t`、儲存格裡巢狀表格之後的段落順序、段落層 `w:pPr/w:sectPr`、`w:gridCol`、`w:hideMark`、核取方塊的 `w:sdtPr` 狀態等），所以一次編輯會連帶損壞沒人碰過的段落與表格。
+- **typed-dirty 的存檔只重寫改過的 body 區塊，沒被碰的區塊沿用原本的 bytes**（#133；維護者 2026-11-09 決定採 (B) tree 層手術）。過去任何會 `markTypedDirty("word/document.xml")` 的操作（`insertParagraph(at:)`、`updateParagraph`、`deleteParagraph`、`insertTable`、`replaceText`、`setPageSize` 等 83 處）都讓 `DocxWriter` 以 typed model 整份重寫 `document.xml`。typed model 從讀檔起就缺了幾種形態（文字方塊 run 裡的公式、純空白的 `w:t`、儲存格裡巢狀表格之後的段落順序、段落層 `w:pPr/w:sectPr`、`w:gridCol`、`w:hideMark`、核取方塊的 `w:sdtPr` 狀態等），所以一次編輯會連帶損壞沒人碰過的段落與表格。
   - 做法：`DocxReader`（預設讀法）記下 body 讀進來時的 typed 區塊與各自對應的 live tree 節點。`DocxWriter` 寫 `document.xml` 時，比較每個區塊「讀進來時」與「現在」的 typed 輸出：相同的區塊照抄原節點的 bytes，不同或新增的區塊才用 typed 輸出；`sectPr` 同樣比較。body 以外的內容（prolog、root 起始標籤、`w:background` 等）原樣保留。判斷「沒變」用 typed 輸出字串而不用 `==`，判斷錯了只會退回過去的整份重寫，不會把修改丟掉。
   - 重寫的區塊用到 root 沒宣告的 namespace prefix 時，宣告加在該區塊自己的起始標籤上（與 #132 的 graft 相同），root 不動。
   - typed 輸出相同、原始 bytes 卻不同的區塊（例如只差在 typed model 沒建模的內容）只靠內容無法分辨。這種輸出的出現次數在編輯前後不同時（其中一個被刪除或改寫），這幾個區塊都改用 typed 輸出、不借用任何一個的 bytes，否則刪掉其中一個時，可能留下被刪那一個的內容。次數相同時依順序配對：新段落一定會蓋上新的 paraId，不會與既有段落相同。一段輸出在讀檔時只出現一次、現在卻出現多次時，也不借用 bytes。
@@ -28,7 +28,7 @@ All notable changes to ooxml-swift will be documented in this file.
 ### Known limits
 
 - 被編輯的那一個區塊本身仍走 typed 輸出，區塊內 typed model 沒建模的內容（例如段落層 `w:pPr/w:sectPr`）仍會遺失。
-- tree-backed 讀法（`wireTreeBackedViews: true`）的 `Paragraph.runs` stub 丟失 drawing（#129 的另一半）不在這次範圍，`Issue129TreeBackedDrawingTests` 的 `XCTExpectFailure` guard 不變。
+- tree-backed 讀法（`wireTreeBackedViews: true`）不適用：typed-dirty 存檔仍整份重寫，`Paragraph.runs` stub 丟失 drawing 的問題（#129）沒有改變，`Issue129TreeBackedDrawingTests` 的 `XCTExpectFailure` guard 不變。
 
 ## [3.21.0] - 2026-11-10
 
