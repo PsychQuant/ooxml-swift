@@ -128,9 +128,9 @@ final class Issue133BodySurgeryTests: XCTestCase {
     }
 
     /// Two blocks the typed model serializes identically but whose source
-    /// bytes differ: matching by content cannot tell which one the edit
-    /// removed, so neither may lend its bytes to the block that remains —
-    /// otherwise deleting the first would keep its unmodelled content.
+    /// bytes differ: the deleted one's bytes must not survive, and the one
+    /// that remains keeps its own (verify R1: content equality alone cannot
+    /// tell them apart, so each kept block must come from its own source).
     func testDeletingOneOfTwoTypedEqualBlocksDoesNotKeepItsBytes() throws {
         let first = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10001" w:h="14000"/></w:sectPr></w:pPr><w:r><w:t>同文</w:t></w:r></w:p>"#
         let second = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10002" w:h="14000"/></w:sectPr></w:pPr><w:r><w:t>同文</w:t></w:r></w:p>"#
@@ -139,6 +139,7 @@ final class Issue133BodySurgeryTests: XCTestCase {
         try doc.deleteParagraph(at: 0)
         let xml = try save(doc)
         XCTAssertFalse(xml.contains(#"w:w="10001""#), "the deleted block's bytes must not survive:\n\(xml)")
+        XCTAssertTrue(xml.contains(second), "the remaining block keeps its own bytes:\n\(xml)")
         XCTAssertEqual(xml.components(separatedBy: "同文").count - 1, 1)
     }
 
@@ -153,6 +154,153 @@ final class Issue133BodySurgeryTests: XCTestCase {
         doc.insertParagraph(Paragraph(text: "新"), at: 0)
         let xml = try save(doc)
         XCTAssertTrue(xml.contains(first + second), "both blocks keep their bytes, in order:\n\(xml)")
+    }
+
+    // MARK: - A kept block's bytes come from that block (verify R1)
+
+    private let thirdBlock = "<w:p><w:r><w:t>丙段</w:t></w:r></w:p>"
+
+    /// Delete the first block and add one at the end: the counts match but
+    /// no position lines up. The untouched blocks keep their bytes.
+    func testDeletingTheFirstAndAddingAtTheEndKeepsTheUntouchedBlocks() throws {
+        var doc = try read(documentXML(body: firstBlock + keptBlock + thirdBlock))
+        defer { doc.close() }
+        try doc.deleteParagraph(at: 0)
+        doc.insertParagraph(Paragraph(text: "新尾"), at: 2)
+        let xml = try save(doc)
+        XCTAssertTrue(xml.contains(keptBlock + thirdBlock), xml)
+        XCTAssertFalse(xml.contains("甲段"))
+        XCTAssertTrue(xml.contains("新尾"))
+    }
+
+    /// Two typed-equal paragraphs whose section breaks differ (no paraId);
+    /// delete the first, then change a third paragraph to the same text.
+    /// The deleted block's section break must not survive on the edited one.
+    func testAnEditedBlockNeverBorrowsADeletedTwinsBytes() throws {
+        let first = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10001" w:h="14000"/></w:sectPr></w:pPr><w:r><w:t>同文</w:t></w:r></w:p>"#
+        let second = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10002" w:h="14000"/></w:sectPr></w:pPr><w:r><w:t>同文</w:t></w:r></w:p>"#
+        var doc = try read(documentXML(body: first + second + "<w:p><w:r><w:t>其他</w:t></w:r></w:p>"))
+        defer { doc.close() }
+        try doc.deleteParagraph(at: 0)
+        try doc.updateParagraph(at: 1, text: "同文")
+        let xml = try save(doc)
+        XCTAssertFalse(xml.contains(#"w:w="10001""#), "the deleted block's section break survived:\n\(xml)")
+        XCTAssertTrue(xml.contains(second), "the untouched twin keeps its own bytes:\n\(xml)")
+        XCTAssertEqual(xml.components(separatedBy: "同文").count - 1, 2)
+    }
+
+    /// Without paraIds, empty paragraphs and section-break paragraphs are
+    /// typed-equal. Deleting an ordinary empty paragraph must not cost the
+    /// section breaks around it.
+    func testDeletingAnEmptyParagraphKeepsTheSectionBreaksAroundIt() throws {
+        let secA = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10001" w:h="14000"/></w:sectPr></w:pPr></w:p>"#
+        let secB = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10002" w:h="14000"/></w:sectPr></w:pPr></w:p>"#
+        var doc = try read(documentXML(body: firstBlock + secA + "<w:p/><w:p/>" + secB + thirdBlock))
+        defer { doc.close() }
+        try doc.deleteParagraph(at: 2)
+        let xml = try save(doc)
+        XCTAssertTrue(xml.contains(secA), xml)
+        XCTAssertTrue(xml.contains(secB), xml)
+        XCTAssertEqual(xml.components(separatedBy: "<w:p").count - 1, 5, "one paragraph fewer:\n\(xml)")
+    }
+
+    /// Two deletions far apart in a long body: every block between them is
+    /// untouched and keeps its bytes, however long the stretch.
+    func testTwoDistantDeletionsInALongBodyKeepTheUntouchedStretch() throws {
+        var body = ""
+        for i in 0..<2500 {
+            body += i == 1200 ? keptBlock : "<w:p><w:r><w:t>段\(i)</w:t></w:r></w:p>"
+        }
+        var doc = try read(documentXML(body: body))
+        defer { doc.close() }
+        try doc.deleteParagraph(at: 2398)
+        try doc.deleteParagraph(at: 0)
+        let xml = try save(doc)
+        XCTAssertTrue(xml.contains(keptBlock), "a block between the two edits lost its bytes")
+        XCTAssertFalse(xml.contains(">段0<"))
+        XCTAssertFalse(xml.contains(">段2398<"))
+        XCTAssertTrue(xml.contains(">段2399<"))
+    }
+
+    /// A copy gets a fresh paraId on insert, so it is a different block: it
+    /// must not gain the original's section break, and the original keeps it.
+    func testACopiedBlockDoesNotDuplicateUnmodelledContent() throws {
+        var doc = try read(documentXML(body: keptBlock + firstBlock))
+        defer { doc.close() }
+        guard case .paragraph(let original) = doc.body.children[0] else { return XCTFail("fixture") }
+        doc.insertParagraph(original, at: 2)
+        let xml = try save(doc)
+        XCTAssertTrue(xml.contains(keptBlock), xml)
+        XCTAssertEqual(xml.components(separatedBy: #"w:w="10000""#).count - 1, 1,
+                       "the section break exists once, on the original:\n\(xml)")
+        XCTAssertEqual(xml.components(separatedBy: "乙段").count - 1, 2)
+    }
+
+    /// A block value taken from another document never borrows bytes here,
+    /// even when it lands where a typed-equal block was deleted.
+    func testABlockFromAnotherDocumentNeverBorrowsBytes() throws {
+        let k1 = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10001" w:h="14000"/></w:sectPr></w:pPr><w:r><w:t>同文</w:t></w:r></w:p>"#
+        let k2 = #"<w:p><w:pPr><w:sectPr><w:pgSz w:w="10002" w:h="14000"/></w:sectPr></w:pPr><w:r><w:t>同文</w:t></w:r></w:p>"#
+        var other = try read(documentXML(body: k1 + firstBlock))
+        defer { other.close() }
+        var doc = try read(documentXML(body: k2 + firstBlock))
+        defer { doc.close() }
+        let foreign = other.body.children[0]
+        try doc.deleteParagraph(at: 0)
+        // A value that reaches the body without paraId stamping.
+        doc.body.children.insert(foreign, at: 0)
+        doc.markTypedDirty("word/document.xml")
+        let xml = try save(doc)
+        XCTAssertFalse(xml.contains(#"w:w="10002""#), "the deleted block's bytes survived:\n\(xml)")
+        XCTAssertFalse(xml.contains(#"w:w="10001""#), "the other document's bytes leaked in:\n\(xml)")
+        XCTAssertTrue(xml.contains("同文"))
+    }
+
+    /// The root start tag is rebuilt from `documentRootAttributes` when they
+    /// changed after reading (the old writer did; surgery must not drop it).
+    func testRootAttributesChangedAfterReadAreWritten() throws {
+        var doc = try read(documentXML(body: firstBlock + keptBlock))
+        defer { doc.close() }
+        doc.documentRootAttributes["xmlns:foo"] = "urn:example:foo"
+        doc.insertParagraph(Paragraph(text: "新"), at: 0)
+        let xml = try save(doc)
+        XCTAssertTrue(xml.contains(#"xmlns:foo="urn:example:foo""#), xml)
+        XCTAssertTrue(xml.contains("新"))
+    }
+
+    // MARK: - Namespace repair of a rewritten block (verify R1)
+
+    private let mainURI = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    private let w14URI = "http://schemas.microsoft.com/office/word/2010/wordml"
+
+    func testRepairDoesNotRedeclareAPrefixTheBlockDeclaresItself() throws {
+        let block = #"<w:p xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:paraId="12345678"/>"#
+        let repaired = try XCTUnwrap(BodySurgery.repairNamespaces(block, rootBindings: ["w": mainURI]))
+        XCTAssertEqual(repaired.components(separatedBy: "xmlns:w14=").count - 1, 1, repaired)
+        XCTAssertNoThrow(try XMLDocument(xmlString: "<root xmlns:w=\"\(mainURI)\">\(repaired)</root>", options: []))
+    }
+
+    func testRepairAcceptsAPrefixDeclaredInsideTheBlock() {
+        let block = #"<w:p><w:r><x:mark xmlns:x="urn:example:x"/></w:r></w:p>"#
+        XCTAssertEqual(BodySurgery.repairNamespaces(block, rootBindings: ["w": mainURI]), block)
+    }
+
+    /// A Strict document binds `w` to another URI; the rewritten block stays
+    /// in the root's namespace (as the full typed writer would write it).
+    func testRepairKeepsTheRootsBindingOfAStandardPrefix() {
+        let strict = "http://purl.oclc.org/ooxml/wordprocessingml/main"
+        let block = "<w:p><w:r><w:t>x</w:t></w:r></w:p>"
+        XCTAssertEqual(BodySurgery.repairNamespaces(block, rootBindings: ["w": strict]), block)
+    }
+
+    func testRepairDeclaresAStandardPrefixNobodyBinds() throws {
+        let block = #"<w:p w14:paraId="12345678"/>"#
+        let repaired = try XCTUnwrap(BodySurgery.repairNamespaces(block, rootBindings: ["w": mainURI]))
+        XCTAssertTrue(repaired.contains("xmlns:w14=\"\(w14URI)\""), repaired)
+    }
+
+    func testRepairGivesUpOnAPrefixWithNoKnownURI() {
+        XCTAssertNil(BodySurgery.repairNamespaces(#"<w:p><zz:x/></w:p>"#, rootBindings: ["w": mainURI]))
     }
 
     // MARK: - Content outside the blocks
