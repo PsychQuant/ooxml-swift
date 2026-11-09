@@ -2,7 +2,7 @@ import XCTest
 import ZIPFoundation
 @testable import OOXMLSwift
 
-/// PsychQuant/ooxml-swift#129 + #133 (Decision (B), 2026-11-09): a typed-dirty
+/// PsychQuant/ooxml-swift#133 (Decision (B), 2026-11-09): a typed-dirty
 /// save rewrites only the body blocks the edit touched. Every other block, and
 /// everything outside `<w:body>`, keeps its source bytes.
 ///
@@ -10,7 +10,7 @@ import ZIPFoundation
 /// paragraph-level section break (`w:pPr/w:sectPr`): the typed model drops it
 /// (#133 comment, 2026-09-25), so it survives a save only when the block's
 /// source bytes were kept. All fixtures are synthetic.
-final class Issue129133BodySurgeryTests: XCTestCase {
+final class Issue133BodySurgeryTests: XCTestCase {
 
     // MARK: - Fixture plumbing
 
@@ -58,7 +58,7 @@ final class Issue129133BodySurgeryTests: XCTestCase {
                 return data.subdata(in: start..<start.advanced(by: size))
             }
         }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i129133-\(UUID().uuidString).docx")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i133-\(UUID().uuidString).docx")
         try XCTUnwrap(archive.data).write(to: url)
         cleanup.append(url)
         return url
@@ -75,7 +75,7 @@ final class Issue129133BodySurgeryTests: XCTestCase {
     /// Save in overlay mode (the path che-word-mcp uses) and return the
     /// saved `word/document.xml`.
     private func save(_ doc: WordDocument) throws -> String {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i129133-out-\(UUID().uuidString).docx")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("i133-out-\(UUID().uuidString).docx")
         cleanup.append(url)
         try DocxWriter.write(doc, to: url)
         return try documentPart(ofArchiveData: Data(contentsOf: url))

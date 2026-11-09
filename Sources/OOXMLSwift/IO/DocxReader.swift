@@ -377,7 +377,7 @@ public struct DocxReader {
         // mutates the typed model.
         document.modifiedParts.removeAll()
 
-        // PsychQuant/ooxml-swift#129 + #133: remember the body as read so a
+        // PsychQuant/ooxml-swift#133: remember the body as read so a
         // typed-dirty save rewrites only the blocks that changed. Tree-backed
         // views edit the tree directly, so surgery never applies to them.
         if !wireTreeBackedViews {

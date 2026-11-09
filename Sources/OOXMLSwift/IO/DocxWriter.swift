@@ -1284,7 +1284,7 @@ public struct DocxWriter {
     }
 
     private static func writeDocument(_ document: WordDocument, to baseURL: URL) throws {
-        // PsychQuant/ooxml-swift#129 + #133: when the live tree is untouched
+        // PsychQuant/ooxml-swift#133: when the live tree is untouched
         // since read, rewrite only the body blocks whose typed serialization
         // changed and keep the source bytes of everything else.
         if let surgical = try BodySurgery.surgicalDocumentXML(document) {

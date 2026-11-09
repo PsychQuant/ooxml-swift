@@ -156,7 +156,7 @@ public struct WordDocument: Equatable {
     /// and re-emit through the typed writer + re-tree bridge instead.
     public internal(set) var treeFreshParts: Set<String> = []
 
-    /// PsychQuant/ooxml-swift#129 + #133: the body as read (typed blocks and
+    /// PsychQuant/ooxml-swift#133: the body as read (typed blocks and
     /// the live-tree node each came from), recorded by `DocxReader` in the
     /// default read mode. When `word/document.xml` is typed-dirty and its tree
     /// is still untouched, `DocxWriter` rewrites only the blocks whose typed
@@ -703,7 +703,7 @@ public struct WordDocument: Equatable {
 
     /// Namespace prefixes an element subtree uses on element and attribute
     /// names (`xmlns` declarations and the reserved `xml` prefix excluded).
-    /// Also used by `BodySurgery` for rewritten body blocks (#129/#133).
+    /// Also used by `BodySurgery` for rewritten body blocks (#133).
     static func prefixesUsed(in node: XmlNode) -> Set<String> {
         var out: Set<String> = []
         func walk(_ n: XmlNode) {

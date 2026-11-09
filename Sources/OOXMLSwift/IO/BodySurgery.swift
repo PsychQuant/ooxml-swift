@@ -1,6 +1,6 @@
 import Foundation
 
-// PsychQuant/ooxml-swift#129 + #133 (Decision (B), 2026-11-09): tree-level
+// PsychQuant/ooxml-swift#133 (Decision (B), 2026-11-09): tree-level
 // surgery for typed-dirty saves of `word/document.xml`.
 //
 // A typed mutator marks the whole part typed-dirty, and the writer used to
