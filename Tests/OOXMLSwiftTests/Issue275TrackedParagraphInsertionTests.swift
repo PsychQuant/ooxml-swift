@@ -551,6 +551,43 @@ final class Issue275TrackedParagraphInsertionTests: XCTestCase {
         // Restoring the text of a deletion read from a file is che-word-mcp#291.
     }
 
+    /// #133, the shipped save path (read-time baseline in place): the
+    /// paragraph the edit did not touch keeps its source bytes, so the file
+    /// keeps the shared id 7 that the reader renumbered in the model. Reading
+    /// the saved file separates the two revisions again, and both stay
+    /// addressable.
+    func testAnUntouchedParagraphKeepsItsSourceRevisionIdsAcrossASave() throws {
+        let body = """
+            <w:p><w:r><w:t>Alpha.</w:t></w:r></w:p>\
+            <w:p><w:pPr><w:rPr><w:ins w:id="7" w:author="A" w:date="2026-10-01T00:00:00Z"/></w:rPr></w:pPr>\
+            \(reviewerA("del", 7))<w:r><w:delText>x</w:delText></w:r></w:del><w:r><w:t>y</w:t></w:r></w:p>
+            """
+        var (doc, fixture) = try openTracked(bodyXML: body)
+        defer { try? FileManager.default.removeItem(at: fixture); doc.close() }
+        try doc.updateParagraph(at: 0, text: "ALPHA.")
+
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("issue275-out-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: outURL) }
+        try DocxWriter.write(doc, to: outURL)
+        let archive = try Archive(url: outURL, accessMode: .read)
+        var data = Data()
+        _ = try archive.extract(try XCTUnwrap(archive["word/document.xml"])) { data.append($0) }
+        let p = try XCTUnwrap(paragraph(containing: ">y<", in: String(decoding: data, as: UTF8.self)))
+        XCTAssertTrue(p.contains(#"<w:del w:id="7""#), "the untouched paragraph keeps its source bytes — got: \(p)")
+
+        var reread = try DocxReader.read(from: outURL)
+        defer { reread.close() }
+        let ids = reread.revisions.revisions.map(\.id)
+        XCTAssertEqual(Set(ids).count, 2, "two revisions, separated on read — got: \(ids)")
+        let deletion = try XCTUnwrap(reread.revisions.revisions.first { $0.type == .deletion })
+        XCTAssertNotEqual(deletion.id, 7)
+        try reread.acceptRevision(revisionId: 7)
+        XCTAssertEqual(reread.revisions.revisions.map(\.id), [deletion.id])
+        try reread.rejectRevision(revisionId: deletion.id)
+        XCTAssertTrue(reread.revisions.revisions.isEmpty)
+    }
+
     func testAnInsertionAndADeletionSharingAnIdInOneParagraphAreSeparate() throws {
         let body = "<w:p>\(reviewerA("ins", 7))<w:r><w:t>new</w:t></w:r></w:ins>\(reviewerA("del", 7))<w:r><w:delText>old</w:delText></w:r></w:del></w:p>"
         var (doc, fixture) = try openTracked(bodyXML: body)
