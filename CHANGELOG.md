@@ -8,6 +8,32 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`DocxForm` library product：表單整理，從 macdoc 搬過來**（PsychQuant/ooxml-swift#238）。
+  macdoc 的 `word form classify|apply`（PsychQuant/macdoc#249、macdoc#250、macdoc#252、macdoc#253）背後的函式庫，
+  過去是 macdoc 套件內的 target，只有 macdoc 用得到；搬過來之後 che-word-mcp 也能依賴它
+  （PsychQuant/che-word-mcp#300）。行為不變：
+  - 只以字串修改 `word/document.xml` 裡被點名的元素，其他 part 逐位元組照抄；只依賴 ZIPFoundation，
+    不依賴 `OOXMLSwift`，所以表單不會經過 typed model 重新序列化。
+  - 9 個原始碼檔與 241 個測試從 macdoc `41b6ef38` 逐字搬入。只有兩處不同：註解裡的 issue 編號改寫成
+    `macdoc#N`（在這個 repo，`#250` 指的是另一張 issue）；`FormOperations.swift` 的刪除與截斷那一段
+    原封不動移到 `FormDeletion.swift`，因為原檔已到 800 行上限。
+  - `ApplyOption` 與 `ParagraphKind.applyOption` 沒有搬過來。它們是段落類型對 macdoc CLI 旗標
+    （`--field`、`--tick-list`）的對照，只有 macdoc 的 CLI 用，改在 PsychQuant/macdoc#274 移進 MacDocCLI。
+  - 新的 `DocxFormPublicAPITests` target 不用 `@testable` 匯入 DocxForm，所以呼叫端用到的符號不再是
+    `public` 時，它會編譯失敗。
+  - `FormError` 的訊息仍提到 macdoc CLI 的旗標（例如 `--remove-table`），因為 macdoc 的 CLI 測試比對
+    這些訊息；MCP 那一面要怎麼呈現，留給 PsychQuant/che-word-mcp#300。同樣沿用 macdoc 的還有兩處：
+    `rewriteDocument` 在輸出檔旁建立的暫存目錄仍叫 `.macdoc-form-<UUID>`（寫入中途被中止時會留下），
+    `rewriteDocument` 也沒有參數可以調低 512 MB 的讀取上限（`read` 與 `readParts` 有）。
+
+### Changed
+
+- **ZIPFoundation 下限由 0.9.0 改成 0.9.20**（PsychQuant/ooxml-swift#238）。`OOXMLSwift` 與 `DocxForm`
+  都用會拋錯的 `Archive(url:accessMode:)`，它在 ZIPFoundation 0.9.17 才加入，所以 0.9.0 到 0.9.16
+  本來就編譯不過，只是 SwiftPM 一律解到最新版，平常碰不到。0.9.20 是實際解析並測過的版本。
+
 ## [3.20.0] - 2026-11-08
 
 ### Added
