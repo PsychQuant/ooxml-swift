@@ -60,6 +60,65 @@ final class DocxFormPublicAPITests: XCTestCase {
         }
     }
 
+    /// Touches every DocxForm name that macdoc's `word form` command and its
+    /// CLI tests use (macdoc 41b6ef38), so a name that stops being public fails
+    /// here instead of in macdoc (verify round 1).
+    func testEveryNameMacdocsWordFormUsesIsPublic() throws {
+        let plan = FormPlan(fields: ["0000A002"], fieldSize: FieldSize(halfPoints: 24), checkboxFont: "MS Gothic",
+                            tickList: [], insertions: [FormInsertion(anchor: "0000A003", text: "Note")],
+                            removals: [], removedTables: [], truncateFrom: nil, tableDefaults: [])
+        let result: FormResult = try plan.apply(toDocumentXML: form)
+        XCTAssertEqual(result.skippedCheckboxRuns, 0)
+        XCTAssertFalse(result.addedFinalParagraph)
+        let skips: [CleanupSkip] = result.skippedCleanups
+        XCTAssertEqual(skips.map(\.paragraphId), [])
+        XCTAssertEqual(skips.flatMap(\.reasons), [])
+        XCTAssertEqual(CleanupSkip.Reason.allCases.map(\.elementName), ["w:tbl", "w:sdt", "w:customXml"])
+        XCTAssertEqual(FieldSize(halfPoints: 21).pointsDescription, "10.5 pt")
+
+        let report = try FormPlan(fieldSize: FieldSize(halfPoints: 24),
+                                  tableDefaults: [TableDefaults.parse("0000A001=col:2")])
+            .apply(toDocumentXML: form).tableDefaultsReports[0]
+        XCTAssertEqual(report.partialCells, [])
+        XCTAssertEqual(report.skippedCells, [])
+
+        XCTAssertEqual(try FormClassifier.kinds(of: ["0000A002", "0000A003"], documentXML: form, numberingXML: nil),
+                       ["0000A002": .tableField, "0000A003": .checkboxLine])
+        XCTAssertFalse(FormClassifier.isReadableNumbering(Array("not xml".utf8)))
+        let paragraphs = try FormClassifier.classify(documentXML: form, numberingXML: nil)
+        XCTAssertEqual(paragraphs.last?.text, "\u{25A1} Agree")
+
+        let mergedTable: [UInt8] = Array((
+            "<w:document \(DocxFormPublicAPITests.namespaces)><w:body><w:tbl><w:tblPr/><w:tblGrid/><w:tr>"
+            + #"<w:tc><w:tcPr><w:hMerge w:val="restart"/></w:tcPr><w:p w14:paraId="0000B001"/></w:tc>"#
+            + "</w:tr></w:tbl></w:body></w:document>").utf8)
+        let cell = try FormClassifier.classify(documentXML: mergedTable, numberingXML: nil, withCells: true).first?.cell
+        guard case .unreadableTable(let table)? = cell else { return XCTFail("\(String(describing: cell))") }
+        XCTAssertEqual(table, 1)
+        XCTAssertEqual(cell?.description, "t1:?")
+
+        XCTAssertThrowsError(try FormClassifier.classify(documentXML: Array("<w:document><w:body>".utf8),
+                                                         numberingXML: nil)) {
+            XCTAssertTrue($0 is XMLScanError, "\($0)")
+        }
+        XCTAssertFalse(FormError.malformedPart("x").description.isEmpty)
+    }
+
+    func testMissingDocumentPartIsAPackageError() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DocxFormPublicAPITests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appendingPathComponent("in.docx")
+        try DocxPackage.write([DocxPackage.Entry(path: "word/styles.xml", data: Data("<w:styles/>".utf8))], to: input)
+        XCTAssertEqual(try DocxPackage.read(from: input).map(\.path), ["word/styles.xml"])
+        XCTAssertEqual(DocxPackage.numberingPart, "word/numbering.xml")
+        XCTAssertThrowsError(try DocxPackage.rewriteDocument(input: input, output: dir.appendingPathComponent("out.docx"),
+                                                             force: false) { d, _ in d }) {
+            XCTAssertEqual($0 as? DocxPackageError, .missingPart(DocxPackage.documentPart))
+        }
+    }
+
     func testRewriteReplacesOnlyTheDocumentPart() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("DocxFormPublicAPITests-\(UUID().uuidString)")
