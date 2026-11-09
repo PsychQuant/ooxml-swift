@@ -11,24 +11,33 @@ All notable changes to ooxml-swift will be documented in this file.
 ### Fixed
 
 - **typed-dirty 的存檔只重寫改過的 body 區塊，沒被碰的區塊沿用原本的 bytes**（#133；維護者 2026-11-09 決定採 (B) tree 層手術）。過去任何會 `markTypedDirty("word/document.xml")` 的操作（`insertParagraph(at:)`、`updateParagraph`、`deleteParagraph`、`insertTable`、`replaceText`、`setPageSize` 等 83 處）都讓 `DocxWriter` 以 typed model 整份重寫 `document.xml`。typed model 從讀檔起就缺了幾種形態（文字方塊 run 裡的公式、純空白的 `w:t`、儲存格裡巢狀表格之後的段落順序、段落層 `w:pPr/w:sectPr`、`w:gridCol`、`w:hideMark`、核取方塊的 `w:sdtPr` 狀態等），所以一次編輯會連帶損壞沒人碰過的段落與表格。
-  - 做法：`DocxReader`（預設讀法）記下 body 讀進來時的 typed 區塊與各自對應的 live tree 節點。`DocxWriter` 寫 `document.xml` 時，比較每個區塊「讀進來時」與「現在」的 typed 輸出：相同的區塊照抄原節點的 bytes，不同或新增的區塊才用 typed 輸出；`sectPr` 同樣比較。body 以外的內容（prolog、root 起始標籤、`w:background` 等）原樣保留。判斷「沒變」用 typed 輸出字串而不用 `==`，判斷錯了只會退回過去的整份重寫，不會把修改丟掉。
-  - 重寫的區塊用到 root 沒宣告的 namespace prefix 時，宣告加在該區塊自己的起始標籤上（與 #132 的 graft 相同），root 不動。
-  - typed 輸出相同、原始 bytes 卻不同的區塊（例如只差在 typed model 沒建模的內容）只靠內容無法分辨。這種輸出的出現次數在編輯前後不同時（其中一個被刪除或改寫），這幾個區塊都改用 typed 輸出、不借用任何一個的 bytes，否則刪掉其中一個時，可能留下被刪那一個的內容。次數相同時依順序配對：新段落一定會蓋上新的 paraId，不會與既有段落相同。一段輸出在讀檔時只出現一次、現在卻出現多次時，也不借用 bytes。
-  - 以下情況退回過去的整份重寫：live tree 在讀檔後被動過（op-log、#132 的 graft、`applyFormattingProfile`、`materializeTypedTrees`）、tree-backed 讀法、重寫的區塊用到沒有已知 URI 的 prefix、任一區塊無法序列化。
-  - 用同一批 104 份真實文件重新量測（插入一段後存檔，#133 的量測程序）：正文有損的文件 6 → 0；元素數量變少的文件 53 → 0。
+  - 做法：`DocxReader`（預設讀法）讀檔時，在每個 body 區塊的值上蓋一個來源記號，記錄是哪一次讀檔、第幾個區塊。記號不參與 `==`，複製該值時會一起帶走。reader 同時記下 body 讀進來時的 typed 區塊，以及各區塊對應的 live tree 節點。`DocxWriter` 寫 `document.xml` 時，區塊要同時符合兩個條件才照抄原節點的 bytes：一是帶著這次讀檔的記號，而且是唯一帶這個記號、內容沒變的區塊；二是 typed 輸出與讀檔時相同。其餘區塊用 typed 輸出，`sectPr` 也以同樣方式比較。保留的區塊必須維持原本的先後順序，被移動的區塊改用 typed 輸出。body 以外的內容（prolog、root 起始標籤、`w:background` 等）原樣保留。
+  - 為什麼要用記號：只比內容的話，分不出 typed 輸出相同、原始 bytes 不同的區塊，例如只差在 typed model 沒建模的分節符。verify 第一輪實測了兩種只比內容時的錯誤：刪掉一個區塊、再把另一段改成相同文字，被刪區塊的分節符會出現在改過的那一段上；刪掉一個普通空段落，旁邊的分節段落也會被重寫。改用記號後，任何不確定的情況都當作「改過」，用 typed 輸出，也就是過去整份重寫時的行為。
+  - 判斷「沒變」用 typed 輸出字串而不用 `==`：手寫的 `==` 若漏了某個欄位，也不會把一次編輯誤判成沒變。
+  - 重寫的區塊若用到 root 與區塊本身都沒宣告的 namespace prefix，宣告加在該區塊自己的起始標籤上，root 不動。root 已綁定的 prefix 沿用 root 的 URI（Strict 文件的 `w` 仍是 Strict）。區塊自己宣告過的 prefix 不再重複宣告。
+  - 被重寫的區塊寫在它原本的位置，typed model 看不到的兄弟節點（註解、`w:id` 不是整數的 bookmark）維持在它後面。
+  - 以下情況退回過去的整份重寫：live tree 在讀檔後被動過（見 Known limits）、tree-backed 讀法、讀檔後改過 `documentRootAttributes`、body 層 `sectPr` 不只一個或不在最後、root 底下的 `body` 不是文件中第一個 `body` 元素、重寫的區塊用到沒有已知 URI 的 prefix、任一區塊無法序列化。
+  - 量測（同一批真實文件，只記彙總）：
+    - body 段落至少 4 個的 78 份文件，做五種操作後存檔：開頭插入一段、刪中段、改中段、刪中段並在尾端加一段、刪第一段並改最後一段。沒被編輯的區塊有元素或文字變少的文件，五種操作都是 0/78。退回整份 typed 重寫時，同一指標在五種操作下都是 40/78，其中 5 份正文有損。
+    - 沿用 #133 原本的量測程序（104 份，開頭插入一段後存檔）：正文有損 6 → 0，元素數量變少 53 → 0。
+    - 沒有修改的文件經 `writeData` 存檔，`document.xml` 104/104 逐位元組相同。
 
 ### Changed
 
 - 上面的修正帶來的可觀察變化：
-  - typed-dirty 存檔時，沒被編輯的區塊與 body 以外的內容現在逐位元組保留，不再被 typed 輸出正規化。例如沒被編輯的 run 上 `<w:i w:val="false"/>` 不再被寫成 `w:val="0"`（`RunPropertyOnOffTests` 已改成預期原始寫法）。
-  - `writeData` 對沒有修改的文件，輸出的 `document.xml` 與來源逐位元組相同（104 份全部相同）；過去會經過 typed 整份重寫。
+  - typed-dirty 存檔時，沒被編輯的區塊與 body 以外的內容現在逐位元組保留，不再被 typed 輸出正規化。例如沒被編輯的 run 上 `<w:i w:val="false"/>` 不再被寫成 `w:val="0"`（`RunPropertyOnOffTests` 改成預期原始寫法，另外新增一個編輯該段、仍寫成 `"0"` 的測試）。
+  - 沒被編輯的區塊現在保留 typed model 看不到的內容，例如文字方塊與 `m:oMath` 裡的文字。過去整份重寫會順帶把它們丟掉，現在不會。用 typed `replaceText` 做遮蔽時，取代範圍仍只涵蓋 typed model 看得到的文字，這兩處的原文會留在存檔裡。
+  - `writeData` 對沒有修改的文件，輸出的 `document.xml` 與來源逐位元組相同；過去會經過 typed 整份重寫。
   - 來源沒有 body 層 `sectPr`、也沒有改過頁面設定時，不再自動補上一個預設的 `sectPr`。
-  - reader 把共用同一個 id 的不同種類修訂分開編號（3.20.0），但沒被編輯的段落在存檔時保留來源的 id。typed model 裡仍是分開的 id，新配的修訂 id 也照舊避開檔案中所有 id。`Issue275TrackedParagraphInsertionTests` 中兩個要檢查 typed writer 輸出的測試，改成先清掉讀檔基準再存檔。
+  - reader 把共用同一個 id 的不同種類修訂分開編號（3.20.0），但沒被編輯的段落在存檔時保留來源的 id；typed model 裡仍是分開的 id，新配的修訂 id 也照舊避開檔案中所有 id。存檔後重讀，reader 會再次把它們分開，兩個修訂都能定址（`testAnUntouchedParagraphKeepsItsSourceRevisionIdsAcrossASave`）。`Issue275TrackedParagraphInsertionTests` 中另外兩個測試要檢查 typed writer 的輸出，所以改成先清掉讀檔基準再存檔。
 
 ### Known limits
 
-- 被編輯的那一個區塊本身仍走 typed 輸出，區塊內 typed model 沒建模的內容（例如段落層 `w:pPr/w:sectPr`）仍會遺失。
-- tree-backed 讀法（`wireTreeBackedViews: true`）不適用：typed-dirty 存檔仍整份重寫，`Paragraph.runs` stub 丟失 drawing 的問題（#129）沒有改變，`Issue129TreeBackedDrawingTests` 的 `XCTExpectFailure` guard 不變。
+- 被編輯的那一個區塊仍走 typed 輸出，區塊內 typed model 沒建模的內容（例如段落層 `w:pPr/w:sectPr`）仍會遺失。單位是 body 層的區塊：改表格裡的一格，整張表格都會重寫。
+- 同一個 session 裡，只要先做過動到 live tree 的操作，之後的 typed 編輯就全部退回整份重寫，#133 的損失會再出現。這類操作包括：在讀進來的文件上 `appendParagraph`（走 op-log 或 #132 的 graft）、op-log 編輯、`applyFormattingProfile`、`materializeTypedTrees`。讀檔時記下的基準不會跟著 tree 更新。先做 typed 編輯、後 append 的順序不受影響。
+- 被移動的區塊（刪掉後在別處插入同一個值）當作改過，用 typed 輸出。同一個區塊有兩個完全相同的複本時（例如保留了原 paraId 的複製），兩個都用 typed 輸出。
+- tree-backed 讀法（`wireTreeBackedViews: true`）不適用：typed-dirty 存檔仍整份重寫，`Paragraph.runs` stub 丟失 drawing 的問題（#129）沒有改變。guard 是 `Issue175R2WhitelistInspectorTests.testTreeBackedTypedDirtyKeepsExistingDrawing_knownLimitation`，不變。
+- 刪掉 pretty-printed body 裡的一個區塊時，它前後的縮排空白會接在一起；區塊本身的 bytes 不變。
 
 ## [3.21.0] - 2026-11-10
 
