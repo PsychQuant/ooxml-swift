@@ -1284,6 +1284,13 @@ public struct DocxWriter {
     }
 
     private static func writeDocument(_ document: WordDocument, to baseURL: URL) throws {
+        // PsychQuant/ooxml-swift#129 + #133: when the live tree is untouched
+        // since read, rewrite only the body blocks whose typed serialization
+        // changed and keep the source bytes of everything else.
+        if let surgical = try BodySurgery.surgicalDocumentXML(document) {
+            try surgical.write(to: baseURL.appendingPathComponent("word/document.xml"), options: .atomic)
+            return
+        }
         // v0.19.0+ (PsychQuant/che-word-mcp#56): rebuild the <w:document> open
         // tag from `documentRootAttributes` so a no-op (or dirty-marked) round-trip
         // preserves every source xmlns:* + mc:Ignorable declaration. Falling back

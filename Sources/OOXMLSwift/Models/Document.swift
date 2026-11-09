@@ -156,6 +156,14 @@ public struct WordDocument: Equatable {
     /// and re-emit through the typed writer + re-tree bridge instead.
     public internal(set) var treeFreshParts: Set<String> = []
 
+    /// PsychQuant/ooxml-swift#129 + #133: the body as read (typed blocks and
+    /// the live-tree node each came from), recorded by `DocxReader` in the
+    /// default read mode. When `word/document.xml` is typed-dirty and its tree
+    /// is still untouched, `DocxWriter` rewrites only the blocks whose typed
+    /// serialization changed and copies every other block's source bytes
+    /// (`BodySurgery`). Excluded from `==` like `xmlTrees`.
+    internal var bodySourceBaseline: BodySourceBaseline?
+
     /// v0.31.2+ Convenience accessor returning `xmlTrees[partPath]`.
     /// Returns `nil` for any path not present in `xmlTrees`.
     public func partTree(at partPath: String) -> XmlTree? {
@@ -695,7 +703,8 @@ public struct WordDocument: Equatable {
 
     /// Namespace prefixes an element subtree uses on element and attribute
     /// names (`xmlns` declarations and the reserved `xml` prefix excluded).
-    private static func prefixesUsed(in node: XmlNode) -> Set<String> {
+    /// Also used by `BodySurgery` for rewritten body blocks (#129/#133).
+    static func prefixesUsed(in node: XmlNode) -> Set<String> {
         var out: Set<String> = []
         func walk(_ n: XmlNode) {
             guard n.kind == .element else { return }
@@ -717,7 +726,7 @@ public struct WordDocument: Equatable {
         for child in node.children { detachFromSource(child) }
     }
 
-    private static let standardWordNamespaces: [String: String] = [
+    static let standardWordNamespaces: [String: String] = [
         "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
         "w14": "http://schemas.microsoft.com/office/word/2010/wordml",
         "w15": "http://schemas.microsoft.com/office/word/2012/wordml",
