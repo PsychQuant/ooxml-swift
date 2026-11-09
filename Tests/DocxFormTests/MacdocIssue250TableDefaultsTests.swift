@@ -1,4 +1,4 @@
-// Issue250TableDefaultsTests.swift — `--table-defaults <paraId>=col:…/row:…`
+// MacdocIssue250TableDefaultsTests.swift — `--table-defaults <paraId>=col:…/row:…`
 // (macdoc#250 requirement 1): the caller names a table and its fill columns
 // or rows on the table's grid; every cell that lies wholly inside the
 // selection is tidied the way `--field` tidies one paragraph, label cells
@@ -7,7 +7,7 @@
 import XCTest
 @testable import DocxForm
 
-final class Issue250TableDefaultsTests: XCTestCase {
+final class MacdocIssue250TableDefaultsTests: XCTestCase {
 
     // MARK: builders
 

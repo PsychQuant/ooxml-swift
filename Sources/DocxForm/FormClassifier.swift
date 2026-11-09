@@ -28,7 +28,7 @@ public struct ClassifiedParagraph: Equatable {
 }
 
 /// A cell's place on its table's grid, as `--table-defaults` counts it
-/// (#250 requirement 1). Tables are numbered in document order, nested
+/// (macdoc#250 requirement 1). Tables are numbered in document order, nested
 /// tables included; rows and grid columns count from 1.
 public enum CellPosition: Equatable, CustomStringConvertible {
     case cell(table: Int, rows: ClosedRange<Int>, columns: ClosedRange<Int>)
@@ -60,7 +60,7 @@ public enum FormClassifier {
 
     /// The numbering levels, or nil when the part cannot be read: the tag scan
     /// refuses it (unpaired tags, a DOCTYPE, more nesting or tags than the
-    /// scan limits, #252) or a real XML parser does (duplicate attributes, bad
+    /// scan limits, macdoc#252) or a real XML parser does (duplicate attributes, bad
     /// entities and the like). The tag index only checks tag pairing, so the
     /// part goes through the parser as well.
     static func numberingLevels(_ xml: [UInt8]?) -> NumberingLevels? {
@@ -76,7 +76,7 @@ public enum FormClassifier {
 
     /// Every paragraph that carries a `w14:paraId`, in document order. An
     /// unreadable numbering part disables list-checkbox detection only.
-    /// `withCells` adds each cell paragraph's grid position (#250).
+    /// `withCells` adds each cell paragraph's grid position (macdoc#250).
     public static func classify(documentXML: [UInt8], numberingXML: [UInt8]?,
                                 withCells: Bool = false) throws -> [ClassifiedParagraph] {
         let index = try XMLTagIndex(documentXML)
@@ -220,7 +220,7 @@ enum FormLocator {
         case notOnParagraph(carrier: String)
     }
 
-    /// Looks the id up in the index's paraId table (#252); the carriers come
+    /// Looks the id up in the index's paraId table (macdoc#252); the carriers come
     /// in document order, so the first non-paragraph carrier is reported as
     /// before the table existed.
     static func paragraph(withId id: String, in index: XMLTagIndex) -> Lookup {

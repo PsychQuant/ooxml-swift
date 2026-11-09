@@ -1,4 +1,4 @@
-// Issue253BoundaryTests.swift — boundaries of `word form apply` that used to
+// MacdocIssue253BoundaryTests.swift — boundaries of `word form apply` that used to
 // pass silently or leave incomplete markup (macdoc#253): a skipped cell
 // cleanup, the content-control size, what counts as an empty paragraph, and
 // markup that pairs across the range `--remove` / `--truncate-from` deletes.
@@ -6,7 +6,7 @@
 import XCTest
 @testable import DocxForm
 
-final class Issue253BoundaryTests: XCTestCase {
+final class MacdocIssue253BoundaryTests: XCTestCase {
     private let sized = "<w:rPr><w:sz w:val=\"24\"/></w:rPr>"
 
     private func result(_ body: String, _ plan: FormPlan) throws -> FormResult {
@@ -233,7 +233,7 @@ final class Issue253BoundaryTests: XCTestCase {
         XCTAssertFalse(out.contains("w:comment"))
     }
 
-    // MARK: verify round 1 (#253)
+    // MARK: verify round 1 (macdoc#253)
 
     private let begin = "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r>"
     private let separate = "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>"
@@ -352,7 +352,7 @@ final class Issue253BoundaryTests: XCTestCase {
         XCTAssertEqual(out.skippedCleanups, [])
     }
 
-    // MARK: verify round 2 (#253)
+    // MARK: verify round 2 (macdoc#253)
 
     /// R2 #1: the last two paragraphs of a cell, removed in either order.
     func testRemovingTheLastTwoParagraphsOfACellKeepsTheirMarkersInEitherOrder() throws {

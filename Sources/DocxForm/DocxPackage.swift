@@ -14,10 +14,10 @@ public enum DocxPackageError: Error, Equatable, CustomStringConvertible {
     case unreadable(String)
     case missingPart(String)
     case tooLarge(limit: Int64)
-    /// More entries than `DocxPackage.maxEntries` (#252).
+    /// More entries than `DocxPackage.maxEntries` (macdoc#252).
     case tooManyEntries(limit: Int)
     /// An entry name that is absolute (`/`, `\` or a drive letter) or has a
-    /// `..` segment (#252).
+    /// `..` segment (macdoc#252).
     case suspiciousEntryName(String)
     case outputExists(String)
     case writeFailed(String)
@@ -64,7 +64,7 @@ public enum DocxPackage {
     public static let maxTotalBytes: Int64 = 512 * 1_048_576
     /// Entries accepted in one package. A Word document has tens to a few
     /// hundred; the cap keeps a package of countless tiny entries from being
-    /// held and walked in memory (#252).
+    /// held and walked in memory (macdoc#252).
     public static let maxEntries = 10_000
 
     /// Entry names refused outright (closed list, #252; nothing is refused by
@@ -76,7 +76,7 @@ public enum DocxPackage {
     /// The name is read as Unicode scalars, not as Characters: a combining
     /// mark after a separator joins it into one Character that equals neither
     /// `/` nor `\`, while an extractor reading the bytes still sees the
-    /// separator (#252 verify R1).
+    /// separator (macdoc#252 verify R1).
     static func isSuspicious(_ path: String) -> Bool {
         let scalars = Array(path.unicodeScalars)
         guard let first = scalars.first else { return false }
@@ -97,7 +97,7 @@ public enum DocxPackage {
     /// Only the entries named in `paths`, in archive order; a name that is not
     /// in the package is absent from the result. The entry-count and name
     /// checks cover the whole archive; the size limit counts only what is
-    /// extracted (#252, used by `word form classify`).
+    /// extracted (macdoc#252, used by `word form classify`).
     public static func readParts(from url: URL, paths: [String], limit: Int64 = maxTotalBytes,
                                  maxEntries: Int = maxEntries) throws -> [Entry] {
         try read(from: url, only: Set(paths), limit: limit, maxEntries: maxEntries)

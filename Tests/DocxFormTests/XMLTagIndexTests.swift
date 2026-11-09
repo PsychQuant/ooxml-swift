@@ -1,4 +1,4 @@
-// XMLTagIndexTests.swift — the tag scanner behind form normalization (#249).
+// XMLTagIndexTests.swift — the tag scanner behind form normalization (macdoc#249).
 
 import XCTest
 @testable import DocxForm

@@ -1,5 +1,5 @@
 // DocxPackageTests.swift — "Parts other than the main part are unchanged" and
-// the output handling of `word form apply` (#249).
+// the output handling of `word form apply` (macdoc#249).
 
 import XCTest
 import ZIPFoundation

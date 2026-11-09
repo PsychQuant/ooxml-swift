@@ -1,4 +1,4 @@
-// FormOperationsTests.swift — the operations of `word form apply` (#249).
+// FormOperationsTests.swift — the operations of `word form apply` (macdoc#249).
 
 import XCTest
 @testable import DocxForm
@@ -493,7 +493,7 @@ final class FormOperationsTests: XCTestCase {
         let body = TestXML.paragraph("0000P060", pPr: "<w:pPr>\(s1)</w:pPr>", TestXML.run("P1")) + chunk
             + TestXML.paragraph("0000P061", TestXML.run("下一份")) + s2
         let out = try apply(body, FormPlan(truncateFrom: "0000P061"))
-        // The body would end with the chunk, so an empty paragraph ends it (#250).
+        // The body would end with the chunk, so an empty paragraph ends it (macdoc#250).
         let expected = TestXML.paragraph("0000P060", pPr: "<w:pPr>\(s1)</w:pPr>", TestXML.run("P1")) + chunk + "<w:p/>" + s2
         XCTAssertEqual(TestXML.string(out), TestXML.string(TestXML.document(expected)))
     }
@@ -528,7 +528,7 @@ final class FormOperationsTests: XCTestCase {
         let out = try apply(body, FormPlan(truncateFrom: "0000P052"))
         let expected = TestXML.paragraph("0000P050", pPr: "<w:pPr>\(s1)</w:pPr>", TestXML.run("P1"))
             + TestXML.table([TestXML.cell(TestXML.paragraph("0000P051", TestXML.run("表內")))]) + "<w:p/>" + s2
-        // The body would end with the table, so an empty paragraph ends it (#250).
+        // The body would end with the table, so an empty paragraph ends it (macdoc#250).
         XCTAssertEqual(TestXML.string(out), TestXML.string(TestXML.document(expected)))
     }
 

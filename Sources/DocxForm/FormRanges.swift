@@ -41,7 +41,7 @@ enum FormRanges {
     }
 
     /// Every pairing decision is taken against the union of all ranges the
-    /// command deletes (#253 verify R1): naming every paragraph of a field, or
+    /// command deletes (macdoc#253 verify R1): naming every paragraph of a field, or
     /// both halves of a bookmark, deletes them together instead of each
     /// paragraph being judged as if the others stayed.
     private static func inAny(_ offset: Int, _ ranges: [Range<Int>]) -> Bool {
@@ -54,7 +54,7 @@ enum FormRanges {
     static func keptMarkers(in span: Range<Int>, deleted: [Range<Int>], index: XMLTagIndex) -> [Int] {
         var positions: [Key: [Int]] = [:]
         var inside: [(element: Int, key: Key?)] = []
-        // Only the marker elements are walked, from the index's name table (#252).
+        // Only the marker elements are walked, from the index's name table (macdoc#252).
         for i in index.elements(namedAnyOf: pairedMarkers.keys) {
             let tag = index.tags[i]
             guard let marker = pairedMarkers[tag.name] else { continue }
@@ -73,7 +73,7 @@ enum FormRanges {
     /// under `destination` (the element they will be children of). A moved
     /// marker must keep the namespace each of its prefixes had where it was, so
     /// a binding is declared on the marker whenever the destination would
-    /// resolve that prefix differently or not at all (#253 verify R1, R2).
+    /// resolve that prefix differently or not at all (macdoc#253 verify R1, R2).
     static func keptMarkerXML(in span: Range<Int>, deleted: [Range<Int>], destination: Int?, index: XMLTagIndex) -> String {
         keptMarkers(in: span, deleted: deleted, index: index)
             .map { serialize($0, under: destination, index: index) }.joined()
@@ -97,7 +97,7 @@ enum FormRanges {
     /// order; "" stands for the default namespace of an unprefixed element.
     /// Unprefixed attributes and the reserved `xml` prefix bind nothing.
     /// Prefixes named inside Markup Compatibility values are never needed:
-    /// a marker that carries such an attribute is not moved (#253 verify R4).
+    /// a marker that carries such an attribute is not moved (macdoc#253 verify R4).
     private static func usedPrefixes(of element: Int, index: XMLTagIndex) -> [String] {
         func prefix(_ name: String) -> String? { name.firstIndex(of: ":").map { String(name[..<$0]) } }
         var out: [String] = [prefix(index.tags[element].name) ?? ""]
@@ -117,7 +117,7 @@ enum FormRanges {
     /// on the element to the markup-compatibility namespace, the declared URI
     /// read with character references decoded. An unprefixed element name
     /// resolves through the default namespace; an unprefixed attribute has no
-    /// namespace. The spelling of the prefix does not matter (#253 verify R4, R5).
+    /// namespace. The spelling of the prefix does not matter (macdoc#253 verify R4, R5).
     static func carriesCompatibilityMarkup(_ element: Int, index: XMLTagIndex) -> Bool {
         func isCompatibility(_ prefix: String) -> Bool {
             guard prefix != "xml", let quoted = binding(of: prefix, from: element, index: index) else { return false }
@@ -133,7 +133,7 @@ enum FormRanges {
     }
 
     /// Whether moving `marker` to become a child of `destination` would change
-    /// the Markup Compatibility rules that apply to it (#253 verify R4). The
+    /// the Markup Compatibility rules that apply to it (macdoc#253 verify R4). The
     /// rules come from the marker and its ancestors, so they change when an
     /// element between the marker and the lowest common ancestor of the two
     /// positions carries one: on the source side the marker itself and the
@@ -177,7 +177,7 @@ enum FormRanges {
     }
 
     /// Attributes of an element, read with quote awareness so text inside a
-    /// value is never taken for another attribute (#253 verify R2). Values keep
+    /// value is never taken for another attribute (macdoc#253 verify R2). Values keep
     /// their quotes and escapes; parsing stops at anything malformed.
     static func attributes(of element: Int, index: XMLTagIndex) -> [(name: String, value: String)] {
         let text = Array(index.string(index.tags[element].attributes).unicodeScalars)
@@ -221,7 +221,7 @@ enum FormRanges {
     /// `separate` and `end` `w:fldChar` (a field nests in document order, and a
     /// separator belongs to the innermost open field). A paragraph wholly
     /// inside a field's result holds none of them and may go; one holding the
-    /// separator alone may not (#253 verify R1). A field missing its `end` is
+    /// separator alone may not (macdoc#253 verify R1). A field missing its `end` is
     /// already broken and is ignored.
     static func fieldSplit(_ spans: [DeletionSpan], index: XMLTagIndex) -> String? {
         let ranges = spans.map(\.range)

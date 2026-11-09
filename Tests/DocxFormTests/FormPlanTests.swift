@@ -1,4 +1,4 @@
-// FormPlanTests.swift — "Apply is all-or-nothing" (#249).
+// FormPlanTests.swift — "Apply is all-or-nothing" (macdoc#249).
 
 import XCTest
 @testable import DocxForm
@@ -29,7 +29,7 @@ final class FormPlanTests: XCTestCase {
 
     /// Each removal is legal against the original two-paragraph cell on its
     /// own, but together they would empty it. The removals are judged as one
-    /// set (#253 verify R2), and the refusal names both paragraphs, since
+    /// set (macdoc#253 verify R2), and the refusal names both paragraphs, since
     /// neither is the cell's only paragraph.
     func testRemovalsThatTogetherEmptyACellAreRefusedNamingBoth() {
         let body = TestXML.table([TestXML.cell(TestXML.paragraph("0000R020", TestXML.run("一"))

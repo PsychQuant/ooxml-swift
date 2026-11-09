@@ -1,4 +1,4 @@
-// Issue252LimitsTests.swift — lookup tables and resource limits for DocxForm
+// MacdocIssue252LimitsTests.swift — lookup tables and resource limits for DocxForm
 // (macdoc#252): paraId and element-name tables built once per index, scan
 // limits on nesting depth and tag count, strict character references, and
 // package limits on entry count and entry names.
@@ -7,7 +7,7 @@ import XCTest
 import ZIPFoundation
 @testable import DocxForm
 
-final class Issue252LimitsTests: XCTestCase {
+final class MacdocIssue252LimitsTests: XCTestCase {
     private func tempDir() throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("docxform-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -149,7 +149,7 @@ final class Issue252LimitsTests: XCTestCase {
     }
 
     /// Decoding walks Unicode scalars, as an XML parser does: a combining
-    /// mark after `;` or `&` must not hide the delimiter (#252 verify R1).
+    /// mark after `;` or `&` must not hide the delimiter (macdoc#252 verify R1).
     func testDecodeWalksScalarsNotCharacters() {
         XCTAssertEqual(Array(XMLText.decode("&#65;\u{301}").unicodeScalars), ["A", "\u{301}"])
         XCTAssertEqual(Array(XMLText.decode("&amp;\u{301}x").unicodeScalars), ["&", "\u{301}", "x"])
@@ -158,7 +158,7 @@ final class Issue252LimitsTests: XCTestCase {
     }
 
     /// A reference after a long run of text, and a reference with a long run
-    /// of leading zeros (XML allows them), decode like short ones (#252 verify R2).
+    /// of leading zeros (XML allows them), decode like short ones (macdoc#252 verify R2).
     func testDecodeHandlesLongTextAndLongDigitRuns() {
         let text = String(repeating: "a", count: 200_000)
         XCTAssertEqual(XMLText.decode(text + "&amp;" + text), text + "&" + text)
@@ -195,7 +195,7 @@ final class Issue252LimitsTests: XCTestCase {
     func testSuspiciousEntryNamesAreRefused() throws {
         for name in ["/etc/x.xml", "\\x.xml", "../x.xml", "word/../../x.xml", "word\\..\\x.xml", "word/..",
                      // A combining mark after the separator joins it into one Character;
-                     // the bytes an extractor reads still hold the separator (#252 verify R1).
+                     // the bytes an extractor reads still hold the separator (macdoc#252 verify R1).
                      "/\u{301}etc/x.xml", "\\\u{301}x.xml", "../\u{301}x.xml", "word/../\u{301}x.xml",
                      // A Windows drive is an absolute path too.
                      "C:\\x.xml", "c:x.xml", "C:..\\x.xml", "Z:/x.xml"] {

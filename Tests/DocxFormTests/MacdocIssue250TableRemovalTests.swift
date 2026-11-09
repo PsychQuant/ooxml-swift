@@ -1,4 +1,4 @@
-// Issue250TableRemovalTests.swift — removing a whole body-level table
+// MacdocIssue250TableRemovalTests.swift — removing a whole body-level table
 // (`--remove-table`, macdoc#250) and the body structure every deletion keeps:
 // two tables never become adjacent, the body keeps content and ends with a
 // paragraph (one is added when a table would end it), and the last section
@@ -7,7 +7,7 @@
 import XCTest
 @testable import DocxForm
 
-final class Issue250TableRemovalTests: XCTestCase {
+final class MacdocIssue250TableRemovalTests: XCTestCase {
     private func apply(_ body: String, _ plan: FormPlan) throws -> String {
         TestXML.string(try plan.apply(toDocumentXML: TestXML.document(body)).documentXML)
     }
@@ -207,7 +207,7 @@ final class Issue250TableRemovalTests: XCTestCase {
         XCTAssertTrue(out.contains("0000S001"), "the section break after the table stays")
     }
 
-    /// Truncation folds such a break into the final section itself (#249), so
+    /// Truncation folds such a break into the final section itself (macdoc#249), so
     /// rule (c) does not apply to it.
     func testTruncationAfterASectionBreakIsStillAllowed() throws {
         let body = p("0000A001") + TestXML.paragraph("0000S001", pPr: sectionBreak, TestXML.run("節尾"))

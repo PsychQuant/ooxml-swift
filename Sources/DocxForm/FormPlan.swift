@@ -85,9 +85,9 @@ public struct FormResult {
     /// Fields whose cell cleanup was skipped, in plan order.
     public let skippedCleanups: [CleanupSkip]
     /// True when the deletions left the body ending with a table (or another
-    /// block that is not a paragraph) and an empty final paragraph was added (#250).
+    /// block that is not a paragraph) and an empty final paragraph was added (macdoc#250).
     public let addedFinalParagraph: Bool
-    /// What each `--table-defaults` did, in plan order (#250 requirement 1).
+    /// What each `--table-defaults` did, in plan order (macdoc#250 requirement 1).
     public let tableDefaultsReports: [TableDefaultsReport]
 }
 
@@ -98,11 +98,11 @@ public struct FormPlan: Equatable {
     public var tickList: [String]
     public var insertions: [FormInsertion]
     public var removals: [String]
-    /// Paragraph ids whose body-level table `--remove-table` deletes (#250).
+    /// Paragraph ids whose body-level table `--remove-table` deletes (macdoc#250).
     public var removedTables: [String]
     public var truncateFrom: String?
     /// Tables whose fill columns or rows are tidied as `--field` tidies one
-    /// paragraph (#250 requirement 1).
+    /// paragraph (macdoc#250 requirement 1).
     public var tableDefaults: [TableDefaults]
 
     public init(fields: [String] = [], fieldSize: FieldSize? = nil, checkboxFont: String? = nil,
@@ -144,7 +144,7 @@ public struct FormPlan: Equatable {
         for id in namedIds { _ = try FormOperations.locate(id, in: editor.index) }
         for id in tables { _ = try FormOperations.tableToRemove(id, in: editor.index) }
         // A table's fill paragraphs join the fields and go through every check
-        // a --field goes through (#250 requirement 1).
+        // a --field goes through (macdoc#250 requirement 1).
         let expansion = try FormOperations.expandTableDefaults(tableDefaults, in: editor.index)
         let fields = unique(self.fields + expansion.fields)
         try checkConflicts(fields: fields, ticks: ticks, removals: removals,
@@ -157,7 +157,7 @@ public struct FormPlan: Equatable {
         // Fields, comment references and range markers pair across paragraphs,
         // and a cell's remaining blocks depend on every paragraph that goes, so
         // the deletions are judged once as a whole before anything is written
-        // (#253 verify R1, R2). The deletion step judges them again on the part
+        // (macdoc#253 verify R1, R2). The deletion step judges them again on the part
         // the earlier steps left, so no caller can bypass the checks (R3).
         _ = try FormOperations.checkDeletions(removals, tables: tables, truncateFrom: truncateFrom, in: editor.index)
 
@@ -227,7 +227,7 @@ public struct FormPlan: Equatable {
             }
         }
         // A paragraph another operation names inside a removed table would
-        // vanish with it while the command reports success (#250).
+        // vanish with it while the command reports success (macdoc#250).
         // A --table-defaults anchor comes first, so a conflict names the id the caller wrote.
         let others = unique(tableDefaults.map(\.anchor) + fields + ticks + insertions.map(\.anchor) + removals
             + (truncateFrom.map { [$0] } ?? []))

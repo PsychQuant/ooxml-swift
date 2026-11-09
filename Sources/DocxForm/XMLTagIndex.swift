@@ -31,9 +31,9 @@ public enum XMLScanError: Error, Equatable, CustomStringConvertible {
     case unexpectedClose(name: String, at: Int)
     case unclosed(name: String)
     case doctypeNotAllowed(at: Int)
-    /// More nested elements than `XMLTagIndex.maxDepth` (#252).
+    /// More nested elements than `XMLTagIndex.maxDepth` (macdoc#252).
     case tooDeep(limit: Int, at: Int)
-    /// More tags than `XMLTagIndex.maxTags` (#252).
+    /// More tags than `XMLTagIndex.maxTags` (macdoc#252).
     case tooManyTags(limit: Int)
 
     public var description: String {
@@ -51,22 +51,22 @@ public enum XMLScanError: Error, Equatable, CustomStringConvertible {
 public struct XMLTagIndex {
     public let bytes: [UInt8]
     public let tags: [XMLTag]
-    /// Non-close tags by element name, in document order (#252).
+    /// Non-close tags by element name, in document order (macdoc#252).
     private let byName: [String: [Int]]
-    /// Non-close tags carrying a `w14:paraId`, by its value, in document order (#252).
+    /// Non-close tags carrying a `w14:paraId`, by its value, in document order (macdoc#252).
     private let byParaId: [String: [Int]]
 
     /// Deepest nesting accepted: Foundation's XMLParser (libxml2 without
     /// XML_PARSE_HUGE) accepts 257 nested elements and rejects 258, measured
     /// on macOS 27.3, so the scan refuses nothing the output check would have
-    /// passed (#252). The value belongs to the platform's parser;
+    /// passed (macdoc#252). The value belongs to the platform's parser;
     /// `testOutputCheckParserAcceptsExactlyTheScanDepth` fails if it moves.
     public static let maxDepth = 257
     /// Most tags accepted, counting close tags. The index grows with the tag
     /// count however small the tags are. One measurement, not a bound: a
     /// 47 MB part at this limit, every paragraph with its own eight-digit
     /// `w14:paraId`, peaked at about 1.3 GB resident memory while the index
-    /// was built; longer ids or attributes cost more (#252 verify R1, R2;
+    /// was built; longer ids or attributes cost more (macdoc#252 verify R1, R2;
     /// PsychQuant/macdoc#265).
     public static let maxTags = 5_000_000
 
@@ -350,9 +350,9 @@ public enum XMLText {
     /// Replaces the five predefined entities and well-formed character
     /// references. The text is walked as Unicode scalars, the units an XML
     /// parser reads: a combining mark after `&` or `;` would otherwise join it
-    /// into one Character and hide it (#252 verify R1). The walk moves over
+    /// into one Character and hide it (macdoc#252 verify R1). The walk moves over
     /// the string's own scalar view and copies the text between references in
-    /// slices, so decoding allocates only the output (#252 verify R2).
+    /// slices, so decoding allocates only the output (macdoc#252 verify R2).
     public static func decode(_ s: String) -> String {
         guard s.utf8.contains(UInt8(ascii: "&")) else { return s }
         let view = s.unicodeScalars
@@ -389,7 +389,7 @@ public enum XMLText {
         // naming a character the XML 1.0 Char production allows. Anything
         // else (`#X`, a sign, an empty number, a control character, a
         // surrogate, a value past UInt32) is not one and stays as written, as
-        // an XML parser would refuse it (#252). Digits are accumulated in
+        // an XML parser would refuse it (macdoc#252). Digits are accumulated in
         // place, so a long run of them allocates nothing.
         var digits = e
         guard digits.first == "#" else { return nil }

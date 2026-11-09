@@ -16,42 +16,42 @@ public enum FormError: Error, Equatable, CustomStringConvertible {
     case onlyParagraphInCell(String)
     case cellWouldEndWithoutParagraph(String)
     /// Several `--remove` paragraphs that each could go alone but together
-    /// take every paragraph of one cell or text box (#253 verify R2).
+    /// take every paragraph of one cell or text box (macdoc#253 verify R2).
     case removalsLeaveNoParagraph([String])
     /// Several `--remove` paragraphs after the last block that stays, whose
     /// removal together leaves a cell or text box ending with a table.
     case removalsEndWithoutParagraph([String])
     /// A range marker that would be kept, where the marker itself, an element
     /// removed around it, or the paragraph it would move into is or carries
-    /// Markup Compatibility markup (#253 verify R4, R5).
+    /// Markup Compatibility markup (macdoc#253 verify R4, R5).
     case markerUnderCompatibilityRules(String)
     /// Every content block before the `--truncate-from` paragraph is named by
-    /// `--remove` (#253 verify R4).
+    /// `--remove` (macdoc#253 verify R4).
     case removalsLeaveNothingBeforeCut(String)
-    /// `--remove-table` named a paragraph that is in no table (#250).
+    /// `--remove-table` named a paragraph that is in no table (macdoc#250).
     case notInTable(String)
     /// `--remove-table` named a paragraph whose nearest table is not a
-    /// body-level block (a nested table, or one in a text box) (#250).
+    /// body-level block (a nested table, or one in a text box) (macdoc#250).
     case tableNotBodyLevel(String)
     /// `--remove-table` named a paragraph inside a text box that sits in a
     /// table; the table around the text box is not the paragraph's table
-    /// (#250 verify R1).
+    /// (macdoc#250 verify R1).
     case inTextBox(String)
     /// `--remove-table` named a paragraph whose table holds a paragraph with
-    /// its own section break (#250 verify R1); named by the caller's id.
+    /// its own section break (macdoc#250 verify R1); named by the caller's id.
     case tableCarriesSectionBreak(String)
     /// The deletions leave two tables adjacent that something other than a
-    /// table separated before; Word would join them (#250). Names, in
+    /// table separated before; Word would join them (macdoc#250). Names, in
     /// document order, what is deleted between them.
     case tablesWouldJoin([String])
-    /// The deletions take every content block of the body (#250).
+    /// The deletions take every content block of the body (macdoc#250).
     case removalsLeaveEmptyBody([String])
     /// The deletions leave the last section with no content: the last kept
     /// block carries its own section break and the body has its own final
-    /// section properties (#250).
+    /// section properties (macdoc#250).
     case lastSectionWouldBeEmpty([String])
     /// `--table-defaults` written in a form the parser does not accept
-    /// (#250 requirement 1); carries the value as written.
+    /// (macdoc#250 requirement 1); carries the value as written.
     case invalidTableDefaults(String, detail: String)
     /// `--table-defaults` named a paragraph that is in no table.
     case tableDefaultsNotInTable(String)

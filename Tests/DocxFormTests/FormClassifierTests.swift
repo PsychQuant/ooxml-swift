@@ -1,5 +1,5 @@
 // FormClassifierTests.swift — "Paragraph kinds are assigned by structure
-// from a closed enumeration" and the classify listing (#249).
+// from a closed enumeration" and the classify listing (macdoc#249).
 
 import XCTest
 @testable import DocxForm

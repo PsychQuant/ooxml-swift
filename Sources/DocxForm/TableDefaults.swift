@@ -136,7 +136,7 @@ public struct TableDefaults: Equatable {
     }
 }
 
-/// What one `--table-defaults` did (#250 requirement 1).
+/// What one `--table-defaults` did (macdoc#250 requirement 1).
 public struct TableDefaultsReport: Equatable {
     public let anchor: String
     /// Cells wholly inside this selection.

@@ -185,7 +185,7 @@ enum FormOperations {
     }
 
     /// True when a paragraph's own `w:pPr` carries something the reader sees
-    /// or a revision would lose (#253): numbering (a visible bullet — a
+    /// or a revision would lose (macdoc#253): numbering (a visible bullet — a
     /// `w:numPr` without `w:numId` may take its id from the style, and only
     /// `w:numId` 0 removes numbering), `w:pPrChange`, or a revision marker in
     /// the paragraph-mark `w:rPr`.
@@ -242,7 +242,7 @@ enum FormOperations {
     // MARK: Field normalization
 
     /// Returns the skipped cleanup when the cell holds a structure that stops
-    /// the removal of empty siblings (#253), so the caller can report it.
+    /// the removal of empty siblings (macdoc#253), so the caller can report it.
     @discardableResult
     static func normalizeField(_ id: String, halfPoints: Int, protected: Set<String>,
                                editor: inout XMLEditor) throws -> CleanupSkip? {
@@ -282,7 +282,7 @@ enum FormOperations {
 
         // A content control's own run properties format what Word writes when
         // a value is picked, so they carry the size too; one without them is
-        // left without (#253).
+        // left without (macdoc#253).
         for sdt in FormLocator.ownElements(named: "w:sdt", of: p, in: index) {
             guard let sdtPr = index.child(of: sdt, named: "w:sdtPr"),
                   let rPr = ownRPr(of: sdtPr, in: index) else { continue }
@@ -303,7 +303,7 @@ enum FormOperations {
 
         // Paragraphs without content in the same cell push the value off centre.
         // The spec skips the cleanup when the cell holds one of these
-        // structures; the skip is returned so it is never silent (#253).
+        // structures; the skip is returned so it is never silent (macdoc#253).
         let present = Set(index.descendants(of: tc).map { index.tags[$0].name })
         let reasons = CleanupSkip.Reason.allCases.filter { present.contains($0.elementName) }
         let removable = index.children(of: tc).filter { sibling in
@@ -315,7 +315,7 @@ enum FormOperations {
             for sibling in removable { edits.append(.remove(index.elementRange(sibling))) }
         }
         try editor.apply(edits)
-        // Only a skip that left an empty paragraph behind is reported (#253 verify R1).
+        // Only a skip that left an empty paragraph behind is reported (macdoc#253 verify R1).
         return reasons.isEmpty || removable.isEmpty ? nil : CleanupSkip(paragraphId: id, reasons: reasons)
     }
 
@@ -472,7 +472,7 @@ enum FormOperations {
 
     // MARK: Remove and truncate
 
-    /// Checks everything the command deletes as one set (#253 verify R1, R2):
+    /// Checks everything the command deletes as one set (macdoc#253 verify R1, R2):
     /// fields and comment references against the union of the `--remove`
     /// paragraphs and the `--truncate-from` range, and each cell or text box
     /// against what is left after all of its named paragraphs go.
@@ -486,7 +486,7 @@ enum FormOperations {
     static func deletionPlan(_ ids: [String], tables: [String], truncateFrom: String?,
                              in index: XMLTagIndex) throws -> (spans: [FormRanges.DeletionSpan], addFinalParagraph: Bool) {
         // Nothing to delete: no pairing or container question arises, and the
-        // whole-part scans below are skipped (#253 verify R3).
+        // whole-part scans below are skipped (macdoc#253 verify R3).
         guard !ids.isEmpty || !tables.isEmpty || truncateFrom != nil else { return ([], false) }
         var distinct: Set<String> = []
         let ids = ids.filter { distinct.insert($0).inserted }
@@ -494,16 +494,16 @@ enum FormOperations {
         let removed = try ids.map { try locate($0, in: index) }
         var spans = zip(ids, removed).map { FormRanges.DeletionSpan(id: $0, range: index.elementRange($1)) }
         // A part with more than one body is not a document the structure
-        // rules below can judge (#250 verify R1).
+        // rules below can judge (macdoc#250 verify R1).
         if index.elements(named: "w:body").count > 1 {
             throw FormError.malformedPart("有多個 w:body，不是一般的 Word 文件，拒絕刪除")
         }
-        // Each named table once, under the first id naming it (#250).
+        // Each named table once, under the first id naming it (macdoc#250).
         let removedTables = try uniqueTables(tables, in: index)
         // A paragraph inside the table carrying its own section break would go
-        // with it, as `--remove` refuses for a paragraph (#250 verify R1).
+        // with it, as `--remove` refuses for a paragraph (macdoc#250 verify R1).
         // Only the table's own tags are walked, so the cost is the size of the
-        // removed tables, not tables times paragraphs (#250 verify R2).
+        // removed tables, not tables times paragraphs (macdoc#250 verify R2).
         for entry in removedTables {
             for t in entry.table...index.tags[entry.table].match! where index.tags[t].kind != .close
                 && index.tags[t].name == "w:p" && ownSectPr(of: t, in: index) != nil {
@@ -588,7 +588,7 @@ enum FormOperations {
 
     /// The table `--remove-table` deletes for a paragraph: the nearest table
     /// around it, which must be a body-level block (looking through
-    /// body-level content controls and custom XML) (#250).
+    /// body-level content controls and custom XML) (macdoc#250).
     static func tableToRemove(_ id: String, in index: XMLTagIndex) throws -> Int {
         let table: Int
         switch enclosingTable(of: try locate(id, in: index), in: index) {
@@ -611,7 +611,7 @@ enum FormOperations {
 
     /// The nearest table around a paragraph. A text box is its own story:
     /// the table around it is not the paragraph's table, so the walk stops
-    /// there (#250 verify R1).
+    /// there (macdoc#250 verify R1).
     static func enclosingTable(of p: Int, in index: XMLTagIndex) -> TableLookup {
         var current = index.tags[p].parent
         while let c = current, index.tags[c].name != "w:tbl" {
@@ -635,7 +635,7 @@ enum FormOperations {
         return out.sorted { $0.table < $1.table }
     }
 
-    /// The body-level block structure every deletion keeps (#250), judged on
+    /// The body-level block structure every deletion keeps (macdoc#250), judged on
     /// the body's content blocks (looking through content controls and
     /// custom XML) before and after everything named goes. Only what this
     /// command causes is refused; a part that already had the shape passes.
@@ -648,7 +648,7 @@ enum FormOperations {
     /// (c) Without a truncation, the last section must keep content: the last
     ///     kept block must not be a paragraph with its own section break when
     ///     the body has its own final section properties. (Truncation folds
-    ///     such a break into the final section, #249.)
+    ///     such a break into the final section, macdoc#249.)
     @discardableResult
     static func checkBodyStructure(_ owners: [Int: String], truncateFrom cut: (id: String, paragraph: Int, body: Int)?,
                                    in index: XMLTagIndex) throws -> Bool {
@@ -680,7 +680,7 @@ enum FormOperations {
         return isParagraph(lastBlock) && !isParagraph(last)
     }
 
-    /// The only entry point that deletes (#253 verify R2, R3): checks the whole
+    /// The only entry point that deletes (macdoc#253 verify R2, R3): checks the whole
     /// deletion, removes every named paragraph and table in one edit, then
     /// truncates.
     /// A range marker whose partner stays is kept where its paragraph was;
@@ -709,7 +709,7 @@ enum FormOperations {
                                                                            destination: index.tags[p].parent, index: index)))
             }
         }
-        // A removed table leaves its kept range markers where it was (#250).
+        // A removed table leaves its kept range markers where it was (macdoc#250).
         for entry in try uniqueTables(tables, in: index) {
             let span = index.elementRange(entry.table)
             edits.append(.replace(span, with: FormRanges.keptMarkerXML(in: span, deleted: deleted,
@@ -793,7 +793,7 @@ enum FormOperations {
                                   with: try Fragment.removeChildren(index.elementString(pPr), named: ["w:sectPr"])))
         }
         // Range markers whose partner is kept end the kept content, before the
-        // final section properties (#253); the plan serializes them.
+        // final section properties (macdoc#253); the plan serializes them.
         edits.append(.replace(cut..<bodyEnd, with: keptMarkers + section))
         try editor.apply(edits)
     }
