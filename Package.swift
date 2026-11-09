@@ -14,7 +14,10 @@ let package = Package(
                     targets: ["WordDSLSwiftScriptRunner"])
     ],
     dependencies: [
-        .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.0")
+        // 0.9.20: the throwing Archive(url:accessMode:) both OOXMLSwift and
+        // DocxForm use first shipped in 0.9.17, so 0.9.0–0.9.16 never
+        // compiled; 0.9.20 is the version resolved and tested (#238).
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.20")
     ],
     targets: [
         .target(
