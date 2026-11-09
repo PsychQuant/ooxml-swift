@@ -7,6 +7,9 @@ let package = Package(
     products: [
         .library(name: "OOXMLSwift", targets: ["OOXMLSwift"]),
         .library(name: "WordDSLSwift", targets: ["WordDSLSwift"]),
+        // Form normalization by string-level edits of word/document.xml
+        // (#238, moved from macdoc so che-word-mcp can use it too).
+        .library(name: "DocxForm", targets: ["DocxForm"]),
         .executable(name: "WordDSLSwiftScriptRunner",
                     targets: ["WordDSLSwiftScriptRunner"])
     ],
@@ -21,6 +24,14 @@ let package = Package(
         .target(
             name: "WordDSLSwift",
             dependencies: ["OOXMLSwift"]
+        ),
+        // Deliberately no OOXMLSwift dependency: DocxForm edits the named
+        // elements of word/document.xml as strings and copies every other
+        // part byte for byte, so a form is never re-serialized through the
+        // typed model (#238; macdoc#249).
+        .target(
+            name: "DocxForm",
+            dependencies: ["ZIPFoundation"]
         ),
         .executableTarget(
             name: "WordDSLSwiftScriptRunner"
@@ -50,6 +61,18 @@ let package = Package(
         .testTarget(
             name: "WordDSLSwiftTests",
             dependencies: ["WordDSLSwift"]
+        ),
+        .testTarget(
+            name: "DocxFormTests",
+            dependencies: ["DocxForm", "ZIPFoundation"]
+        ),
+        // Imports DocxForm without @testable, in a target of its own: a
+        // @testable import in any file of a test target can make internal
+        // names visible to the other files, so only a separate target proves
+        // that what client packages call is public (#238).
+        .testTarget(
+            name: "DocxFormPublicAPITests",
+            dependencies: ["DocxForm"]
         )
     ]
 )
