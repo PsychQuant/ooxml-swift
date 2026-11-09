@@ -244,7 +244,9 @@ enum BodySurgery {
                     guard emitCurrent(upTo: nextKept[k]) else { return nil }
                     continue
                 }
-                guard emitCurrent(upTo: c) else { return nil }
+                // Kept blocks come in order; anything else would re-emit
+                // blocks, so fall back instead.
+                guard c >= nextCurrent, emitCurrent(upTo: c) else { return nil }
                 out.append(span(i))
                 nextCurrent = c + 1
                 continue
