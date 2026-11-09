@@ -238,6 +238,91 @@ final class Issue133BodySurgeryTests: XCTestCase {
         XCTAssertEqual(xml.components(separatedBy: "乙段").count - 1, 2)
     }
 
+    // MARK: - Copies and moves (verify R2)
+
+    private let paraIdKept = #"<w:p w14:paraId="1A2B3C4D"><w:pPr><w:sectPr><w:pgSz w:w="10000" w:h="14000"/></w:sectPr></w:pPr><w:r><w:t>乙段</w:t></w:r></w:p>"#
+
+    /// A paragraph read from a Word file keeps its paraId when copied
+    /// (`withStampedParaId` only stamps paragraphs without one), so the copy
+    /// and the original are two unchanged values with the same identity. They
+    /// cannot be told apart: both are rewritten and the untouched original
+    /// loses its section break (CHANGELOG Known limits).
+    func testACopyThatKeepsItsParaIdMakesBothRewritten() throws {
+        var doc = try read(documentXML(body: paraIdKept + firstBlock))
+        defer { doc.close() }
+        guard case .paragraph(let original) = doc.body.children[0] else { return XCTFail("fixture") }
+        XCTAssertNotNil(original.w14ParaId)
+        doc.insertParagraph(original, at: 2)
+        let xml = try save(doc)
+        XCTAssertEqual(xml.components(separatedBy: #"w:w="10000""#).count - 1, 0, "known limit changed:\n\(xml)")
+        XCTAssertEqual(xml.components(separatedBy: "乙段").count - 1, 2)
+        XCTAssertNoThrow(try XMLDocument(xmlString: xml, options: []))
+    }
+
+    /// Tables get no fresh id on insert, so copying a table read from the
+    /// file rewrites the untouched original too (CHANGELOG Known limits).
+    func testACopiedTableMakesTheOriginalRewritten() throws {
+        let table = #"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:hideMark/></w:tcPr><w:p><w:r><w:t>格</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+        var doc = try read(documentXML(body: table + firstBlock))
+        defer { doc.close() }
+        guard case .table(let original) = doc.body.children[0] else { return XCTFail("fixture") }
+        doc.insertTable(original, at: 2)
+        let xml = try save(doc)
+        XCTAssertFalse(xml.contains(table), "known limit changed:\n\(xml)")
+        XCTAssertEqual(xml.components(separatedBy: ">格<").count - 1, 2)
+        XCTAssertNoThrow(try XMLDocument(xmlString: xml, options: []))
+    }
+
+    /// Two paragraphs swapped (delete one, insert the same value after the
+    /// other): only one of them can stay in source order. Exactly one keeps
+    /// its bytes; which one is the longest-run tie-break, not pinned.
+    func testSwappingTwoBlocksKeepsExactlyOneOfThem() throws {
+        let a = #"<w:p w14:paraId="0A000001"><w:pPr><w:sectPr><w:pgSz w:w="10001" w:h="14000"/></w:sectPr></w:pPr><w:r><w:t>甲甲</w:t></w:r></w:p>"#
+        let b = #"<w:p w14:paraId="0B000002"><w:pPr><w:sectPr><w:pgSz w:w="10002" w:h="14000"/></w:sectPr></w:pPr><w:r><w:t>乙乙</w:t></w:r></w:p>"#
+        var doc = try read(documentXML(body: a + b + thirdBlock))
+        defer { doc.close() }
+        guard case .paragraph(let first) = doc.body.children[0] else { return XCTFail("fixture") }
+        try doc.deleteParagraph(at: 0)
+        doc.insertParagraph(first, at: 1)
+        let xml = try save(doc)
+        let kept = [a, b].filter { xml.contains($0) }
+        XCTAssertEqual(kept.count, 1, "exactly one of the swapped pair keeps its bytes:\n\(xml)")
+        XCTAssertEqual(xml.components(separatedBy: "w:pgSz").count - 1, 1, xml)
+        XCTAssertLessThan(try XCTUnwrap(xml.range(of: "乙乙")).lowerBound, try XCTUnwrap(xml.range(of: "甲甲")).lowerBound)
+        XCTAssertTrue(xml.contains(thirdBlock), xml)
+        XCTAssertNoThrow(try XMLDocument(xmlString: xml, options: []))
+    }
+
+    /// `longestIncreasing` against a brute-force longest increasing
+    /// subsequence, for every permutation up to six blocks.
+    func testLongestIncreasingMatchesBruteForceOnAllSmallPermutations() {
+        func permutations(_ items: [Int]) -> [[Int]] {
+            guard items.count > 1 else { return [items] }
+            return items.indices.flatMap { i -> [[Int]] in
+                var rest = items
+                let head = rest.remove(at: i)
+                return permutations(rest).map { [head] + $0 }
+            }
+        }
+        func bruteForce(_ p: [Int]) -> Int {
+            var best = 0
+            for mask in 0..<(1 << p.count) {
+                let chosen = p.indices.filter { mask & (1 << $0) != 0 }.map { p[$0] }
+                if zip(chosen, chosen.dropFirst()).allSatisfy({ $0 < $1 }) { best = max(best, chosen.count) }
+            }
+            return best
+        }
+        for n in 0...6 {
+            for p in permutations(Array(0..<n)) {
+                let pairs = p.enumerated().map { c, k in (k, c) }
+                let result = BodySurgery.longestIncreasing(pairs)
+                XCTAssertEqual(result.count, bruteForce(p), "\(p)")
+                XCTAssertTrue(zip(result, result.dropFirst()).allSatisfy { $0.0 < $1.0 && $0.1 < $1.1 }, "\(p)")
+                XCTAssertTrue(result.allSatisfy { r in pairs.contains { $0 == r } }, "\(p)")
+            }
+        }
+    }
+
     /// A block value taken from another document never borrows bytes here,
     /// even when it lands where a typed-equal block was deleted.
     func testABlockFromAnotherDocumentNeverBorrowsBytes() throws {
@@ -376,9 +461,10 @@ final class Issue133BodySurgeryTests: XCTestCase {
         XCTAssertEqual(try save(doc), try save(doc))
     }
 
-    /// With `word/document.xml` already typed-dirty, `appendParagraph` stays on
-    /// the typed path, so surgery still applies and untouched blocks keep
-    /// their bytes (the order the CHANGELOG says is unaffected).
+    /// Typed edit, then append, then save: `appendParagraph` takes the op-log
+    /// path, whose `materializeTypedTrees` writes the typed-dirty part through
+    /// surgery first, so the new tree still carries the untouched bytes and a
+    /// save right away keeps them.
     func testAppendAfterATypedEditStillKeepsUntouchedBlocks() throws {
         var doc = try read(documentXML(body: firstBlock + keptBlock))
         defer { doc.close() }
@@ -388,6 +474,23 @@ final class Issue133BodySurgeryTests: XCTestCase {
         XCTAssertTrue(xml.contains(firstBlock + keptBlock), xml)
         XCTAssertTrue(xml.contains("首段"))
         XCTAssertTrue(xml.contains("尾段"))
+    }
+
+    /// Known limit (CHANGELOG, #241): the materialized tree is no longer the
+    /// tree the baseline was read from, so a typed edit after the append
+    /// falls back to the full writer and the untouched block loses its
+    /// section break. When this starts failing, update the CHANGELOG.
+    func testATypedEditAfterAnAppendFallsBack() throws {
+        var doc = try read(documentXML(body: firstBlock + keptBlock))
+        defer { doc.close() }
+        doc.insertParagraph(Paragraph(text: "首段"), at: 0)
+        doc.appendParagraph(Paragraph(text: "尾段"))
+        try doc.updateParagraph(at: 0, text: "新首")
+        let xml = try save(doc)
+        for text in ["新首", "甲段", "乙段", "尾段"] {
+            XCTAssertTrue(xml.contains(text), "\(text) missing:\n\(xml)")
+        }
+        XCTAssertFalse(xml.contains(keptBlock), "known limit changed:\n\(xml)")
     }
 
     /// An op-log edit makes the live tree the authority and the read-time
