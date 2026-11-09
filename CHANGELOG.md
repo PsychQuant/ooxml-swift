@@ -23,8 +23,9 @@ All notable changes to ooxml-swift will be documented in this file.
     - 沒有修改的文件經 `writeData` 存檔，`document.xml` 104/104 逐位元組相同。
 
 - **tree-backed 讀法（`wireTreeBackedViews: true`）也套用上面的 surgery，沒被碰的段落不再遺失 `<w:drawing>`**（#129；同一個 Decision (B)）。tree-backed 段落的 typed runs 只有文字（stub），過去任何 typed-dirty 存檔都會把每一段改用 stub 重寫，含圖的段落因此遺失 drawing、rPr、tab、break。現在 reader 在兩種讀法都裝上讀檔基準，存檔時沒被碰的區塊沿用原 bytes。
-  - tree-backed 的值和快照共用同一批 `XmlNode`，存檔時快照的序列化反映的是現在的 tree。surgery 原有的檢查已經涵蓋這一點：`XmlNode` 的每一種修改都會標 dirty（`didSet`），沒有任何程式會清掉這個標記，只要有任何 dirty 節點就退回整份重寫。
-  - 量測（同一批真實文件，只記彙總；以 tree-backed 讀法讀檔）：78 份文件做 #133 的五種操作，沒被編輯的區塊有元素或文字變少的文件都是 0/78，退回整份 typed 重寫時是 78/78（正文有損 24～25 份）。其中 19 份含 drawing：新路徑下 drawing 變少的文件，四種操作是 0/19；「刪第一段並改最後一段」是 1/19，那一份的 drawing 就在被編輯的段落裡。整份重寫時是 18/19。沒有修改的文件經 `writeData` 存檔，`document.xml` 78/78 逐位元組相同。
+  - tree-backed 的值和快照共用同一批 `XmlNode`，存檔時快照的序列化反映的是現在的 tree。surgery 原有的檢查已經涵蓋這一點：會寫進輸出的 `XmlNode` 欄位（名稱、屬性、子節點、文字）一改就標 dirty（`didSet`），沒有任何程式會清掉這個標記。dirty 不會往上傳到祖先節點，所以 surgery 遞迴掃描整棵 tree，只要有任何 dirty 節點就退回整份重寫（`testAnEditedTextNodeInsideAParagraphIsNeverOverwritten`；拿掉這個掃描，它就會失敗）。
+  - 讀檔時也記下 body 會引用的外部資源 id：圖片與超連結的 relationship、腳註、尾註、註解。存檔時，若某個要沿用原 bytes 的區塊引用了讀檔後被刪掉的資源，就改用 typed 輸出。tree-backed 段落的 typed runs 是 stub，`deleteImage`、`deleteFootnote`、`deleteEndnote`、`deleteComment` 改不到段落裡的引用；沒有這一步，沿用的 bytes 會引用已經不存在的 relationship 或註腳（verify 第一輪實測 `deleteImage`）。
+  - 量測（同一批真實文件，只記彙總；以 tree-backed 讀法讀檔）：78 份文件做 #133 的五種操作，沒被編輯的區塊有元素或文字變少的文件都是 0/78；退回整份 typed 重寫時是 78/78（正文有損 24～25 份）。其中 19 份含 drawing：新路徑下 drawing 變少的文件是 0/19，只有「刪第一段並改最後一段」是 1/19；整份重寫時是 18/19。注意「改」在 tree-backed 讀法下多半沒有生效（#244）：「改中段」78 份都沒有生效；「刪第一段並改最後一段」的修改只在 16 份生效，推測是 #242 的誤綁讓那一段成了一般段落。那 1/19 就是其中一份，drawing 在被改寫的段落裡。沒有修改的文件經 `writeData` 存檔，`document.xml` 78/78 逐位元組相同。
   - `Issue175R2WhitelistInspectorTests` 的 strict `XCTExpectFailure` guard 改成一般斷言，並改名為 `testTreeBackedTypedDirtyKeepsExistingDrawing`。
 
 ### Changed
@@ -42,7 +43,7 @@ All notable changes to ooxml-swift will be documented in this file.
 - 同一個 session 裡，只要先做過動到 live tree 的操作，之後的 typed 編輯就全部退回整份重寫，#133 的損失會再出現。這類操作包括：在讀進來的文件上 `appendParagraph`（走 op-log 或 #132 的 graft）、op-log 編輯、`applyFormattingProfile`、`materializeTypedTrees`。讀檔時記下的基準不會跟著 tree 更新（#241）。先做 typed 編輯、再 append 時，append 走 op-log 並經過 `materializeTypedTrees`，物化出來的 tree 帶著 surgery 的輸出，所以 append 之後立刻存檔仍會保留；但 append 之後再做任何 typed 編輯，就會退回整份重寫。
 - 保留的區塊必須維持來源順序。區塊被移動後（刪掉後在別處插入同一個值），只保留來源順序最長的那一串；其餘改用 typed 輸出。被重寫的不一定是被移動的那一個：相鄰兩段對調時，恰有一段被重寫，可能是沒被移動的那一段。
 - 同一個區塊有兩個沒改過的複本時，分不出哪一個是原本的，兩個都改用 typed 輸出，沒被編輯的原區塊也因此失去 typed model 沒建模的內容。Word 2010 以後產生的檔案，段落通常帶 `w14:paraId`，複製時會保留原 paraId（`withStampedParaId` 只替沒有 paraId 的段落配新的），表格、內容控制項等其他區塊則一律不配新 id，所以複製這些值都屬於這種情況。
-- tree-backed 讀法下，被編輯的段落仍用 text-only stub 序列化，該段的 drawing、rPr、tab、break 會遺失。修好 stub 本身需要單一節點的 XML 序列化（見 #129 的討論；#106 卡在同一處）。
+- tree-backed 讀法下，被改寫的區塊仍用 typed model 序列化。段落的 runs 是 text-only stub，該段的 drawing、rPr、tab、break 會遺失；tree-backed 表格的儲存格段落同樣是 stub，改到表格就整張表用 stub 重寫。被移動的區塊、兩個沒改過的複本，以及引用了讀檔後被刪除資源的區塊，也都屬於被改寫的區塊。修好 stub 本身需要單一節點的 XML 序列化（見 #129 的討論；#106 卡在同一處）。
 - tree-backed 讀法下，只要有修改直接寫進 tree（例如 `Paragraph.text` 的 setter），tree 就是 dirty，之後的 typed-dirty 存檔都退回整份重寫。
 - tree-backed 讀法下，`updateParagraph` 這類經過 `Paragraph.runs` setter 的修改會被無聲丟掉，與這次的修正無關，舊寫法也一樣（#244）。
 - 刪掉 pretty-printed body 裡的一個區塊時，它前後的縮排空白會接在一起；區塊本身的 bytes 不變。

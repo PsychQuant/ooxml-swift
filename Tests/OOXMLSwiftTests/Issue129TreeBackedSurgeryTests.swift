@@ -22,6 +22,10 @@ final class Issue129TreeBackedSurgeryTests: XCTestCase {
 
     /// A paragraph whose only run is an inline picture.
     private let drawingParagraph = #"<w:p w14:paraId="11111111"><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rId4"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+    /// A second picture, on its own relationship.
+    private var drawingParagraphB: String {
+        drawingParagraph.replacingOccurrences(of: "11111111", with: "33333333").replacingOccurrences(of: "rId4", with: "rId5")
+    }
     private let textParagraph = #"<w:p w14:paraId="22222222"><w:r><w:t>文字段</w:t></w:r></w:p>"#
 
     private var cleanup: [URL] = []
@@ -39,8 +43,9 @@ final class Issue129TreeBackedSurgeryTests: XCTestCase {
             "[Content_Types].xml": Data(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.utf8),
             "_rels/.rels": Data(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.utf8),
             "word/document.xml": Data(documentXML.utf8),
-            "word/_rels/document.xml.rels": Data(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>"#.utf8),
+            "word/_rels/document.xml.rels": Data(#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image2.png"/></Relationships>"#.utf8),
             "word/media/image1.png": Data("png".utf8),
+            "word/media/image2.png": Data("png2".utf8),
         ]
         let archive = try Archive(accessMode: .create)
         for name in parts.keys.sorted() {
@@ -86,10 +91,11 @@ final class Issue129TreeBackedSurgeryTests: XCTestCase {
         XCTAssertTrue(xml.contains("新段"))
     }
 
-    /// A paragraph the op payload cannot carry (here: a page break) makes
-    /// `appendParagraph` fall back to the typed path, the issue's other
-    /// trigger.
-    func testAppendParagraphFallbackKeepsAnUntouchedDrawing() throws {
+    /// On a freshly read document, a paragraph the op payload cannot carry
+    /// (here: a page break) is grafted into the tree (#132), so the save
+    /// serializes the tree and never reaches surgery. Pinned as it behaves;
+    /// the typed fallback is the next test.
+    func testAppendOfANonRepresentableParagraphIsGrafted() throws {
         var doc = try readTreeBacked(body: drawingParagraph + textParagraph)
         defer { doc.close() }
         var paragraph = Paragraph(text: "尾段")
@@ -133,6 +139,87 @@ final class Issue129TreeBackedSurgeryTests: XCTestCase {
         let xml = try save(doc)
         XCTAssertEqual(drawingCount(xml), 1, xml)
         XCTAssertTrue(xml.contains(body), "the bookmarked stretch keeps its bytes:\n\(xml)")
+    }
+
+    /// The append trigger the issue reports: after a typed edit the graft
+    /// refuses (the part is typed-dirty), so `appendParagraph` falls back to
+    /// the typed path (non-representable paragraph) or materializes the typed
+    /// part through surgery first (representable paragraph). Both keep the
+    /// untouched drawing.
+    func testAppendAfterATypedEditKeepsAnUntouchedDrawing() throws {
+        for representable in [false, true] {
+            var doc = try readTreeBacked(body: drawingParagraph + textParagraph)
+            defer { doc.close() }
+            doc.insertParagraph(Paragraph(text: "新段"), at: 0)
+            var paragraph = Paragraph(text: "尾段")
+            paragraph.hasPageBreak = !representable
+            doc.appendParagraph(paragraph)
+            let xml = try save(doc)
+            XCTAssertEqual(drawingCount(xml), 1, "representable=\(representable):\n\(xml)")
+            XCTAssertTrue(xml.contains(drawingParagraph + textParagraph), "representable=\(representable):\n\(xml)")
+            XCTAssertTrue(xml.contains("新段") && xml.contains("尾段"), "representable=\(representable)")
+        }
+    }
+
+    // MARK: - Resources removed since read (verify R1)
+
+    /// `deleteImage` drops the relationship, but on a tree-backed paragraph it
+    /// cannot remove the drawing from the typed runs (a text-only stub). The
+    /// paragraph that shows the deleted picture must not keep its source
+    /// bytes, or the saved file refers to a relationship that is gone. The
+    /// other picture's paragraph is untouched and keeps its bytes.
+    func testDeletingAnImageNeverLeavesADanglingReference() throws {
+        var doc = try readTreeBacked(body: drawingParagraph + drawingParagraphB + textParagraph)
+        defer { doc.close() }
+        XCTAssertTrue(doc.images.contains { $0.id == "rId4" }, "fixture: the image must be typed")
+        try doc.deleteImage(imageId: "rId4")
+        let xml = try save(doc)
+        XCTAssertFalse(xml.contains(#"r:embed="rId4""#), "a dangling reference to the deleted image:\n\(xml)")
+        XCTAssertTrue(xml.contains(drawingParagraphB + textParagraph), "the other picture keeps its bytes:\n\(xml)")
+        XCTAssertEqual(drawingCount(xml), 1, xml)
+    }
+
+    /// The scan that finds such references, for every kind of resource.
+    func testTheReferenceScanCoversEveryResourceKind() throws {
+        let parts: [String] = [
+            #"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+            #"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#,
+            #"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">"#,
+            #"<w:hyperlink r:id="rId7"><w:r><w:t>連結</w:t></w:r></w:hyperlink>"#,
+            #"<w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r>"#,
+            #"<w:r><w:footnoteReference w:id="3"/></w:r><w:r><w:endnoteReference w:id="5"/></w:r>"#,
+            #"<w:commentRangeStart w:id="9"/><w:r><w:commentReference w:id="9"/></w:r></w:p>"#,
+        ]
+        let root = try XmlTreeReader.parse(Data(parts.joined().utf8)).root
+        func removed(rels: Set<String> = [], footnotes: Set<Int> = [], endnotes: Set<Int> = [], comments: Set<Int> = []) -> BodyResourceIds {
+            BodyResourceIds(relationships: rels, footnotes: footnotes, endnotes: endnotes, comments: comments)
+        }
+        XCTAssertTrue(BodySurgery.refers(root, to: removed(rels: ["rId4"])))
+        XCTAssertTrue(BodySurgery.refers(root, to: removed(rels: ["rId7"])))
+        XCTAssertTrue(BodySurgery.refers(root, to: removed(footnotes: [3])))
+        XCTAssertTrue(BodySurgery.refers(root, to: removed(endnotes: [5])))
+        XCTAssertTrue(BodySurgery.refers(root, to: removed(comments: [9])))
+        XCTAssertFalse(BodySurgery.refers(root, to: removed(rels: ["rId5"], footnotes: [5], endnotes: [3], comments: [3])))
+    }
+
+    /// The dirty mark does not propagate to ancestors: editing a text node
+    /// inside a paragraph leaves the paragraph node clean, with its source
+    /// range intact. Only the recursive scan sees it; without it the save
+    /// would copy the paragraph's read-time bytes over the edit.
+    func testAnEditedTextNodeInsideAParagraphIsNeverOverwritten() throws {
+        var doc = try readTreeBacked(body: drawingParagraph + textParagraph)
+        defer { doc.close() }
+        guard case .paragraph(let paragraph) = doc.body.children[1],
+              let run = paragraph.xmlNode?.children.first(where: { $0.localName == "r" }),
+              let text = run.children.first(where: { $0.localName == "t" }),
+              let leaf = text.children.first
+        else { return XCTFail("fixture") }
+        leaf.textContent = "葉改"
+        XCTAssertNotNil(paragraph.xmlNode?.sourceRange, "the paragraph node itself stays clean")
+        doc.insertParagraph(Paragraph(text: "新段"), at: 0)
+        let xml = try save(doc)
+        XCTAssertTrue(xml.contains("葉改"), xml)
+        XCTAssertFalse(xml.contains("文字段"), xml)
     }
 
     // MARK: - Tree edits and known limits

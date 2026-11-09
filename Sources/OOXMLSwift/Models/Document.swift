@@ -157,11 +157,12 @@ public struct WordDocument: Equatable {
     public internal(set) var treeFreshParts: Set<String> = []
 
     /// PsychQuant/ooxml-swift#133: the body as read (typed blocks and
-    /// the live-tree node each came from), recorded by `DocxReader` in the
-    /// default read mode. When `word/document.xml` is typed-dirty and its tree
-    /// is still untouched, `DocxWriter` rewrites only the blocks whose typed
-    /// serialization changed and copies every other block's source bytes
-    /// (`BodySurgery`). Excluded from `==` like `xmlTrees`.
+    /// the live-tree node each came from), recorded by `DocxReader` in every
+    /// read mode (tree-backed too since #129). When `word/document.xml` is
+    /// typed-dirty and its tree is still untouched, `DocxWriter` keeps the
+    /// source bytes of every block that is still the block it was read as
+    /// and rewrites the others (`BodySurgery`). Excluded from `==` like
+    /// `xmlTrees`.
     internal var bodySourceBaseline: BodySourceBaseline?
 
     /// v0.31.2+ Convenience accessor returning `xmlTrees[partPath]`.
