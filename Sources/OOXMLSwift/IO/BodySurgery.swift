@@ -80,12 +80,6 @@ struct BodySourceBaseline {
     /// source root start tag, so a change to these attributes falls back to
     /// the full writer, which rebuilds the tag from them.
     let rootAttributes: [String: String]
-    /// Resources outside the body that body blocks may refer to, at read
-    /// time. A block whose source bytes refer to one removed since then is
-    /// rewritten: on a tree-backed paragraph a typed mutator cannot remove
-    /// the reference (its typed runs are a text-only stub), and keeping the
-    /// bytes would leave the reference dangling (verify R1 of #129).
-    let resourceIds: BodyResourceIds
 
     /// Stamp every body block with its identity and record the baseline.
     /// The document gets no baseline (so surgery never applies) when the
@@ -103,8 +97,7 @@ struct BodySourceBaseline {
             generation: generation, root: root, body: body, bodyChildren: body.children,
             blockNodeIndex: index, snapshot: document.body.children,
             sectionProperties: document.sectionProperties,
-            rootAttributes: document.documentRootAttributes,
-            resourceIds: BodyResourceIds(document))
+            rootAttributes: document.documentRootAttributes)
     }
 
     /// The tree's root and body and, for each typed block, the index of its
@@ -199,14 +192,7 @@ enum BodySurgery {
         } catch {
             return nil
         }
-        guard var matched = keptBlocks(current, after, base) else { return nil }
-        let removed = base.resourceIds.removed(in: BodyResourceIds(document))
-        if !removed.isEmpty {
-            for k in matched.indices where matched[k] != nil
-                && refers(base.bodyChildren[base.blockNodeIndex[k]], to: removed) {
-                matched[k] = nil
-            }
-        }
+        guard let matched = keptBlocks(current, after, base) else { return nil }
 
         let rootBindings = Dictionary(
             tree.root.attributes.filter { $0.prefix == "xmlns" }.map { ($0.localName, $0.value) },
@@ -392,65 +378,5 @@ enum BodySurgery {
     private static func hasDirtyNode(_ node: XmlNode) -> Bool {
         if node.isDirty { return true }
         return node.children.contains(where: hasDirtyNode)
-    }
-}
-
-/// Ids of resources outside the body that body blocks refer to: relationship
-/// ids of images and hyperlinks, and footnote, endnote and comment ids.
-struct BodyResourceIds: Equatable {
-    var relationships: Set<String>
-    var footnotes: Set<Int>
-    var endnotes: Set<Int>
-    var comments: Set<Int>
-
-    init(relationships: Set<String>, footnotes: Set<Int>, endnotes: Set<Int>, comments: Set<Int>) {
-        self.relationships = relationships
-        self.footnotes = footnotes
-        self.endnotes = endnotes
-        self.comments = comments
-    }
-
-    /// The resources the typed model holds now.
-    init(_ document: WordDocument) {
-        relationships = Set(document.images.map(\.id)).union(document.hyperlinkReferences.map(\.relationshipId))
-        footnotes = Set(document.footnotes.footnotes.map(\.id))
-        endnotes = Set(document.endnotes.endnotes.map(\.id))
-        comments = Set(document.comments.comments.map(\.id))
-    }
-
-    /// The ids in `self` that `now` no longer has.
-    func removed(in now: BodyResourceIds) -> BodyResourceIds {
-        BodyResourceIds(relationships: relationships.subtracting(now.relationships),
-                        footnotes: footnotes.subtracting(now.footnotes),
-                        endnotes: endnotes.subtracting(now.endnotes),
-                        comments: comments.subtracting(now.comments))
-    }
-
-    var isEmpty: Bool {
-        relationships.isEmpty && footnotes.isEmpty && endnotes.isEmpty && comments.isEmpty
-    }
-}
-
-extension BodySurgery {
-    /// Whether an element subtree refers to one of `removed`: an `r:`
-    /// attribute (`r:id`, `r:embed`, `r:link`, …) holding a removed
-    /// relationship id, or a footnote / endnote reference or comment marker
-    /// with a removed `w:id`.
-    static func refers(_ node: XmlNode, to removed: BodyResourceIds) -> Bool {
-        guard node.kind == .element else { return false }
-        for a in node.attributes where a.prefix == "r" && removed.relationships.contains(a.value) {
-            return true
-        }
-        let id = node.attributes.first(where: { $0.prefix == "w" && $0.localName == "id" }).flatMap { Int($0.value) }
-        if let id {
-            switch node.localName {
-            case "footnoteReference": if removed.footnotes.contains(id) { return true }
-            case "endnoteReference": if removed.endnotes.contains(id) { return true }
-            case "commentReference", "commentRangeStart", "commentRangeEnd":
-                if removed.comments.contains(id) { return true }
-            default: break
-            }
-        }
-        return node.children.contains { refers($0, to: removed) }
     }
 }
