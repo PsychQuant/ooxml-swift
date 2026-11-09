@@ -24,7 +24,9 @@ All notable changes to ooxml-swift will be documented in this file.
   - 新的 `DocxFormPublicAPITests` target 不用 `@testable` 匯入 DocxForm，所以呼叫端用到的符號不再是
     `public` 時，它會編譯失敗。
   - `FormError` 的訊息仍提到 macdoc CLI 的旗標（例如 `--remove-table`），因為 macdoc 的 CLI 測試比對
-    這些訊息；MCP 那一面要怎麼呈現，留給 PsychQuant/che-word-mcp#300。
+    這些訊息；MCP 那一面要怎麼呈現，留給 PsychQuant/che-word-mcp#300。同樣沿用 macdoc 的還有兩處：
+    `rewriteDocument` 在輸出檔旁建立的暫存目錄仍叫 `.macdoc-form-<UUID>`（寫入中途被中止時會留下），
+    `rewriteDocument` 也沒有參數可以調低 512 MB 的讀取上限（`read` 與 `readParts` 有）。
 
 ### Changed
 
