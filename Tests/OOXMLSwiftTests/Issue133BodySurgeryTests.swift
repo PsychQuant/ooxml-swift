@@ -376,6 +376,20 @@ final class Issue133BodySurgeryTests: XCTestCase {
         XCTAssertEqual(try save(doc), try save(doc))
     }
 
+    /// With `word/document.xml` already typed-dirty, `appendParagraph` stays on
+    /// the typed path, so surgery still applies and untouched blocks keep
+    /// their bytes (the order the CHANGELOG says is unaffected).
+    func testAppendAfterATypedEditStillKeepsUntouchedBlocks() throws {
+        var doc = try read(documentXML(body: firstBlock + keptBlock))
+        defer { doc.close() }
+        doc.insertParagraph(Paragraph(text: "首段"), at: 0)
+        doc.appendParagraph(Paragraph(text: "尾段"))
+        let xml = try save(doc)
+        XCTAssertTrue(xml.contains(firstBlock + keptBlock), xml)
+        XCTAssertTrue(xml.contains("首段"))
+        XCTAssertTrue(xml.contains("尾段"))
+    }
+
     /// An op-log edit makes the live tree the authority and the read-time
     /// baseline stale; a later typed edit must fall back to the full typed
     /// serialization and keep both edits.
@@ -389,5 +403,10 @@ final class Issue133BodySurgeryTests: XCTestCase {
             XCTAssertTrue(xml.contains(text), "\(text) missing:\n\(xml)")
         }
         XCTAssertNoThrow(try XMLDocument(xmlString: xml, options: []))
+        // Known limit (CHANGELOG): the read-time baseline does not follow the
+        // tree, so in this order the untouched block is rewritten and loses
+        // its section break. When this starts failing, the limit is gone:
+        // update the CHANGELOG.
+        XCTAssertFalse(xml.contains(keptBlock), "known limit changed:\n\(xml)")
     }
 }
