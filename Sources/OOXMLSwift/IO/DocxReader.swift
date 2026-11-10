@@ -4219,12 +4219,18 @@ public struct DocxReader {
             default:
                 // Anything else a cell may hold (block-level SDTs, bookmark
                 // markers) has no typed form here and is not recorded (#45).
-                // Its `<w:t>` elements are still counted, as at every other
-                // site that skips raw XML: the whitespace overlay looks text
-                // up by ordinal, so an uncounted skip shifts every lookup
-                // after it. The two-pass read hid this for some shapes — the
+                // Its `<w:t>` elements are still counted, as the body- and
+                // paragraph-level raw-skip sites do: the whitespace overlay
+                // looks text up by an ordinal that runs across the whole
+                // part, so an uncounted skip shifts every lookup after it,
+                // in this cell and in everything that follows the table.
+                // The two-pass read hid this for some shapes — the
                 // paragraphs after a nested table were parsed before it and
                 // could make up the difference by coincidence.
+                //
+                // Not covered here: a `w:sdt` wrapping a whole `w:tr` or
+                // `w:tc` is skipped by `parseTable` / `parseTableRow`
+                // without being counted (#249).
                 Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
             }
         }

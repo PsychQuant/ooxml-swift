@@ -163,7 +163,7 @@ final class Issue248CellBlockOrderTests: XCTestCase {
         }
     }
 
-    /// The sixth shape of the report: a paragraph with formatting but no
+    /// The third shape of the report: a paragraph with formatting but no
     /// run sits BEFORE the table, and the trailing empty paragraph after it.
     /// The run-less paragraph is the one the pre-#248 writer could mistake
     /// for the trailing placeholder. Its formatting must stay on the
@@ -186,10 +186,12 @@ final class Issue248CellBlockOrderTests: XCTestCase {
             let blocks = (cell.children ?? []).compactMap { $0 as? XMLElement }
                 .filter { $0.name == "w:p" || $0.name == "w:tbl" }
             XCTAssertEqual(blocks.count, 4, "generation \(generation)")
-            let isCentered = blocks.map {
-                $0.name == "w:p" && !($0.elements(forName: "w:pPr").first?.elements(forName: "w:jc").isEmpty ?? true)
+            let alignment = blocks.map { block -> String in
+                guard block.name == "w:p" else { return "table" }
+                return block.elements(forName: "w:pPr").first?.elements(forName: "w:jc").first?
+                    .attribute(forName: "w:val")?.stringValue ?? "none"
             }
-            XCTAssertEqual(isCentered, [false, true, false, false],
+            XCTAssertEqual(alignment, ["none", "center", "table", "none"],
                            "the centering belongs to the second block only, generation \(generation)")
             url = saved.url
         }
@@ -251,6 +253,31 @@ final class Issue248CellBlockOrderTests: XCTestCase {
         let xml = try save(doc).xml
         XCTAssertTrue(xml.contains(#"<w:t xml:space="preserve">  </w:t>"#),
                       "the preserved whitespace after the nested table must survive:\n\(xml)")
+    }
+
+    /// The whitespace overlay counts `<w:t>` elements across the whole part,
+    /// so an uncounted skip inside a cell does not stay inside that cell: it
+    /// shifts every later lookup, including body paragraphs after the table,
+    /// and can move a run's whitespace into a neighbouring empty run. This
+    /// is visible right after reading, without any edit or save.
+    func testASkippedCellChildDoesNotShiftWhitespaceInLaterBodyParagraphs() throws {
+        let sdt = "<w:sdt><w:sdtContent><w:p><w:r><w:t>S</w:t></w:r></w:p></w:sdtContent></w:sdt>"
+        let table = "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w=\"5000\"/></w:tblGrid><w:tr><w:tc>"
+            + "<w:tcPr><w:tcW w:w=\"5000\" w:type=\"dxa\"/></w:tcPr>\(sdt)\(p("A"))</w:tc></w:tr></w:tbl>"
+        let first = #"<w:p><w:r><w:t xml:space="preserve">  </w:t></w:r><w:r><w:t>after</w:t></w:r></w:p>"#
+        let second = #"<w:p><w:r><w:t xml:space="preserve">   </w:t></w:r><w:r><w:t/></w:r><w:r><w:t>end</w:t></w:r></w:p>"#
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
+            + "<w:document \(Self.namespaces)><w:body>\(table)\(first)\(second)<w:sectPr/></w:body></w:document>"
+        let doc = try DocxReader.read(from: makeDocx(xml))
+
+        func runTexts(_ index: Int) throws -> [String] {
+            guard case .paragraph(let paragraph) = doc.body.children[index] else {
+                XCTFail("fixture: body child \(index) must be a paragraph"); return []
+            }
+            return paragraph.runs.map(\.text)
+        }
+        XCTAssertEqual(try runTexts(1), ["  ", "after"])
+        XCTAssertEqual(try runTexts(2), ["   ", "", "end"], "the whitespace must stay in its own run")
     }
 
     // MARK: - A cell must still end with a paragraph
