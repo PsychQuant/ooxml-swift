@@ -52,7 +52,11 @@ import ZIPFoundation
 ///    into nested tables. Both moved into `@inline(never)` helpers
 ///    (`cellPropertiesAndParagraphs`, `parseTablePropertiesBlock`) that
 ///    return already-assembled values, freeing those slots before the
-///    recursive call begins — the same technique #195 used for
+///    recursive call begins. (PsychQuant/ooxml-swift#248 later replaced
+///    `cellPropertiesAndParagraphs` with `cellProperties` and
+///    `appendCellParagraph` when the cell's children became a single
+///    document-order walk; the arrangement is the same.) It is the same
+///    technique #195 used for
 ///    `TableCell.toXML(depth:)`'s `bodyAndTrailingParagraphXML` and
 ///    `Table.toXML(depth:)`'s `tblGridXML`. This dropped the per-level
 ///    cost from ~32 KB/level to ~24 KB/level.

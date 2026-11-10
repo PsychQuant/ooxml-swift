@@ -333,6 +333,13 @@ public enum HeightRule: String, Codable {
 
 // MARK: - Table Cell
 
+/// PsychQuant/ooxml-swift#248: the kind of one block child of a `<w:tc>`.
+/// See `TableCell._blockOrder`.
+internal enum CellBlockKind: Equatable {
+    case paragraph
+    case table
+}
+
 /// 表格儲存格
 public struct TableCell: Equatable {
     /// v0.31.1+ Tree-backed view marker; see `Table.xmlNode` for the same
@@ -353,6 +360,39 @@ public struct TableCell: Equatable {
     /// at parser layer per design.md decision 1). Distinct from `paragraphs`
     /// so the writer can emit `<w:tbl>` siblings of `<w:p>` correctly.
     internal var _legacyNestedTables: [Table] = []
+
+    /// PsychQuant/ooxml-swift#248: which KINDS of block child this cell held
+    /// when it was read, in document order. Only the shape, not the values.
+    ///
+    /// `paragraphs` and `nestedTables` are two arrays, so between them they
+    /// cannot say whether a paragraph came before or after a table. The
+    /// reader used to drop that at parse time and the writer emitted every
+    /// paragraph, then every table: `A, table, B, C` came back as
+    /// `A, B, C, table, <w:p/>`.
+    ///
+    /// Kinds rather than values, on purpose. Swift routes an in-place
+    /// mutation (`cell.paragraphs[i] = p`) through the `paragraphs` setter,
+    /// so a record that had to be invalidated on every write would be lost
+    /// to the many call sites that edit a paragraph in place. A record of
+    /// kinds stays valid across those writes.
+    ///
+    /// What ends it is a write that changes how many paragraphs or nested
+    /// tables the cell holds: the `paragraphs` and `nestedTables` setters
+    /// set it to `nil` when the new array has a different length, and it
+    /// stays `nil`. Comparing counts at emit time alone is not enough —
+    /// removing one paragraph and adding another brings the count back
+    /// while the record describes a cell that no longer exists, and the
+    /// paragraphs then land on the wrong side of the table. `toXML(depth:)`
+    /// still checks the counts before using the record, as a second guard.
+    ///
+    /// One write it cannot see: replacing the whole array with another of
+    /// the SAME length. That is indistinguishable from an in-place edit, so
+    /// the new paragraphs take the positions the old ones had.
+    ///
+    /// `nil`: no order was recorded (a cell built by a caller). Not part of
+    /// `==`, so a caller-built cell still equals the same content read from
+    /// a file.
+    internal var _blockOrder: [CellBlockKind]?
 
     /// PsychQuant/ooxml-swift#180: shared default backing for the
     /// placeholder paragraph an empty `TableCell()` needs (OOXML requires
@@ -410,7 +450,12 @@ public struct TableCell: Equatable {
                 return Paragraph(xmlNode: child)
             }
         }
-        set { _legacyParagraphs = newValue }
+        set {
+            // #248: a write that changes how many paragraphs the cell holds
+            // drops the order record for good. See `_blockOrder`.
+            if newValue.count != _legacyParagraphs.count { _blockOrder = nil }
+            _legacyParagraphs = newValue
+        }
     }
 
     /// v0.31.1+ Mode-aware view of `<w:tbl>` nested tables.
@@ -430,7 +475,11 @@ public struct TableCell: Equatable {
                 return Table(xmlNode: child)
             }
         }
-        set { _legacyNestedTables = newValue }
+        set {
+            // #248: same rule as the `paragraphs` setter.
+            if newValue.count != _legacyNestedTables.count { _blockOrder = nil }
+            _legacyNestedTables = newValue
+        }
     }
 
     /// v0.31.1+ Stable identifier for this cell. Same fallback chain as
@@ -1560,6 +1609,31 @@ extension TableCell {
         // Cell Properties
         xml += properties.toXML()
 
+        // PsychQuant/ooxml-swift#248: when the cell knows the order its
+        // blocks were read in, emit them in that order. Otherwise — a cell
+        // built by a caller, or one whose paragraphs or nested tables were
+        // added or removed since it was read — emit the previous shape:
+        // every paragraph, every nested table, then a trailing paragraph.
+        //
+        // Both paths live in their own functions so that THIS frame, which
+        // stays open across the recursion into nested tables, holds nothing
+        // but strings (#195).
+        if let order = usableBlockOrder() {
+            xml += orderedBlocksXML(order, depth: depth)
+        } else {
+            xml += flattenedBlocksXML(depth: depth)
+        }
+
+        xml += "</w:tc>"
+        return xml
+    }
+
+    /// The shape a cell had before PsychQuant/ooxml-swift#248, kept for
+    /// cells with no usable order record: every paragraph, every nested
+    /// table, then a trailing paragraph.
+    private func flattenedBlocksXML(depth: Int) -> String {
+        var xml = ""
+
         // PsychQuant/ooxml-swift#195 R2: `bodyAndTrailingParagraphXML` used
         // to be inlined here, holding `bodyParagraphs: [Paragraph]` and a
         // full `trailingParagraph: Paragraph?` (Paragraph has ~25 stored
@@ -1604,8 +1678,93 @@ extension TableCell {
             xml += trailingXML ?? Paragraph().toXML()
         }
 
-        xml += "</w:tc>"
         return xml
+    }
+
+    /// PsychQuant/ooxml-swift#248: the order to emit this cell's blocks in,
+    /// or `nil` when the cell has no record that still describes it.
+    ///
+    /// A tree-backed cell reads the order from its node, the same children
+    /// its `paragraphs` and `nestedTables` views are derived from, so the
+    /// two cannot disagree. A detached cell uses the order recorded when it
+    /// was read, and only while that record accounts for exactly the
+    /// paragraphs and nested tables the cell holds now.
+    private func usableBlockOrder() -> [CellBlockKind]? {
+        if let node = xmlNode {
+            return node.children.compactMap { child -> CellBlockKind? in
+                guard child.kind == .element else { return nil }
+                switch child.localName {
+                case "p": return .paragraph
+                case "tbl": return .table
+                default: return nil
+                }
+            }
+        }
+        guard let order = _blockOrder else { return nil }
+        var paragraphCount = 0
+        var tableCount = 0
+        for kind in order {
+            switch kind {
+            case .paragraph: paragraphCount += 1
+            case .table: tableCount += 1
+            }
+        }
+        guard paragraphCount == _legacyParagraphs.count, tableCount == _legacyNestedTables.count else {
+            return nil
+        }
+        return order
+    }
+
+    /// PsychQuant/ooxml-swift#248: this cell's paragraphs and nested tables
+    /// interleaved as `order` says, ending with a paragraph.
+    ///
+    /// Keeps the PsychQuant/ooxml-swift#195 arrangement. The paragraphs are
+    /// rendered to strings by `paragraphXMLStrings` (`@inline(never)`)
+    /// BEFORE the loop that recurses into nested tables, so nothing
+    /// `Paragraph`-sized sits in a frame that stays open across that
+    /// recursion; and the recursion stops at `Table.maxSerializationDepth`.
+    private func orderedBlocksXML(_ order: [CellBlockKind], depth: Int) -> String {
+        let paragraphXML = Self.paragraphXMLStrings(paragraphs)
+        let tables = nestedTables
+        var xml = ""
+        var nextParagraph = 0
+        var nextTable = 0
+        var endsWithParagraph = false
+        for kind in order {
+            switch kind {
+            case .paragraph:
+                xml += paragraphXML[nextParagraph]
+                nextParagraph += 1
+                endsWithParagraph = true
+            case .table:
+                let index = nextTable
+                nextTable += 1
+                // Same guard, same reason as the fallback path in
+                // `toXML(depth:)` (#195): drop nesting past the limit
+                // rather than overflow the stack.
+                guard depth + 1 <= Table.maxSerializationDepth else { continue }
+                xml += tables[index].toXML(depth: depth + 1)
+                endsWithParagraph = false
+            }
+        }
+        // `<w:tc>` must end with a paragraph. One is added only when the
+        // cell does not already end with one, and the next read records it,
+        // so this cannot grow the cell save after save (#155).
+        if !endsWithParagraph { xml += Self.emptyParagraphXML() }
+        return xml
+    }
+
+    /// `@inline(never)`: PsychQuant/ooxml-swift#195 R2 — see
+    /// `orderedBlocksXML`.
+    @inline(never)
+    private static func paragraphXMLStrings(_ paragraphs: [Paragraph]) -> [String] {
+        paragraphs.map { $0.toXML() }
+    }
+
+    /// `@inline(never)`: same reason as `paragraphXMLStrings`.
+    @inline(never)
+    private static func emptyParagraphXML() -> String {
+        Paragraph().toXML()
     }
 
     /// PsychQuant/ooxml-swift#155: this model emits ALL `paragraphs`
@@ -1627,12 +1786,15 @@ extension TableCell {
     /// as the existing trailing placeholder and re-use it (move it after
     /// the nested tables) instead of leaving it in place AND synthesizing
     /// a new one. This makes repeated saves idempotent (paragraph count
-    /// stops moving) without requiring the harder architectural fix
-    /// (preserving exact paragraph/table interleaving order) that #133 /
-    /// #129 still owns. Trade-off: a genuinely run-less-but-styled
+    /// stops moving). Trade-off: a genuinely run-less-but-styled
     /// paragraph that happens to sit last (before the table) gets moved
     /// to trail the table instead — accepted per the issue's own framing
     /// of this as a bounded, local fix.
+    ///
+    /// PsychQuant/ooxml-swift#248: a cell read from a file now records the
+    /// order of its blocks and is emitted by `orderedBlocksXML` instead, so
+    /// this helper only serves cells with no usable record (see
+    /// `flattenedBlocksXML`).
     ///
     /// Returns the rendered body-paragraph XML and, separately, the
     /// rendered trailing-placeholder XML (already a `String`, not a

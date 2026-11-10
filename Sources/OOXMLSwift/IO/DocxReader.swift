@@ -4176,67 +4176,115 @@ public struct DocxReader {
     ) throws -> TableCell {
         var cell = TableCell()
 
-        // PsychQuant/ooxml-swift#153 R: cell properties + paragraph parsing
-        // moved into a separate `@inline(never)` helper (`cellPropertiesAndParagraphs`)
-        // for the SAME reason #195 moved `TableCell.toXML(depth:)`'s paragraph
-        // work into `bodyAndTrailingParagraphXML` — the loop variable `para:
-        // Paragraph` in the original inline `for p in element.elements(forName:
-        // "w:p")` loop below is a ~25-stored-property struct that, under
-        // `-Onone`, would otherwise sit in THIS function's frame for the
-        // entire `for nestedEl in element.elements(forName: "w:tbl")`
-        // recursion that follows — i.e., on every currently-open nesting
-        // level's frame, all the way down. Confining it to a helper that
-        // returns already-assembled `TableCellProperties` + `[Paragraph]`
-        // frees that slot before the recursive `parseTable(depth:)` call
-        // below ever runs. Measured effect: see the #153 fix report.
-        (cell.properties, cell.paragraphs) = try Self.cellPropertiesAndParagraphs(
-            from: element, relationships: relationships, styles: styles, numbering: numbering)
+        // PsychQuant/ooxml-swift#248: walk the cell's children ONCE, in
+        // document order, and record which kind each block is.
+        //
+        // This used to be two passes (every `<w:p>`, then every `<w:tbl>`),
+        // which dropped the order between paragraphs and nested tables before
+        // the writer could see it: `A, table, B` became paragraphs `[A, B]`
+        // plus one table, and came back out as `A, B, table`.
+        //
+        // PsychQuant/ooxml-swift#153 R still holds: nothing `Paragraph`-sized
+        // may sit in THIS function's frame. Under `-Onone` a frame is sized
+        // for every local declared anywhere in the body, and this frame stays
+        // open across the recursive `parseTable(depth:)` call below, once per
+        // nesting level. So the paragraph is parsed and appended inside
+        // `appendCellParagraph` (`@inline(never)`), and this function only
+        // ever holds the arrays.
+        cell.properties = Self.cellProperties(from: element)
 
-        // v0.17.0+ (#49): nested tables — recurse into <w:tbl> children of <w:tc>
-        for nestedEl in element.elements(forName: "w:tbl") {
-            let nested = try parseTable(
-                from: nestedEl,
-                relationships: relationships,
-                styles: styles,
-                numbering: numbering,
-                depth: depth + 1
-            )
-            cell.nestedTables.append(nested)
+        var paragraphs: [Paragraph] = []
+        var nestedTables: [Table] = []
+        var blockOrder: [CellBlockKind] = []
+        for child in element.children ?? [] {
+            guard let childElement = child as? XMLElement else { continue }
+            switch childElement.name {
+            case "w:p":
+                try Self.appendCellParagraph(
+                    from: childElement, relationships: relationships, styles: styles,
+                    numbering: numbering, to: &paragraphs)
+                blockOrder.append(.paragraph)
+            case "w:tbl":
+                // v0.17.0+ (#49): nested tables — recurse into <w:tbl> children of <w:tc>
+                nestedTables.append(try parseTable(
+                    from: childElement,
+                    relationships: relationships,
+                    styles: styles,
+                    numbering: numbering,
+                    depth: depth + 1
+                ))
+                blockOrder.append(.table)
+            case "w:tcPr":
+                continue    // read above; holds no text
+            default:
+                // Anything else a cell may hold (block-level SDTs, bookmark
+                // markers) has no typed form here and is not recorded (#45).
+                // Its `<w:t>` elements are still counted, as the body- and
+                // paragraph-level raw-skip sites do: the whitespace overlay
+                // looks text up by an ordinal that runs across the whole
+                // part, so an uncounted skip shifts every lookup after it,
+                // in this cell and in everything that follows the table.
+                // The two-pass read hid this for some shapes — the
+                // paragraphs after a nested table were parsed before it and
+                // could make up the difference by coincidence.
+                //
+                // Not covered here: a `w:sdt` wrapping a whole `w:tr` or
+                // `w:tc` is skipped by `parseTable` / `parseTableRow`
+                // without being counted (#249).
+                Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
+            }
         }
 
-        // 確保至少有一個段落
-        if cell.paragraphs.isEmpty {
-            cell.paragraphs.append(Paragraph())
+        // 確保至少有一個段落. The record must say the same thing as
+        // `paragraphs`, and the added paragraph goes LAST: a cell whose only
+        // child is a table gets it after the table, where `<w:tc>` needs one.
+        if paragraphs.isEmpty {
+            Self.appendEmptyCellParagraph(to: &paragraphs)
+            blockOrder.append(.paragraph)
         }
+
+        // The record is assigned LAST: the two setters above it drop any
+        // record when the array length changes.
+        cell.paragraphs = paragraphs
+        cell.nestedTables = nestedTables
+        cell._blockOrder = blockOrder
 
         return cell
     }
 
-    /// `@inline(never)`: PsychQuant/ooxml-swift#153 R — see the doc comment
-    /// on the call site in `parseTableCell`.
+    /// `@inline(never)`: PsychQuant/ooxml-swift#153 R — see the comment at
+    /// the call site in `parseTableCell`.
     @inline(never)
-    private static func cellPropertiesAndParagraphs(
+    private static func cellProperties(from element: XMLElement) -> TableCellProperties {
+        guard let tcPr = element.elements(forName: "w:tcPr").first else { return TableCellProperties() }
+        return parseTableCellProperties(from: tcPr)
+    }
+
+    /// Parses one `<w:p>` child of a cell and appends it.
+    ///
+    /// `@inline(never)`: PsychQuant/ooxml-swift#153 R — the parsed
+    /// `Paragraph` lives in this frame, which is gone before the caller
+    /// recurses into a nested table.
+    @inline(never)
+    private static func appendCellParagraph(
         from element: XMLElement,
         relationships: RelationshipsCollection,
         styles: [Style],
-        numbering: Numbering
-    ) throws -> (properties: TableCellProperties, paragraphs: [Paragraph]) {
-        var properties = TableCellProperties()
-        if let tcPr = element.elements(forName: "w:tcPr").first {
-            properties = parseTableCellProperties(from: tcPr)
-        }
+        numbering: Numbering,
+        to paragraphs: inout [Paragraph]
+    ) throws {
+        paragraphs.append(try parseParagraph(
+            from: element,
+            relationships: relationships,
+            styles: styles,
+            numbering: numbering
+        ))
+    }
 
-        var paragraphs: [Paragraph] = []
-        for p in element.elements(forName: "w:p") {
-            let para = try parseParagraph(
-                from: p,
-                relationships: relationships,
-                styles: styles,
-                numbering: numbering
-            )
-            paragraphs.append(para)
-        }
-        return (properties, paragraphs)
+    /// `@inline(never)`: same reason as `appendCellParagraph`.
+    @inline(never)
+    private static func appendEmptyCellParagraph(to paragraphs: inout [Paragraph]) {
+        paragraphs.append(Paragraph())
     }
 
     static func parseTableCellProperties(from element: XMLElement) -> TableCellProperties {
