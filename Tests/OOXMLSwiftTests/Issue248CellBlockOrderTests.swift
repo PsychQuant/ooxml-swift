@@ -224,6 +224,23 @@ final class Issue248CellBlockOrderTests: XCTestCase {
         XCTAssertEqual(try signature(save(doc).xml), "A,T[N1],B2,C")
     }
 
+    /// `updateCell` rewrites the cell's first paragraph. In a cell that
+    /// starts with a table, that paragraph is the one AFTER the table, and
+    /// the text now stays there — which is where Word puts it when you type
+    /// into that cell. Before this issue the flattened output moved the text
+    /// in front of the table and added an empty paragraph behind it; the
+    /// second half of the test shows that shape, which a cell with no
+    /// record still has.
+    func testUpdatingACellThatStartsWithATableWritesIntoTheParagraphAfterIt() throws {
+        var doc = try DocxReader.read(from: makeDocx(documentXML(cell: tbl(p("N1")) + emptyP)))
+        try doc.updateCell(tableIndex: 0, row: 1, col: 0, text: "X")
+        XCTAssertEqual(try signature(save(doc).xml), "T[N1],X")
+
+        var withoutRecord = try cellUnderTest(doc)
+        withoutRecord._blockOrder = nil
+        XCTAssertEqual(try cellSignature(withoutRecord), "X,T[N1],<empty>")
+    }
+
     /// Adding a paragraph changes how many blocks the cell holds, so the
     /// recorded order no longer describes it. The cell falls back to the
     /// shape it had before this issue (paragraphs, tables, a trailing
