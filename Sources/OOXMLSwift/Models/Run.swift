@@ -6,6 +6,9 @@ import Foundation
 /// preserved verbatim within a Run. `name` is the local element name
 /// (e.g., `"pict"`, `"object"`); `xml` is the verbatim serialized XML.
 public struct RawElement: Equatable {
+    /// PsychQuant/ooxml-swift#133: which body block this value was read as
+    /// (stamped by `DocxReader`, carried by copies). Not part of `==`.
+    internal var bodySourceIdentity = BodySourceIdentity()
     public let name: String
     public let xml: String
     public init(name: String, xml: String) {

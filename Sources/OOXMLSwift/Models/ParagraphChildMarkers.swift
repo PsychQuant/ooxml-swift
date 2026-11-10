@@ -33,6 +33,9 @@ public enum RangeMarkerKind: String, Equatable {
 /// bookmark elements at their original relative positions during Writer
 /// sort-by-position emit (see Phase 4 task 4.5).
 public struct BookmarkRangeMarker: Equatable {
+    /// PsychQuant/ooxml-swift#133: which body block this value was read as
+    /// (stamped by `DocxReader`, carried by copies). Not part of `==`.
+    internal var bodySourceIdentity = BodySourceIdentity()
     public typealias Kind = RangeMarkerKind
 
     public var kind: Kind

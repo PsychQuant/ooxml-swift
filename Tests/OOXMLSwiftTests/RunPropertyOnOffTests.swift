@@ -103,11 +103,45 @@ final class RunPropertyOnOffTests: XCTestCase {
             encoding: .utf8
         )
         XCTAssertTrue(xml.contains(#"<w:b w:val="0"/>"#), "Got: \(xml)")
-        XCTAssertTrue(xml.contains(#"<w:i w:val="0"/>"#), "Got: \(xml)")
-        XCTAssertTrue(xml.contains(#"<w:strike w:val="0"/>"#), "Got: \(xml)")
+        // #133: the run sits in a paragraph the edit did not touch, so
+        // its source spelling is kept byte for byte (it used to be
+        // normalized to "0" by the full typed re-serialization).
+        XCTAssertTrue(xml.contains(#"<w:i w:val="false"/>"#), "Got: \(xml)")
+        XCTAssertTrue(xml.contains(#"<w:strike w:val="off"/>"#), "Got: \(xml)")
         XCTAssertTrue(xml.contains(#"<w:noProof w:val="0"/>"#), "Got: \(xml)")
         XCTAssertFalse(xml.contains("<w:b/>"), "Got: \(xml)")
         XCTAssertTrue(xml.contains("GAMMA delta"), "Got: \(xml)")
+    }
+
+    /// #133: when the edit touches the paragraph that holds the explicit-off
+    /// run, the typed writer rewrites it and still emits each explicit off
+    /// (normalized to "0"), never dropping it.
+    func testEditingTheParagraphRewritesExplicitOffRunPropertiesAsZero() throws {
+        let source = try buildFixture(documentXML: documentXML(
+            firstRunProperties: #"<w:b w:val="0"/><w:i w:val="false"/><w:strike w:val="off"/><w:noProof w:val="0"/>"#
+        ))
+        defer { try? FileManager.default.removeItem(at: source) }
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("run-on-off-output-\(UUID().uuidString).docx")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        var document = try DocxReader.read(from: source)
+        defer { document.close() }
+        XCTAssertEqual(try document.replaceText(find: "beta", with: "BETA"), 1)
+        try DocxWriter.write(document, to: output)
+
+        let extracted = try ZipHelper.unzip(output)
+        defer { ZipHelper.cleanup(extracted) }
+        let xml = try String(
+            contentsOf: extracted.appendingPathComponent("word/document.xml"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(xml.contains("alpha BETA"), "Got: \(xml)")
+        for element in ["b", "i", "strike", "noProof"] {
+            XCTAssertTrue(xml.contains(#"<w:\#(element) w:val="0"/>"#), "\(element) — got: \(xml)")
+        }
+        XCTAssertFalse(xml.contains(#"w:val="false""#), "Got: \(xml)")
+        XCTAssertFalse(xml.contains(#"w:val="off""#), "Got: \(xml)")
     }
 
     func testRevisionPreviousFormatEmitsExplicitOffProperties() {

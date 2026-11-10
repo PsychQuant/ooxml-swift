@@ -2,6 +2,9 @@ import Foundation
 
 /// 表格 (Table) - Word 文件中的表格結構
 public struct Table: Equatable {
+    /// PsychQuant/ooxml-swift#133: which body block this value was read as
+    /// (stamped by `DocxReader`, carried by copies). Not part of `==`.
+    internal var bodySourceIdentity = BodySourceIdentity()
     /// v0.31.1+ (Spectra `sibling-types-tree-projection-impl`,
     /// `word-aligned-state-sync` Phase 1 task 2.3): when non-nil, this Table
     /// is a tree-backed view over the wrapped `<w:tbl>` element. Getters walk
