@@ -4214,11 +4214,18 @@ public struct DocxReader {
                     depth: depth + 1
                 ))
                 blockOrder.append(.table)
+            case "w:tcPr":
+                continue    // read above; holds no text
             default:
-                // `w:tcPr` is read above. Anything else a cell may hold
-                // (block-level SDTs, bookmark markers) has no typed form
-                // here and is not recorded (#45).
-                continue
+                // Anything else a cell may hold (block-level SDTs, bookmark
+                // markers) has no typed form here and is not recorded (#45).
+                // Its `<w:t>` elements are still counted, as at every other
+                // site that skips raw XML: the whitespace overlay looks text
+                // up by ordinal, so an uncounted skip shifts every lookup
+                // after it. The two-pass read hid this for some shapes — the
+                // paragraphs after a nested table were parsed before it and
+                // could make up the difference by coincidence.
+                Self.advanceWhitespaceCounter(forSkippedXML: childElement.xmlString)
             }
         }
 

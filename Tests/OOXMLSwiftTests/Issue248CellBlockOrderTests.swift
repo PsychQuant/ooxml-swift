@@ -163,6 +163,38 @@ final class Issue248CellBlockOrderTests: XCTestCase {
         }
     }
 
+    /// The sixth shape of the report: a paragraph with formatting but no
+    /// run sits BEFORE the table, and the trailing empty paragraph after it.
+    /// The run-less paragraph is the one the pre-#248 writer could mistake
+    /// for the trailing placeholder. Its formatting must stay on the
+    /// paragraph in front of the table, which the text-only signature above
+    /// cannot see.
+    func testAFormattedEmptyParagraphBeforeTheTableKeepsItsPlaceAndItsFormatting() throws {
+        let centered = #"<w:p><w:pPr><w:jc w:val="center"/></w:pPr></w:p>"#
+        var url = try makeDocx(documentXML(cell: p("A") + centered + tbl(p("N1")) + emptyP))
+        for generation in 1...3 {
+            var doc = try DocxReader.read(from: url)
+            try doc.updateCell(tableIndex: 0, row: 0, col: 0, text: "X\(generation)")
+            let saved = try save(doc)
+            doc.close()
+            XCTAssertEqual(try signature(saved.xml), "A,<empty>,T[N1],<empty>", "generation \(generation)")
+
+            let parsed = try XMLDocument(xmlString: saved.xml)
+            let body = try XCTUnwrap(parsed.rootElement()?.elements(forName: "w:body").first)
+            let table = try XCTUnwrap(body.elements(forName: "w:tbl").first)
+            let cell = try XCTUnwrap(table.elements(forName: "w:tr")[1].elements(forName: "w:tc").first)
+            let blocks = (cell.children ?? []).compactMap { $0 as? XMLElement }
+                .filter { $0.name == "w:p" || $0.name == "w:tbl" }
+            XCTAssertEqual(blocks.count, 4, "generation \(generation)")
+            let isCentered = blocks.map {
+                $0.name == "w:p" && !($0.elements(forName: "w:pPr").first?.elements(forName: "w:jc").isEmpty ?? true)
+            }
+            XCTAssertEqual(isCentered, [false, true, false, false],
+                           "the centering belongs to the second block only, generation \(generation)")
+            url = saved.url
+        }
+    }
+
     /// The reader records the kinds in document order.
     func testTheReaderRecordsTheBlockKindsInDocumentOrder() throws {
         let doc = try DocxReader.read(from: makeDocx(documentXML(cell: p("A") + tbl(p("N1")) + p("B") + p("C"))))
@@ -189,6 +221,36 @@ final class Issue248CellBlockOrderTests: XCTestCase {
         // `XMLDocument` drops whitespace-only text, so the signature shows
         // only the order; the raw-byte check above is the whitespace check.
         XCTAssertEqual(try signature(xml), "A,T[N1],TAIL")
+    }
+
+    /// A child of the cell the reader does not model (here a block-level
+    /// content control) is skipped, and its `<w:t>` elements still have to be
+    /// counted or every later lookup in the whitespace overlay is off by
+    /// that many. With the old two-pass read this shape came out right by
+    /// coincidence — the paragraph after the table was parsed first and made
+    /// up the difference — so a single-pass read that did not count the
+    /// skipped child lost whitespace the previous release kept.
+    func testASkippedChildBeforeANestedTableDoesNotShiftTheWhitespaceOverlay() throws {
+        let sdt = "<w:sdt><w:sdtContent><w:p><w:r><w:t>S</w:t></w:r></w:p></w:sdtContent></w:sdt>"
+        let spaced = #"<w:p><w:r><w:t xml:space="preserve">  </w:t></w:r><w:r><w:t>N1</w:t></w:r></w:p>"#
+        var doc = try DocxReader.read(from: makeDocx(documentXML(cell: sdt + tbl(spaced) + p("Q"))))
+        try doc.updateCell(tableIndex: 0, row: 0, col: 0, text: "X1")
+        let xml = try save(doc).xml
+        XCTAssertTrue(xml.contains(#"<w:t xml:space="preserve">  </w:t>"#),
+                      "the preserved whitespace inside the nested table must survive:\n\(xml)")
+    }
+
+    /// The same, with the whitespace in a paragraph of the cell itself after
+    /// the nested table. This shape lost its whitespace before this issue
+    /// too.
+    func testASkippedChildDoesNotShiftTheWhitespaceOfALaterParagraph() throws {
+        let sdt = "<w:sdt><w:sdtContent><w:p><w:r><w:t>S</w:t></w:r></w:p></w:sdtContent></w:sdt>"
+        let spaced = #"<w:p><w:r><w:t xml:space="preserve">  </w:t></w:r><w:r><w:t>Q</w:t></w:r></w:p>"#
+        var doc = try DocxReader.read(from: makeDocx(documentXML(cell: sdt + p("A") + tbl(p("N1")) + spaced)))
+        try doc.updateCell(tableIndex: 0, row: 0, col: 0, text: "X1")
+        let xml = try save(doc).xml
+        XCTAssertTrue(xml.contains(#"<w:t xml:space="preserve">  </w:t>"#),
+                      "the preserved whitespace after the nested table must survive:\n\(xml)")
     }
 
     // MARK: - A cell must still end with a paragraph
