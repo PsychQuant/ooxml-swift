@@ -244,6 +244,47 @@ final class Issue248CellBlockOrderTests: XCTestCase {
         XCTAssertEqual(try cellSignature(cell), "A,B,T[N1],T[N2],<empty>")
     }
 
+    /// Removing one paragraph and adding another leaves the COUNT where it
+    /// was, but the record no longer describes the cell. The record is
+    /// dropped by the first of the two writes, so the cell falls back
+    /// instead of putting a paragraph on the wrong side of the table.
+    func testRemovingThenAddingAParagraphFallsBack() throws {
+        let doc = try DocxReader.read(from: makeDocx(documentXML(cell: p("A") + tbl(p("N1")) + p("B"))))
+
+        var front = try cellUnderTest(doc)
+        front.paragraphs.removeLast()
+        front.paragraphs.insert(Paragraph(text: "NEWFIRST"), at: 0)
+        XCTAssertNil(front._blockOrder)
+        XCTAssertEqual(try cellSignature(front), "NEWFIRST,A,T[N1],<empty>")
+
+        var back = try cellUnderTest(doc)
+        back.paragraphs.remove(at: 0)
+        back.paragraphs.append(Paragraph(text: "C"))
+        XCTAssertNil(back._blockOrder)
+        XCTAssertEqual(try cellSignature(back), "B,C,T[N1],<empty>")
+    }
+
+    /// The same for nested tables.
+    func testRemovingThenAddingANestedTableFallsBack() throws {
+        let doc = try DocxReader.read(from: makeDocx(documentXML(cell: p("A") + tbl(p("N1")) + p("B"))))
+        var cell = try cellUnderTest(doc)
+        cell.nestedTables.removeAll()
+        cell.nestedTables.append(Table(rows: [TableRow(cells: [TableCell(text: "N2")])]))
+        XCTAssertNil(cell._blockOrder)
+        XCTAssertEqual(try cellSignature(cell), "A,B,T[N2],<empty>")
+    }
+
+    /// Replacing the whole array with one of the SAME length keeps the
+    /// record: the new paragraphs take the positions the old ones had. That
+    /// is the same write an in-place edit makes, and the two cannot be told
+    /// apart.
+    func testReplacingTheParagraphsWithTheSameNumberKeepsThePositions() throws {
+        let doc = try DocxReader.read(from: makeDocx(documentXML(cell: p("A") + tbl(p("N1")) + p("B"))))
+        var cell = try cellUnderTest(doc)
+        cell.paragraphs = [Paragraph(text: "X"), Paragraph(text: "Y")]
+        XCTAssertEqual(try cellSignature(cell), "X,T[N1],Y")
+    }
+
     // MARK: - What the record must not change
 
     /// The record is not part of a cell's value: a cell built by a caller

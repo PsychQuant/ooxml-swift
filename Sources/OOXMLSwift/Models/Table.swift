@@ -374,10 +374,20 @@ public struct TableCell: Equatable {
     /// mutation (`cell.paragraphs[i] = p`) through the `paragraphs` setter,
     /// so a record that had to be invalidated on every write would be lost
     /// to the many call sites that edit a paragraph in place. A record of
-    /// kinds stays valid across those writes. `toXML(depth:)` uses it only
-    /// while it still accounts for exactly the paragraphs and tables the
-    /// cell holds; a write that adds or removes a block makes the counts
-    /// disagree and the cell falls back to its previous shape.
+    /// kinds stays valid across those writes.
+    ///
+    /// What ends it is a write that changes how many paragraphs or nested
+    /// tables the cell holds: the `paragraphs` and `nestedTables` setters
+    /// set it to `nil` when the new array has a different length, and it
+    /// stays `nil`. Comparing counts at emit time alone is not enough —
+    /// removing one paragraph and adding another brings the count back
+    /// while the record describes a cell that no longer exists, and the
+    /// paragraphs then land on the wrong side of the table. `toXML(depth:)`
+    /// still checks the counts before using the record, as a second guard.
+    ///
+    /// One write it cannot see: replacing the whole array with another of
+    /// the SAME length. That is indistinguishable from an in-place edit, so
+    /// the new paragraphs take the positions the old ones had.
     ///
     /// `nil`: no order was recorded (a cell built by a caller). Not part of
     /// `==`, so a caller-built cell still equals the same content read from
@@ -440,7 +450,12 @@ public struct TableCell: Equatable {
                 return Paragraph(xmlNode: child)
             }
         }
-        set { _legacyParagraphs = newValue }
+        set {
+            // #248: a write that changes how many paragraphs the cell holds
+            // drops the order record for good. See `_blockOrder`.
+            if newValue.count != _legacyParagraphs.count { _blockOrder = nil }
+            _legacyParagraphs = newValue
+        }
     }
 
     /// v0.31.1+ Mode-aware view of `<w:tbl>` nested tables.
@@ -460,7 +475,11 @@ public struct TableCell: Equatable {
                 return Table(xmlNode: child)
             }
         }
-        set { _legacyNestedTables = newValue }
+        set {
+            // #248: same rule as the `paragraphs` setter.
+            if newValue.count != _legacyNestedTables.count { _blockOrder = nil }
+            _legacyNestedTables = newValue
+        }
     }
 
     /// v0.31.1+ Stable identifier for this cell. Same fallback chain as

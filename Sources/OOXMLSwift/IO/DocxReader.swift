@@ -4230,6 +4230,8 @@ public struct DocxReader {
             blockOrder.append(.paragraph)
         }
 
+        // The record is assigned LAST: the two setters above it drop any
+        // record when the array length changes.
         cell.paragraphs = paragraphs
         cell.nestedTables = nestedTables
         cell._blockOrder = blockOrder
