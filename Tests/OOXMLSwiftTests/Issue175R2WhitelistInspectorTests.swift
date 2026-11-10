@@ -145,13 +145,13 @@ final class Issue175R2WhitelistInspectorTests: XCTestCase {
         XCTAssertGreaterThan(doc.operationLog.entries.count, before, "plain text append must still be op-emitted")
     }
 
-    // MARK: - Known limitation, documented not hidden (PsychQuant/ooxml-swift#129)
+    // MARK: - Tree-backed typed-dirty saves (PsychQuant/ooxml-swift#129)
 
-    /// Tree-backed views + typed re-serialization drop existing `<w:drawing>`
-    /// (regression lens, 13/27 real documents). Not introduced by #128 but
-    /// re-routed onto by it. Expected-failure until #129 lands; non-strict
-    /// because a minimal fixture may not reproduce what real Word files do.
-    func testTreeBackedTypedDirtyKeepsExistingDrawing_knownLimitation() throws {
+    /// Tree-backed views + typed re-serialization used to drop existing
+    /// `<w:drawing>` (regression lens, 13/27 real documents). Since #129 the
+    /// body surgery of #133 also covers tree-backed reads, so an untouched
+    /// paragraph keeps its source bytes and its drawing.
+    func testTreeBackedTypedDirtyKeepsExistingDrawing() throws {
         let drawing = #"<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rId4"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#
         let url = try minimalDocx(
             body: #"<w:p w14:paraId="11111111" w14:textId="11111111"><w:r>"# + drawing + #"</w:r></w:p>"#,
@@ -160,9 +160,7 @@ final class Issue175R2WhitelistInspectorTests: XCTestCase {
         var doc = try DocxReader.read(from: url, wireTreeBackedViews: true)
         try doc.insertParagraph(Paragraph(runs: [Run(text: "typed-dirty edit")]), at: 0)
         let xml = try documentXML(of: try DocxWriter.writeData(doc))
-        XCTExpectFailure("PsychQuant/ooxml-swift#129 — tree-backed typed re-serialization drops existing drawings", strict: true) {
-            XCTAssertEqual(xml.components(separatedBy: "<w:drawing").count - 1, 1)
-        }
+        XCTAssertEqual(xml.components(separatedBy: "<w:drawing").count - 1, 1, xml)
     }
 
     // MARK: - PackageInspector: per-part relationship scoping

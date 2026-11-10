@@ -16,11 +16,16 @@ All notable changes to ooxml-swift will be documented in this file.
   - 判斷「沒變」用 typed 輸出字串而不用 `==`：手寫的 `==` 若漏了某個欄位，也不會把一次編輯誤判成沒變。
   - 重寫的區塊若用到 root 與區塊本身都沒宣告的 namespace prefix，宣告加在該區塊自己的起始標籤上，root 不動。root 已綁定的 prefix 沿用 root 的 URI（Strict 文件的 `w` 仍是 Strict）。區塊自己宣告過的 prefix 不再重複宣告。
   - 被重寫的區塊寫在第一個被刪除或被改寫的來源區塊所在的位置。兩個保留區塊之間只有一個被重寫的區塊時，typed model 看不到的兄弟節點（註解、`w:id` 不是整數的 bookmark）會維持在它後面；有兩個以上時，它們會一起寫在第一個的位置，夾在中間的兄弟節點會移到它們後面。
-  - 以下情況退回過去的整份重寫：live tree 在讀檔後被動過（見 Known limits）、tree-backed 讀法、讀檔後改過 `documentRootAttributes`、body 層 `sectPr` 不只一個或不在最後、root 底下的 `body` 不是文件中第一個 `body` 元素、重寫的區塊用到沒有已知 URI 的 prefix、任一區塊無法序列化。
+  - 以下情況退回過去的整份重寫：live tree 在讀檔後被動過（見 Known limits）、讀檔後改過 `documentRootAttributes`、body 層 `sectPr` 不只一個或不在最後、root 底下的 `body` 不是文件中第一個 `body` 元素、重寫的區塊用到沒有已知 URI 的 prefix、任一區塊無法序列化。
   - 量測（同一批真實文件，只記彙總）：
     - body 段落至少 4 個的 78 份文件，做五種操作後存檔：開頭插入一段、刪中段、改中段、刪中段並在尾端加一段、刪第一段並改最後一段。沒被編輯的區塊有元素或文字變少的文件，五種操作都是 0/78。退回整份 typed 重寫時，同一指標在五種操作下都是 40/78，其中 5 份正文有損。
     - 沿用 #133 原本的量測程序（104 份，開頭插入一段後存檔）：正文有損 6 → 0，元素數量變少 53 → 0。
     - 沒有修改的文件經 `writeData` 存檔，`document.xml` 104/104 逐位元組相同。
+
+- **tree-backed 讀法（`wireTreeBackedViews: true`）也套用上面的 surgery，沒被碰的段落不再遺失 `<w:drawing>`**（#129；同一個 Decision (B)）。tree-backed 段落的 typed runs 只有文字（stub），過去任何 typed-dirty 存檔都會把每一段改用 stub 重寫，含圖的段落因此遺失 drawing、rPr、tab、break。現在 reader 在兩種讀法都裝上讀檔基準，存檔時沒被碰的區塊沿用原 bytes。
+  - tree-backed 的值和快照共用同一批 `XmlNode`，存檔時快照的序列化反映的是現在的 tree。surgery 原有的檢查已經涵蓋這一點：會寫進輸出的 `XmlNode` 欄位（名稱、屬性、子節點、文字）一改就標 dirty（`didSet`），沒有任何程式會清掉這個標記。dirty 不會往上傳到祖先節點，所以 surgery 遞迴掃描整棵 tree，只要有任何 dirty 節點就退回整份重寫（`testAnEditedTextNodeInsideAParagraphIsNeverOverwritten`；拿掉這個掃描，它就會失敗）。
+  - 量測（同一批真實文件，只記彙總；以 tree-backed 讀法讀檔）：78 份文件做 #133 的五種操作，沒被編輯的區塊有元素或文字變少的文件都是 0/78；退回整份 typed 重寫時是 78/78（正文有損 24～25 份）。其中 19 份含 drawing：新路徑下 drawing 變少的文件是 0/19，只有「刪第一段並改最後一段」是 1/19；整份重寫時是 18/19。注意「改」在 tree-backed 讀法下多半沒有生效（#244）：「改中段」78 份都沒有生效；「刪第一段並改最後一段」的修改只在 16 份生效，推測是 #242 的誤綁讓那一段成了一般段落。那 1/19 就是其中一份，drawing 在被改寫的段落裡。沒有修改的文件經 `writeData` 存檔，`document.xml` 78/78 逐位元組相同。
+  - `Issue175R2WhitelistInspectorTests` 的 strict `XCTExpectFailure` guard 改成一般斷言，並改名為 `testTreeBackedTypedDirtyKeepsExistingDrawing`。
 
 ### Changed
 
@@ -37,9 +42,12 @@ All notable changes to ooxml-swift will be documented in this file.
 - 同一個 session 裡，只要先做過動到 live tree 的操作，之後的 typed 編輯就全部退回整份重寫，#133 的損失會再出現。這類操作包括：在讀進來的文件上 `appendParagraph`（走 op-log 或 #132 的 graft）、op-log 編輯、`applyFormattingProfile`、`materializeTypedTrees`。讀檔時記下的基準不會跟著 tree 更新（#241）。先做 typed 編輯、再 append 時，append 走 op-log 並經過 `materializeTypedTrees`，物化出來的 tree 帶著 surgery 的輸出，所以 append 之後立刻存檔仍會保留；但 append 之後再做任何 typed 編輯，就會退回整份重寫。
 - 保留的區塊必須維持來源順序。區塊被移動後（刪掉後在別處插入同一個值），只保留來源順序最長的那一串；其餘改用 typed 輸出。被重寫的不一定是被移動的那一個：相鄰兩段對調時，恰有一段被重寫，可能是沒被移動的那一段。
 - 同一個區塊有兩個沒改過的複本時，分不出哪一個是原本的，兩個都改用 typed 輸出，沒被編輯的原區塊也因此失去 typed model 沒建模的內容。Word 2010 以後產生的檔案，段落通常帶 `w14:paraId`，複製時會保留原 paraId（`withStampedParaId` 只替沒有 paraId 的段落配新的），表格、內容控制項等其他區塊則一律不配新 id，所以複製這些值都屬於這種情況。
-- tree-backed 讀法（`wireTreeBackedViews: true`）不適用：typed-dirty 存檔仍整份重寫，`Paragraph.runs` stub 丟失 drawing 的問題（#129）沒有改變。guard 是 `Issue175R2WhitelistInspectorTests.testTreeBackedTypedDirtyKeepsExistingDrawing_knownLimitation`，不變。
+- tree-backed 讀法下，被改寫的區塊仍用 typed model 序列化。段落的 runs 是 text-only stub，該段的 drawing、rPr、tab、break 會遺失；tree-backed 表格的儲存格段落同樣是 stub，改到表格就整張表用 stub 重寫。被移動的區塊、兩個沒改過的複本，也都屬於被改寫的區塊。修好 stub 本身需要單一節點的 XML 序列化（見 #129 的討論；#106 卡在同一處）。
+- tree-backed 讀法下，只要有修改直接寫進 tree（例如 `Paragraph.text` 的 setter），tree 就是 dirty，之後的 typed-dirty 存檔都退回整份重寫。
+- tree-backed 讀法下，`updateParagraph` 這類經過 `Paragraph.runs` setter 的修改會被無聲丟掉，與這次的修正無關，舊寫法也一樣（#244）。
+- `deleteImage`、`deleteFootnote`、`deleteEndnote`、`deleteComment` 刪掉資源，但沒有移除正文裡的引用（#245）。tree-backed 讀法下，顯示該資源的段落會沿用原 bytes，存檔後可能引用已經不存在的 relationship、腳註、尾註或註解。舊的整份重寫會把所有段落換成 stub，引用是跟著其他內容一起被丟掉的。預設讀法下，typed 重寫本來就會再輸出這些引用。
 - 刪掉 pretty-printed body 裡的一個區塊時，它前後的縮排空白會接在一起；區塊本身的 bytes 不變。
-- 相關的後續 issue：#241（graft、op-log 之後重新建立基準）、#242（tree-backed 讀法接線的 cursor 錯位）、PsychQuant/che-word-mcp#303（`delete_header` 沒有清掉 `sectPr` 裡的 `w:headerReference`；沒被編輯的段落層 `sectPr` 現在沿用原 bytes，懸空的參照也多了這個來源）。
+- 相關的後續 issue：#241（graft、op-log 之後重新建立基準）、#242（tree-backed 讀法接線的 cursor 錯位；沒被碰的區塊現在依 surgery 自己的配對沿用正確的原 bytes，被編輯的區塊仍受影響）、#244、PsychQuant/che-word-mcp#303（`delete_header` 沒有清掉 `sectPr` 裡的 `w:headerReference`；沒被編輯的段落層 `sectPr` 現在沿用原 bytes，懸空的參照也多了這個來源）。
 
 ## [3.21.0] - 2026-11-10
 

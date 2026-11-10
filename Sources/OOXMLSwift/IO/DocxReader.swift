@@ -379,10 +379,12 @@ public struct DocxReader {
 
         // PsychQuant/ooxml-swift#133: stamp each body block with where it was
         // read and remember the body, so a typed-dirty save rewrites only the
-        // blocks that changed. Tree-backed mode is not covered (#129).
-        if !wireTreeBackedViews {
-            BodySourceBaseline.install(on: &document)
-        }
+        // blocks that changed. #129: tree-backed reads too. Their values share
+        // tree nodes with the snapshot, so a block's typed serialization at
+        // save time reflects the live tree; surgery relies on the dirty mark
+        // (every XmlNode mutation sets it, nothing clears it) and falls back
+        // whenever any node is dirty.
+        BodySourceBaseline.install(on: &document)
 
         // New revision ids must not reuse an id the model does not type
         // (deleted paragraph marks, table-row revisions stay raw).
