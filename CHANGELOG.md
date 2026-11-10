@@ -10,6 +10,15 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ### Fixed
 
+- **表格儲存格裡的段落與巢狀表格，重寫時維持來源順序**（#248）。預設讀法下編輯表格的任何一格，整張表格都會由 typed model 重寫；`TableCell` 把段落與巢狀表格分存兩個陣列、不記相對順序，輸出時固定先寫全部段落、再寫全部巢狀表格，所以同一張表格裡其他含巢狀表格的儲存格，內容會被搬動：`A, 表格, B, C` 變成 `A, B, C, 表格, 空段`。
+  - reader 現在依文件順序單次走訪儲存格的子元素，並記下每個 block 的種類（段落或表格）。writer 在紀錄仍對得上目前的段落數與表格數時，依紀錄的順序輸出。tree-backed 的儲存格直接從節點讀順序。
+  - 紀錄只有種類、沒有值，也不參與 `==`。就地改一個段落不影響它；加減段落或巢狀表格之後紀錄就對不上，這時退回原本的形狀（全部段落、全部表格、結尾補一段）。呼叫端自己建的儲存格沒有紀錄，行為不變。
+  - `<w:tc>` 仍然一定以段落結尾：最後一個輸出的不是段落時才補一個，下次讀檔會把它記進順序，不會每存一次多一段（#155）。
+  - 量測（合成文件，讀檔 → `updateCell` 改同一張表格的另一格 → 存檔，重複三代）：七種形狀都與來源相同；修正前有四種被搬動。
+  - 附帶改善：巢狀表格裡帶 `xml:space="preserve"` 的純空白 `w:t`，在該儲存格的表格後面還有文字段落時不再變成空字串（#133 Measurement 的形態 2b）。原因是舊的兩段式讀法讓空白 overlay 的序號錯位。把 #133 的 8 個形態夾具放進被編輯的表格：修正前 8 個都遺失內容，現在是 6 個（形態 1、2a、4、5，見 #249）。
+  - #153、#195 的堆疊深度安排維持：段落的解析與輸出都留在 `@inline(never)` helper，遞迴進巢狀表格的 frame 不放 `Paragraph` 大小的區域變數；`maxSerializationDepth` 的上限照舊。五層巢狀表格在 debug build 的最小安全堆疊：讀檔 180KB（修正前 244KB），`updateCell` 後存檔 148KB（修正前 196KB）。
+  - 已知限制：加段落或加巢狀表格之後退回原本的形狀，這時仍會重排。儲存格裡的區塊層 SDT、bookmark 標記仍沒有 typed 表示（#45）。
+
 - **live tree 自讀檔後沒被動過時，typed-dirty 的存檔只重寫改過的 body 區塊，沒被碰的區塊沿用原本的 bytes**（#133；維護者 2026-11-09 決定採 (B) tree 層手術）。過去任何會 `markTypedDirty("word/document.xml")` 的操作（`insertParagraph(at:)`、`updateParagraph`、`deleteParagraph`、`insertTable`、`replaceText`、`setPageSize` 等 83 處）都讓 `DocxWriter` 以 typed model 整份重寫 `document.xml`。typed model 從讀檔起就缺了幾種形態（文字方塊 run 裡的公式、純空白的 `w:t`、儲存格裡巢狀表格之後的段落順序、段落層 `w:pPr/w:sectPr`、`w:gridCol`、`w:hideMark`、核取方塊的 `w:sdtPr` 狀態等），所以一次編輯會連帶損壞沒人碰過的段落與表格。
   - 做法：`DocxReader`（預設讀法）讀檔時，在每個 body 區塊的值上蓋一個來源記號，記錄是哪一次讀檔、第幾個區塊。記號不參與 `==`，複製該值時會一起帶走。reader 同時記下 body 讀進來時的 typed 區塊，以及各區塊對應的 live tree 節點。`DocxWriter` 寫 `document.xml` 時，區塊要同時符合兩個條件才照抄原節點的 bytes：一是帶著這次讀檔的記號，而且是唯一帶這個記號、內容沒變的區塊；二是 typed 輸出與讀檔時相同。其餘區塊用 typed 輸出，`sectPr` 也以同樣方式比較。保留的區塊必須維持原本的先後順序，被移動的區塊改用 typed 輸出。body 以外的內容（prolog、root 起始標籤、`w:background` 等）原樣保留。
   - 為什麼要用記號：只比內容的話，分不出 typed 輸出相同、原始 bytes 不同的區塊，例如只差在 typed model 沒建模的分節符。verify 第一輪實測了兩種只比內容時的錯誤：刪掉一個區塊、再把另一段改成相同文字，被刪區塊的分節符會出現在改過的那一段上；刪掉一個普通空段落，旁邊的分節段落也會被重寫。改用記號後，任何不確定的情況都當作「改過」，用 typed 輸出，也就是過去整份重寫時的行為。
