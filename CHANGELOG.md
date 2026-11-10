@@ -8,6 +8,8 @@ All notable changes to ooxml-swift will be documented in this file.
 
 ## [Unreleased]
 
+## [3.22.0] - 2026-11-10
+
 ### Fixed
 
 - **表格儲存格裡的段落與巢狀表格，重寫成 XML 時維持來源順序**（#248）。預設讀法下編輯表格的任何一格，整張表格都會由 typed model 重寫；`TableCell` 把段落與巢狀表格分存兩個陣列、不記相對順序，輸出時固定先寫全部段落、再寫全部巢狀表格，所以同一張表格裡其他含巢狀表格的儲存格，內容會被搬動：`A, 表格, B, C` 變成 `A, B, C, 表格, 空段`。
